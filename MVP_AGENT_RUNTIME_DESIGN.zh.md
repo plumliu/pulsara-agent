@@ -237,7 +237,7 @@ ModelRequest
 识别 tool calls
 ```
 
-MVP 支持 OpenAI-compatible Chat Completions 即可。
+MVP 支持 OpenAI Responses-compatible adapter 即可。
 
 ### 3.5 tool_execution
 
@@ -609,7 +609,7 @@ class ModelProvider(Protocol):
 第一版只支持：
 
 ```text
-OpenAI-compatible chat completions
+OpenAI Responses-compatible adapter
 tool calls
 stream optional
 basic retry
@@ -969,7 +969,7 @@ agent_runtime/
 
   models/
     base.py
-    openai_compatible.py
+    responses.py
 
   tools/
     base.py
@@ -1123,7 +1123,7 @@ ArtifactStore
 ### Phase 5: Provider Adapters
 
 ```text
-OpenAI-compatible ModelProvider
+OpenAI Responses-compatible model adapter
 ExternalMemoryProvider base
 optional Mem0/Honcho mock adapter
 ```

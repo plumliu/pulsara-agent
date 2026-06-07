@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pulsara_agent.tools.base import Tool
+from pulsara_agent.llm.input import ToolSpec
 
 
 @dataclass(slots=True)
@@ -24,3 +25,16 @@ class ToolRegistry:
 
     def names(self) -> list[str]:
         return sorted(self._tools)
+
+    def all(self) -> list[Tool]:
+        return [self._tools[name] for name in self.names()]
+
+    def tool_specs(self) -> tuple[ToolSpec, ...]:
+        return tuple(
+            ToolSpec(
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.parameters,
+            )
+            for tool in self.all()
+        )
