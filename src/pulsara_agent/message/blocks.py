@@ -1,0 +1,94 @@
+"""Message content blocks for Pulsara runtime events."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Literal
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class TextBlock(BaseModel):
+    type: Literal["text"] = "text"
+    text: str
+    id: str = Field(default_factory=lambda: uuid4().hex)
+
+
+class ThinkingBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    id: str = Field(default_factory=lambda: uuid4().hex)
+
+
+class Base64Source(BaseModel):
+    type: Literal["base64"] = "base64"
+    data: str
+    media_type: str
+
+
+class URLSource(BaseModel):
+    type: Literal["url"] = "url"
+    url: str
+    media_type: str
+
+
+class DataBlock(BaseModel):
+    type: Literal["data"] = "data"
+    source: Base64Source | URLSource
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    name: str | None = None
+
+
+class HintBlock(BaseModel):
+    type: Literal["hint"] = "hint"
+    hint: str | list[TextBlock | DataBlock]
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    source: str | None = None
+
+
+class ToolCallState(StrEnum):
+    PENDING = "pending"
+    ASKING = "asking"
+    ALLOWED = "allowed"
+    SUBMITTED = "submitted"
+    FINISHED = "finished"
+
+
+class ToolCallBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["tool_call"] = "tool_call"
+    id: str
+    name: str
+    input: str = ""
+    state: ToolCallState = ToolCallState.PENDING
+    suggested_rules: list[dict] = Field(default_factory=list)
+
+
+class ToolResultState(StrEnum):
+    SUCCESS = "success"
+    ERROR = "error"
+    INTERRUPTED = "interrupted"
+    DENIED = "denied"
+    RUNNING = "running"
+
+
+class ToolResultBlock(BaseModel):
+    type: Literal["tool_result"] = "tool_result"
+    id: str
+    name: str
+    output: list[TextBlock | DataBlock] = Field(default_factory=list)
+    state: ToolResultState = ToolResultState.RUNNING
+
+
+ContentBlock = (
+    TextBlock
+    | ThinkingBlock
+    | HintBlock
+    | ToolCallBlock
+    | ToolResultBlock
+    | DataBlock
+)
