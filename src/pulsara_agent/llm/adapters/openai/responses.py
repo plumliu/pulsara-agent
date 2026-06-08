@@ -28,6 +28,7 @@ from pulsara_agent.event import (
 from pulsara_agent.llm.input import LLMMessage, MessageRole, ToolSpec
 from pulsara_agent.llm.models import ModelProfile
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.transport import LLMTransport
 from pulsara_agent.llm.usage import Usage
 
 
@@ -35,7 +36,7 @@ OPENAI_RESPONSES_API = "openai_responses"
 
 
 @dataclass(slots=True)
-class OpenAIResponsesTransport:
+class OpenAIResponsesTransport(LLMTransport):
     """Adapter for OpenAI Responses-compatible APIs."""
 
     api_key: str

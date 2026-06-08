@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from pulsara_agent.jsonld import JsonLdEntity, NodeRef, Term
+from pulsara_agent.memory.provenance import RuntimeEventSpan
 from pulsara_agent.ontology import memory
 
 
@@ -22,6 +23,7 @@ class ToolResult(JsonLdEntity):
     scope: str
     created_at: str
     stored_as: NodeRef | None = None
+    event_span: RuntimeEventSpan | None = None
 
     def properties(self) -> dict[Any, Any]:
         values: dict[Any, Any] = {
@@ -35,4 +37,6 @@ class ToolResult(JsonLdEntity):
         }
         if self.stored_as is not None:
             values[memory.STORED_AS] = self.stored_as
+        if self.event_span is not None:
+            values[memory.EVENT_SPAN] = self.event_span.to_jsonld()
         return values

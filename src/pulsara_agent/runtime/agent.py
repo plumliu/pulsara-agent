@@ -25,6 +25,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.memory.provenance import runtime_event_span_from_events
 from pulsara_agent.message import (
     AssistantMsg,
     Msg,
@@ -40,7 +41,7 @@ from pulsara_agent.message import (
     UserMsg,
 )
 from pulsara_agent.runtime.context import build_llm_context, msg_to_llm_messages
-from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks
+from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     PermissionDecisionKind,
@@ -79,6 +80,7 @@ class AgentRuntime:
         runtime_session: RuntimeSession,
         llm_runtime: LLMRuntime,
         memory_hooks: MemoryHooks | None = None,
+        tool_result_persistence_hook: ToolResultPersistenceHook | None = None,
         permission_gate: PermissionGate | None = None,
         model_role: ModelRole = ModelRole.PRO,
         options: LLMOptions | None = None,
@@ -88,6 +90,7 @@ class AgentRuntime:
         self.runtime_session = runtime_session
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
+        self.tool_result_persistence_hook = tool_result_persistence_hook
         self.permission_gate = permission_gate or AllowAllPermissionGate()
         self.model_role = model_role
         self.options = options
@@ -213,6 +216,10 @@ class AgentRuntime:
                 state.consecutive_tool_failures = 0
                 state.recovery_mode = False
 
+            if self.tool_result_persistence_hook is not None:
+                event = await self._run_tool_result_persistence_hook(state)
+                if event is not None:
+                    yield event
             ok, _result, error_event = await self._run_memory_hook(
                 state,
                 "after_tool_results",
@@ -275,6 +282,23 @@ class AgentRuntime:
         except Exception as exc:
             event = self._mark_memory_hook_failed(state, hook_name, exc)
             return False, None, event
+
+    async def _run_tool_result_persistence_hook(self, state: LoopState) -> AgentEvent | None:
+        assert self.tool_result_persistence_hook is not None
+        try:
+            await self.tool_result_persistence_hook.after_tool_results(state, state.tool_results)
+            return None
+        except Exception as exc:
+            return self.runtime_session.event_log.append(
+                CustomEvent(
+                    **self._event_context(state).event_fields(),
+                    name="tool_result_persistence_failed",
+                    value={
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            )
 
     def _mark_memory_hook_failed(self, state: LoopState, hook_name: str, exc: Exception) -> AgentEvent:
         message = f"memory hook {hook_name} failed: {type(exc).__name__}: {exc}"
@@ -376,6 +400,7 @@ class AgentRuntime:
                 for event in stored_events:
                     yield event
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
+                _remember_tool_result_event_span(state, stored_events, block.id)
                 state.tool_results.append(result_block)
                 state.messages.append(
                     Msg(
@@ -422,6 +447,7 @@ class AgentRuntime:
                 for event in stored_events:
                     yield event
                 result_block = _tool_result_from_event_slice(stored_events, call.id)
+                _remember_tool_result_event_span(state, stored_events, call.id)
                 state.tool_results.append(result_block)
                 state.messages.append(
                     Msg(
@@ -467,6 +493,7 @@ class AgentRuntime:
                         yield event
             for call in batch:
                 result_block = _tool_result_from_event_slice(batch_events, call.id)
+                _remember_tool_result_event_span(state, batch_events, call.id)
                 state.tool_results.append(result_block)
                 state.messages.append(
                     Msg(role="tool_result", name=call.name, id=f"tool-result-message:{call.id}", content=[result_block])
@@ -573,6 +600,15 @@ def _last_sequence(event_log: InMemoryEventLog) -> int:
 
 def _events_after(event_log: InMemoryEventLog, sequence: int) -> list[AgentEvent]:
     return [event for event in event_log.iter() if (event.sequence or 0) > sequence]
+
+
+def _remember_tool_result_event_span(state: LoopState, events: list[AgentEvent], tool_call_id: str) -> None:
+    try:
+        span = runtime_event_span_from_events(events, tool_call_id, session_id=state.session_id)
+    except KeyError:
+        return
+    spans = state.scratchpad.setdefault("tool_result_event_spans", {})
+    spans[tool_call_id] = span
 
 
 def _tool_result_from_event_slice(events: list[AgentEvent], tool_call_id: str) -> ToolResultBlock:

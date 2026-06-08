@@ -25,6 +25,14 @@ CONTRADICTS = MEMORY.term("contradicts")
 SUPERSEDES = MEMORY.term("supersedes")
 BASED_ON = MEMORY.term("basedOn")
 CREATED_FROM = MEMORY.term("createdFrom")
+SOURCE_EVENT = MEMORY.term("sourceEvent")
+EVENT_SPAN = MEMORY.term("eventSpan")
+SOURCE_SESSION = MEMORY.term("sourceSession")
+SOURCE_RUN = MEMORY.term("sourceRun")
+SOURCE_TURN = MEMORY.term("sourceTurn")
+SOURCE_REPLY = MEMORY.term("sourceReply")
+START_SEQUENCE = MEMORY.term("startSequence")
+END_SEQUENCE = MEMORY.term("endSequence")
 
 CONFIDENCE_LEVEL = MEMORY.term("confidenceLevel")
 CREATED_AT = MEMORY.term("createdAt")
@@ -55,6 +63,7 @@ CONTEXT: dict[str, Any] = {
     "evidence": "https://pulsara.dev/evidence/",
     "claim": "https://pulsara.dev/claim/",
     "decision": "https://pulsara.dev/decision/",
+    "event": "https://pulsara.dev/event/",
     TURN.name: TURN.value,
     TOOL_RESULT.name: TOOL_RESULT.value,
     ARTIFACT.name: ARTIFACT.value,
@@ -69,6 +78,14 @@ CONTEXT: dict[str, Any] = {
     SUPERSEDES.name: {"@id": SUPERSEDES.value, "@type": "@id"},
     BASED_ON.name: {"@id": BASED_ON.value, "@type": "@id"},
     CREATED_FROM.name: {"@id": CREATED_FROM.value, "@type": "@id"},
+    SOURCE_EVENT.name: {"@id": SOURCE_EVENT.value, "@type": "@id"},
+    EVENT_SPAN.name: EVENT_SPAN.value,
+    SOURCE_SESSION.name: SOURCE_SESSION.value,
+    SOURCE_RUN.name: SOURCE_RUN.value,
+    SOURCE_TURN.name: SOURCE_TURN.value,
+    SOURCE_REPLY.name: SOURCE_REPLY.value,
+    START_SEQUENCE.name: START_SEQUENCE.value,
+    END_SEQUENCE.name: END_SEQUENCE.value,
     CONFIDENCE_LEVEL.name: CONFIDENCE_LEVEL.value,
     CREATED_AT.name: CREATED_AT.value,
     GATE_REASON.name: GATE_REASON.value,

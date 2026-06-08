@@ -27,6 +27,7 @@ from pulsara_agent.event import (
 from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.memory import ExecutionEvidenceLedger, ExecutionEvidencePersistenceHook, InMemoryArchiveStore, InMemoryGraphStore
 from pulsara_agent.message import (
     AssistantMsg,
     Base64Source,
@@ -51,6 +52,8 @@ from pulsara_agent.runtime import (
 from pulsara_agent.runtime.agent import _tool_result_from_event_slice
 from pulsara_agent.runtime.permission import PermissionDecision, PermissionDecisionKind
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
+from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.ontology import memory
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.registry import ToolRegistry
 
@@ -575,6 +578,11 @@ class FailingHook(NoopMemoryHooks):
         self._maybe_raise("on_session_end")
 
 
+class FailingPersistenceHook:
+    async def after_tool_results(self, state: LoopState, results: list[ToolResultBlock]) -> None:
+        raise RuntimeError("persist boom")
+
+
 def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> None:
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
     error = next(event for event in events if isinstance(event, RunErrorEvent))
@@ -639,6 +647,69 @@ def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) 
 
     _assert_memory_hook_failed(agent, result, "after_tool_results")
     assert len(transport.contexts) == 1
+
+
+def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> None:
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    graph = InMemoryGraphStore()
+    ledger = ExecutionEvidenceLedger(
+        graph=graph,
+        archive=InMemoryArchiveStore(),
+        gate=MemoryWriteGate(),
+    )
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        tool_result_persistence_hook=ExecutionEvidencePersistenceHook(ledger),
+    )
+
+    result = asyncio.run(agent.run_task("read"))
+
+    assert result.status is LoopStatus.FINISHED
+    tool_results = graph.find_by_type(memory.TOOL_RESULT)
+    assert len(tool_results) == 1
+    assert graph.find_by_type(memory.EVIDENCE) == []
+    assert graph.find_by_type(memory.CLAIM) == []
+    span = tool_results[0][memory.EVENT_SPAN.name]
+    assert span[memory.SOURCE_SESSION.name] == agent.runtime_session.runtime_session_id
+
+
+def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> None:
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        tool_result_persistence_hook=FailingPersistenceHook(),
+    )
+
+    result = asyncio.run(agent.run_task("read"))
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.stop_reason == "final"
+    assert any(event.type is EventType.CUSTOM and event.name == "tool_result_persistence_failed" for event in events)
+    assert not any(isinstance(event, RunErrorEvent) and event.code == "memory_persistence_error" for event in events)
+    assert any(event.type is EventType.CUSTOM and event.name == "session_completed" for event in events)
 
 
 def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> None:

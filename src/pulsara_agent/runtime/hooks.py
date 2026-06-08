@@ -22,6 +22,10 @@ class MemoryHooks(Protocol):
     async def on_session_end(self, state: LoopState) -> None: ...
 
 
+class ToolResultPersistenceHook(Protocol):
+    async def after_tool_results(self, state: LoopState, results: list[ToolResultBlock]) -> None: ...
+
+
 class NoopMemoryHooks:
     async def on_session_start(self, state: LoopState, user_input: str) -> None:
         return None

@@ -6,7 +6,28 @@ from dataclasses import dataclass
 from typing import Any
 
 from pulsara_agent.jsonld import jsonld_value
+from pulsara_agent.memory.provenance import RuntimeEventSpan
 from pulsara_agent.ontology import memory
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactWriteResult:
+    id: str
+    digest: str
+    stored_at: str
+    size_bytes: int
+
+    @property
+    def artifact_id(self) -> str:
+        return self.id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "digest": self.digest,
+            "stored_at": self.stored_at,
+            "size_bytes": self.size_bytes,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,16 +36,18 @@ class ToolResultRecord:
     artifact_id: str | None
     output_summary: str
     status: memory.ToolExecutionStatus
+    event_span: RuntimeEventSpan | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return jsonld_value(
-            {
-                "tool_result_id": self.tool_result_id,
-                "artifact_id": self.artifact_id,
-                "output_summary": self.output_summary,
-                "status": self.status,
-            }
-        )
+        payload: dict[str, Any] = {
+            "tool_result_id": self.tool_result_id,
+            "artifact_id": self.artifact_id,
+            "output_summary": self.output_summary,
+            "status": self.status,
+        }
+        if self.event_span is not None:
+            payload["event_span"] = self.event_span.to_jsonld()
+        return jsonld_value(payload)
 
 
 @dataclass(frozen=True, slots=True)
