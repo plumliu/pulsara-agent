@@ -11,6 +11,7 @@ class MessageRole(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
 
 
@@ -23,15 +24,19 @@ class ToolSpec:
 
 @dataclass(frozen=True, slots=True)
 class LLMMessage:
-    """Text input sent to a model provider.
+    """Provider-neutral input item sent to a model provider.
 
     Runtime messages are rebuilt from AgentEvent streams in ``pulsara_agent.message``.
-    This object is intentionally narrower: it only represents prompt/input content
-    before a provider adapter translates it to a wire format.
+    Text messages use ``content``. Tool transcripts use ``tool_call_id``,
+    ``name``, and ``arguments`` so each provider adapter can emit its native
+    tool-call and tool-result wire format.
     """
 
     role: MessageRole
     content: tuple[str, ...] = field(default_factory=tuple)
+    tool_call_id: str | None = None
+    name: str | None = None
+    arguments: str | None = None
 
     @classmethod
     def system(cls, text: str) -> "LLMMessage":
@@ -46,5 +51,14 @@ class LLMMessage:
         return cls(role=MessageRole.ASSISTANT, content=(text,))
 
     @classmethod
-    def tool_result(cls, text: str) -> "LLMMessage":
-        return cls(role=MessageRole.TOOL_RESULT, content=(text,))
+    def tool_call(cls, *, tool_call_id: str, name: str, arguments: str) -> "LLMMessage":
+        return cls(
+            role=MessageRole.TOOL_CALL,
+            tool_call_id=tool_call_id,
+            name=name,
+            arguments=arguments,
+        )
+
+    @classmethod
+    def tool_result(cls, text: str, *, tool_call_id: str | None = None) -> "LLMMessage":
+        return cls(role=MessageRole.TOOL_RESULT, content=(text,), tool_call_id=tool_call_id)

@@ -22,7 +22,6 @@ class ToolExecutor:
     event_log: InMemoryEventLog | None = None
 
     def execute(self, call: ToolCall, *, event_context: EventContext) -> ToolExecutionResult:
-        tool = self.registry.get(call.name)
         self._append(
             ToolResultStartEvent(
                 **event_context.event_fields(),
@@ -31,6 +30,7 @@ class ToolExecutor:
             )
         )
         try:
+            tool = self.registry.get(call.name)
             result = tool.execute(call)
         except Exception as exc:
             result = ToolExecutionResult(

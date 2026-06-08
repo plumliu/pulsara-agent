@@ -152,19 +152,39 @@ def translate_responses_event(
     if event_type == "response.output_item.added":
         item = raw_event.get("item")
         if isinstance(item, dict) and item.get("type") == "function_call":
-            tool_call_id = str(item.get("id") or item.get("call_id") or uuid4())
+            provider_item_id = str(item.get("id") or "")
+            tool_call_id = str(item.get("call_id") or item.get("id") or uuid4())
             return builder.tool_call_start(
                 tool_call_id=tool_call_id,
                 tool_call_name=str(item.get("name") or ""),
+                provider_item_id=provider_item_id,
             )
     if event_type == "response.function_call_arguments.delta":
         item_id = str(raw_event.get("item_id") or raw_event.get("call_id") or "")
-        return builder.tool_call_delta(tool_call_id=item_id, delta=str(raw_event.get("delta", "")))
+        return builder.tool_call_delta(
+            tool_call_id=builder.resolve_tool_call_id(item_id),
+            delta=str(raw_event.get("delta", "")),
+        )
     if event_type == "response.output_item.done":
         item = raw_event.get("item")
         if isinstance(item, dict) and item.get("type") == "function_call":
-            tool_call_id = str(item.get("id") or item.get("call_id") or "")
-            return builder.tool_call_end(tool_call_id=tool_call_id)
+            provider_item_id = str(item.get("id") or "")
+            tool_call_id = str(item.get("call_id") or item.get("id") or "")
+            events = builder.tool_call_start(
+                tool_call_id=tool_call_id,
+                tool_call_name=str(item.get("name") or ""),
+                provider_item_id=provider_item_id,
+            )
+            arguments = item.get("arguments")
+            if arguments and not builder.has_arguments(tool_call_id):
+                events.extend(
+                    builder.tool_call_delta(
+                        tool_call_id=tool_call_id,
+                        delta=_arguments_to_json_string(arguments),
+                    )
+                )
+            events.extend(builder.tool_call_end(tool_call_id=tool_call_id))
+            return events
     if event_type == "response.completed":
         response = raw_event.get("response")
         events = builder.close_active_blocks()
@@ -180,6 +200,8 @@ class _AgentEventBuilder:
     text_block_id: str | None = None
     thinking_block_id: str | None = None
     active_tool_call_ids: set[str] = field(default_factory=set)
+    item_id_to_tool_call_id: dict[str, str] = field(default_factory=dict)
+    tool_call_has_arguments: set[str] = field(default_factory=set)
 
     def event_fields(self) -> dict[str, str]:
         return self.event_context.event_fields()
@@ -225,7 +247,15 @@ class _AgentEventBuilder:
         )
         return events
 
-    def tool_call_start(self, *, tool_call_id: str, tool_call_name: str) -> list[AgentEvent]:
+    def tool_call_start(
+        self,
+        *,
+        tool_call_id: str,
+        tool_call_name: str,
+        provider_item_id: str | None = None,
+    ) -> list[AgentEvent]:
+        if provider_item_id:
+            self.item_id_to_tool_call_id[provider_item_id] = tool_call_id
         if tool_call_id in self.active_tool_call_ids:
             return []
         self.active_tool_call_ids.add(tool_call_id)
@@ -241,6 +271,8 @@ class _AgentEventBuilder:
         events: list[AgentEvent] = []
         if tool_call_id and tool_call_id not in self.active_tool_call_ids:
             events.extend(self.tool_call_start(tool_call_id=tool_call_id, tool_call_name=""))
+        if tool_call_id and delta:
+            self.tool_call_has_arguments.add(tool_call_id)
         events.append(ToolCallDeltaEvent(**self.event_fields(), tool_call_id=tool_call_id, delta=delta))
         return events
 
@@ -257,6 +289,12 @@ class _AgentEventBuilder:
             events.extend(self.tool_call_delta(tool_call_id=tool_call_id, delta=arguments))
         events.extend(self.tool_call_end(tool_call_id=tool_call_id))
         return events
+
+    def resolve_tool_call_id(self, item_id_or_call_id: str) -> str:
+        return self.item_id_to_tool_call_id.get(item_id_or_call_id, item_id_or_call_id)
+
+    def has_arguments(self, tool_call_id: str) -> bool:
+        return tool_call_id in self.tool_call_has_arguments
 
     def close_active_blocks(self) -> list[AgentEvent]:
         events: list[AgentEvent] = []
@@ -336,9 +374,27 @@ def _responses_url(base_url: str) -> str:
 
 
 def _message_to_responses_input(message: LLMMessage) -> dict[str, Any]:
-    role = "tool" if message.role is MessageRole.TOOL_RESULT else message.role.value
+    if message.role is MessageRole.TOOL_CALL:
+        if not message.tool_call_id:
+            raise ValueError("Responses function_call input requires tool_call_id")
+        if not message.name:
+            raise ValueError("Responses function_call input requires name")
+        return {
+            "type": "function_call",
+            "call_id": message.tool_call_id,
+            "name": message.name,
+            "arguments": message.arguments or "{}",
+        }
+    if message.role is MessageRole.TOOL_RESULT:
+        if not message.tool_call_id:
+            raise ValueError("Responses function_call_output input requires tool_call_id/call_id")
+        return {
+            "type": "function_call_output",
+            "call_id": message.tool_call_id,
+            "output": "\n".join(message.content),
+        }
     return {
-        "role": role,
+        "role": message.role.value,
         "content": [{"type": "input_text", "text": text} for text in message.content],
     }
 
@@ -396,7 +452,7 @@ def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, str]]:
         if item.get("type") == "function_call":
             calls.append(
                 {
-                    "id": str(item.get("id") or item.get("call_id") or ""),
+                    "id": str(item.get("call_id") or item.get("id") or ""),
                     "name": str(item.get("name") or ""),
                     "arguments": _arguments_to_json_string(item.get("arguments") or "{}"),
                 }

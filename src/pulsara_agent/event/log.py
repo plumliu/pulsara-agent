@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Iterable
 
 from pulsara_agent.event.events import AgentEvent, ReplyStartEvent
@@ -14,14 +15,16 @@ from pulsara_agent.message.reducer import MessageReducer
 class InMemoryEventLog:
     _events: list[AgentEvent] = field(default_factory=list)
     _next_sequence: int = 1
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def append(self, event: AgentEvent) -> AgentEvent:
-        stored = event
-        if event.sequence is None:
-            stored = event.model_copy(update={"sequence": self._next_sequence})
-        self._next_sequence = max(self._next_sequence, (stored.sequence or 0) + 1)
-        self._events.append(stored)
-        return stored
+        with self._lock:
+            stored = event
+            if event.sequence is None:
+                stored = event.model_copy(update={"sequence": self._next_sequence})
+            self._next_sequence = max(self._next_sequence, (stored.sequence or 0) + 1)
+            self._events.append(stored)
+            return stored
 
     def extend(self, events: Iterable[AgentEvent]) -> list[AgentEvent]:
         return [self.append(event) for event in events]
@@ -33,7 +36,8 @@ class InMemoryEventLog:
         turn_id: str | None = None,
         reply_id: str | None = None,
     ) -> list[AgentEvent]:
-        events = self._events
+        with self._lock:
+            events = list(self._events)
         if run_id is not None:
             events = [event for event in events if event.run_id == run_id]
         if turn_id is not None:

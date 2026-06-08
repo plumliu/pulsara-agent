@@ -17,10 +17,12 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResultStartEvent,
 )
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock
+from pulsara_agent.runtime import AgentRuntime, RuntimeSession
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -74,6 +76,21 @@ def test_real_pro_model_emits_text_and_optional_thinking_events():
         pytest.skip("Configured provider did not expose reasoning summary events for this request.")
     assert result["thinking"]
     assert result["replayed_thinking"]
+
+
+def test_real_agent_runtime_completes_tool_loop_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_tool_loop_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_call_ids"]
+    assert result["tool_result_ids"] == result["tool_call_ids"]
+    assert result["final_text"]
+    assert "PULSARA_RESPONSES_TOOL_OK" in result["final_text"]
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -192,6 +209,45 @@ async def _run_real_thinking_text_smoke() -> dict:
         **_summarize_collected_result(result),
         "replayed_text": replayed_text.strip(),
         "replayed_thinking": replayed_thinking.strip(),
+    }
+
+
+async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
+    probe = tmp_path / "probe.txt"
+    probe.write_text("PULSARA_RESPONSES_TOOL_OK", encoding="utf-8")
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=128),
+        system_prompt=(
+            "You are validating a Responses API tool loop. "
+            "First call read_file on probe.txt. "
+            "Then answer with exactly the file content and nothing else."
+        ),
+    )
+
+    result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    tool_call_ids = [
+        event.tool_call_id
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    tool_result_ids = [
+        event.tool_call_id
+        for event in events
+        if isinstance(event, ToolResultStartEvent)
+    ]
+    errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_call_ids": tool_call_ids,
+        "tool_result_ids": tool_result_ids,
+        "errors": errors,
     }
 
 

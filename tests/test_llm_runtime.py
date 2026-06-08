@@ -131,6 +131,42 @@ def test_openai_responses_payload_uses_internal_context() -> None:
     assert payload["max_output_tokens"] == 128
 
 
+def test_openai_responses_payload_uses_function_call_output_items() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("Use lookup."),
+            LLMMessage.tool_call(
+                tool_call_id="call_responses_123",
+                name="lookup",
+                arguments='{"q":"pulsara"}',
+            ),
+            LLMMessage.tool_result("found", tool_call_id="call_responses_123"),
+        )
+    )
+
+    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+
+    assert payload["input"][0]["role"] == "user"
+    assert payload["input"][1] == {
+        "type": "function_call",
+        "call_id": "call_responses_123",
+        "name": "lookup",
+        "arguments": '{"q":"pulsara"}',
+    }
+    assert payload["input"][2] == {
+        "type": "function_call_output",
+        "call_id": "call_responses_123",
+        "output": "found",
+    }
+    assert all(item.get("role") != "tool" for item in payload["input"])
+
+
 def test_openai_responses_events_translate_to_agent_events() -> None:
     config = LLMConfig(
         api_key="sk-test",
@@ -270,6 +306,84 @@ def test_non_streaming_response_synthesizes_same_event_shape() -> None:
     assert events[-1].input_tokens == 3
     assert events[-1].output_tokens == 5
     assert events[-1].total_tokens == 8
+
+
+def test_openai_responses_tool_calls_prefer_call_id_over_item_id() -> None:
+    builder = transport_builder_for_test()
+
+    events = response_to_agent_events(
+        response={
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "call_id": "call_responses_1",
+                    "name": "lookup",
+                    "arguments": '{"q":"pulsara"}',
+                }
+            ],
+        },
+        builder=builder,
+    )
+
+    start = next(event for event in events if isinstance(event, ToolCallStartEvent))
+    delta = next(event for event in events if isinstance(event, ToolCallDeltaEvent))
+    end = next(event for event in events if isinstance(event, ToolCallEndEvent))
+    assert start.tool_call_id == "call_responses_1"
+    assert delta.tool_call_id == "call_responses_1"
+    assert end.tool_call_id == "call_responses_1"
+
+
+def test_openai_responses_streaming_arguments_map_item_id_to_call_id() -> None:
+    builder = transport_builder_for_test()
+
+    events = []
+    events.extend(
+        translate_responses_event(
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "call_id": "call_responses_1",
+                    "name": "lookup",
+                },
+            },
+            builder=builder,
+        )
+    )
+    events.extend(
+        translate_responses_event(
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_item_1",
+                "delta": '{"q":"pulsara"}',
+            },
+            builder=builder,
+        )
+    )
+    events.extend(
+        translate_responses_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "call_id": "call_responses_1",
+                    "name": "lookup",
+                },
+            },
+            builder=builder,
+        )
+    )
+
+    assert isinstance(events[0], ToolCallStartEvent)
+    assert isinstance(events[1], ToolCallDeltaEvent)
+    assert isinstance(events[2], ToolCallEndEvent)
+    assert events[0].tool_call_id == "call_responses_1"
+    assert events[1].tool_call_id == "call_responses_1"
+    assert events[2].tool_call_id == "call_responses_1"
 
 
 def test_openai_responses_transport_posts_to_configured_base_url(monkeypatch) -> None:
