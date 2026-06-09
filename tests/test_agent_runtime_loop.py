@@ -27,7 +27,8 @@ from pulsara_agent.event import (
 from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.memory import ExecutionEvidenceLedger, ExecutionEvidencePersistenceHook, InMemoryArchiveStore, InMemoryGraphStore
+from pulsara_agent.graph import InMemoryGraphStore
+from pulsara_agent.memory import ExecutionEvidenceLedger, ExecutionEvidencePersistenceHook, InMemoryArchiveStore
 from pulsara_agent.message import (
     AssistantMsg,
     Base64Source,

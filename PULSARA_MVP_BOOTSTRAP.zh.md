@@ -35,7 +35,7 @@ MVP 只有四个物理对象。
 
 `LoopState` 是 Working Context Cache。它保存当前 loop 的临时状态、预算、当前 scope、当前 projection。它不是事实源，也不长期保存。
 
-`GraphStore` 是 JSON-LD/RDF fact layer。当前实现是 in-memory JSON-LD document store，后续 Oxigraph / SPARQL 必须藏在这个边界之后，调用方不直接依赖具体数据库。
+`GraphStore` 是 JSON-LD/RDF fact layer。它是顶层 semantic persistence boundary，不属于 `memory/` domain。当前实现包括测试/轻量 demo 用的 `InMemoryGraphStore`，以及本地 RDF/SPARQL 用的 `OxigraphGraphStore`；调用方只依赖 `pulsara_agent.graph.GraphStore` 边界，不直接依赖具体数据库细节。
 
 `ArchiveStore` 保存大文本、大工具输出、原文 blob。GraphStore 只保存它的 `@id`、hash、summary 和 metadata。
 
@@ -165,10 +165,14 @@ src/pulsara_agent/
   tools/
     base.py           # ToolCall / ToolExecutionResult / Tool protocol
     registry.py       # 收敛版 ToolRegistry
+  graph/
+    store.py          # GraphStore protocol / DEFAULT_GRAPH_ID
+    in_memory.py      # InMemoryGraphStore
+    oxigraph.py       # OxigraphGraphStore
   memory/
     archive.py        # ArchiveStore
-    graph.py          # GraphStore boundary
     ledger.py         # ExecutionEvidenceLedger
+    protocols.py      # memory runtime protocols, excluding GraphStore
     entities/
       artifact.py     # Artifact JSON-LD entity
       claim.py        # Claim JSON-LD entity
@@ -188,7 +192,7 @@ tests/
 
 ## 暂时不做什么
 
-MVP 阶段暂时不做完整 Task Graph、后台 curator、真实 Oxigraph、SPARQL planner、FastAPI 服务、前端、插件市场、长期定时维护任务、多厂商 provider marketplace。
+MVP 阶段暂时不做完整 Task Graph、后台 curator、SPARQL planner、FastAPI 服务、前端、插件市场、长期定时维护任务、多厂商 provider marketplace。
 
 LLM 层当前只做 OpenAI Responses-compatible 的最小真实 HTTP 调用和 mock 测试流；还不做完整 SSE streaming、自动重试、速率限制、provider 特性协商、复杂 tool result 回填协议。
 

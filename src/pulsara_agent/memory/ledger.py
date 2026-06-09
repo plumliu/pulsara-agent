@@ -12,9 +12,10 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
+from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
 from pulsara_agent.memory.entities import Artifact, Claim, Evidence, ToolResult, Turn
-from pulsara_agent.memory.protocols import DEFAULT_GRAPH_ID, ArtifactStore, GraphStore, RuntimeEventReadStore
+from pulsara_agent.memory.protocols import ArtifactStore, RuntimeEventReadStore
 from pulsara_agent.memory.provenance import RuntimeEventSpan, runtime_event_span_from_events
 from pulsara_agent.memory.records import ClaimRecord, EvidenceRecord, ToolResultRecord
 from pulsara_agent.memory.write_gate import MemoryWriteGate

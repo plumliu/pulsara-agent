@@ -1,8 +1,4 @@
-"""GraphStore abstractions.
-
-The MVP keeps an in-memory JSON-LD document store. RDF expansion/SPARQL will be
-added behind this boundary without changing callers.
-"""
+"""In-memory GraphStore implementation for tests and lightweight demos."""
 
 from __future__ import annotations
 
@@ -11,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsara_agent.jsonld import Term
-from pulsara_agent.memory.protocols import DEFAULT_GRAPH_ID
+from pulsara_agent.graph.store import DEFAULT_GRAPH_ID
 
 
 @dataclass(slots=True)
@@ -22,22 +18,20 @@ class InMemoryGraphStore:
     def documents(self) -> dict[str, dict[str, Any]]:
         return self.graphs.setdefault(DEFAULT_GRAPH_ID, {})
 
-    def put_jsonld(self, document: dict[str, Any], graph_id: str = DEFAULT_GRAPH_ID) -> None:
+    def put_jsonld(self, document: dict[str, Any], graph_id: str | None = None) -> None:
         node_id = document.get("@id")
         if not isinstance(node_id, str) or not node_id:
             raise ValueError("JSON-LD document must include a string @id")
-        self.graphs.setdefault(graph_id, {})[node_id] = deepcopy(document)
+        self.graphs.setdefault(_graph_key(graph_id), {})[node_id] = deepcopy(document)
 
     def get_jsonld(self, node_id: str, graph_id: str | None = None) -> dict[str, Any]:
-        graph_key = graph_id or DEFAULT_GRAPH_ID
-        graph = self.graphs.get(graph_key, {})
+        graph = self.graphs.get(_graph_key(graph_id), {})
         if node_id not in graph:
             raise KeyError(node_id)
         return deepcopy(graph[node_id])
 
     def has_jsonld(self, node_id: str, graph_id: str | None = None) -> bool:
-        graph_key = graph_id or DEFAULT_GRAPH_ID
-        return node_id in self.graphs.get(graph_key, {})
+        return node_id in self.graphs.get(_graph_key(graph_id), {})
 
     def add_relation(
         self,
@@ -55,10 +49,9 @@ class InMemoryGraphStore:
         self.put_jsonld(document, graph_id=graph_id)
 
     def find_by_type(self, type_name: Term, graph_id: str | None = None) -> list[dict[str, Any]]:
-        graphs = [self.graphs.get(graph_id, {})] if graph_id is not None else list(self.graphs.values())
+        graph = self.graphs.get(_graph_key(graph_id), {})
         return [
-            doc
-            for graph in graphs
+            deepcopy(doc)
             for doc in graph.values()
             if type_name.name in _as_list(doc.get("@type"))
         ]
@@ -70,7 +63,7 @@ class InMemoryGraphStore:
         raise NotImplementedError("InMemoryGraphStore does not implement SPARQL update")
 
     def delete_graph(self, graph_id: str) -> None:
-        self.graphs.pop(graph_id, None)
+        self.graphs.pop(_graph_key(graph_id), None)
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -79,3 +72,11 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def _graph_key(graph_id: str | None) -> str:
+    if graph_id is None:
+        return DEFAULT_GRAPH_ID
+    if not graph_id:
+        raise ValueError("graph_id must be a non-empty string or None")
+    return graph_id
