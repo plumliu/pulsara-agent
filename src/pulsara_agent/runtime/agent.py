@@ -18,7 +18,6 @@ from pulsara_agent.event import (
     ProjectionRequestedEvent,
     RequireUserConfirmEvent,
     RunErrorEvent,
-    ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -29,17 +28,15 @@ from pulsara_agent.memory.provenance import runtime_event_span_from_events
 from pulsara_agent.message import (
     AssistantMsg,
     Msg,
-    Base64Source,
-    DataBlock,
     TextBlock,
     ToolCallBlock,
     ToolCallState,
     ToolResultBlock,
     ToolResultState,
-    URLSource,
     Usage,
     UserMsg,
 )
+from pulsara_agent.message.assembler import completed_tool_result_from_events
 from pulsara_agent.runtime.context import build_llm_context, msg_to_llm_messages
 from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
 from pulsara_agent.runtime.permission import (
@@ -612,61 +609,7 @@ def _remember_tool_result_event_span(state: LoopState, events: list[AgentEvent],
 
 
 def _tool_result_from_event_slice(events: list[AgentEvent], tool_call_id: str) -> ToolResultBlock:
-    block: ToolResultBlock | None = None
-    saw_matching_tool_result_event = False
-    ended = False
-
-    for event in events:
-        if getattr(event, "tool_call_id", None) != tool_call_id:
-            continue
-        if isinstance(
-            event,
-            (
-                ToolResultStartEvent,
-                ToolResultTextDeltaEvent,
-                ToolResultDataDeltaEvent,
-                ToolResultEndEvent,
-            ),
-        ):
-            saw_matching_tool_result_event = True
-
-        if isinstance(event, ToolResultStartEvent):
-            block = ToolResultBlock(
-                id=tool_call_id,
-                name=event.tool_call_name,
-                output=[],
-                state=ToolResultState.RUNNING,
-            )
-            ended = False
-        elif isinstance(event, ToolResultTextDeltaEvent):
-            if block is None:
-                raise ValueError(f"Tool result delta without start for tool_call_id: {tool_call_id}")
-            if block.output and isinstance(block.output[-1], TextBlock):
-                block.output[-1].text += event.delta
-            else:
-                block.output.append(TextBlock(text=event.delta))
-        elif isinstance(event, ToolResultDataDeltaEvent):
-            if block is None:
-                raise ValueError(f"Tool result data without start for tool_call_id: {tool_call_id}")
-            source = (
-                Base64Source(data=event.data, media_type=event.media_type)
-                if event.data is not None
-                else URLSource(url=str(event.url), media_type=event.media_type)
-            )
-            block.output.append(DataBlock(id=event.block_id, source=source))
-        elif isinstance(event, ToolResultEndEvent):
-            if block is None:
-                raise ValueError(f"Tool result end without start for tool_call_id: {tool_call_id}")
-            block.state = event.state
-            ended = True
-
-    if block is None:
-        if saw_matching_tool_result_event:
-            raise ValueError(f"Malformed tool result slice for tool_call_id: {tool_call_id}")
-        raise KeyError(f"No tool result found in event slice for tool_call_id: {tool_call_id}")
-    if not ended:
-        raise ValueError(f"Tool result slice missing end for tool_call_id: {tool_call_id}")
-    return block
+    return completed_tool_result_from_events(events, tool_call_id)
 
 
 def _accumulate_usage(state: LoopState, message: Msg) -> None:

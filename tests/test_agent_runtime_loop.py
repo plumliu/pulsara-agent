@@ -149,7 +149,7 @@ def test_msg_to_llm_messages_compresses_context_blocks() -> None:
                     output=[TextBlock(text=huge)],
                     state=ToolResultState.SUCCESS,
                 ),
-                DataBlock(source=Base64Source(data="abc", media_type="image/png"), name="plot"),
+                DataBlock(id="data:plot", source=Base64Source(data="abc", media_type="image/png"), name="plot"),
             ],
         ),
     ]
