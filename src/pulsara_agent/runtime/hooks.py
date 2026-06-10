@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol, TypeAlias
 from pulsara_agent.event import AgentEvent, EventType
 from pulsara_agent.message import Msg, ToolResultBlock
 from pulsara_agent.message.assembler import BlockAssembler, BlockCompletion
+from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 
 
@@ -87,6 +88,16 @@ class RuntimeHookManager:
 
     def register_block(self, block_type: str | None, handler: BlockObserverHook) -> None:
         self._block_hooks.append(_BlockHookRegistration(selector=block_type, handler=handler))
+
+    async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+        context = HookContext(
+            runtime_session_id=published.runtime_session_id,
+            run_id=published.event.run_id,
+            turn_id=published.event.turn_id,
+            reply_id=published.event.reply_id,
+            state=published.state,
+        )
+        await self.dispatch_observer_event(context, published.event)
 
     async def dispatch_observer_event(self, context: HookContext, event: AgentEvent) -> None:
         for registration in self._event_hooks:

@@ -8,7 +8,6 @@ from typing import Callable
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
-    InMemoryEventLog,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -21,8 +20,7 @@ from pulsara_agent.tools.registry import ToolRegistry
 @dataclass(slots=True)
 class ToolExecutor:
     registry: ToolRegistry
-    event_log: InMemoryEventLog | None = None
-    event_sink: Callable[[AgentEvent], None] | None = None
+    record_event: Callable[[AgentEvent], AgentEvent] | None = None
 
     def execute(self, call: ToolCall, *, event_context: EventContext) -> ToolExecutionResult:
         self._append(
@@ -60,9 +58,6 @@ class ToolExecutor:
         return result
 
     def _append(self, event):
-        stored = event
-        if self.event_log is not None:
-            stored = self.event_log.append(event)
-        if self.event_sink is not None:
-            self.event_sink(stored)
-        return stored
+        if self.record_event is not None:
+            return self.record_event(event)
+        return event

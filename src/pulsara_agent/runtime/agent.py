@@ -12,12 +12,12 @@ from pulsara_agent.event import (
     CustomEvent,
     EventContext,
     ExceedMaxItersEvent,
-    InMemoryEventLog,
     ProjectionFailedEvent,
     ProjectionReadyEvent,
     ProjectionRequestedEvent,
     RequireUserConfirmEvent,
     RunErrorEvent,
+    ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -26,19 +26,18 @@ from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory.provenance import runtime_event_span_from_events
 from pulsara_agent.message import (
-    AssistantMsg,
     Msg,
     TextBlock,
     ToolCallBlock,
     ToolCallState,
     ToolResultBlock,
     ToolResultState,
-    Usage,
     UserMsg,
 )
 from pulsara_agent.message.assembler import completed_tool_result_from_events
-from pulsara_agent.runtime.context import build_llm_context, msg_to_llm_messages
-from pulsara_agent.runtime.hooks import HookContext, MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
+from pulsara_agent.runtime.context import build_llm_context
+from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
+from pulsara_agent.runtime.publisher import RuntimeEventSubscriber, RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     PermissionDecisionKind,
@@ -68,6 +67,28 @@ class AgentRunResult:
     messages: list[Msg]
     final_text: str
     error_message: str | None = None
+
+
+class _ToolBatchTap(RuntimeEventSubscriber):
+    def __init__(self, tool_call_ids: set[str]) -> None:
+        self._tool_call_ids = tool_call_ids
+        self.queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
+
+    async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+        event = published.event
+        tool_call_id = getattr(event, "tool_call_id", None)
+        if tool_call_id not in self._tool_call_ids:
+            return
+        if isinstance(
+            event,
+            (
+                ToolResultStartEvent,
+                ToolResultTextDeltaEvent,
+                ToolResultDataDeltaEvent,
+                ToolResultEndEvent,
+            ),
+        ):
+            await self.queue.put(event)
 
 
 class AgentRuntime:
@@ -123,13 +144,13 @@ class AgentRuntime:
                 state.status = LoopStatus.FAILED
                 state.stop_reason = "max_turns"
                 state.transition(LoopTransition.EXCEED_MAX_ITERS)
-                event = await self._append_event(
-                    state,
+                event = await self.runtime_session.emit(
                     ExceedMaxItersEvent(
                         **self._event_context(state).event_fields(),
                         name="agent_runtime",
                         max_iters=self.budget.max_turns,
                     ),
+                    state=state,
                 )
                 yield event
                 break
@@ -152,18 +173,18 @@ class AgentRuntime:
                     event_context=self._event_context(state),
                     options=self.options,
                 ):
-                    stored = await self._append_event(state, event)
+                    stored = await self.runtime_session.emit(event, state=state)
                     if isinstance(stored, RunErrorEvent):
                         reply_had_run_error = True
                     yield stored
             except Exception as exc:
-                event = await self._append_event(
-                    state,
+                event = await self.runtime_session.emit(
                     RunErrorEvent(
                         **self._event_context(state).event_fields(),
                         message=f"{type(exc).__name__}: {exc}",
                         code="model_stream_error",
                     ),
+                    state=state,
                 )
                 reply_had_run_error = True
                 yield event
@@ -288,8 +309,7 @@ class AgentRuntime:
             await self.tool_result_persistence_hook.after_tool_results(state, state.tool_results)
             return None
         except Exception as exc:
-            return await self._append_event(
-                state,
+            return await self.runtime_session.emit(
                 CustomEvent(
                     **self._event_context(state).event_fields(),
                     name="tool_result_persistence_failed",
@@ -298,6 +318,7 @@ class AgentRuntime:
                         "message": str(exc),
                     },
                 ),
+                state=state,
             )
 
     async def _mark_memory_hook_failed(self, state: LoopState, hook_name: str, exc: Exception) -> AgentEvent:
@@ -306,14 +327,14 @@ class AgentRuntime:
         state.stop_reason = "memory_hook_error"
         state.error_message = message
         state.transition(LoopTransition.FAIL)
-        return await self._append_event(
-            state,
+        return await self.runtime_session.emit(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
                 code="memory_hook_error",
                 metadata={"hook": hook_name},
             ),
+            state=state,
         )
 
     async def _mark_tool_budget_exceeded(self, state: LoopState, *, attempted_count: int) -> AgentEvent:
@@ -325,8 +346,7 @@ class AgentRuntime:
         state.stop_reason = "tool_error_budget"
         state.error_message = message
         state.transition(LoopTransition.FAIL)
-        return await self._append_event(
-            state,
+        return await self.runtime_session.emit(
             RunErrorEvent(
                 **self._event_context(state).event_fields(),
                 message=message,
@@ -337,13 +357,13 @@ class AgentRuntime:
                     "max_tool_calls": self.budget.max_tool_calls,
                 },
             ),
+            state=state,
         )
 
     async def _project_memory(self, state: LoopState) -> AsyncIterator[AgentEvent]:
         projection_id = f"projection:{state.turn_id}"
         context = self._event_context(state)
-        yield await self._append_event(
-            state,
+        yield await self.runtime_session.emit(
             ProjectionRequestedEvent(
                 **context.event_fields(),
                 projection_id=projection_id,
@@ -351,6 +371,7 @@ class AgentRuntime:
                 scope=state.current_scope or "session",
                 token_budget=self.budget.projection_token_budget,
             ),
+            state=state,
         )
         try:
             projection = await self.memory_hooks.project(
@@ -359,8 +380,7 @@ class AgentRuntime:
             )
         except Exception as exc:
             state.memory_projection = None
-            yield await self._append_event(
-                state,
+            yield await self.runtime_session.emit(
                 ProjectionFailedEvent(
                     **context.event_fields(),
                     projection_id=projection_id,
@@ -369,11 +389,11 @@ class AgentRuntime:
                     token_budget=self.budget.projection_token_budget,
                     error=f"{type(exc).__name__}: {exc}",
                 ),
+                state=state,
             )
             return
         state.memory_projection = projection
-        yield await self._append_event(
-            state,
+        yield await self.runtime_session.emit(
             ProjectionReadyEvent(
                 **context.event_fields(),
                 projection_id=projection_id,
@@ -383,6 +403,7 @@ class AgentRuntime:
                 included_memory_ids=_projection_ids(projection),
                 summary=_projection_summary(projection),
             ),
+            state=state,
         )
 
     async def _execute_tool_blocks(
@@ -395,14 +416,15 @@ class AgentRuntime:
             try:
                 parsed_calls.append(_parse_tool_call(block))
             except ValueError as exc:
-                stored_events = emit_tool_result_error(
-                    self.runtime_session.event_log,
-                    self._event_context(state),
-                    tool_call_id=block.id,
-                    tool_call_name=block.name,
-                    message=str(exc),
+                stored_events = await self.runtime_session.emit_many(
+                    build_tool_result_error_events(
+                        self._event_context(state),
+                        tool_call_id=block.id,
+                        tool_call_name=block.name,
+                        message=str(exc),
+                    ),
+                    state=state,
                 )
-                await self._dispatch_stored_events(state, stored_events)
                 for event in stored_events:
                     yield event
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
@@ -420,6 +442,39 @@ class AgentRuntime:
         if not parsed_calls:
             return
 
+        duplicate_ids = _duplicate_tool_call_ids(parsed_calls)
+        if duplicate_ids:
+            unique_calls: list[ToolCall] = []
+            for call in parsed_calls:
+                if call.id not in duplicate_ids:
+                    unique_calls.append(call)
+                    continue
+                stored_events = await self.runtime_session.emit_many(
+                    build_tool_result_error_events(
+                        self._event_context(state),
+                        tool_call_id=call.id,
+                        tool_call_name=call.name,
+                        message=f"Duplicate tool_call_id in assistant reply: {call.id}",
+                    ),
+                    state=state,
+                )
+                for event in stored_events:
+                    yield event
+                result_block = _tool_result_from_event_slice(stored_events, call.id)
+                _remember_tool_result_event_span(state, stored_events, call.id)
+                state.tool_results.append(result_block)
+                state.messages.append(
+                    Msg(
+                        role="tool_result",
+                        name=call.name,
+                        id=f"tool-result-message:{call.id}",
+                        content=[result_block],
+                    )
+                )
+            parsed_calls = unique_calls
+            if not parsed_calls:
+                return
+
         decision = await self.permission_gate.evaluate(parsed_calls)
         if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
             blocks = [
@@ -435,23 +490,24 @@ class AgentRuntime:
             state.status = LoopStatus.WAITING_USER
             state.stop_reason = "waiting_user"
             state.transition(LoopTransition.WAIT_FOR_USER)
-            event = await self._append_event(
-                state,
+            event = await self.runtime_session.emit(
                 RequireUserConfirmEvent(**self._event_context(state).event_fields(), tool_calls=blocks),
+                state=state,
             )
             yield event
             return
         if decision.kind is PermissionDecisionKind.DENY:
             for call in parsed_calls:
-                stored_events = emit_tool_result_error(
-                    self.runtime_session.event_log,
-                    self._event_context(state),
-                    tool_call_id=call.id,
-                    tool_call_name=call.name,
-                    message=decision.reason or "tool call denied by permission gate",
-                    state=ToolResultState.DENIED,
+                stored_events = await self.runtime_session.emit_many(
+                    build_tool_result_error_events(
+                        self._event_context(state),
+                        tool_call_id=call.id,
+                        tool_call_name=call.name,
+                        message=decision.reason or "tool call denied by permission gate",
+                        state=ToolResultState.DENIED,
+                    ),
+                    state=state,
                 )
-                await self._dispatch_stored_events(state, stored_events)
                 for event in stored_events:
                     yield event
                 result_block = _tool_result_from_event_slice(stored_events, call.id)
@@ -489,17 +545,11 @@ class AgentRuntime:
         batch: list[ToolCall],
         batch_events: list[AgentEvent],
     ) -> AsyncIterator[AgentEvent]:
-        loop = asyncio.get_running_loop()
-        event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
-
-        def event_sink(event: AgentEvent) -> None:
-            future = asyncio.run_coroutine_threadsafe(event_queue.put(event), loop)
-            future.result()
-
+        tap = _ToolBatchTap({call.id for call in batch})
+        self.runtime_session.publisher.subscribe(tap)
         executor = ToolExecutor(
             registry=self.tool_executor.registry,
-            event_log=self.runtime_session.event_log,
-            event_sink=event_sink,
+            record_event=self.runtime_session.make_thread_recorder(state=state),
         )
         tasks = [
             asyncio.create_task(
@@ -512,25 +562,29 @@ class AgentRuntime:
             for call in batch
         ]
         pending = set(tasks)
+        completed_tool_calls: set[str] = set()
 
         try:
-            while pending or not event_queue.empty():
-                while not event_queue.empty():
-                    event = event_queue.get_nowait()
+            while pending or len(completed_tool_calls) < len(batch) or not tap.queue.empty():
+                while not tap.queue.empty():
+                    event = tap.queue.get_nowait()
                     batch_events.append(event)
-                    await self._dispatch_observer_event(state, event)
+                    if isinstance(event, ToolResultEndEvent):
+                        completed_tool_calls.add(event.tool_call_id)
                     yield event
-                if not pending:
-                    break
-                done, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    task.result()
-            while not event_queue.empty():
-                event = event_queue.get_nowait()
-                batch_events.append(event)
-                await self._dispatch_observer_event(state, event)
-                yield event
+                if pending:
+                    done, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        task.result()
+                    continue
+                if len(completed_tool_calls) < len(batch):
+                    event = await tap.queue.get()
+                    batch_events.append(event)
+                    if isinstance(event, ToolResultEndEvent):
+                        completed_tool_calls.add(event.tool_call_id)
+                    yield event
         finally:
+            self.runtime_session.publisher.unsubscribe(tap)
             for task in pending:
                 if not task.done():
                     task.cancel()
@@ -550,36 +604,14 @@ class AgentRuntime:
     def _event_context(self, state: LoopState) -> EventContext:
         return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
 
-    def _hook_context(self, state: LoopState, event: AgentEvent) -> HookContext:
-        return HookContext(
-            runtime_session_id=self.runtime_session.runtime_session_id,
-            run_id=event.run_id,
-            turn_id=event.turn_id,
-            reply_id=event.reply_id,
+    async def _append_lifecycle_event(self, state: LoopState, name: str, value: dict) -> AgentEvent:
+        return await self.runtime_session.emit(
+            CustomEvent(**self._event_context(state).event_fields(), name=name, value=value),
             state=state,
         )
 
-    async def _dispatch_observer_event(self, state: LoopState, event: AgentEvent) -> None:
-        await self.runtime_session.hook_manager.dispatch_observer_event(self._hook_context(state, event), event)
 
-    async def _dispatch_stored_events(self, state: LoopState, events: list[AgentEvent]) -> None:
-        for event in events:
-            await self._dispatch_observer_event(state, event)
-
-    async def _append_event(self, state: LoopState, event: AgentEvent) -> AgentEvent:
-        stored = self.runtime_session.event_log.append(event)
-        await self._dispatch_observer_event(state, stored)
-        return stored
-
-    async def _append_lifecycle_event(self, state: LoopState, name: str, value: dict) -> AgentEvent:
-        return await self._append_event(
-            state,
-            CustomEvent(**self._event_context(state).event_fields(), name=name, value=value),
-        )
-
-
-def emit_tool_result_error(
-    event_log: InMemoryEventLog,
+def build_tool_result_error_events(
     event_context: EventContext,
     *,
     tool_call_id: str,
@@ -587,25 +619,23 @@ def emit_tool_result_error(
     message: str,
     state: ToolResultState = ToolResultState.ERROR,
 ) -> list[AgentEvent]:
-    return event_log.extend(
-        [
-            ToolResultStartEvent(
-                **event_context.event_fields(),
-                tool_call_id=tool_call_id,
-                tool_call_name=tool_call_name,
-            ),
-            ToolResultTextDeltaEvent(
-                **event_context.event_fields(),
-                tool_call_id=tool_call_id,
-                delta=message,
-            ),
-            ToolResultEndEvent(
-                **event_context.event_fields(),
-                tool_call_id=tool_call_id,
-                state=state,
-            ),
-        ]
-    )
+    return [
+        ToolResultStartEvent(
+            **event_context.event_fields(),
+            tool_call_id=tool_call_id,
+            tool_call_name=tool_call_name,
+        ),
+        ToolResultTextDeltaEvent(
+            **event_context.event_fields(),
+            tool_call_id=tool_call_id,
+            delta=message,
+        ),
+        ToolResultEndEvent(
+            **event_context.event_fields(),
+            tool_call_id=tool_call_id,
+            state=state,
+        ),
+    ]
 
 
 def _parse_tool_call(block: ToolCallBlock) -> ToolCall:
@@ -636,6 +666,17 @@ def _tool_batches(calls: list[ToolCall], executor: ToolExecutor) -> list[list[To
     if current_readonly:
         batches.append(current_readonly)
     return batches
+
+
+def _duplicate_tool_call_ids(calls: list[ToolCall]) -> set[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for call in calls:
+        if call.id in seen:
+            duplicates.add(call.id)
+            continue
+        seen.add(call.id)
+    return duplicates
 
 
 def _call_can_run_concurrently(call: ToolCall, executor: ToolExecutor) -> bool:

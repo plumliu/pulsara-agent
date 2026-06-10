@@ -174,7 +174,6 @@ def test_openai_responses_events_translate_to_agent_events() -> None:
         pro_model="pro",
         flash_model="flash",
     )
-    transport = OpenAIResponsesTransport(api_key="sk-test")
     builder = transport_builder_for_test(config)
 
     text_events = translate_responses_event(

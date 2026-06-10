@@ -1,6 +1,10 @@
 """Runtime primitives for Pulsara."""
 
-from pulsara_agent.runtime.agent import AgentRunResult, AgentRuntime, emit_tool_result_error
+from pulsara_agent.runtime.agent import (
+    AgentRunResult,
+    AgentRuntime,
+    build_tool_result_error_events,
+)
 from pulsara_agent.runtime.context import build_llm_context, msg_to_llm_messages
 from pulsara_agent.runtime.hooks import (
     ControlHookResult,
@@ -13,6 +17,7 @@ from pulsara_agent.runtime.hooks import (
     RuntimeHookManager,
     ToolResultPersistenceHook,
 )
+from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimeEventSubscriber, RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     PermissionDecision,
@@ -54,6 +59,9 @@ __all__ = [
     "PermissionDecision",
     "PermissionDecisionKind",
     "PermissionGate",
+    "RuntimeEventPublisher",
+    "RuntimeEventSubscriber",
+    "RuntimePublishedEvent",
     "RuntimeSession",
     "TerminalBackend",
     "TerminalBackendType",
@@ -64,6 +72,6 @@ __all__ = [
     "TerminalSessionState",
     "TerminalStatus",
     "build_llm_context",
-    "emit_tool_result_error",
+    "build_tool_result_error_events",
     "msg_to_llm_messages",
 ]

@@ -15,7 +15,7 @@ def make_registry(tmp_path):
 
 def execute_tool(tmp_path, name: str, arguments: dict) -> tuple[ToolExecutor, object]:
     registry = make_registry(tmp_path)
-    executor = ToolExecutor(registry=registry, event_log=InMemoryEventLog())
+    executor = ToolExecutor(registry=registry)
     result = executor.execute(
         ToolCall(id=f"call:{name}", name=name, arguments=arguments),
         event_context=CTX,
@@ -65,7 +65,7 @@ def test_read_file_deduplicates_unchanged_repeated_reads(tmp_path) -> None:
     target.write_text("hello Pulsara\n", encoding="utf-8")
 
     registry = make_registry(tmp_path)
-    executor = ToolExecutor(registry=registry, event_log=InMemoryEventLog())
+    executor = ToolExecutor(registry=registry)
     call = ToolCall(id="call:read", name="read_file", arguments={"path": "note.txt"})
 
     first = executor.execute(call, event_context=CTX)
@@ -138,7 +138,7 @@ def test_write_file_warns_when_file_changed_after_read(tmp_path) -> None:
     target.parent.mkdir()
     target.write_text("v1", encoding="utf-8")
     registry = make_registry(tmp_path)
-    executor = ToolExecutor(registry=registry, event_log=InMemoryEventLog())
+    executor = ToolExecutor(registry=registry)
 
     executor.execute(
         ToolCall(id="call:read", name="read_file", arguments={"path": "docs/design.md"}),
@@ -219,7 +219,7 @@ def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     registry = make_registry(tmp_path)
     terminal_spec = next(spec for spec in registry.tool_specs() if spec.name == "terminal")
-    executor = ToolExecutor(registry=registry, event_log=InMemoryEventLog())
+    executor = ToolExecutor(registry=registry)
 
     result = executor.execute(
         ToolCall(id="call:terminal", name="terminal", arguments={"command": "pwd", "workdir": "src"}),
@@ -240,7 +240,7 @@ def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
 
 def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     registry = make_registry(tmp_path)
-    executor = ToolExecutor(registry=registry, event_log=InMemoryEventLog())
+    executor = ToolExecutor(registry=registry)
 
     added = executor.execute(
         ToolCall(id="call:todo:add", name="todo", arguments={"action": "add", "text": "write tests"}),
@@ -286,7 +286,7 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
 def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) -> None:
     registry = make_registry(tmp_path)
     event_log = InMemoryEventLog()
-    executor = ToolExecutor(registry=registry, event_log=event_log)
+    executor = ToolExecutor(registry=registry, record_event=event_log.append)
 
     result = executor.execute(
         ToolCall(id="call:terminal", name="terminal", arguments={"command": "printf ok"}),

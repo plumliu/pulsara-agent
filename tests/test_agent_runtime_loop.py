@@ -12,8 +12,6 @@ from pulsara_agent.event import (
     ToolResultDataDeltaEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
-    ReplyEndEvent,
-    ReplyStartEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -25,7 +23,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
-from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile, ModelRole
+from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.graph import InMemoryGraphStore
@@ -48,7 +46,7 @@ from pulsara_agent.runtime import (
     LoopStatus,
     LoopTransition,
     RuntimeSession,
-    emit_tool_result_error,
+    build_tool_result_error_events,
     msg_to_llm_messages,
 )
 from pulsara_agent.runtime.agent import _tool_result_from_event_slice
@@ -455,18 +453,19 @@ def test_agent_runtime_exceeds_max_turns(tmp_path) -> None:
     assert any(event.type is EventType.EXCEED_MAX_ITERS for event in agent.runtime_session.event_log.iter())
 
 
-def test_emit_tool_result_error_uses_standard_events() -> None:
+def test_build_tool_result_error_events_use_standard_event_shape() -> None:
     from pulsara_agent.event import InMemoryEventLog
 
     event_log = InMemoryEventLog()
     context = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
 
-    events = emit_tool_result_error(
-        event_log,
-        context,
-        tool_call_id="call:bad",
-        tool_call_name="lookup",
-        message="bad json",
+    events = event_log.extend(
+        build_tool_result_error_events(
+            context,
+            tool_call_id="call:bad",
+            tool_call_name="lookup",
+            message="bad json",
+        )
     )
 
     assert [event.type for event in events] == [
@@ -920,6 +919,81 @@ def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> Non
     assert "not released" not in tool_output
 
 
+def test_duplicate_tool_call_id_becomes_error_observation_without_execution(tmp_path) -> None:
+    calls: list[str] = []
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:dup", "name": "dup_tool", "arguments": "{}"},
+                    {"id": "call:dup", "name": "dup_tool", "arguments": "{}"},
+                ]
+            },
+            {"text": "recovered"},
+        ]
+    )
+    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    registry = ToolRegistry()
+    registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("run duplicate tool ids"))
+    second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.final_text == "recovered"
+    assert calls == []
+    assert "Duplicate tool_call_id in assistant reply: call:dup" in second_context_text
+    assert any(
+        isinstance(event, ToolResultEndEvent)
+        and event.tool_call_id == "call:dup"
+        and event.state is ToolResultState.ERROR
+        for event in agent.runtime_session.event_log.iter()
+    )
+
+
+def test_duplicate_tool_call_id_only_blocks_the_duplicate_calls(tmp_path) -> None:
+    calls: list[str] = []
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:ok", "name": "ok_tool", "arguments": "{}"},
+                    {"id": "call:dup", "name": "dup_tool", "arguments": "{}"},
+                    {"id": "call:dup", "name": "dup_tool", "arguments": "{}"},
+                ]
+            },
+            {"text": "recovered"},
+        ]
+    )
+    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    registry = ToolRegistry()
+    registry.register(RecordingTool("ok_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
+    registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("run mixed duplicate tool ids"))
+    second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.final_text == "recovered"
+    assert calls == ["call:ok"]
+    assert "Duplicate tool_call_id in assistant reply: call:dup" in second_context_text
+    assert "call:ok" in second_context_text
+    assert any(
+        isinstance(event, ToolResultEndEvent)
+        and event.tool_call_id == "call:dup"
+        and event.state is ToolResultState.ERROR
+        for event in agent.runtime_session.event_log.iter()
+    )
+    assert any(
+        isinstance(event, ToolResultEndEvent)
+        and event.tool_call_id == "call:ok"
+        and event.state is ToolResultState.SUCCESS
+        for event in agent.runtime_session.event_log.iter()
+    )
+
+
 def test_tool_budget_blocks_unsafe_tool_before_execution(tmp_path) -> None:
     calls: list[str] = []
     transport = ScriptedTransport(
@@ -1011,3 +1085,35 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
 
     assert elapsed < 0.35
     assert sequences == sorted(sequences)
+
+
+def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:a", "name": "sleep_a", "arguments": "{}"},
+                    {"id": "call:b", "name": "sleep_b", "arguments": "{}"},
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    runtime_session = RuntimeSession(tmp_path)
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    registry = ToolRegistry()
+    registry.register(SleepTool("sleep_a", delay=0.2))
+    registry.register(SleepTool("sleep_b", delay=0.2))
+    agent.tool_executor.registry = registry
+    seen_sequences: list[int] = []
+
+    def record_tool_result_sequences(context, event) -> None:
+        if event.type.name.startswith("TOOL_RESULT") and event.sequence is not None:
+            seen_sequences.append(event.sequence)
+
+    runtime_session.hook_manager.register_event(None, record_tool_result_sequences)
+
+    result = asyncio.run(agent.run_task("run both"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert seen_sequences == sorted(seen_sequences)

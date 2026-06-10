@@ -15,7 +15,6 @@ from pulsara_agent.event import (
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
     ToolCallDeltaEvent,
-    ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultStartEvent,
 )
