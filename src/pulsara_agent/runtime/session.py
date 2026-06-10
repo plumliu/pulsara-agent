@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from pulsara_agent.event import InMemoryEventLog
+from pulsara_agent.runtime.hooks import RuntimeHookManager
 from pulsara_agent.runtime.terminal import TerminalSessionManager
 
 
@@ -15,6 +16,7 @@ class RuntimeSession:
     workspace_root: Path
     runtime_session_id: str = field(default_factory=lambda: f"runtime:{uuid4().hex}")
     event_log: InMemoryEventLog = field(default_factory=InMemoryEventLog)
+    hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
     terminal_sessions: TerminalSessionManager = field(init=False)
 
     def __post_init__(self) -> None:
@@ -29,4 +31,3 @@ class RuntimeSession:
             registry=build_core_tool_registry(self),
             event_log=self.event_log,
         )
-

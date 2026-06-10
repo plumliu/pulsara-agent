@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator
@@ -188,6 +189,23 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     assert agent.runtime_session.event_log.replay(result.state.reply_id).content[0].text == "done"
 
 
+def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(tmp_path) -> None:
+    runtime_session = RuntimeSession(tmp_path)
+    seen_events: list[EventType] = []
+    seen_blocks: list[str] = []
+
+    runtime_session.hook_manager.register_event(None, lambda context, event: seen_events.append(event.type))
+    runtime_session.hook_manager.register_block(None, lambda context, completion: seen_blocks.append(completion.block_type))
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+
+    result = asyncio.run(agent.run_task("Say done"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert EventType.TEXT_BLOCK_DELTA in seen_events
+    assert "text" in seen_blocks
+
+
 def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
     (tmp_path / "note.txt").write_text("hello from file", encoding="utf-8")
     transport = ScriptedTransport(
@@ -214,6 +232,64 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
     assert len(transport.contexts) == 2
     second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
     assert "hello from file" in second_context_text
+
+
+def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
+    (tmp_path / "note.txt").write_text("hook file", encoding="utf-8")
+    runtime_session = RuntimeSession(tmp_path)
+    seen_tool_result_events: list[EventType] = []
+    seen_tool_result_blocks: list[str] = []
+
+    runtime_session.hook_manager.register_event(
+        None,
+        lambda context, event: seen_tool_result_events.append(event.type)
+        if event.type.name.startswith("TOOL_RESULT")
+        else None,
+    )
+    runtime_session.hook_manager.register_block(
+        "tool_result",
+        lambda context, completion: seen_tool_result_blocks.append(completion.block.output[0].text),
+    )
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+
+    result = asyncio.run(agent.run_task("Read note.txt"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert seen_tool_result_events == [
+        EventType.TOOL_RESULT_START,
+        EventType.TOOL_RESULT_TEXT_DELTA,
+        EventType.TOOL_RESULT_END,
+    ]
+    assert any("hook file" in text for text in seen_tool_result_blocks)
+
+
+def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
+    runtime_session = RuntimeSession(tmp_path)
+
+    def failing_hook(context, event) -> None:
+        if event.type is EventType.TEXT_BLOCK_DELTA:
+            raise RuntimeError("observer failed")
+
+    runtime_session.hook_manager.register_event(None, failing_hook)
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+
+    result = asyncio.run(agent.run_task("Say done"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.final_text == "done"
+    assert len(runtime_session.hook_manager.errors) == 1
+    assert runtime_session.hook_manager.errors[0].message == "observer failed"
 
 
 def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_path) -> None:
@@ -787,6 +863,61 @@ class RecordingTool:
             status=ToolResultState.SUCCESS,
             output=call.id,
         )
+
+
+@dataclass(slots=True)
+class BlockingUntilStartHookTool:
+    release: threading.Event
+    name: str = "blocking_tool"
+    is_read_only: bool = True
+    is_concurrency_safe: bool = True
+    description: str = "Wait until the start hook releases execution."
+    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+
+    def execute(self, call: ToolCall) -> ToolExecutionResult:
+        released = self.release.wait(timeout=0.5)
+        return ToolExecutionResult(
+            call_id=call.id,
+            tool_name=call.name,
+            status=ToolResultState.SUCCESS if released else ToolResultState.ERROR,
+            output="released" if released else "not released before start hook",
+        )
+
+
+def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> None:
+    release = threading.Event()
+    runtime_session = RuntimeSession(tmp_path)
+    registry = ToolRegistry()
+    registry.register(BlockingUntilStartHookTool(release=release))
+    transport = ScriptedTransport(
+        [
+            {"tool_calls": [{"id": "call:block", "name": "blocking_tool", "arguments": "{}"}]},
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent.tool_executor.registry = registry
+
+    def release_on_start(context, event) -> None:
+        if isinstance(event, ToolResultStartEvent) and event.tool_call_id == "call:block":
+            release.set()
+
+    runtime_session.hook_manager.register_event(EventType.TOOL_RESULT_START, release_on_start)
+
+    result = asyncio.run(agent.run_task("run blocking tool"))
+
+    assert result.status is LoopStatus.FINISHED
+    tool_output = "\n".join(
+        output.text
+        for message in result.messages
+        if message.role == "tool_result"
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+        for output in block.output
+        if isinstance(output, TextBlock)
+    )
+    assert "released" in tool_output
+    assert "not released" not in tool_output
 
 
 def test_tool_budget_blocks_unsafe_tool_before_execution(tmp_path) -> None:

@@ -80,6 +80,17 @@ class BlockAssembler:
     def __init__(self) -> None:
         self._active: dict[tuple[str, str, str], _ActiveBlock] = {}
 
+    def discard_reply(self, reply_id: str) -> int:
+        keys = [key for key in self._active if key[0] == reply_id]
+        for key in keys:
+            self._active.pop(key, None)
+        return len(keys)
+
+    def active_count(self, reply_id: str | None = None) -> int:
+        if reply_id is None:
+            return len(self._active)
+        return sum(1 for key in self._active if key[0] == reply_id)
+
     def append(self, event: AgentEvent) -> BlockAssemblyUpdate:
         match event.type:
             case EventType.TEXT_BLOCK_START:

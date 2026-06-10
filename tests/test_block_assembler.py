@@ -107,6 +107,26 @@ def test_block_assembler_isolates_active_blocks_by_reply_id() -> None:
     assert completions[3].block.input == '{"reply":"b"}'
 
 
+def test_block_assembler_can_discard_unfinished_blocks_for_reply() -> None:
+    assembler = BlockAssembler()
+    assembler.append(TextBlockStartEvent(**CTX_A.event_fields(), block_id="text:1", sequence=1))
+    assembler.append(TextBlockDeltaEvent(**CTX_A.event_fields(), block_id="text:1", delta="A", sequence=2))
+    assembler.append(TextBlockStartEvent(**CTX_B.event_fields(), block_id="text:1", sequence=3))
+    assembler.append(TextBlockDeltaEvent(**CTX_B.event_fields(), block_id="text:1", delta="B", sequence=4))
+
+    assert assembler.active_count() == 2
+    assert assembler.discard_reply("reply:a") == 1
+    assert assembler.active_count("reply:a") == 0
+    assert assembler.active_count("reply:b") == 1
+
+    assert assembler.append(TextBlockEndEvent(**CTX_A.event_fields(), block_id="text:1", sequence=5)).completed == []
+    completions = assembler.append(TextBlockEndEvent(**CTX_B.event_fields(), block_id="text:1", sequence=6)).completed
+
+    assert len(completions) == 1
+    assert isinstance(completions[0].block, TextBlock)
+    assert completions[0].block.text == "B"
+
+
 def test_block_assembler_completes_data_and_hint_blocks() -> None:
     assembler = BlockAssembler()
     completions = []

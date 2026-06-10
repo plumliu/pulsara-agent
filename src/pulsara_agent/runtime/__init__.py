@@ -2,7 +2,17 @@
 
 from pulsara_agent.runtime.agent import AgentRunResult, AgentRuntime, emit_tool_result_error
 from pulsara_agent.runtime.context import build_llm_context, msg_to_llm_messages
-from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
+from pulsara_agent.runtime.hooks import (
+    ControlHookResult,
+    HookContext,
+    HookDecision,
+    HookDispatchError,
+    MemoryHooks,
+    NoopMemoryHooks,
+    ObserverHookResult,
+    RuntimeHookManager,
+    ToolResultPersistenceHook,
+)
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     PermissionDecision,
@@ -32,8 +42,14 @@ __all__ = [
     "LoopStatus",
     "LoopTransition",
     "LocalTerminalBackend",
+    "ControlHookResult",
+    "HookContext",
+    "HookDecision",
+    "HookDispatchError",
     "MemoryHooks",
     "NoopMemoryHooks",
+    "ObserverHookResult",
+    "RuntimeHookManager",
     "ToolResultPersistenceHook",
     "PermissionDecision",
     "PermissionDecisionKind",
