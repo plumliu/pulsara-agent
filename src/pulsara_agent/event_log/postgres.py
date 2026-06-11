@@ -24,43 +24,24 @@ class PostgresEventLog:
     workspace_root: str | Path | None = None
 
     def append(self, event: AgentEvent) -> AgentEvent:
+        return self.extend([event])[0]
+
+    def extend(self, events: Iterable[AgentEvent]) -> list[AgentEvent]:
+        event_list = list(events)
+        if not event_list:
+            return []
+
         with psycopg.connect(self.dsn) as connection:
             with connection.cursor() as cursor:
                 self._lock_session(cursor)
-                self._ensure_parent_rows(cursor, event)
-                stored = self._with_canonical_sequence(cursor, event)
-                payload = dump_agent_event(stored)
-                cursor.execute(
-                    """
-                    insert into agent_events (
-                        id,
-                        session_id,
-                        run_id,
-                        turn_id,
-                        reply_id,
-                        sequence,
-                        event_type,
-                        created_at,
-                        payload
-                    )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)
-                    """,
-                    (
-                        stored.id,
-                        self.runtime_session_id,
-                        stored.run_id,
-                        stored.turn_id,
-                        stored.reply_id,
-                        stored.sequence,
-                        str(stored.type),
-                        stored.created_at,
-                        Jsonb(payload),
-                    ),
-                )
-                return stored
-
-    def extend(self, events: Iterable[AgentEvent]) -> list[AgentEvent]:
-        return [self.append(event) for event in events]
+                stored_events: list[AgentEvent] = []
+                next_sequence = self._next_sequence(cursor)
+                for event in event_list:
+                    self._ensure_parent_rows(cursor, event)
+                    stored, next_sequence = self._with_canonical_sequence(event, next_sequence)
+                    self._insert_event(cursor, stored)
+                    stored_events.append(stored)
+                return stored_events
 
     def iter(
         self,
@@ -125,7 +106,6 @@ class PostgresEventLog:
             """,
             (self.runtime_session_id, str(self.workspace_root) if self.workspace_root is not None else None),
         )
-        self._ensure_run_belongs_to_session(cursor, event)
         cursor.execute(
             """
             insert into runs (id, session_id)
@@ -134,7 +114,7 @@ class PostgresEventLog:
             """,
             (event.run_id, self.runtime_session_id),
         )
-        self._ensure_turn_belongs_to_run(cursor, event)
+        self._ensure_run_belongs_to_session(cursor, event)
         cursor.execute(
             """
             insert into turns (id, session_id, run_id, turn_index)
@@ -145,6 +125,7 @@ class PostgresEventLog:
             """,
             (event.turn_id, self.runtime_session_id, event.run_id, event.run_id),
         )
+        self._ensure_turn_belongs_to_run(cursor, event)
 
     def _ensure_run_belongs_to_session(self, cursor, event: AgentEvent) -> None:
         cursor.execute("select session_id from runs where id = %s", (event.run_id,))
@@ -169,10 +150,37 @@ class PostgresEventLog:
                 f"and run {run_id!r}"
             )
 
-    def _with_canonical_sequence(self, cursor, event: AgentEvent) -> AgentEvent:
-        if event.sequence is not None:
-            return event
+    def _insert_event(self, cursor, stored: AgentEvent) -> None:
+        payload = dump_agent_event(stored)
+        cursor.execute(
+            """
+            insert into agent_events (
+                id,
+                session_id,
+                run_id,
+                turn_id,
+                reply_id,
+                sequence,
+                event_type,
+                created_at,
+                payload
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)
+            """,
+            (
+                stored.id,
+                self.runtime_session_id,
+                stored.run_id,
+                stored.turn_id,
+                stored.reply_id,
+                stored.sequence,
+                str(stored.type),
+                stored.created_at,
+                Jsonb(payload),
+            ),
+        )
 
+    def _next_sequence(self, cursor) -> int:
         cursor.execute(
             """
             select coalesce(max(sequence), 0) + 1
@@ -181,5 +189,10 @@ class PostgresEventLog:
             """,
             (self.runtime_session_id,),
         )
-        sequence = cursor.fetchone()[0]
-        return event.model_copy(update={"sequence": sequence})
+        return cursor.fetchone()[0]
+
+    def _with_canonical_sequence(self, event: AgentEvent, next_sequence: int) -> tuple[AgentEvent, int]:
+        if event.sequence is not None:
+            return event, max(next_sequence, event.sequence + 1)
+
+        return event.model_copy(update={"sequence": next_sequence}), next_sequence + 1

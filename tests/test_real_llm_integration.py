@@ -17,7 +17,7 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
     ToolResultStartEvent,
 )
-from pulsara_agent.event_log import InMemoryEventLog
+from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
@@ -113,6 +113,24 @@ def test_real_agent_runtime_persists_run_timeline_with_responses_api(tmp_path):
     assert "tool_result" in result["timeline_item_kinds"]
     assert any("probe.txt" in args for args in result["tool_call_arguments"])
     assert any("PULSARA_TIMELINE_TOOL_OK" in summary for summary in result["tool_result_summaries"])
+
+
+def test_real_agent_runtime_persists_events_to_postgres_and_timeline_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_postgres_event_log_timeline_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["timeline_records"] == 1
+    assert result["timeline_status"] == "completed"
+    assert result["postgres_event_count"] >= 1
+    assert result["postgres_sequence_numbers"] == list(range(1, result["postgres_event_count"] + 1))
+    assert "tool_call" in result["timeline_item_kinds"]
+    assert "tool_result" in result["timeline_item_kinds"]
+    assert any("probe.txt" in args for args in result["tool_call_arguments"])
+    assert any("PULSARA_POSTGRES_CHAIN_OK" in summary for summary in result["tool_result_summaries"])
+    assert "PULSARA_POSTGRES_CHAIN_OK" in result["replayed_text"]
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -319,6 +337,72 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
     }
 
 
+async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> dict:
+    probe = tmp_path / "probe.txt"
+    probe.write_text("PULSARA_POSTGRES_CHAIN_OK", encoding="utf-8")
+    settings = _load_settings_for_real_llm()
+    runtime_session = RuntimeSession(tmp_path)
+    event_log = PostgresEventLog(
+        dsn=settings.storage.postgres_dsn,
+        runtime_session_id=runtime_session.runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    runtime_session.event_log = event_log
+    graph = InMemoryGraphStore()
+    archive = InMemoryArchiveStore()
+    runtime_session.hook_manager.register_event(
+        None,
+        RunTimelinePersistenceHook(
+            graph=graph,
+            archive=archive,
+            event_store=runtime_session.event_log,
+        ),
+    )
+    agent = AgentRuntime(
+        runtime_session=runtime_session,
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=128),
+        system_prompt=(
+            "You are validating durable runtime event persistence. "
+            "First call read_file on probe.txt. "
+            "Then answer with exactly the file content and nothing else."
+        ),
+    )
+
+    try:
+        result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
+        records = graph.find_by_type(memory.RUN_TIMELINE)
+        timeline = load_run_timeline(
+            graph=graph,
+            archive=archive,
+            run_id=result.state.run_id,
+            runtime_session_id=runtime_session.runtime_session_id,
+        )
+        summary = summarize_run_timeline(timeline)
+        reloaded_log = PostgresEventLog(
+            dsn=settings.storage.postgres_dsn,
+            runtime_session_id=runtime_session.runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        persisted_events = reloaded_log.iter(run_id=result.state.run_id)
+        replayed = reloaded_log.replay(result.state.reply_id)
+        replayed_text = "".join(block.text for block in replayed.content if isinstance(block, TextBlock))
+        return {
+            "status": result.status.value,
+            "timeline_records": len(records),
+            "timeline_status": summary.status,
+            "timeline_item_kinds": [item.kind for item in timeline.items],
+            "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
+            "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
+            "postgres_event_count": len(persisted_events),
+            "postgres_sequence_numbers": [event.sequence for event in persisted_events],
+            "replayed_text": replayed_text.strip(),
+        }
+    finally:
+        _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
+
+
 async def _collect_real_events(
     *,
     role: ModelRole,
@@ -381,3 +465,11 @@ def _load_settings_for_real_llm() -> PulsaraSettings:
     if env_file.exists():
         return PulsaraSettings.from_env_file(env_file)
     return PulsaraSettings.from_env()
+
+
+def _delete_postgres_runtime_session(dsn: str, runtime_session_id: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))

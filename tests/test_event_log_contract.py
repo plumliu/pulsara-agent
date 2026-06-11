@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from uuid import uuid4
 
 import psycopg
@@ -181,6 +182,127 @@ def test_postgres_event_log_rejects_cross_run_turn_id_reuse(tmp_path: Path) -> N
             event_log.append(TextBlockDeltaEvent(**second_ctx.event_fields(), block_id="text:2", delta="second"))
     finally:
         _cleanup_session(dsn, runtime_session_id)
+
+
+def test_postgres_event_log_rejects_concurrent_cross_session_run_id_reuse(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    first_session_id = _runtime_session_id()
+    second_session_id = _runtime_session_id()
+    shared_run_id = f"run:shared:{uuid4().hex}"
+    barrier = Barrier(2)
+    _connect_or_skip(dsn).close()
+
+    def append_with(log: PostgresEventLog, ctx: EventContext) -> str:
+        barrier.wait(timeout=2)
+        try:
+            log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{uuid4().hex}", delta="x"))
+        except ValueError:
+            return "error"
+        return "ok"
+
+    try:
+        first_log = PostgresEventLog(dsn=dsn, runtime_session_id=first_session_id, workspace_root=tmp_path)
+        second_log = PostgresEventLog(dsn=dsn, runtime_session_id=second_session_id, workspace_root=tmp_path)
+        first_ctx = EventContext(run_id=shared_run_id, turn_id=f"turn:{uuid4().hex}", reply_id=f"reply:{uuid4().hex}")
+        second_ctx = EventContext(run_id=shared_run_id, turn_id=f"turn:{uuid4().hex}", reply_id=f"reply:{uuid4().hex}")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(append_with, first_log, first_ctx),
+                executor.submit(append_with, second_log, second_ctx),
+            ]
+            outcomes = sorted(future.result() for future in futures)
+
+        assert outcomes == ["error", "ok"]
+    finally:
+        _cleanup_session(dsn, first_session_id)
+        _cleanup_session(dsn, second_session_id)
+
+
+def test_postgres_event_log_rejects_concurrent_cross_session_turn_id_reuse(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    first_session_id = _runtime_session_id()
+    second_session_id = _runtime_session_id()
+    shared_turn_id = f"turn:shared:{uuid4().hex}"
+    barrier = Barrier(2)
+    _connect_or_skip(dsn).close()
+
+    def append_with(log: PostgresEventLog, ctx: EventContext) -> str:
+        barrier.wait(timeout=2)
+        try:
+            log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{uuid4().hex}", delta="x"))
+        except ValueError:
+            return "error"
+        return "ok"
+
+    try:
+        first_log = PostgresEventLog(dsn=dsn, runtime_session_id=first_session_id, workspace_root=tmp_path)
+        second_log = PostgresEventLog(dsn=dsn, runtime_session_id=second_session_id, workspace_root=tmp_path)
+        first_ctx = EventContext(
+            run_id=f"run:first:{uuid4().hex}",
+            turn_id=shared_turn_id,
+            reply_id=f"reply:{uuid4().hex}",
+        )
+        second_ctx = EventContext(
+            run_id=f"run:second:{uuid4().hex}",
+            turn_id=shared_turn_id,
+            reply_id=f"reply:{uuid4().hex}",
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(append_with, first_log, first_ctx),
+                executor.submit(append_with, second_log, second_ctx),
+            ]
+            outcomes = sorted(future.result() for future in futures)
+
+        assert outcomes == ["error", "ok"]
+    finally:
+        _cleanup_session(dsn, first_session_id)
+        _cleanup_session(dsn, second_session_id)
+
+
+def test_postgres_event_log_extend_rolls_back_entire_batch_on_parent_conflict(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    conflicting_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+
+    try:
+        event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        conflicting_log = PostgresEventLog(dsn=dsn, runtime_session_id=conflicting_session_id, workspace_root=tmp_path)
+        conflicting_ctx = EventContext(
+            run_id="run:batch-conflict",
+            turn_id=f"turn:{uuid4().hex}",
+            reply_id=f"reply:{uuid4().hex}",
+        )
+        valid_ctx = EventContext(
+            run_id=f"run:valid:{uuid4().hex}",
+            turn_id=f"turn:{uuid4().hex}",
+            reply_id=f"reply:{uuid4().hex}",
+        )
+        invalid_ctx = EventContext(
+            run_id=conflicting_ctx.run_id,
+            turn_id=f"turn:{uuid4().hex}",
+            reply_id=f"reply:{uuid4().hex}",
+        )
+        conflicting_log.append(
+            TextBlockDeltaEvent(**conflicting_ctx.event_fields(), block_id="text:seed", delta="seed")
+        )
+
+        with pytest.raises(ValueError, match="already belongs to runtime session"):
+            event_log.extend(
+                [
+                    TextBlockDeltaEvent(**valid_ctx.event_fields(), block_id="text:valid", delta="valid"),
+                    TextBlockDeltaEvent(**invalid_ctx.event_fields(), block_id="text:invalid", delta="invalid"),
+                ]
+            )
+
+        assert event_log.iter(reply_id=valid_ctx.reply_id) == []
+        assert event_log.iter(reply_id=invalid_ctx.reply_id) == []
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+        _cleanup_session(dsn, conflicting_session_id)
 
 
 def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> None:
