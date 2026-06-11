@@ -11,6 +11,7 @@ from pulsara_agent.jsonld import Namespace
 MEMORY = Namespace("https://pulsara.dev/memory#")
 
 TURN = MEMORY.term("Turn")
+RUN_TIMELINE = MEMORY.term("RunTimeline")
 TOOL_RESULT = MEMORY.term("ToolResult")
 ARTIFACT = MEMORY.term("Artifact")
 EVIDENCE = MEMORY.term("Evidence")
@@ -19,6 +20,7 @@ DECISION = MEMORY.term("Decision")
 
 PRODUCED = MEMORY.term("produced")
 STORED_AS = MEMORY.term("storedAs")
+ITEM_COUNT = MEMORY.term("itemCount")
 PROVIDES = MEMORY.term("provides")
 SUPPORTS = MEMORY.term("supports")
 CONTRADICTS = MEMORY.term("contradicts")
@@ -58,6 +60,7 @@ CONTEXT: dict[str, Any] = {
     "mem": MEMORY.base,
     "ctx": "https://pulsara.dev/context#",
     "turn": "https://pulsara.dev/turn/",
+    "run-timeline": "https://pulsara.dev/run-timeline/",
     "tool-result": "https://pulsara.dev/tool-result/",
     "artifact": "https://pulsara.dev/artifact/",
     "evidence": "https://pulsara.dev/evidence/",
@@ -65,6 +68,7 @@ CONTEXT: dict[str, Any] = {
     "decision": "https://pulsara.dev/decision/",
     "event": "https://pulsara.dev/event/",
     TURN.name: TURN.value,
+    RUN_TIMELINE.name: RUN_TIMELINE.value,
     TOOL_RESULT.name: TOOL_RESULT.value,
     ARTIFACT.name: ARTIFACT.value,
     EVIDENCE.name: EVIDENCE.value,
@@ -72,6 +76,7 @@ CONTEXT: dict[str, Any] = {
     DECISION.name: DECISION.value,
     PRODUCED.name: {"@id": PRODUCED.value, "@type": "@id"},
     STORED_AS.name: {"@id": STORED_AS.value, "@type": "@id"},
+    ITEM_COUNT.name: ITEM_COUNT.value,
     PROVIDES.name: {"@id": PROVIDES.value, "@type": "@id"},
     SUPPORTS.name: {"@id": SUPPORTS.value, "@type": "@id"},
     CONTRADICTS.name: {"@id": CONTRADICTS.value, "@type": "@id"},

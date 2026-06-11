@@ -12,6 +12,8 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
                 "PULSARA_BASE_URL=https://example.test/v1 # comment",
                 "export PULSARA_PRO_MODEL=gpt-5",
                 'PULSARA_FLASH_MODEL="gpt-5-mini"',
+                "PULSARA_OXIGRAPH_URL=http://localhost:7878",
+                "PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara",
             ]
         ),
         encoding="utf-8",
@@ -21,6 +23,8 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
         "PULSARA_BASE_URL",
         "PULSARA_PRO_MODEL",
         "PULSARA_FLASH_MODEL",
+        "PULSARA_OXIGRAPH_URL",
+        "PULSARA_POSTGRES_DSN",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -30,6 +34,12 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
     assert settings.llm.base_url == "https://example.test/v1"
     assert settings.llm.pro_model == "gpt-5"
     assert settings.llm.flash_model == "gpt-5-mini"
+    assert settings.storage.oxigraph_url == "http://localhost:7878"
+    assert settings.storage.postgres_dsn == "postgresql://pulsara:pulsara@localhost:5432/pulsara"
+    assert settings.redacted_dict()["storage"] == {
+        "oxigraph_url": "http://localhost:7878",
+        "postgres_dsn_set": True,
+    }
 
 
 def test_env_file_does_not_override_existing_environment_by_default(tmp_path, monkeypatch):

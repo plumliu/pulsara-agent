@@ -89,6 +89,20 @@ uv run pulsara config-check
 uv run python -m pytest
 ```
 
+Start local semantic storage services for Oxigraph-backed graph tests and future
+durable archive/session work:
+
+```bash
+docker compose up -d oxigraph postgres
+```
+
+Oxigraph is exposed at `http://localhost:7878`, matching
+`PULSARA_OXIGRAPH_URL`. Postgres is exposed at
+`postgresql://pulsara:pulsara@localhost:5432/pulsara`, matching
+`PULSARA_POSTGRES_DSN`. The current runtime uses Oxigraph through
+`OxigraphGraphStore`; Postgres is configured as the future durable
+archive/session boundary and is not yet used by runtime code.
+
 Run the opt-in real LLM harness smoke test:
 
 ```bash
@@ -166,3 +180,4 @@ internal request objects and runtime events.
 ## Design Notes
 
 See [PULSARA_MVP_BOOTSTRAP.zh.md](PULSARA_MVP_BOOTSTRAP.zh.md) for the Chinese MVP bootstrap rationale.
+See [RUNTIME_STORAGE_ARCHITECTURE.zh.md](RUNTIME_STORAGE_ARCHITECTURE.zh.md) for the PostgreSQL runtime truth and Oxigraph semantic truth split.

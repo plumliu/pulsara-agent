@@ -70,13 +70,13 @@ class RuntimeSession:
     def emit_from_thread(self, event: AgentEvent, *, state: LoopState | None = None) -> AgentEvent:
         self._require_runtime_managed_sequence(event)
         stored = self.event_log.append(event)
-        self.publisher.publish_from_thread(
-            RuntimePublishedEvent(
-                runtime_session_id=self.runtime_session_id,
-                event=stored,
-                state=state,
-            )
+        published = RuntimePublishedEvent(
+            runtime_session_id=self.runtime_session_id,
+            event=stored,
+            state=state,
         )
+        if not self.publisher.publish_from_thread(published):
+            self.publisher.discard_unpublished(published)
         return stored
 
     def make_thread_recorder(self, *, state: LoopState | None = None) -> RuntimeThreadRecorder:

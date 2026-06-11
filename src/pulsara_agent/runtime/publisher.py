@@ -56,13 +56,23 @@ class RuntimeEventPublisher:
         self._enqueue(_PublishItem(published=published, delivered=delivered))
         await delivered
 
-    def publish_from_thread(self, published: RuntimePublishedEvent) -> None:
+    def publish_from_thread(self, published: RuntimePublishedEvent) -> bool:
         if self._loop is None or self._loop.is_closed():
-            return
+            return False
         if self._loop_thread_id == threading.get_ident():
             self._enqueue(_PublishItem(published=published))
-            return
+            return True
         self._loop.call_soon_threadsafe(self._enqueue, _PublishItem(published=published))
+        return True
+
+    def discard_unpublished(self, published: RuntimePublishedEvent) -> None:
+        sequence = published.event.sequence
+        if sequence is None:
+            raise ValueError("Discarded events must have a canonical sequence")
+        if self._loop is not None and not self._loop.is_closed() and self._loop_thread_id != threading.get_ident():
+            self._loop.call_soon_threadsafe(self._discard_unpublished_in_loop, sequence)
+            return
+        self._discard_unpublished_in_loop(sequence)
 
     def _bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         if self._loop is None or self._loop.is_closed():
@@ -99,6 +109,7 @@ class RuntimeEventPublisher:
     async def _drain_mailbox(self) -> None:
         assert self._mailbox is not None
         while True:
+            await self._drain_pending()
             try:
                 item = self._mailbox.get_nowait()
             except asyncio.QueueEmpty:
@@ -110,6 +121,12 @@ class RuntimeEventPublisher:
                 self.errors.append(exc)
                 if item.delivered is not None and not item.delivered.done():
                     item.delivered.set_exception(exc)
+
+    def _discard_unpublished_in_loop(self, sequence: int) -> None:
+        if sequence >= self._next_sequence_to_publish:
+            self._next_sequence_to_publish = sequence + 1
+        if self._pending_by_sequence:
+            self._ensure_drain_task()
 
     def _store_pending(self, item: _PublishItem) -> None:
         sequence = item.published.event.sequence

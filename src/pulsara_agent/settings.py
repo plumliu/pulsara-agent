@@ -9,15 +9,42 @@ from pathlib import Path
 from pulsara_agent.llm.config import LLMConfig
 
 
+DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
+DEFAULT_POSTGRES_DSN = "postgresql://pulsara:pulsara@localhost:5432/pulsara"
+
+
+@dataclass(frozen=True, slots=True)
+class StorageConfig:
+    oxigraph_url: str = DEFAULT_OXIGRAPH_URL
+    postgres_dsn: str = DEFAULT_POSTGRES_DSN
+
+    @classmethod
+    def from_env(cls, prefix: str = "PULSARA") -> "StorageConfig":
+        return cls(
+            oxigraph_url=os.getenv(f"{prefix}_OXIGRAPH_URL", DEFAULT_OXIGRAPH_URL).strip(),
+            postgres_dsn=os.getenv(f"{prefix}_POSTGRES_DSN", DEFAULT_POSTGRES_DSN).strip(),
+        )
+
+    def redacted_dict(self) -> dict:
+        return {
+            "oxigraph_url": self.oxigraph_url,
+            "postgres_dsn_set": bool(self.postgres_dsn),
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class PulsaraSettings:
     """Runtime settings loaded by application bootstrap code."""
 
     llm: LLMConfig
+    storage: StorageConfig
 
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "PulsaraSettings":
-        return cls(llm=LLMConfig.from_env(prefix=prefix))
+        return cls(
+            llm=LLMConfig.from_env(prefix=prefix),
+            storage=StorageConfig.from_env(prefix=prefix),
+        )
 
     @classmethod
     def from_env_file(
@@ -39,7 +66,8 @@ class PulsaraSettings:
                 "pro_model": self.llm.pro_model,
                 "flash_model": self.llm.flash_model,
                 "api_key_set": bool(self.llm.api_key),
-            }
+            },
+            "storage": self.storage.redacted_dict(),
         }
 
 

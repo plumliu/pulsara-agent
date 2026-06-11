@@ -26,6 +26,7 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
+from pulsara_agent.runtime.timeline import RunTimeline, RunTimelineItem, build_run_timeline
 from pulsara_agent.runtime.terminal import (
     LocalTerminalBackend,
     TerminalBackend,
@@ -63,6 +64,8 @@ __all__ = [
     "RuntimeEventSubscriber",
     "RuntimePublishedEvent",
     "RuntimeSession",
+    "RunTimeline",
+    "RunTimelineItem",
     "TerminalBackend",
     "TerminalBackendType",
     "TerminalRequest",
@@ -72,6 +75,7 @@ __all__ = [
     "TerminalSessionState",
     "TerminalStatus",
     "build_llm_context",
+    "build_run_timeline",
     "build_tool_result_error_events",
     "msg_to_llm_messages",
 ]

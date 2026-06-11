@@ -18,9 +18,17 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
     ToolResultStartEvent,
 )
+from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.memory import (
+    InMemoryArchiveStore,
+    RunTimelinePersistenceHook,
+    load_run_timeline,
+    summarize_run_timeline,
+)
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock
+from pulsara_agent.ontology import memory
 from pulsara_agent.runtime import AgentRuntime, RuntimeSession
 from pulsara_agent.settings import PulsaraSettings
 
@@ -90,6 +98,21 @@ def test_real_agent_runtime_completes_tool_loop_with_responses_api(tmp_path):
     assert result["tool_result_ids"] == result["tool_call_ids"]
     assert result["final_text"]
     assert "PULSARA_RESPONSES_TOOL_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_persists_run_timeline_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_timeline_persistence_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["timeline_records"] == 1
+    assert result["timeline_status"] == "completed"
+    assert "tool_call" in result["timeline_item_kinds"]
+    assert "tool_result" in result["timeline_item_kinds"]
+    assert any("probe.txt" in args for args in result["tool_call_arguments"])
+    assert any("PULSARA_TIMELINE_TOOL_OK" in summary for summary in result["tool_result_summaries"])
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -247,6 +270,52 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
         "tool_call_ids": tool_call_ids,
         "tool_result_ids": tool_result_ids,
         "errors": errors,
+    }
+
+
+async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
+    probe = tmp_path / "probe.txt"
+    probe.write_text("PULSARA_TIMELINE_TOOL_OK", encoding="utf-8")
+    settings = _load_settings_for_real_llm()
+    runtime_session = RuntimeSession(tmp_path)
+    graph = InMemoryGraphStore()
+    archive = InMemoryArchiveStore()
+    runtime_session.hook_manager.register_event(
+        None,
+        RunTimelinePersistenceHook(
+            graph=graph,
+            archive=archive,
+            event_store=runtime_session.event_log,
+        ),
+    )
+    agent = AgentRuntime(
+        runtime_session=runtime_session,
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=128),
+        system_prompt=(
+            "You are validating runtime timeline persistence. "
+            "First call read_file on probe.txt. "
+            "Then answer with exactly the file content and nothing else."
+        ),
+    )
+
+    result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
+    records = graph.find_by_type(memory.RUN_TIMELINE)
+    timeline = load_run_timeline(
+        graph=graph,
+        archive=archive,
+        run_id=result.state.run_id,
+        runtime_session_id=runtime_session.runtime_session_id,
+    )
+    summary = summarize_run_timeline(timeline)
+    return {
+        "status": result.status.value,
+        "timeline_records": len(records),
+        "timeline_status": summary.status,
+        "timeline_item_kinds": [item.kind for item in timeline.items],
+        "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
+        "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
     }
 
 

@@ -54,3 +54,4 @@ temp/
 # Logs and local runtime artifacts
 *.log
 logs/
+.pulsara/
