@@ -20,7 +20,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
-from pulsara_agent.graph import InMemoryGraphStore, OxigraphGraphStore
+from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
@@ -31,7 +31,7 @@ from pulsara_agent.memory import (
 )
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import AgentRuntime, RuntimeSession
+from pulsara_agent.runtime import AgentRuntime, RuntimeSession, build_durable_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -350,25 +350,13 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
     probe = tmp_path / "probe.txt"
     probe.write_text("PULSARA_POSTGRES_CHAIN_OK", encoding="utf-8")
     settings = _load_settings_for_real_llm()
-    runtime_session = RuntimeSession(tmp_path)
-    event_log = PostgresEventLog(
-        dsn=settings.storage.postgres_dsn,
-        runtime_session_id=runtime_session.runtime_session_id,
-        workspace_root=tmp_path,
-    )
-    runtime_session.event_log = event_log
-    graph = OxigraphGraphStore(settings.storage.oxigraph_url)
     graph_id = f"graph:real-llm/{uuid4().hex}"
-    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
-    runtime_session.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime_session.event_log,
-            graph_id=graph_id,
-        ),
+    wiring = build_durable_runtime_wiring(
+        settings,
+        tmp_path,
+        graph_id=graph_id,
     )
+    runtime_session = wiring.runtime_session
     agent = AgentRuntime(
         runtime_session=runtime_session,
         llm_runtime=build_llm_runtime(settings.llm),
@@ -386,11 +374,11 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
     try:
         result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
         timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
-        records = graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
+        records = wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
         timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
-            graph=graph,
-            archive=archive,
+            graph=wiring.graph,
+            archive=wiring.archive,
             run_id=result.state.run_id,
             runtime_session_id=runtime_session.runtime_session_id,
             graph_id=graph_id,
@@ -415,10 +403,10 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
             "postgres_event_count": len(persisted_events),
             "postgres_sequence_numbers": [event.sequence for event in persisted_events],
             "replayed_text": replayed_text.strip(),
-            "timeline_artifact_text": archive.get_text(timeline_blob_id),
+            "timeline_artifact_text": wiring.archive.get_text(timeline_blob_id),
         }
     finally:
-        graph.delete_graph(graph_id)
+        wiring.graph.delete_graph(graph_id)
         if timeline_blob_prefix is not None:
             _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
         _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)

@@ -38,6 +38,11 @@ from pulsara_agent.runtime.terminal import (
     TerminalSessionState,
     TerminalStatus,
 )
+from pulsara_agent.runtime.wiring import (
+    RuntimeWiring,
+    build_durable_runtime_wiring,
+    build_in_memory_runtime_wiring,
+)
 
 __all__ = [
     "AgentRunResult",
@@ -64,6 +69,7 @@ __all__ = [
     "RuntimeEventSubscriber",
     "RuntimePublishedEvent",
     "RuntimeSession",
+    "RuntimeWiring",
     "RunTimeline",
     "RunTimelineItem",
     "TerminalBackend",
@@ -75,6 +81,8 @@ __all__ = [
     "TerminalSessionState",
     "TerminalStatus",
     "build_llm_context",
+    "build_durable_runtime_wiring",
+    "build_in_memory_runtime_wiring",
     "build_run_timeline",
     "build_tool_result_error_events",
     "msg_to_llm_messages",

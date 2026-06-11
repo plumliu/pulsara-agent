@@ -8,21 +8,19 @@ from uuid import uuid4
 import pytest
 
 from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
-from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.graph import OxigraphGraphStore
+from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.memory import (
     ExecutionEvidenceLedger,
     InMemoryArchiveStore,
-    PostgresArtifactStore,
-    RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
 )
 from pulsara_agent.memory.provenance import RuntimeEventSpan
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import RuntimeSession
-from pulsara_agent.settings import StorageConfig
+from pulsara_agent.runtime import build_durable_runtime_wiring
+from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
 
 OXIGRAPH_URL = "http://localhost:7878"
@@ -128,7 +126,7 @@ def test_oxigraph_store_supports_ledger_provenance_round_trip() -> None:
 
 
 def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(tmp_path) -> None:
-    dsn = StorageConfig.from_env().postgres_dsn
+    storage = StorageConfig.from_env()
     graph_id = f"graph:test/{uuid4().hex}"
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     ctx = EventContext(
@@ -136,42 +134,29 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(tmp_p
         turn_id=f"turn:oxigraph-timeline:{uuid4().hex}",
         reply_id=f"reply:oxigraph-timeline:{uuid4().hex}",
     )
-    graph = OxigraphGraphStore(OXIGRAPH_URL)
-    archive = PostgresArtifactStore(dsn=dsn)
-    event_log = PostgresEventLog(
-        dsn=dsn,
-        runtime_session_id=runtime_session_id,
-        workspace_root=tmp_path,
-    )
-    runtime = RuntimeSession(
+    wiring = build_durable_runtime_wiring(
+        _settings_for_storage(storage),
         tmp_path,
         runtime_session_id=runtime_session_id,
-        event_log=event_log,
-    )
-    runtime.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime.event_log,
-            graph_id=graph_id,
-        ),
+        graph_id=graph_id,
     )
     timeline_blob_id: str | None = None
 
     async def run() -> None:
-        await runtime.emit(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello oxigraph"))
-        await runtime.emit(ReplyEndEvent(**ctx.event_fields()))
+        await wiring.runtime_session.emit(
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello oxigraph")
+        )
+        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields()))
 
     try:
         import asyncio
 
         asyncio.run(run())
-        records = graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
+        records = wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
         timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
-            graph=graph,
-            archive=archive,
+            graph=wiring.graph,
+            archive=wiring.archive,
             run_id=ctx.run_id,
             runtime_session_id=runtime_session_id,
             graph_id=graph_id,
@@ -183,13 +168,24 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(tmp_p
         assert records[0][memory.SOURCE_SESSION.name] == runtime_session_id
         assert records[0][memory.STATUS.name] == "completed"
         assert timeline_blob_id.startswith(f"timeline:{runtime_session_id}:{ctx.run_id}:")
-        assert "hello oxigraph" in archive.get_text(timeline_blob_id)
+        assert "hello oxigraph" in wiring.archive.get_text(timeline_blob_id)
         assert summary.assistant_text == "hello oxigraph"
     finally:
-        graph.delete_graph(graph_id)
-        if timeline_blob_id is not None:
-            _delete_postgres_artifact(dsn, timeline_blob_id)
-        _delete_postgres_runtime_session(dsn, runtime_session_id)
+        wiring.graph.delete_graph(graph_id)
+        _delete_postgres_artifacts_with_prefix(storage.postgres_dsn, f"timeline:{runtime_session_id}:{ctx.run_id}:")
+        _delete_postgres_runtime_session(storage.postgres_dsn, runtime_session_id)
+
+
+def _settings_for_storage(storage: StorageConfig) -> PulsaraSettings:
+    return PulsaraSettings(
+        llm=LLMConfig(
+            api_key="test-key",
+            base_url="https://example.invalid/v1",
+            pro_model="test-pro",
+            flash_model="test-flash",
+        ),
+        storage=storage,
+    )
 
 
 def _delete_postgres_runtime_session(dsn: str, runtime_session_id: str) -> None:
@@ -200,12 +196,12 @@ def _delete_postgres_runtime_session(dsn: str, runtime_session_id: str) -> None:
             cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
 
 
-def _delete_postgres_artifact(dsn: str, blob_id: str) -> None:
+def _delete_postgres_artifacts_with_prefix(dsn: str, blob_id_prefix: str) -> None:
     import psycopg
 
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("delete from artifacts where id = %s", (blob_id,))
+            cursor.execute("delete from artifacts where id like %s", (f"{blob_id_prefix}%",))
 
 
 def _artifact_id_from_node_ref(node_id: str) -> str:
