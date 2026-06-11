@@ -7,11 +7,22 @@ from uuid import uuid4
 
 import pytest
 
+from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
+from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.graph import OxigraphGraphStore
-from pulsara_agent.memory import ExecutionEvidenceLedger, InMemoryArchiveStore
+from pulsara_agent.memory import (
+    ExecutionEvidenceLedger,
+    InMemoryArchiveStore,
+    PostgresArtifactStore,
+    RunTimelinePersistenceHook,
+    load_run_timeline,
+    summarize_run_timeline,
+)
 from pulsara_agent.memory.provenance import RuntimeEventSpan
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory
+from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.settings import StorageConfig
 
 
 OXIGRAPH_URL = "http://localhost:7878"
@@ -114,3 +125,91 @@ def test_oxigraph_store_supports_ledger_provenance_round_trip() -> None:
         assert len(store.find_by_type(memory.TOOL_RESULT, graph_id=graph_id)) == 1
     finally:
         store.delete_graph(graph_id)
+
+
+def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(tmp_path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    graph_id = f"graph:test/{uuid4().hex}"
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    ctx = EventContext(
+        run_id=f"run:oxigraph-timeline:{uuid4().hex}",
+        turn_id=f"turn:oxigraph-timeline:{uuid4().hex}",
+        reply_id=f"reply:oxigraph-timeline:{uuid4().hex}",
+    )
+    graph = OxigraphGraphStore(OXIGRAPH_URL)
+    archive = PostgresArtifactStore(dsn=dsn)
+    event_log = PostgresEventLog(
+        dsn=dsn,
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    runtime = RuntimeSession(
+        tmp_path,
+        runtime_session_id=runtime_session_id,
+        event_log=event_log,
+    )
+    runtime.hook_manager.register_event(
+        None,
+        RunTimelinePersistenceHook(
+            graph=graph,
+            archive=archive,
+            event_store=runtime.event_log,
+            graph_id=graph_id,
+        ),
+    )
+    timeline_blob_id: str | None = None
+
+    async def run() -> None:
+        await runtime.emit(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello oxigraph"))
+        await runtime.emit(ReplyEndEvent(**ctx.event_fields()))
+
+    try:
+        import asyncio
+
+        asyncio.run(run())
+        records = graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
+        timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
+        timeline = load_run_timeline(
+            graph=graph,
+            archive=archive,
+            run_id=ctx.run_id,
+            runtime_session_id=runtime_session_id,
+            graph_id=graph_id,
+        )
+        summary = summarize_run_timeline(timeline)
+
+        assert len(records) == 1
+        assert records[0][memory.SOURCE_RUN.name] == ctx.run_id
+        assert records[0][memory.SOURCE_SESSION.name] == runtime_session_id
+        assert records[0][memory.STATUS.name] == "completed"
+        assert timeline_blob_id.startswith(f"timeline:{runtime_session_id}:{ctx.run_id}:")
+        assert "hello oxigraph" in archive.get_text(timeline_blob_id)
+        assert summary.assistant_text == "hello oxigraph"
+    finally:
+        graph.delete_graph(graph_id)
+        if timeline_blob_id is not None:
+            _delete_postgres_artifact(dsn, timeline_blob_id)
+        _delete_postgres_runtime_session(dsn, runtime_session_id)
+
+
+def _delete_postgres_runtime_session(dsn: str, runtime_session_id: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+
+
+def _delete_postgres_artifact(dsn: str, blob_id: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from artifacts where id = %s", (blob_id,))
+
+
+def _artifact_id_from_node_ref(node_id: str) -> str:
+    prefix = "urn:pulsara:"
+    if node_id.startswith(prefix):
+        return urllib.parse.unquote(node_id[len(prefix) :])
+    return node_id

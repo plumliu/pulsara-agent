@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,9 +67,10 @@ def load_run_timeline(
         graph_id=graph_id,
     )
     stored_as = record.get(memory.STORED_AS.name)
-    if not isinstance(stored_as, dict) or not isinstance(stored_as.get("@id"), str):
+    stored_as_id = _node_ref_id(stored_as)
+    if stored_as_id is None:
         raise ValueError(f"Run timeline record for {run_id} does not reference an archived payload")
-    payload = json.loads(archive.get_text(stored_as["@id"]))
+    payload = json.loads(archive.get_text(_artifact_id_from_node_ref(stored_as_id)))
     return RunTimeline.from_dict(payload)
 
 
@@ -135,3 +137,21 @@ def _find_run_timeline_record(
         raise KeyError(run_id)
     records.sort(key=lambda record: str(record.get(memory.UPDATED_AT.name, "")), reverse=True)
     return records[0]
+
+
+def _artifact_id_from_node_ref(node_id: str) -> str:
+    prefix = "urn:pulsara:"
+    if node_id.startswith(prefix):
+        return urllib.parse.unquote(node_id[len(prefix) :])
+    return node_id
+
+
+def _node_ref_id(value: Any) -> str | None:
+    if isinstance(value, dict) and isinstance(value.get("@id"), str):
+        return value["@id"]
+    if isinstance(value, list):
+        for item in value:
+            node_id = _node_ref_id(item)
+            if node_id is not None:
+                return node_id
+    return None

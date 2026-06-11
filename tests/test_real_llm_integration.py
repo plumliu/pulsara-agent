@@ -1,6 +1,8 @@
 import asyncio
 import os
+import urllib.parse
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -18,7 +20,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
-from pulsara_agent.graph import InMemoryGraphStore
+from pulsara_agent.graph import InMemoryGraphStore, OxigraphGraphStore
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
@@ -319,23 +321,29 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
         ),
     )
 
-    result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
-    records = graph.find_by_type(memory.RUN_TIMELINE)
-    timeline = load_run_timeline(
-        graph=graph,
-        archive=archive,
-        run_id=result.state.run_id,
-        runtime_session_id=runtime_session.runtime_session_id,
-    )
-    summary = summarize_run_timeline(timeline)
-    return {
-        "status": result.status.value,
-        "timeline_records": len(records),
-        "timeline_status": summary.status,
-        "timeline_item_kinds": [item.kind for item in timeline.items],
-        "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
-        "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
-    }
+    timeline_blob_prefix: str | None = None
+    try:
+        result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
+        timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
+        records = graph.find_by_type(memory.RUN_TIMELINE)
+        timeline = load_run_timeline(
+            graph=graph,
+            archive=archive,
+            run_id=result.state.run_id,
+            runtime_session_id=runtime_session.runtime_session_id,
+        )
+        summary = summarize_run_timeline(timeline)
+        return {
+            "status": result.status.value,
+            "timeline_records": len(records),
+            "timeline_status": summary.status,
+            "timeline_item_kinds": [item.kind for item in timeline.items],
+            "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
+            "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
+        }
+    finally:
+        if timeline_blob_prefix is not None:
+            _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
 
 
 async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> dict:
@@ -349,7 +357,8 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
         workspace_root=tmp_path,
     )
     runtime_session.event_log = event_log
-    graph = InMemoryGraphStore()
+    graph = OxigraphGraphStore(settings.storage.oxigraph_url)
+    graph_id = f"graph:real-llm/{uuid4().hex}"
     archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
     runtime_session.hook_manager.register_event(
         None,
@@ -357,6 +366,7 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
             graph=graph,
             archive=archive,
             event_store=runtime_session.event_log,
+            graph_id=graph_id,
         ),
     )
     agent = AgentRuntime(
@@ -372,15 +382,18 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
     )
 
     timeline_blob_id: str | None = None
+    timeline_blob_prefix: str | None = None
     try:
         result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
-        records = graph.find_by_type(memory.RUN_TIMELINE)
-        timeline_blob_id = records[0][memory.STORED_AS.name]["@id"]
+        timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
+        records = graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
+        timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
             graph=graph,
             archive=archive,
             run_id=result.state.run_id,
             runtime_session_id=runtime_session.runtime_session_id,
+            graph_id=graph_id,
         )
         summary = summarize_run_timeline(timeline)
         reloaded_log = PostgresEventLog(
@@ -394,6 +407,7 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
         return {
             "status": result.status.value,
             "timeline_records": len(records),
+            "timeline_record_stored_as": timeline_blob_id,
             "timeline_status": summary.status,
             "timeline_item_kinds": [item.kind for item in timeline.items],
             "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
@@ -404,8 +418,9 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
             "timeline_artifact_text": archive.get_text(timeline_blob_id),
         }
     finally:
-        if timeline_blob_id is not None:
-            _delete_postgres_artifact(settings.storage.postgres_dsn, timeline_blob_id)
+        graph.delete_graph(graph_id)
+        if timeline_blob_prefix is not None:
+            _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
         _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
 
 
@@ -487,3 +502,18 @@ def _delete_postgres_artifact(dsn: str, blob_id: str) -> None:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from artifacts where id = %s", (blob_id,))
+
+
+def _delete_postgres_artifacts_with_prefix(dsn: str, blob_id_prefix: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from artifacts where id like %s", (f"{blob_id_prefix}%",))
+
+
+def _artifact_id_from_node_ref(node_id: str) -> str:
+    prefix = "urn:pulsara:"
+    if node_id.startswith(prefix):
+        return urllib.parse.unquote(node_id[len(prefix) :])
+    return node_id
