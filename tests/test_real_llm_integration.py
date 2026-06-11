@@ -22,7 +22,7 @@ from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
-    InMemoryArchiveStore,
+    PostgresArtifactStore,
     RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
@@ -131,6 +131,7 @@ def test_real_agent_runtime_persists_events_to_postgres_and_timeline_with_respon
     assert any("probe.txt" in args for args in result["tool_call_arguments"])
     assert any("PULSARA_POSTGRES_CHAIN_OK" in summary for summary in result["tool_result_summaries"])
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["replayed_text"]
+    assert "PULSARA_POSTGRES_CHAIN_OK" in result["timeline_artifact_text"]
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -297,7 +298,7 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
     runtime_session = RuntimeSession(tmp_path)
     graph = InMemoryGraphStore()
-    archive = InMemoryArchiveStore()
+    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
     runtime_session.hook_manager.register_event(
         None,
         RunTimelinePersistenceHook(
@@ -349,7 +350,7 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
     )
     runtime_session.event_log = event_log
     graph = InMemoryGraphStore()
-    archive = InMemoryArchiveStore()
+    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
     runtime_session.hook_manager.register_event(
         None,
         RunTimelinePersistenceHook(
@@ -370,9 +371,11 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
         ),
     )
 
+    timeline_blob_id: str | None = None
     try:
         result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
         records = graph.find_by_type(memory.RUN_TIMELINE)
+        timeline_blob_id = records[0][memory.STORED_AS.name]["@id"]
         timeline = load_run_timeline(
             graph=graph,
             archive=archive,
@@ -398,8 +401,11 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
             "postgres_event_count": len(persisted_events),
             "postgres_sequence_numbers": [event.sequence for event in persisted_events],
             "replayed_text": replayed_text.strip(),
+            "timeline_artifact_text": archive.get_text(timeline_blob_id),
         }
     finally:
+        if timeline_blob_id is not None:
+            _delete_postgres_artifact(settings.storage.postgres_dsn, timeline_blob_id)
         _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
 
 
@@ -473,3 +479,11 @@ def _delete_postgres_runtime_session(dsn: str, runtime_session_id: str) -> None:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+
+
+def _delete_postgres_artifact(dsn: str, blob_id: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from artifacts where id = %s", (blob_id,))

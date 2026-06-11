@@ -62,9 +62,16 @@ class RunTimelinePersistenceHook:
             run_id=context.run_id,
         )
         timeline_id = _timeline_id(context.runtime_session_id, context.run_id)
-        blob_id = _timeline_blob_id(context.runtime_session_id, context.run_id)
+        blob_id = _timeline_blob_id(context.runtime_session_id, context.run_id, event)
         payload = json.dumps(timeline.to_dict(), ensure_ascii=True, sort_keys=True, indent=2)
-        artifact = self.archive.put_text(blob_id, payload)
+        artifact = self.archive.put_text(
+            blob_id,
+            payload,
+            session_id=context.runtime_session_id,
+            run_id=context.run_id,
+            media_type="application/json",
+            metadata={"artifact_kind": "run_timeline"},
+        )
         now = utc_now()
         record = RunTimelineRecord(
             id=timeline_id,
@@ -92,8 +99,11 @@ def _timeline_id(runtime_session_id: str, run_id: str) -> str:
     return f"run-timeline:{runtime_session_id}:{run_id}"
 
 
-def _timeline_blob_id(runtime_session_id: str, run_id: str) -> str:
-    return f"timeline:{runtime_session_id}:{run_id}"
+def _timeline_blob_id(runtime_session_id: str, run_id: str, event: Any) -> str:
+    sequence = getattr(event, "sequence", None)
+    if sequence is None:
+        return f"timeline:{runtime_session_id}:{run_id}:{getattr(event, 'id')}"
+    return f"timeline:{runtime_session_id}:{run_id}:seq:{sequence}"
 
 
 def _existing_created_at(graph: Any, timeline_id: str, graph_id: str | None) -> str | None:
