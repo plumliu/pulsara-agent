@@ -1,12 +1,12 @@
 from pulsara_agent.event import (
     EventContext,
-    InMemoryEventLog,
     ReplyStartEvent,
     ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
+from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.memory.archive import InMemoryArchiveStore
 from pulsara_agent.memory.ledger import ExecutionEvidenceLedger

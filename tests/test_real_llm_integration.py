@@ -6,7 +6,6 @@ import pytest
 
 from pulsara_agent.event import (
     EventContext,
-    InMemoryEventLog,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ReplyEndEvent,
@@ -18,6 +17,7 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
     ToolResultStartEvent,
 )
+from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions

@@ -45,7 +45,6 @@ from pulsara_agent.event.events import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
-from pulsara_agent.event.log import InMemoryEventLog
 
 __all__ = [
     "AgentEvent",
@@ -60,7 +59,6 @@ __all__ = [
     "ExceedMaxItersEvent",
     "ExternalExecutionResultEvent",
     "HintBlockEvent",
-    "InMemoryEventLog",
     "MemoryCandidateProposedEvent",
     "MemoryMaintenanceAppliedEvent",
     "MemoryMaintenanceProposedEvent",

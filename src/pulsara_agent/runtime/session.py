@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Iterable
 from uuid import uuid4
 
-from pulsara_agent.event import AgentEvent, InMemoryEventLog
+from pulsara_agent.event import AgentEvent
+from pulsara_agent.event_log import EventLog, InMemoryEventLog
 from pulsara_agent.runtime.hooks import RuntimeHookManager
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
@@ -27,7 +28,7 @@ class RuntimeThreadRecorder:
 class RuntimeSession:
     workspace_root: Path
     runtime_session_id: str = field(default_factory=lambda: f"runtime:{uuid4().hex}")
-    event_log: InMemoryEventLog = field(default_factory=InMemoryEventLog)
+    event_log: EventLog = field(default_factory=InMemoryEventLog)
     hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)

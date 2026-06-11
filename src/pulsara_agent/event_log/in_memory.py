@@ -1,4 +1,4 @@
-"""Append-only in-memory event log."""
+"""Append-only in-memory EventLog implementation."""
 
 from __future__ import annotations
 

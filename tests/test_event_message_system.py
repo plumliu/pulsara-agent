@@ -4,7 +4,6 @@ from pulsara_agent.event import (
     DataBlockStartEvent,
     EventContext,
     ExternalExecutionResultEvent,
-    InMemoryEventLog,
     ModelCallEndEvent,
     ProjectionReadyEvent,
     RequireExternalExecutionEvent,
@@ -23,6 +22,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
+from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.message import Base64Source, TextBlock, ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState
 from pulsara_agent.ontology import memory

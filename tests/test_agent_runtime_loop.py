@@ -454,7 +454,7 @@ def test_agent_runtime_exceeds_max_turns(tmp_path) -> None:
 
 
 def test_build_tool_result_error_events_use_standard_event_shape() -> None:
-    from pulsara_agent.event import InMemoryEventLog
+    from pulsara_agent.event_log import InMemoryEventLog
 
     event_log = InMemoryEventLog()
     context = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
