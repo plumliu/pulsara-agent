@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 
 from pulsara_agent.event import (
-    CustomEvent,
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ReplyEndEvent,
     ReplyStartEvent,
+    RunEndEvent,
     TextBlockDeltaEvent,
     ToolCallDeltaEvent,
     ToolCallEndEvent,
@@ -93,10 +93,10 @@ def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(tmp_pa
         await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="done"))
         await runtime.emit(ReplyEndEvent(**CTX.event_fields()))
         await runtime.emit(
-            CustomEvent(
+            RunEndEvent(
                 **CTX.event_fields(),
-                name="session_completed",
-                value={"status": "finished", "stop_reason": "final"},
+                status="finished",
+                stop_reason="final",
             )
         )
 
@@ -134,10 +134,10 @@ def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(t
         await runtime.emit(ReplyEndEvent(**CTX.event_fields()))
         first = graph.find_by_type(memory.RUN_TIMELINE)[0]
         await runtime.emit(
-            CustomEvent(
+            RunEndEvent(
                 **CTX.event_fields(),
-                name="session_completed",
-                value={"status": "finished", "stop_reason": "final"},
+                status="finished",
+                stop_reason="final",
             )
         )
         second = graph.find_by_type(memory.RUN_TIMELINE)[0]
@@ -171,10 +171,10 @@ def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
             ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:read", delta="PULSARA_TRACE_OK"),
             ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:read", state=ToolResultState.SUCCESS),
             ReplyEndEvent(**CTX.event_fields()),
-            CustomEvent(
+            RunEndEvent(
                 **CTX.event_fields(),
-                name="session_completed",
-                value={"status": "finished", "stop_reason": "final"},
+                status="finished",
+                stop_reason="final",
             ),
         ]:
             await runtime.emit(event)
@@ -229,7 +229,7 @@ def test_run_timeline_summary_separates_multiple_assistant_text_items() -> None:
         ("aborted", "aborted"),
     ],
 )
-def test_run_timeline_preserves_non_success_session_completed_status(
+def test_run_timeline_preserves_non_success_run_end_status(
     tmp_path,
     session_status: str,
     timeline_status: str,
@@ -239,10 +239,10 @@ def test_run_timeline_preserves_non_success_session_completed_status(
     async def run() -> None:
         await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
         await runtime.emit(
-            CustomEvent(
+            RunEndEvent(
                 **CTX.event_fields(),
-                name="session_completed",
-                value={"status": session_status, "stop_reason": session_status},
+                status=session_status,
+                stop_reason=session_status,
             )
         )
 

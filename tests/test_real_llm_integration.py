@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import urllib.parse
 from pathlib import Path
@@ -31,7 +32,7 @@ from pulsara_agent.memory import (
 )
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import AgentRuntime, RuntimeSession, build_durable_runtime_wiring
+from pulsara_agent.runtime import AgentRuntime, RuntimeSession, build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -134,6 +135,32 @@ def test_real_agent_runtime_persists_events_to_postgres_and_timeline_with_respon
     assert any("PULSARA_POSTGRES_CHAIN_OK" in summary for summary in result["tool_result_summaries"])
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["replayed_text"]
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["timeline_artifact_text"]
+
+
+def test_real_llm_trajectory_suite_collects_five_rollouts(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    trajectories = asyncio.run(_run_real_llm_trajectory_suite(tmp_path))
+
+    print("\nREAL_LLM_TRAJECTORIES=" + json.dumps(trajectories, ensure_ascii=True, indent=2))
+    assert [trajectory["label"] for trajectory in trajectories] == [
+        "flash_text",
+        "tool_spec_call",
+        "agent_read_file",
+        "durable_agent_read_file",
+        "durable_multi_tool_rollout",
+    ]
+    assert all(trajectory["errors"] == [] for trajectory in trajectories)
+    assert all(trajectory["status"] in {"finished", "streamed"} for trajectory in trajectories)
+    assert any(trajectory["tool_call_count"] >= 3 for trajectory in trajectories)
+    multi_tool = trajectories[-1]
+    assert multi_tool["event_type_names"][0] == "RunStartEvent"
+    assert multi_tool["event_type_names"][-1] == "RunEndEvent"
+    assert multi_tool["tool_names"].count("read_file") >= 2
+    assert "search_files" in multi_tool["tool_names"]
+    assert "PULSARA_MULTI_ALPHA" in multi_tool["final_text"]
+    assert "PULSARA_MULTI_BETA" in multi_tool["final_text"]
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -351,15 +378,10 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
     probe.write_text("PULSARA_POSTGRES_CHAIN_OK", encoding="utf-8")
     settings = _load_settings_for_real_llm()
     graph_id = f"graph:real-llm/{uuid4().hex}"
-    wiring = build_durable_runtime_wiring(
+    wiring = build_agent_runtime_wiring(
         settings,
         tmp_path,
-        graph_id=graph_id,
-    )
-    runtime_session = wiring.runtime_session
-    agent = AgentRuntime(
-        runtime_session=runtime_session,
-        llm_runtime=build_llm_runtime(settings.llm),
+        durable=True,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=128),
         system_prompt=(
@@ -367,18 +389,21 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
             "First call read_file on probe.txt. "
             "Then answer with exactly the file content and nothing else."
         ),
+        graph_id=graph_id,
     )
+    runtime_session = wiring.runtime_wiring.runtime_session
+    agent = wiring.agent_runtime
 
     timeline_blob_id: str | None = None
     timeline_blob_prefix: str | None = None
     try:
         result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
         timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
-        records = wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
+        records = wiring.runtime_wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
         timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
-            graph=wiring.graph,
-            archive=wiring.archive,
+            graph=wiring.runtime_wiring.graph,
+            archive=wiring.runtime_wiring.archive,
             run_id=result.state.run_id,
             runtime_session_id=runtime_session.runtime_session_id,
             graph_id=graph_id,
@@ -403,13 +428,163 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
             "postgres_event_count": len(persisted_events),
             "postgres_sequence_numbers": [event.sequence for event in persisted_events],
             "replayed_text": replayed_text.strip(),
-            "timeline_artifact_text": wiring.archive.get_text(timeline_blob_id),
+            "timeline_artifact_text": wiring.runtime_wiring.archive.get_text(timeline_blob_id),
         }
     finally:
-        wiring.graph.delete_graph(graph_id)
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
         if timeline_blob_prefix is not None:
             _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
         _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
+
+
+async def _run_real_llm_trajectory_suite(tmp_path: Path) -> list[dict]:
+    agent_read_dir = tmp_path / "agent-read"
+    durable_read_dir = tmp_path / "durable-read"
+    multi_tool_dir = tmp_path / "multi-tool"
+    agent_read_dir.mkdir()
+    durable_read_dir.mkdir()
+    multi_tool_dir.mkdir()
+
+    flash = await _run_real_flash_smoke()
+    tool_spec = await _run_real_tool_call_smoke()
+    agent_read = await _run_real_agent_tool_loop_smoke(agent_read_dir)
+    durable_read = await _run_real_agent_postgres_event_log_timeline_smoke(durable_read_dir)
+    multi_tool = await _run_real_agent_multi_tool_rollout(multi_tool_dir)
+    return [
+        _trajectory_from_stream_result(
+            "flash_text",
+            flash,
+            final_text=flash["text"],
+        ),
+        _trajectory_from_stream_result(
+            "tool_spec_call",
+            tool_spec,
+            final_text=tool_spec["text"],
+            tool_names=[tool_spec["tool_call_name"]],
+        ),
+        {
+            "label": "agent_read_file",
+            "status": agent_read["status"],
+            "final_text": agent_read["final_text"],
+            "event_type_names": [],
+            "tool_call_count": len(agent_read["tool_call_ids"]),
+            "tool_names": ["read_file"] if agent_read["tool_call_ids"] else [],
+            "tool_result_count": len(agent_read["tool_result_ids"]),
+            "timeline_status": None,
+            "timeline_item_kinds": [],
+            "postgres_event_count": None,
+            "errors": agent_read["errors"],
+        },
+        {
+            "label": "durable_agent_read_file",
+            "status": durable_read["status"],
+            "final_text": durable_read["replayed_text"],
+            "event_type_names": [],
+            "tool_call_count": len(durable_read["tool_call_arguments"]),
+            "tool_names": ["read_file"] if durable_read["tool_call_arguments"] else [],
+            "tool_result_count": len(durable_read["tool_result_summaries"]),
+            "timeline_status": durable_read["timeline_status"],
+            "timeline_item_kinds": durable_read["timeline_item_kinds"],
+            "postgres_event_count": durable_read["postgres_event_count"],
+            "errors": [],
+        },
+        multi_tool,
+    ]
+
+
+async def _run_real_agent_multi_tool_rollout(tmp_path: Path) -> dict:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "alpha.txt").write_text("PULSARA_MULTI_ALPHA\n", encoding="utf-8")
+    notes_dir = tmp_path / "notes"
+    notes_dir.mkdir()
+    (notes_dir / "beta.md").write_text(
+        "# Beta\n\nThe second rollout token is PULSARA_MULTI_BETA.\n",
+        encoding="utf-8",
+    )
+    settings = _load_settings_for_real_llm()
+    graph_id = f"graph:real-llm/{uuid4().hex}"
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=256),
+        system_prompt=(
+            "You are validating a longer multi-tool rollout. "
+            "Before the final answer, call tools in this order: "
+            "read_file on alpha.txt; search_files for PULSARA_MULTI_BETA; "
+            "read_file on the matched beta file. "
+            "Do not use write_file, edit_file, terminal, or todo."
+        ),
+        graph_id=graph_id,
+    )
+    runtime_session = wiring.runtime_wiring.runtime_session
+    timeline_blob_prefix: str | None = None
+    try:
+        result = await wiring.agent_runtime.run_task(
+            "Run the required three-step tool rollout, then answer exactly: "
+            "PULSARA_MULTI_ALPHA|PULSARA_MULTI_BETA"
+        )
+        timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
+        events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        tool_result_events = [event for event in events if isinstance(event, ToolResultStartEvent)]
+        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        records = wiring.runtime_wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
+        timeline = load_run_timeline(
+            graph=wiring.runtime_wiring.graph,
+            archive=wiring.runtime_wiring.archive,
+            run_id=result.state.run_id,
+            runtime_session_id=runtime_session.runtime_session_id,
+            graph_id=graph_id,
+        )
+        summary = summarize_run_timeline(timeline)
+        return {
+            "label": "durable_multi_tool_rollout",
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "event_type_names": [type(event).__name__ for event in events],
+            "tool_call_count": len(tool_call_events),
+            "tool_names": [event.tool_call_name for event in tool_call_events],
+            "tool_result_count": len(tool_result_events),
+            "timeline_status": summary.status,
+            "timeline_item_kinds": [item.kind for item in timeline.items],
+            "timeline_records": len(records),
+            "postgres_event_count": len(events),
+            "postgres_sequence_numbers": [event.sequence for event in events],
+            "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
+            "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
+            "errors": errors,
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if timeline_blob_prefix is not None:
+            _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
+        _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
+
+
+def _trajectory_from_stream_result(
+    label: str,
+    result: dict,
+    *,
+    final_text: str,
+    tool_names: list[str] | None = None,
+) -> dict:
+    event_type_names = result["event_type_names"]
+    tool_names = [name for name in (tool_names or []) if name]
+    return {
+        "label": label,
+        "status": "streamed",
+        "final_text": final_text,
+        "event_type_names": event_type_names,
+        "tool_call_count": event_type_names.count("ToolCallStartEvent"),
+        "tool_names": tool_names,
+        "tool_result_count": 0,
+        "timeline_status": None,
+        "timeline_item_kinds": [],
+        "postgres_event_count": None,
+        "errors": result["errors"],
+    }
 
 
 async def _collect_real_events(

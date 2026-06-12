@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from pulsara_agent.event import CustomEvent, EventType
+from pulsara_agent.event import EventType, RunEndEvent
 from pulsara_agent.jsonld import JsonLdEntity, NodeRef, Term, utc_now
 from pulsara_agent.memory.protocols import ArtifactStore
 from pulsara_agent.ontology import memory
@@ -92,7 +92,7 @@ class RunTimelinePersistenceHook:
 def _should_persist_timeline(event: Any) -> bool:
     if event.type in {EventType.REPLY_END, EventType.RUN_ERROR, EventType.EXCEED_MAX_ITERS}:
         return True
-    return isinstance(event, CustomEvent) and event.name == "session_completed"
+    return isinstance(event, RunEndEvent)
 
 
 def _timeline_id(runtime_session_id: str, run_id: str) -> str:

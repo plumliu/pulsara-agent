@@ -8,8 +8,11 @@ from uuid import uuid4
 
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import GraphStore, InMemoryGraphStore, OxigraphGraphStore
+from pulsara_agent.llm import ModelRole, build_llm_runtime
+from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import ArtifactStore, InMemoryArchiveStore, PostgresArtifactStore
 from pulsara_agent.memory.run_timeline_persistence import RunTimelinePersistenceHook
+from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.settings import PulsaraSettings
 
@@ -21,6 +24,12 @@ class RuntimeWiring:
     graph: GraphStore
     archive: ArtifactStore
     graph_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRuntimeWiring:
+    agent_runtime: AgentRuntime
+    runtime_wiring: RuntimeWiring
 
 
 def build_in_memory_runtime_wiring(
@@ -85,6 +94,44 @@ def build_durable_runtime_wiring(
         graph=graph,
         archive=archive,
         graph_id=resolved_graph_id,
+    )
+
+
+def build_agent_runtime_wiring(
+    settings: PulsaraSettings,
+    workspace_root: Path,
+    *,
+    durable: bool,
+    model_role: ModelRole,
+    options: LLMOptions | None = None,
+    system_prompt: str | None = None,
+    runtime_session_id: str | None = None,
+    graph_id: str | None = None,
+) -> AgentRuntimeWiring:
+    runtime_wiring = (
+        build_durable_runtime_wiring(
+            settings,
+            workspace_root,
+            runtime_session_id=runtime_session_id,
+            graph_id=graph_id,
+        )
+        if durable
+        else build_in_memory_runtime_wiring(
+            workspace_root,
+            runtime_session_id=runtime_session_id,
+            graph_id=graph_id,
+        )
+    )
+    agent_runtime = AgentRuntime(
+        runtime_session=runtime_wiring.runtime_session,
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=model_role,
+        options=options,
+        system_prompt=system_prompt,
+    )
+    return AgentRuntimeWiring(
+        agent_runtime=agent_runtime,
+        runtime_wiring=runtime_wiring,
     )
 
 

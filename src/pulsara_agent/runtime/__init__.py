@@ -39,7 +39,9 @@ from pulsara_agent.runtime.terminal import (
     TerminalStatus,
 )
 from pulsara_agent.runtime.wiring import (
+    AgentRuntimeWiring,
     RuntimeWiring,
+    build_agent_runtime_wiring,
     build_durable_runtime_wiring,
     build_in_memory_runtime_wiring,
 )
@@ -47,6 +49,7 @@ from pulsara_agent.runtime.wiring import (
 __all__ = [
     "AgentRunResult",
     "AgentRuntime",
+    "AgentRuntimeWiring",
     "AllowAllPermissionGate",
     "LoopBudget",
     "LoopState",
@@ -81,6 +84,7 @@ __all__ = [
     "TerminalSessionState",
     "TerminalStatus",
     "build_llm_context",
+    "build_agent_runtime_wiring",
     "build_durable_runtime_wiring",
     "build_in_memory_runtime_wiring",
     "build_run_timeline",

@@ -11,11 +11,13 @@ from pulsara_agent.event import (
     EventContext,
     ReplyEndEvent,
     ReplyStartEvent,
+    RunEndEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
 )
-from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
+from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.settings import StorageConfig
 
 
@@ -94,6 +96,15 @@ def test_event_log_replay_rebuilds_assistant_message(event_log: EventLog) -> Non
     assert message.name == "assistant"
     assert message.content[0].type == "text"
     assert message.content[0].text == "hello world"
+
+
+def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> None:
+    ctx = _ctx("contract:lifecycle")
+    started = RunStartEvent(**ctx.event_fields(), user_input_chars=7)
+    ended = RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final")
+
+    assert load_agent_event(dump_agent_event(started)) == started
+    assert load_agent_event(dump_agent_event(ended)) == ended
 
 
 def test_event_log_preassigned_sequence_advances_next_sequence(event_log: EventLog) -> None:

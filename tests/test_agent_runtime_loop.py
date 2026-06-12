@@ -9,9 +9,9 @@ from pulsara_agent.event import (
     AgentEvent,
     EventContext,
     EventType,
-    ToolResultDataDeltaEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    RunEndEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -19,6 +19,7 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -662,15 +663,16 @@ class FailingPersistenceHook:
 def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> None:
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
     error = next(event for event in events if isinstance(event, RunErrorEvent))
-    completed = next(event for event in events if event.type is EventType.CUSTOM and event.name == "session_completed")
+    completed = next(event for event in events if isinstance(event, RunEndEvent))
 
     assert result.status is LoopStatus.FAILED
     assert result.stop_reason == "memory_hook_error"
     assert hook_name in (result.error_message or "")
     assert error.code == "memory_hook_error"
     assert error.metadata == {"hook": hook_name}
-    assert completed.value["status"] == "failed"
-    assert completed.value["stop_reason"] == "memory_hook_error"
+    assert completed.status == "failed"
+    assert completed.stop_reason == "memory_hook_error"
+    assert hook_name in (completed.error_message or "")
 
 
 def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) -> None:
@@ -785,7 +787,7 @@ def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> No
     assert result.stop_reason == "final"
     assert any(event.type is EventType.CUSTOM and event.name == "tool_result_persistence_failed" for event in events)
     assert not any(isinstance(event, RunErrorEvent) and event.code == "memory_persistence_error" for event in events)
-    assert any(event.type is EventType.CUSTOM and event.name == "session_completed" for event in events)
+    assert any(isinstance(event, RunEndEvent) and event.status == "finished" for event in events)
 
 
 def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> None:

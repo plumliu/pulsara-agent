@@ -15,6 +15,8 @@ from pulsara_agent.ontology import memory
 
 
 class EventType(StrEnum):
+    RUN_START = "RUN_START"
+    RUN_END = "RUN_END"
     REPLY_START = "REPLY_START"
     REPLY_END = "REPLY_END"
     RUN_ERROR = "RUN_ERROR"
@@ -93,6 +95,18 @@ class EventBase(BaseModel):
     reply_id: str
     sequence: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunStartEvent(EventBase):
+    type: Literal[EventType.RUN_START] = EventType.RUN_START
+    user_input_chars: int
+
+
+class RunEndEvent(EventBase):
+    type: Literal[EventType.RUN_END] = EventType.RUN_END
+    status: str
+    stop_reason: str | None = None
+    error_message: str | None = None
 
 
 class ReplyStartEvent(EventBase):
@@ -354,7 +368,9 @@ class CustomEvent(EventBase):
 
 
 AgentEvent: TypeAlias = (
-    ReplyStartEvent
+    RunStartEvent
+    | RunEndEvent
+    | ReplyStartEvent
     | ReplyEndEvent
     | RunErrorEvent
     | ExceedMaxItersEvent

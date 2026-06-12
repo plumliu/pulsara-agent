@@ -13,6 +13,7 @@ from pulsara_agent.event import (
     ReplyEndEvent,
     ReplyStartEvent,
     RequireUserConfirmEvent,
+    RunEndEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
@@ -23,7 +24,6 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
-    CustomEvent,
 )
 
 TimelineItemKind = Literal[
@@ -257,10 +257,8 @@ def build_run_timeline(
             status = event.state.value
             _finish(tool_results.get(event.tool_call_id), event, status=status)
             continue
-        if isinstance(event, CustomEvent) and event.name == "session_completed":
-            value_status = event.value.get("status")
-            if isinstance(value_status, str):
-                terminal_status = _timeline_status_from_session_status(value_status)
+        if isinstance(event, RunEndEvent):
+            terminal_status = _timeline_status_from_run_status(event.status)
             if terminal_status == "failed":
                 failed = True
             continue
@@ -334,7 +332,7 @@ def _append_summary(item: RunTimelineItem, text: str, *, limit: int = 500) -> No
     item.summary = (item.summary + text)[:limit]
 
 
-def _timeline_status_from_session_status(status: str) -> str:
+def _timeline_status_from_run_status(status: str) -> str:
     if status == "finished":
         return "completed"
     return status

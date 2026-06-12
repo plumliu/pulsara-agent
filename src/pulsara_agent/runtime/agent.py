@@ -16,7 +16,9 @@ from pulsara_agent.event import (
     ProjectionReadyEvent,
     ProjectionRequestedEvent,
     RequireUserConfirmEvent,
+    RunEndEvent,
     RunErrorEvent,
+    RunStartEvent,
     ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
@@ -126,7 +128,13 @@ class AgentRuntime:
     async def stream_task(self, user_input: str) -> AsyncIterator[AgentEvent]:
         state = LoopState(session_id=self.runtime_session.runtime_session_id, budget=self.budget)
         state.messages.append(UserMsg(name="user", content=user_input))
-        yield await self._append_lifecycle_event(state, "session_started", {"user_input_chars": len(user_input)})
+        yield await self.runtime_session.emit(
+            RunStartEvent(
+                **self._event_context(state).event_fields(),
+                user_input_chars=len(user_input),
+            ),
+            state=state,
+        )
         ok, _result, error_event = await self._run_memory_hook(
             state,
             "on_session_start",
@@ -260,7 +268,14 @@ class AgentRuntime:
                 break
             if should_compact:
                 state.compacted = True
-                yield await self._append_lifecycle_event(state, "compaction_requested", {})
+                yield await self.runtime_session.emit(
+                    CustomEvent(
+                        **self._event_context(state).event_fields(),
+                        name="compaction_requested",
+                        value={},
+                    ),
+                    state=state,
+                )
             state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
             state.begin_next_turn()
 
@@ -282,10 +297,14 @@ class AgentRuntime:
             if not ok:
                 assert error_event is not None
                 yield error_event
-        yield await self._append_lifecycle_event(
-            state,
-            "session_completed",
-            {"status": state.status.value, "stop_reason": state.stop_reason},
+        yield await self.runtime_session.emit(
+            RunEndEvent(
+                **self._event_context(state).event_fields(),
+                status=state.status.value,
+                stop_reason=state.stop_reason,
+                error_message=state.error_message,
+            ),
+            state=state,
         )
         self._last_result = AgentRunResult(
             status=state.status,
@@ -603,13 +622,6 @@ class AgentRuntime:
 
     def _event_context(self, state: LoopState) -> EventContext:
         return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
-
-    async def _append_lifecycle_event(self, state: LoopState, name: str, value: dict) -> AgentEvent:
-        return await self.runtime_session.emit(
-            CustomEvent(**self._event_context(state).event_fields(), name=name, value=value),
-            state=state,
-        )
-
 
 def build_tool_result_error_events(
     event_context: EventContext,
