@@ -11,6 +11,7 @@ from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore, InMemoryGraphStore
 from pulsara_agent.llm import ModelRole, build_llm_runtime
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import ArtifactStore, InMemoryArchiveStore, PostgresArtifactStore
+from pulsara_agent.memory.durable_hooks import DurableMemoryHooks
 from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.run_timeline_persistence import RunTimelinePersistenceHook
 from pulsara_agent.memory.runtime_persistence import ExecutionEvidencePersistenceHook
@@ -137,6 +138,10 @@ def build_agent_runtime_wiring(
     agent_runtime = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=build_llm_runtime(settings.llm),
+        memory_hooks=DurableMemoryHooks(
+            service=runtime_wiring.memory_write_service,
+            sink=runtime_wiring.runtime_session.memory_proposal_sink,
+        ),
         tool_result_persistence_hook=ExecutionEvidencePersistenceHook(ledger=runtime_wiring.ledger),
         model_role=model_role,
         options=options,

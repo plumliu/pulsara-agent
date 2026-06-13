@@ -31,7 +31,7 @@ from pulsara_agent.memory import (
     summarize_run_timeline,
 )
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock
-from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import AgentRuntime, RuntimeSession, build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
@@ -150,17 +150,23 @@ def test_real_llm_trajectory_suite_collects_five_rollouts(tmp_path):
         "agent_read_file",
         "durable_agent_read_file",
         "durable_multi_tool_rollout",
+        "durable_propose_memory",
     ]
     assert all(trajectory["errors"] == [] for trajectory in trajectories)
     assert all(trajectory["status"] in {"finished", "streamed"} for trajectory in trajectories)
     assert any(trajectory["tool_call_count"] >= 3 for trajectory in trajectories)
-    multi_tool = trajectories[-1]
+    multi_tool = trajectories[4]
     assert multi_tool["event_type_names"][0] == "RunStartEvent"
     assert multi_tool["event_type_names"][-1] == "RunEndEvent"
     assert multi_tool["tool_names"].count("read_file") >= 2
     assert "search_files" in multi_tool["tool_names"]
     assert "PULSARA_MULTI_ALPHA" in multi_tool["final_text"]
     assert "PULSARA_MULTI_BETA" in multi_tool["final_text"]
+    propose = trajectories[-1]
+    assert "propose_memory" in propose["tool_names"]
+    assert "MemoryCandidateProposedEvent" in propose["event_type_names"]
+    assert "MemoryWriteResultEvent" in propose["event_type_names"]
+    assert propose["memory_node_count"] >= 1
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -441,15 +447,18 @@ async def _run_real_llm_trajectory_suite(tmp_path: Path) -> list[dict]:
     agent_read_dir = tmp_path / "agent-read"
     durable_read_dir = tmp_path / "durable-read"
     multi_tool_dir = tmp_path / "multi-tool"
+    propose_memory_dir = tmp_path / "propose-memory"
     agent_read_dir.mkdir()
     durable_read_dir.mkdir()
     multi_tool_dir.mkdir()
+    propose_memory_dir.mkdir()
 
     flash = await _run_real_flash_smoke()
     tool_spec = await _run_real_tool_call_smoke()
     agent_read = await _run_real_agent_tool_loop_smoke(agent_read_dir)
     durable_read = await _run_real_agent_postgres_event_log_timeline_smoke(durable_read_dir)
     multi_tool = await _run_real_agent_multi_tool_rollout(multi_tool_dir)
+    propose_memory = await _run_real_agent_propose_memory_rollout(propose_memory_dir)
     return [
         _trajectory_from_stream_result(
             "flash_text",
@@ -489,6 +498,7 @@ async def _run_real_llm_trajectory_suite(tmp_path: Path) -> list[dict]:
             "errors": [],
         },
         multi_tool,
+        propose_memory,
     ]
 
 
@@ -554,6 +564,73 @@ async def _run_real_agent_multi_tool_rollout(tmp_path: Path) -> dict:
             "postgres_sequence_numbers": [event.sequence for event in events],
             "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
             "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
+            "errors": errors,
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if timeline_blob_prefix is not None:
+            _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
+        _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
+
+
+_MEMORY_NODE_TYPES = (
+    memory.PREFERENCE,
+    memory.CLAIM,
+    memory.OBSERVATION,
+    memory.ACTION_BOUNDARY,
+    memory.DECISION,
+)
+
+
+async def _run_real_agent_propose_memory_rollout(tmp_path: Path) -> dict:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    settings = _load_settings_for_real_llm()
+    graph_id = f"graph:real-llm/{uuid4().hex}"
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=256),
+        system_prompt=(
+            "You are validating the durable-memory producer. "
+            "The user is stating a durable preference. "
+            "Call the propose_memory tool exactly once with kind='Preference', a clear "
+            "statement of the preference, scope='ctx:user', "
+            "source_authority='explicit_user_instruction', and "
+            "verification_status='user_confirmed'. "
+            "For kind='Preference', omit applies_when, do_not_apply_when, and based_on_ids entirely; "
+            "do not send empty strings or empty arrays for fields that do not apply. "
+            "Then answer with exactly: PULSARA_MEMORY_OK"
+        ),
+        graph_id=graph_id,
+    )
+    runtime_session = wiring.runtime_wiring.runtime_session
+    timeline_blob_prefix: str | None = None
+    try:
+        result = await wiring.agent_runtime.run_task(
+            "Going forward I always want concise summaries. Remember that preference."
+        )
+        timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
+        events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        memory_node_count = sum(
+            len(wiring.runtime_wiring.graph.find_by_type(node_type, graph_id=graph_id))
+            for node_type in _MEMORY_NODE_TYPES
+        )
+        return {
+            "label": "durable_propose_memory",
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "event_type_names": [type(event).__name__ for event in events],
+            "tool_call_count": len(tool_call_events),
+            "tool_names": [event.tool_call_name for event in tool_call_events],
+            "tool_result_count": len(tool_call_events),
+            "timeline_status": None,
+            "timeline_item_kinds": [],
+            "postgres_event_count": len(events),
+            "memory_node_count": memory_node_count,
             "errors": errors,
         }
     finally:

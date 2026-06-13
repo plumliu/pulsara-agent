@@ -4,6 +4,7 @@ from pulsara_agent.event import EventContext
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import ToolCall, ToolExecutor, build_core_tool_registry
 
 
@@ -37,6 +38,15 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
     ]
     assert [spec.name for spec in registry.tool_specs()] == registry.names()
     assert all(spec.parameters["type"] == "object" for spec in registry.tool_specs())
+
+
+def test_core_tool_registry_can_enable_propose_memory(tmp_path) -> None:
+    registry = build_core_tool_registry(
+        RuntimeSession(tmp_path),
+        memory_proposal_sink=MemoryProposalSink(),
+    )
+
+    assert "propose_memory" in registry.names()
 
 
 def test_read_file_reads_workspace_file_and_blocks_path_escape(tmp_path) -> None:

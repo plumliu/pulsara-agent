@@ -116,7 +116,9 @@ class AgentRuntime:
         self.options = options
         self.budget = budget or LoopBudget()
         self.system_prompt = system_prompt
-        self.tool_executor = runtime_session.create_tool_executor()
+        self.tool_executor = runtime_session.create_tool_executor(
+            memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
+        )
         self._last_result: AgentRunResult | None = None
 
     async def run_task(self, user_input: str) -> AgentRunResult:
@@ -206,14 +208,14 @@ class AgentRuntime:
             assistant = self.runtime_session.event_log.replay(state.reply_id)
             state.messages.append(assistant)
             _accumulate_usage(state, assistant)
-            ok, _result, error_event = await self._run_memory_hook(
+            ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,
                 "after_model_reply",
                 lambda: self.memory_hooks.after_model_reply(state, assistant),
             )
+            for event in hook_events:
+                yield event
             if not ok:
-                assert error_event is not None
-                yield error_event
                 break
 
             tool_blocks = _tool_call_blocks(assistant)
@@ -248,14 +250,14 @@ class AgentRuntime:
                 event = await self._run_tool_result_persistence_hook(state)
                 if event is not None:
                     yield event
-            ok, _result, error_event = await self._run_memory_hook(
+            ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,
                 "after_tool_results",
                 lambda: self.memory_hooks.after_tool_results(state, state.tool_results),
             )
+            for event in hook_events:
+                yield event
             if not ok:
-                assert error_event is not None
-                yield error_event
                 break
             ok, should_compact, error_event = await self._run_memory_hook(
                 state,
@@ -289,14 +291,13 @@ class AgentRuntime:
         run_session_end_hook: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         if run_session_end_hook:
-            ok, _result, error_event = await self._run_memory_hook(
+            _ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,
                 "on_session_end",
                 lambda: self.memory_hooks.on_session_end(state),
             )
-            if not ok:
-                assert error_event is not None
-                yield error_event
+            for event in hook_events:
+                yield event
         yield await self.runtime_session.emit(
             RunEndEvent(
                 **self._event_context(state).event_fields(),
@@ -321,6 +322,25 @@ class AgentRuntime:
         except Exception as exc:
             event = await self._mark_memory_hook_failed(state, hook_name, exc)
             return False, None, event
+
+    async def _run_memory_hook_and_emit_events(
+        self,
+        state: LoopState,
+        hook_name: str,
+        call,
+    ) -> tuple[bool, list[AgentEvent]]:
+        ok, produced_events, error_event = await self._run_memory_hook(state, hook_name, call)
+        if not ok:
+            assert error_event is not None
+            return False, [error_event]
+        emitted_events: list[AgentEvent] = []
+        try:
+            for event in produced_events or ():
+                emitted_events.append(await self.runtime_session.emit(event, state=state))
+        except Exception as exc:
+            emitted_events.append(await self._mark_memory_hook_failed(state, hook_name, exc))
+            return False, emitted_events
+        return True, emitted_events
 
     async def _run_tool_result_persistence_hook(self, state: LoopState) -> AgentEvent | None:
         assert self.tool_result_persistence_hook is not None

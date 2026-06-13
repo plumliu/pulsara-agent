@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
 
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
@@ -10,12 +11,17 @@ from pulsara_agent.tools.builtins.filesystem import (
     SearchFilesTool,
     WriteFileTool,
 )
+from pulsara_agent.tools.builtins.propose_memory import ProposeMemoryTool
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.registry import ToolRegistry
 
 
-def build_core_tool_registry(runtime_session: RuntimeSession) -> ToolRegistry:
+def build_core_tool_registry(
+    runtime_session: RuntimeSession,
+    *,
+    memory_proposal_sink: MemoryProposalSink | None = None,
+) -> ToolRegistry:
     if not isinstance(runtime_session, RuntimeSession):
         raise TypeError("build_core_tool_registry requires a RuntimeSession")
     root = runtime_session.workspace_root
@@ -26,4 +32,6 @@ def build_core_tool_registry(runtime_session: RuntimeSession) -> ToolRegistry:
     registry.register(EditFileTool(root))
     registry.register(WriteFileTool(root))
     registry.register(TodoTool())
+    if memory_proposal_sink is not None:
+        registry.register(ProposeMemoryTool(sink=memory_proposal_sink))
     return registry

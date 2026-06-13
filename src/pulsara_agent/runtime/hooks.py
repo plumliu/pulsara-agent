@@ -11,6 +11,7 @@ from pulsara_agent.event import AgentEvent, EventType
 from pulsara_agent.message import Msg, ToolResultBlock
 from pulsara_agent.message.assembler import BlockAssembler, BlockCompletion
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
+from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
 
 
@@ -184,17 +185,22 @@ def _dispatch_error(
 
 
 class MemoryHooks(Protocol):
+    @property
+    def memory_proposal_sink(self) -> MemoryProposalSink | None: ...
+
     async def on_session_start(self, state: LoopState, user_input: str) -> None: ...
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None: ...
 
-    async def after_model_reply(self, state: LoopState, assistant: Msg) -> None: ...
+    async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]: ...
 
-    async def after_tool_results(self, state: LoopState, results: list[ToolResultBlock]) -> None: ...
+    async def after_tool_results(
+        self, state: LoopState, results: list[ToolResultBlock]
+    ) -> list[AgentEvent]: ...
 
     async def should_compact(self, state: LoopState) -> bool: ...
 
-    async def on_session_end(self, state: LoopState) -> None: ...
+    async def on_session_end(self, state: LoopState) -> list[AgentEvent]: ...
 
 
 class ToolResultPersistenceHook(Protocol):
@@ -202,20 +208,26 @@ class ToolResultPersistenceHook(Protocol):
 
 
 class NoopMemoryHooks:
+    @property
+    def memory_proposal_sink(self) -> MemoryProposalSink | None:
+        return None
+
     async def on_session_start(self, state: LoopState, user_input: str) -> None:
         return None
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None:
         return None
 
-    async def after_model_reply(self, state: LoopState, assistant: Msg) -> None:
-        return None
+    async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:
+        return []
 
-    async def after_tool_results(self, state: LoopState, results: list[ToolResultBlock]) -> None:
-        return None
+    async def after_tool_results(
+        self, state: LoopState, results: list[ToolResultBlock]
+    ) -> list[AgentEvent]:
+        return []
 
     async def should_compact(self, state: LoopState) -> bool:
         return False
 
-    async def on_session_end(self, state: LoopState) -> None:
-        return None
+    async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
+        return []

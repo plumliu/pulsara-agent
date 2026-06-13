@@ -10,6 +10,7 @@ from uuid import uuid4
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog
 from pulsara_agent.runtime.hooks import RuntimeHookManager
+from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.terminal import TerminalSessionManager
@@ -30,6 +31,7 @@ class RuntimeSession:
     runtime_session_id: str = field(default_factory=lambda: f"runtime:{uuid4().hex}")
     event_log: EventLog = field(default_factory=InMemoryEventLog)
     hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
+    memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)
 
@@ -87,6 +89,7 @@ class RuntimeSession:
         self,
         *,
         record_event: RuntimeThreadRecorder | None = None,
+        memory_proposal_sink: MemoryProposalSink | None = None,
     ):
         from pulsara_agent.tools import ToolExecutor
         from pulsara_agent.tools.builtins.registry import build_core_tool_registry
@@ -97,6 +100,9 @@ class RuntimeSession:
             )
 
         return ToolExecutor(
-            registry=build_core_tool_registry(self),
+            registry=build_core_tool_registry(
+                self,
+                memory_proposal_sink=memory_proposal_sink,
+            ),
             record_event=record_event,
         )

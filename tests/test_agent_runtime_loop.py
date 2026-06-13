@@ -655,6 +655,40 @@ class FailingHook(NoopMemoryHooks):
         self._maybe_raise("on_session_end")
 
 
+class InvalidEventHook(NoopMemoryHooks):
+    async def after_model_reply(self, state: LoopState, assistant) -> list[AgentEvent]:
+        return [
+            TextBlockDeltaEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                block_id="text:invalid",
+                delta="invalid",
+                sequence=99,
+            )
+        ]
+
+
+class LegacyShapeMemoryHook:
+    async def on_session_start(self, state: LoopState, user_input: str) -> None:
+        return None
+
+    async def project(self, state: LoopState, *, token_budget: int):
+        return None
+
+    async def after_model_reply(self, state: LoopState, assistant):
+        return []
+
+    async def after_tool_results(self, state: LoopState, results):
+        return []
+
+    async def should_compact(self, state: LoopState) -> bool:
+        return False
+
+    async def on_session_end(self, state: LoopState):
+        return []
+
+
 class FailingPersistenceHook:
     async def after_tool_results(self, state: LoopState, results: list[ToolResultBlock]) -> None:
         raise RuntimeError("persist boom")
@@ -701,6 +735,34 @@ def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -
 
     _assert_memory_hook_failed(agent, result, "after_model_reply")
     assert result.final_text == "done"
+
+
+def test_memory_hook_event_emit_failure_returns_failed_result(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        memory_hooks=InvalidEventHook(),
+    )
+
+    result = asyncio.run(agent.run_task("hi"))
+
+    _assert_memory_hook_failed(agent, result, "after_model_reply")
+    assert result.final_text == "done"
+
+
+def test_agent_runtime_accepts_memory_hook_without_proposal_sink_property(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        memory_hooks=LegacyShapeMemoryHook(),
+    )
+
+    result = asyncio.run(agent.run_task("hi"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert "propose_memory" not in agent.tool_executor.registry.names()
 
 
 def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) -> None:
