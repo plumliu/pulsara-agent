@@ -7,6 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsara_agent.graph.store import DEFAULT_GRAPH_ID
+from pulsara_agent.graph.jsonld_codec import (
+    compact_iri,
+    expand_id,
+    expand_type,
+    graph_key as _graph_key,
+    normalize_jsonld_document,
+)
 from pulsara_agent.jsonld import Term
 from pulsara_agent.ontology.registry import CORE_CONTEXT
 
@@ -23,16 +30,18 @@ class InMemoryGraphStore:
         node_id = document.get("@id")
         if not isinstance(node_id, str) or not node_id:
             raise ValueError("JSON-LD document must include a string @id")
-        self.graphs.setdefault(_graph_key(graph_id), {})[node_id] = deepcopy(document)
+        normalized = normalize_jsonld_document(document, CORE_CONTEXT)
+        self.graphs.setdefault(_graph_key(graph_id), {})[normalized["@id"]] = normalized
 
     def get_jsonld(self, node_id: str, graph_id: str | None = None) -> dict[str, Any]:
         graph = self.graphs.get(_graph_key(graph_id), {})
-        if node_id not in graph:
+        normalized_id = _normalize_node_id(node_id)
+        if normalized_id not in graph:
             raise KeyError(node_id)
-        return deepcopy(graph[node_id])
+        return deepcopy(graph[normalized_id])
 
     def has_jsonld(self, node_id: str, graph_id: str | None = None) -> bool:
-        return node_id in self.graphs.get(_graph_key(graph_id), {})
+        return _normalize_node_id(node_id) in self.graphs.get(_graph_key(graph_id), {})
 
     def add_relation(
         self,
@@ -75,31 +84,11 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _graph_key(graph_id: str | None) -> str:
-    if graph_id is None:
-        return DEFAULT_GRAPH_ID
-    if not graph_id:
-        raise ValueError("graph_id must be a non-empty string or None")
-    return graph_id
-
-
 def _type_matches(value: Any, type_name: Term) -> bool:
-    if value == type_name.name or value == type_name.value:
-        return True
     if isinstance(value, str):
-        return _expand_compact_iri(value) == type_name.value
+        return expand_type(value, CORE_CONTEXT) == type_name.value
     return False
 
 
-def _expand_compact_iri(value: str) -> str:
-    if "://" in value or value.startswith("urn:"):
-        return value
-    prefix, sep, suffix = value.partition(":")
-    if sep:
-        base = CORE_CONTEXT.get(prefix)
-        if isinstance(base, str):
-            return base + suffix
-    mapped = CORE_CONTEXT.get(value)
-    if isinstance(mapped, str):
-        return mapped
-    return value
+def _normalize_node_id(node_id: str) -> str:
+    return compact_iri(expand_id(node_id, CORE_CONTEXT), CORE_CONTEXT)

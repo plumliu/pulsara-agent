@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -67,6 +68,13 @@ def _artifact_count(dsn: str, blob_id: str) -> int:
         with connection.cursor() as cursor:
             cursor.execute("select count(*) from artifacts where id = %s", (blob_id,))
             return cursor.fetchone()[0]
+
+
+def _artifact_id_from_node_ref(node_id: str) -> str:
+    prefix = "urn:pulsara:"
+    if node_id.startswith(prefix):
+        return urllib.parse.unquote(node_id[len(prefix) :])
+    return node_id
 
 
 @pytest.fixture(params=["memory", "postgres"])
@@ -278,7 +286,7 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
             runtime_session_id=runtime_session_id,
         )
         record = graph.find_by_type(rt.RUN_TIMELINE)[0]
-        blob_id = record[rt.STORED_AS.name]["@id"]
+        blob_id = _artifact_id_from_node_ref(record[rt.STORED_AS.name]["@id"])
 
         assert timeline.run_id == ctx.run_id
         with _connect_or_skip(dsn) as connection:

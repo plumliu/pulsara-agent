@@ -1,5 +1,6 @@
 import asyncio
 import json
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,7 @@ def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(tmp_pa
     assert records[0][rt.STATUS.name] == "completed"
     assert records[0][rt.ITEM_COUNT.name] >= 2
 
-    blob_id = records[0][rt.STORED_AS.name]["@id"]
+    blob_id = _artifact_id_from_node_ref(records[0][rt.STORED_AS.name]["@id"])
     payload = json.loads(archive.get_text(blob_id))
     assert payload["runtime_session_id"] == runtime.runtime_session_id
     assert payload["run_id"] == CTX.run_id
@@ -218,6 +219,13 @@ def test_run_timeline_summary_separates_multiple_assistant_text_items() -> None:
     summary = summarize_run_timeline(timeline)
 
     assert summary.assistant_text == "first\nsecond"
+
+
+def _artifact_id_from_node_ref(node_id: str) -> str:
+    prefix = "urn:pulsara:"
+    if node_id.startswith(prefix):
+        return urllib.parse.unquote(node_id[len(prefix) :])
+    return node_id
 
 
 @pytest.mark.parametrize(
