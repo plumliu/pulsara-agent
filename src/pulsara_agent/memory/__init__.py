@@ -14,6 +14,7 @@ from pulsara_agent.memory.run_timeline_query import (
 )
 from pulsara_agent.memory.runtime_persistence import ExecutionEvidencePersistenceHook
 from pulsara_agent.memory.run_timeline_persistence import RunTimelinePersistenceHook
+from pulsara_agent.memory.write_service import MemoryWriteOutcome, MemoryWriteService
 
 __all__ = [
     "ArtifactStore",
@@ -21,6 +22,8 @@ __all__ = [
     "ExecutionEvidenceLedger",
     "ExecutionEvidencePersistenceHook",
     "InMemoryArchiveStore",
+    "MemoryWriteOutcome",
+    "MemoryWriteService",
     "PostgresArtifactStore",
     "RuntimeEventReadStore",
     "RuntimeEventRef",

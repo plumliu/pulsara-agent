@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.message.blocks import ToolCallBlock, ToolResultBlock, ToolResultState
 from pulsara_agent.ontology import memory
 
@@ -54,8 +55,8 @@ class EventType(StrEnum):
     EXTERNAL_EXECUTION_RESULT = "EXTERNAL_EXECUTION_RESULT"
 
     MEMORY_CANDIDATE_PROPOSED = "MEMORY_CANDIDATE_PROPOSED"
-    MEMORY_WRITE_ACCEPTED = "MEMORY_WRITE_ACCEPTED"
-    MEMORY_WRITE_REJECTED = "MEMORY_WRITE_REJECTED"
+    MEMORY_WRITE_RESULT = "MEMORY_WRITE_RESULT"
+    MEMORY_WRITE_FAILED = "MEMORY_WRITE_FAILED"
     MEMORY_SUPERSEDED = "MEMORY_SUPERSEDED"
     MEMORY_MARKED_STALE = "MEMORY_MARKED_STALE"
     MEMORY_MAINTENANCE_PROPOSED = "MEMORY_MAINTENANCE_PROPOSED"
@@ -291,19 +292,28 @@ class MemoryEventBase(EventBase):
     gate_reason: str | None = None
 
 
-class MemoryCandidateProposedEvent(MemoryEventBase):
+class MemoryCandidateProposedEvent(EventBase):
     type: Literal[EventType.MEMORY_CANDIDATE_PROPOSED] = EventType.MEMORY_CANDIDATE_PROPOSED
+    candidate: MemoryCandidate
+
+
+class MemoryWriteResultEvent(EventBase):
+    type: Literal[EventType.MEMORY_WRITE_RESULT] = EventType.MEMORY_WRITE_RESULT
     candidate_id: str
-
-
-class MemoryWriteAcceptedEvent(MemoryEventBase):
-    type: Literal[EventType.MEMORY_WRITE_ACCEPTED] = EventType.MEMORY_WRITE_ACCEPTED
     memory_id: str
+    memory_type: str
+    status: memory.NodeStatus
+    confidence_level: memory.ConfidenceLevel
+    verification_status: memory.VerificationStatus
+    gate_reason: str
 
 
-class MemoryWriteRejectedEvent(MemoryEventBase):
-    type: Literal[EventType.MEMORY_WRITE_REJECTED] = EventType.MEMORY_WRITE_REJECTED
-    candidate_id: str
+class MemoryWriteFailedEvent(EventBase):
+    type: Literal[EventType.MEMORY_WRITE_FAILED] = EventType.MEMORY_WRITE_FAILED
+    candidate_id: str | None = None
+    memory_type: str | None = None
+    error_type: str
+    message: str
 
 
 class MemorySupersededEvent(MemoryEventBase):
@@ -398,8 +408,8 @@ AgentEvent: TypeAlias = (
     | RequireExternalExecutionEvent
     | ExternalExecutionResultEvent
     | MemoryCandidateProposedEvent
-    | MemoryWriteAcceptedEvent
-    | MemoryWriteRejectedEvent
+    | MemoryWriteResultEvent
+    | MemoryWriteFailedEvent
     | MemorySupersededEvent
     | MemoryMarkedStaleEvent
     | MemoryMaintenanceProposedEvent

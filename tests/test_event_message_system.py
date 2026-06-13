@@ -23,9 +23,7 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.message import Base64Source, TextBlock, ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState
-from pulsara_agent.ontology import memory
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
@@ -167,47 +165,6 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
     assert result.id == "call:external"
     assert result.state is ToolResultState.SUCCESS
     assert result.output[0].text == "external result"
-
-
-def test_memory_write_gate_emits_memory_events() -> None:
-    gate = MemoryWriteGate()
-
-    decision, events = gate.evaluate_claim_with_events(
-        event_context=CTX,
-        candidate_id="candidate:1",
-        memory_id="claim:1",
-        statement="Use JSON-LD for semantic memory.",
-        scope="ctx:test",
-        evidence_ids=["evidence:1"],
-        source_authority=memory.SourceAuthority.TOOL_RESULT,
-        verification_status=memory.VerificationStatus.TOOL_VERIFIED,
-    )
-
-    assert decision.accepted
-    assert events[0].type == "MEMORY_CANDIDATE_PROPOSED"
-    assert events[1].type == "MEMORY_WRITE_ACCEPTED"
-    assert events[1].memory_id == "claim:1"
-    assert events[1].gate_reason == "accepted"
-
-
-def test_memory_write_gate_rejects_unsupported_claim_with_events() -> None:
-    gate = MemoryWriteGate()
-
-    decision, events = gate.evaluate_claim_with_events(
-        event_context=CTX,
-        candidate_id="candidate:2",
-        memory_id="claim:2",
-        statement="Weak inferred claim.",
-        scope="ctx:test",
-        evidence_ids=[],
-        source_authority=memory.SourceAuthority.MODEL_INFERENCE,
-        verification_status=memory.VerificationStatus.INFERRED,
-    )
-
-    assert not decision.accepted
-    assert events[0].type == "MEMORY_CANDIDATE_PROPOSED"
-    assert events[1].type == "MEMORY_WRITE_REJECTED"
-    assert events[1].candidate_id == "candidate:2"
 
 
 def test_projection_events_are_not_written_as_canonical_memory() -> None:

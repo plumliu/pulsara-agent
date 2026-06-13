@@ -243,6 +243,44 @@ def test_submit_preference_persists_without_edges(graph_store) -> None:
     assert memory.HAS_EVIDENCE.name not in doc
 
 
+def test_submit_preference_links_single_evidence(graph_store) -> None:
+    store, graph_id = graph_store
+    ledger = _ledger(store, graph_id)
+    evidence_id = _seed_evidence(ledger, scope="ctx:user")
+
+    record = ledger.submit_preference(
+        statement="Prefer concise summaries.",
+        scope="ctx:user",
+        evidence_ids=[evidence_id],
+        source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+        verification_status=memory.VerificationStatus.USER_CONFIRMED,
+    )
+
+    assert record.status is memory.NodeStatus.ACTIVE
+    doc = store.get_jsonld(record.memory_id, graph_id=graph_id)
+    assert doc["@type"] == [memory.PREFERENCE.name]
+    assert doc[memory.HAS_EVIDENCE.name] == [{"@id": evidence_id}]
+    assert store.get_jsonld(evidence_id, graph_id=graph_id)[memory.SUPPORTS.name] == [
+        {"@id": record.memory_id}
+    ]
+
+
+def test_submit_preference_with_missing_evidence_does_not_write_partial_node(graph_store) -> None:
+    store, graph_id = graph_store
+    ledger = _ledger(store, graph_id)
+
+    with pytest.raises(ValueError, match="missing evidence node"):
+        ledger.submit_preference(
+            statement="Prefer concise summaries.",
+            scope="ctx:user",
+            evidence_ids=["evidence:missing"],
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+        )
+
+    assert store.find_by_type(memory.PREFERENCE, graph_id=graph_id) == []
+
+
 def test_submit_preference_with_empty_scope_is_rejected(graph_store) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
@@ -277,3 +315,47 @@ def test_submit_action_boundary_persists_conditions(graph_store) -> None:
     assert doc["@type"] == [memory.ACTION_BOUNDARY.name]
     assert doc[memory.APPLIES_WHEN.name] == "branch is main"
     assert doc[memory.DO_NOT_APPLY_WHEN.name] == "user explicitly authorizes"
+
+
+def test_submit_action_boundary_links_single_evidence(graph_store) -> None:
+    store, graph_id = graph_store
+    ledger = _ledger(store, graph_id)
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace")
+
+    record = ledger.submit_action_boundary(
+        statement="Never force-push to main.",
+        scope="ctx:workspace",
+        applies_when="branch is main",
+        do_not_apply_when="user explicitly authorizes",
+        evidence_ids=[evidence_id],
+        source_authority=memory.SourceAuthority.SYSTEM_RULE,
+        verification_status=memory.VerificationStatus.USER_CONFIRMED,
+    )
+
+    assert record.status is memory.NodeStatus.ACTIVE
+    doc = store.get_jsonld(record.memory_id, graph_id=graph_id)
+    assert doc["@type"] == [memory.ACTION_BOUNDARY.name]
+    assert doc[memory.HAS_EVIDENCE.name] == [{"@id": evidence_id}]
+    assert store.get_jsonld(evidence_id, graph_id=graph_id)[memory.SUPPORTS.name] == [
+        {"@id": record.memory_id}
+    ]
+
+
+def test_submit_action_boundary_with_missing_evidence_does_not_write_partial_node(
+    graph_store,
+) -> None:
+    store, graph_id = graph_store
+    ledger = _ledger(store, graph_id)
+
+    with pytest.raises(ValueError, match="missing evidence node"):
+        ledger.submit_action_boundary(
+            statement="Never force-push to main.",
+            scope="ctx:workspace",
+            applies_when="branch is main",
+            do_not_apply_when="user explicitly authorizes",
+            evidence_ids=["evidence:missing"],
+            source_authority=memory.SourceAuthority.SYSTEM_RULE,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+        )
+
+    assert store.find_by_type(memory.ACTION_BOUNDARY, graph_id=graph_id) == []

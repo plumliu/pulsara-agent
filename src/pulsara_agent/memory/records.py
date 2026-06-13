@@ -75,6 +75,7 @@ class ClaimRecord:
     status: memory.NodeStatus
     confidence_level: memory.ConfidenceLevel
     verification_status: memory.VerificationStatus
+    gate_reason: str
 
     def to_dict(self) -> dict[str, Any]:
         return jsonld_value(
@@ -84,6 +85,7 @@ class ClaimRecord:
                 "status": self.status,
                 "confidence_level": self.confidence_level,
                 "verification_status": self.verification_status,
+                "gate_reason": self.gate_reason,
             }
         )
 
@@ -95,6 +97,7 @@ class MemoryWriteRecord:
     status: memory.NodeStatus
     confidence_level: memory.ConfidenceLevel
     verification_status: memory.VerificationStatus
+    gate_reason: str
 
     def to_dict(self) -> dict[str, Any]:
         return jsonld_value(
@@ -104,5 +107,6 @@ class MemoryWriteRecord:
                 "status": self.status,
                 "confidence_level": self.confidence_level,
                 "verification_status": self.verification_status,
+                "gate_reason": self.gate_reason,
             }
         )

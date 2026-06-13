@@ -221,6 +221,7 @@ class ExecutionEvidenceLedger:
             status=decision.status,
             confidence_level=decision.confidence_level,
             verification_status=verification_status,
+            gate_reason=decision.reason,
         )
 
     def submit_preference(
@@ -228,15 +229,18 @@ class ExecutionEvidenceLedger:
         *,
         statement: str,
         scope: str,
+        evidence_ids: list[str] | None = None,
         source_authority: memory.SourceAuthority,
         verification_status: memory.VerificationStatus,
     ) -> MemoryWriteRecord:
+        evidence_ids = evidence_ids or []
         decision = self.gate.evaluate_preference(
             statement=statement,
             scope=scope,
             source_authority=source_authority,
             verification_status=verification_status,
         )
+        self._require_existing_nodes(evidence_ids, role="evidence")
         preference_id = f"preference:{uuid4()}"
         self.graph.put_jsonld(
             Preference(
@@ -250,9 +254,12 @@ class ExecutionEvidenceLedger:
                 created_at=utc_now(),
                 updated_at=utc_now(),
                 gate_reason=decision.reason,
+                evidence=tuple(NodeRef(evidence_id) for evidence_id in evidence_ids),
             ).to_jsonld(),
             graph_id=self.graph_id,
         )
+        for evidence_id in evidence_ids:
+            self._add_relation(evidence_id, memory.SUPPORTS, preference_id)
         return self._memory_write_record(preference_id, statement, decision, verification_status)
 
     def submit_action_boundary(
@@ -262,9 +269,11 @@ class ExecutionEvidenceLedger:
         scope: str,
         applies_when: str,
         do_not_apply_when: str,
+        evidence_ids: list[str] | None = None,
         source_authority: memory.SourceAuthority,
         verification_status: memory.VerificationStatus,
     ) -> MemoryWriteRecord:
+        evidence_ids = evidence_ids or []
         decision = self.gate.evaluate_action_boundary(
             statement=statement,
             scope=scope,
@@ -273,6 +282,7 @@ class ExecutionEvidenceLedger:
             source_authority=source_authority,
             verification_status=verification_status,
         )
+        self._require_existing_nodes(evidence_ids, role="evidence")
         boundary_id = f"action-boundary:{uuid4()}"
         self.graph.put_jsonld(
             ActionBoundary(
@@ -288,9 +298,12 @@ class ExecutionEvidenceLedger:
                 created_at=utc_now(),
                 updated_at=utc_now(),
                 gate_reason=decision.reason,
+                evidence=tuple(NodeRef(evidence_id) for evidence_id in evidence_ids),
             ).to_jsonld(),
             graph_id=self.graph_id,
         )
+        for evidence_id in evidence_ids:
+            self._add_relation(evidence_id, memory.SUPPORTS, boundary_id)
         return self._memory_write_record(boundary_id, statement, decision, verification_status)
 
     def submit_observation(
@@ -386,6 +399,7 @@ class ExecutionEvidenceLedger:
             status=decision.status,
             confidence_level=decision.confidence_level,
             verification_status=verification_status,
+            gate_reason=decision.reason,
         )
 
     def _record_turn_produced(self, *, turn_id: str, tool_result_id: str, scope: str) -> None:
