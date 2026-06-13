@@ -7,16 +7,17 @@ from typing import Any, ClassVar
 
 from pulsara_agent.jsonld import JsonLdEntity, NodeRef, Term
 from pulsara_agent.memory.provenance import RuntimeEventSpan
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.ontology.registry import CORE_CONTEXT
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResult(JsonLdEntity):
-    CONTEXT: ClassVar[dict[str, Any]] = memory.CONTEXT
-    TYPE: ClassVar[Term] = memory.TOOL_RESULT
+    CONTEXT: ClassVar[dict[str, Any]] = CORE_CONTEXT
+    TYPE: ClassVar[Term] = rt.TOOL_RESULT
 
     tool_name: str
-    status: memory.ToolExecutionStatus
+    status: rt.ToolExecutionStatus
     input_summary: str
     output_summary: str
     truncated: bool
@@ -27,16 +28,16 @@ class ToolResult(JsonLdEntity):
 
     def properties(self) -> dict[Any, Any]:
         values: dict[Any, Any] = {
-            memory.TOOL_NAME: self.tool_name,
-            memory.STATUS: self.status,
-            memory.INPUT_SUMMARY: self.input_summary,
-            memory.OUTPUT_SUMMARY: self.output_summary,
-            memory.TRUNCATED: self.truncated,
-            memory.SCOPE: self.scope,
-            memory.CREATED_AT: self.created_at,
+            rt.TOOL_NAME: self.tool_name,
+            rt.STATUS: self.status,
+            rt.INPUT_SUMMARY: self.input_summary,
+            rt.OUTPUT_SUMMARY: self.output_summary,
+            rt.TRUNCATED: self.truncated,
+            rt.SCOPE: self.scope,
+            rt.CREATED_AT: self.created_at,
         }
         if self.stored_as is not None:
-            values[memory.STORED_AS] = self.stored_as
+            values[rt.STORED_AS] = self.stored_as
         if self.event_span is not None:
-            values[memory.EVENT_SPAN] = self.event_span.to_jsonld()
+            values[rt.EVENT_SPAN_PROPERTY] = self.event_span.to_jsonld()
         return values

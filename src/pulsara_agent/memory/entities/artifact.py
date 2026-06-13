@@ -7,13 +7,14 @@ from typing import Any, ClassVar
 
 from pulsara_agent.jsonld import JsonLdEntity, Term
 from pulsara_agent.memory.provenance import RuntimeEventSpan
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.ontology.registry import CORE_CONTEXT
 
 
 @dataclass(frozen=True, slots=True)
 class Artifact(JsonLdEntity):
-    CONTEXT: ClassVar[dict[str, Any]] = memory.CONTEXT
-    TYPE: ClassVar[Term] = memory.ARTIFACT
+    CONTEXT: ClassVar[dict[str, Any]] = CORE_CONTEXT
+    TYPE: ClassVar[Term] = rt.ARTIFACT
 
     stored_at: str
     digest: str
@@ -24,12 +25,12 @@ class Artifact(JsonLdEntity):
 
     def properties(self) -> dict[Any, Any]:
         values: dict[Any, Any] = {
-            memory.STORED_AT: self.stored_at,
-            memory.HASH: self.digest,
-            memory.SUMMARY: self.summary,
-            memory.CREATED_AT: self.created_at,
-            memory.SCOPE: self.scope,
+            rt.STORED_AT: self.stored_at,
+            rt.HASH: self.digest,
+            rt.SUMMARY: self.summary,
+            rt.CREATED_AT: self.created_at,
+            rt.SCOPE: self.scope,
         }
         if self.event_span is not None:
-            values[memory.EVENT_SPAN] = self.event_span.to_jsonld()
+            values[rt.EVENT_SPAN_PROPERTY] = self.event_span.to_jsonld()
         return values

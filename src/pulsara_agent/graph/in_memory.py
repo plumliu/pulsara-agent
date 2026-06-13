@@ -6,8 +6,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from pulsara_agent.jsonld import Term
 from pulsara_agent.graph.store import DEFAULT_GRAPH_ID
+from pulsara_agent.jsonld import Term
+from pulsara_agent.ontology.registry import CORE_CONTEXT
 
 
 @dataclass(slots=True)
@@ -53,7 +54,7 @@ class InMemoryGraphStore:
         return [
             deepcopy(doc)
             for doc in graph.values()
-            if type_name.name in _as_list(doc.get("@type"))
+            if any(_type_matches(value, type_name) for value in _as_list(doc.get("@type")))
         ]
 
     def query(self, sparql: str, bindings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -80,3 +81,25 @@ def _graph_key(graph_id: str | None) -> str:
     if not graph_id:
         raise ValueError("graph_id must be a non-empty string or None")
     return graph_id
+
+
+def _type_matches(value: Any, type_name: Term) -> bool:
+    if value == type_name.name or value == type_name.value:
+        return True
+    if isinstance(value, str):
+        return _expand_compact_iri(value) == type_name.value
+    return False
+
+
+def _expand_compact_iri(value: str) -> str:
+    if "://" in value or value.startswith("urn:"):
+        return value
+    prefix, sep, suffix = value.partition(":")
+    if sep:
+        base = CORE_CONTEXT.get(prefix)
+        if isinstance(base, str):
+            return base + suffix
+    mapped = CORE_CONTEXT.get(value)
+    if isinstance(mapped, str):
+        return mapped
+    return value

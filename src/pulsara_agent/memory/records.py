@@ -7,7 +7,7 @@ from typing import Any
 
 from pulsara_agent.jsonld import jsonld_value
 from pulsara_agent.memory.provenance import RuntimeEventSpan
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import memory, runtime as rt
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +35,7 @@ class ToolResultRecord:
     tool_result_id: str
     artifact_id: str | None
     output_summary: str
-    status: memory.ToolExecutionStatus
+    status: rt.ToolExecutionStatus
     event_span: RuntimeEventSpan | None = None
 
     def to_dict(self) -> dict[str, Any]:

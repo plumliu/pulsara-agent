@@ -1,4 +1,4 @@
-"""Pulsara memory ontology."""
+"""Pulsara durable semantic memory ontology."""
 
 from __future__ import annotations
 
@@ -10,106 +10,63 @@ from pulsara_agent.jsonld import Namespace
 
 MEMORY = Namespace("https://pulsara.dev/memory#")
 
-TURN = MEMORY.term("Turn")
-RUN_TIMELINE = MEMORY.term("RunTimeline")
-TOOL_RESULT = MEMORY.term("ToolResult")
-ARTIFACT = MEMORY.term("Artifact")
-EVIDENCE = MEMORY.term("Evidence")
 CLAIM = MEMORY.term("Claim")
 DECISION = MEMORY.term("Decision")
+PREFERENCE = MEMORY.term("Preference")
+ACTION_BOUNDARY = MEMORY.term("ActionBoundary")
+OBSERVATION = MEMORY.term("Observation")
 
-PRODUCED = MEMORY.term("produced")
-STORED_AS = MEMORY.term("storedAs")
-ITEM_COUNT = MEMORY.term("itemCount")
-PROVIDES = MEMORY.term("provides")
+STATEMENT = MEMORY.term("statement")
+SUMMARY = MEMORY.term("summary")
+SCOPE = MEMORY.term("scope")
+STATUS = MEMORY.term("status")
+HAS_EVIDENCE = MEMORY.term("hasEvidence")
 SUPPORTS = MEMORY.term("supports")
 CONTRADICTS = MEMORY.term("contradicts")
 SUPERSEDES = MEMORY.term("supersedes")
+DERIVED_FROM = MEMORY.term("derivedFrom")
 BASED_ON = MEMORY.term("basedOn")
-CREATED_FROM = MEMORY.term("createdFrom")
-SOURCE_EVENT = MEMORY.term("sourceEvent")
-EVENT_SPAN = MEMORY.term("eventSpan")
-SOURCE_SESSION = MEMORY.term("sourceSession")
-SOURCE_RUN = MEMORY.term("sourceRun")
-SOURCE_TURN = MEMORY.term("sourceTurn")
-SOURCE_REPLY = MEMORY.term("sourceReply")
-START_SEQUENCE = MEMORY.term("startSequence")
-END_SEQUENCE = MEMORY.term("endSequence")
-
 CONFIDENCE_LEVEL = MEMORY.term("confidenceLevel")
-CREATED_AT = MEMORY.term("createdAt")
-GATE_REASON = MEMORY.term("gateReason")
-HASH = MEMORY.term("hash")
-HAS_EVIDENCE = MEMORY.term("hasEvidence")
-INPUT_SUMMARY = MEMORY.term("inputSummary")
-OBSERVED_AT = MEMORY.term("observedAt")
-OUTPUT_SUMMARY = MEMORY.term("outputSummary")
-SCOPE = MEMORY.term("scope")
-SOURCE_AUTHORITY = MEMORY.term("sourceAuthority")
-SOURCE_TYPE = MEMORY.term("sourceType")
-STATEMENT = MEMORY.term("statement")
-STATUS = MEMORY.term("status")
-STORED_AT = MEMORY.term("storedAt")
-SUMMARY = MEMORY.term("summary")
-TOOL_NAME = MEMORY.term("toolName")
-TRUNCATED = MEMORY.term("truncated")
-UPDATED_AT = MEMORY.term("updatedAt")
 VERIFICATION_STATUS = MEMORY.term("verificationStatus")
+SOURCE_AUTHORITY = MEMORY.term("sourceAuthority")
+GATE_REASON = MEMORY.term("gateReason")
+APPLIES_WHEN = MEMORY.term("appliesWhen")
+DO_NOT_APPLY_WHEN = MEMORY.term("doNotApplyWhen")
+STALE_AFTER = MEMORY.term("staleAfter")
+EXPIRES_AT = MEMORY.term("expiresAt")
+CREATED_AT = MEMORY.term("createdAt")
+UPDATED_AT = MEMORY.term("updatedAt")
 
 CONTEXT: dict[str, Any] = {
     "mem": MEMORY.base,
     "ctx": "https://pulsara.dev/context#",
-    "turn": "https://pulsara.dev/turn/",
-    "run-timeline": "https://pulsara.dev/run-timeline/",
-    "tool-result": "https://pulsara.dev/tool-result/",
-    "artifact": "https://pulsara.dev/artifact/",
-    "evidence": "https://pulsara.dev/evidence/",
     "claim": "https://pulsara.dev/claim/",
     "decision": "https://pulsara.dev/decision/",
-    "event": "https://pulsara.dev/event/",
-    TURN.name: TURN.value,
-    RUN_TIMELINE.name: RUN_TIMELINE.value,
-    TOOL_RESULT.name: TOOL_RESULT.value,
-    ARTIFACT.name: ARTIFACT.value,
-    EVIDENCE.name: EVIDENCE.value,
     CLAIM.name: CLAIM.value,
     DECISION.name: DECISION.value,
-    PRODUCED.name: {"@id": PRODUCED.value, "@type": "@id"},
-    STORED_AS.name: {"@id": STORED_AS.value, "@type": "@id"},
-    ITEM_COUNT.name: ITEM_COUNT.value,
-    PROVIDES.name: {"@id": PROVIDES.value, "@type": "@id"},
+    PREFERENCE.name: PREFERENCE.value,
+    ACTION_BOUNDARY.name: ACTION_BOUNDARY.value,
+    OBSERVATION.name: OBSERVATION.value,
+    STATEMENT.name: STATEMENT.value,
+    SUMMARY.name: SUMMARY.value,
+    SCOPE.name: SCOPE.value,
+    STATUS.name: STATUS.value,
+    HAS_EVIDENCE.name: {"@id": HAS_EVIDENCE.value, "@type": "@id"},
     SUPPORTS.name: {"@id": SUPPORTS.value, "@type": "@id"},
     CONTRADICTS.name: {"@id": CONTRADICTS.value, "@type": "@id"},
     SUPERSEDES.name: {"@id": SUPERSEDES.value, "@type": "@id"},
+    DERIVED_FROM.name: {"@id": DERIVED_FROM.value, "@type": "@id"},
     BASED_ON.name: {"@id": BASED_ON.value, "@type": "@id"},
-    CREATED_FROM.name: {"@id": CREATED_FROM.value, "@type": "@id"},
-    SOURCE_EVENT.name: {"@id": SOURCE_EVENT.value, "@type": "@id"},
-    EVENT_SPAN.name: EVENT_SPAN.value,
-    SOURCE_SESSION.name: SOURCE_SESSION.value,
-    SOURCE_RUN.name: SOURCE_RUN.value,
-    SOURCE_TURN.name: SOURCE_TURN.value,
-    SOURCE_REPLY.name: SOURCE_REPLY.value,
-    START_SEQUENCE.name: START_SEQUENCE.value,
-    END_SEQUENCE.name: END_SEQUENCE.value,
     CONFIDENCE_LEVEL.name: CONFIDENCE_LEVEL.value,
-    CREATED_AT.name: CREATED_AT.value,
-    GATE_REASON.name: GATE_REASON.value,
-    HASH.name: HASH.value,
-    HAS_EVIDENCE.name: {"@id": HAS_EVIDENCE.value, "@type": "@id"},
-    INPUT_SUMMARY.name: INPUT_SUMMARY.value,
-    OBSERVED_AT.name: OBSERVED_AT.value,
-    OUTPUT_SUMMARY.name: OUTPUT_SUMMARY.value,
-    SCOPE.name: SCOPE.value,
-    SOURCE_AUTHORITY.name: SOURCE_AUTHORITY.value,
-    SOURCE_TYPE.name: SOURCE_TYPE.value,
-    STATEMENT.name: STATEMENT.value,
-    STATUS.name: STATUS.value,
-    STORED_AT.name: STORED_AT.value,
-    SUMMARY.name: SUMMARY.value,
-    TOOL_NAME.name: TOOL_NAME.value,
-    TRUNCATED.name: TRUNCATED.value,
-    UPDATED_AT.name: UPDATED_AT.value,
     VERIFICATION_STATUS.name: VERIFICATION_STATUS.value,
+    SOURCE_AUTHORITY.name: SOURCE_AUTHORITY.value,
+    GATE_REASON.name: GATE_REASON.value,
+    APPLIES_WHEN.name: APPLIES_WHEN.value,
+    DO_NOT_APPLY_WHEN.name: DO_NOT_APPLY_WHEN.value,
+    STALE_AFTER.name: STALE_AFTER.value,
+    EXPIRES_AT.name: EXPIRES_AT.value,
+    CREATED_AT.name: CREATED_AT.value,
+    UPDATED_AT.name: UPDATED_AT.value,
 }
 
 
@@ -147,13 +104,3 @@ class ConfidenceLevel(StrEnum):
     MEDIUM = "medium"
     HIGH = "high"
     VERIFIED = "verified"
-
-
-class EvidenceSourceType(StrEnum):
-    TOOL_RESULT = "tool_result"
-
-
-class ToolExecutionStatus(StrEnum):
-    SUCCESS = "success"
-    ERROR = "error"
-    CANCELLED = "cancelled"

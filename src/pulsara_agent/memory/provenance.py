@@ -7,7 +7,7 @@ from typing import Any
 
 from pulsara_agent.event import AgentEvent, ToolResultStartEvent
 from pulsara_agent.jsonld import NodeRef, Term, jsonld_value
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,15 +22,15 @@ class RuntimeEventSpan:
 
     def to_jsonld(self) -> dict[str | Term, Any]:
         payload: dict[str | Term, Any] = {
-            memory.SOURCE_SESSION: self.session_id,
-            memory.SOURCE_RUN: self.run_id,
-            memory.SOURCE_TURN: self.turn_id,
-            memory.SOURCE_REPLY: self.reply_id,
-            memory.START_SEQUENCE: self.start_sequence,
-            memory.END_SEQUENCE: self.end_sequence,
+            rt.SOURCE_SESSION: self.session_id,
+            rt.SOURCE_RUN: self.run_id,
+            rt.SOURCE_TURN: self.turn_id,
+            rt.SOURCE_REPLY: self.reply_id,
+            rt.START_SEQUENCE: self.start_sequence,
+            rt.END_SEQUENCE: self.end_sequence,
         }
         if self.source_event_id is not None:
-            payload[memory.SOURCE_EVENT] = NodeRef(runtime_event_iri(self.source_event_id))
+            payload[rt.SOURCE_EVENT] = NodeRef(runtime_event_iri(self.source_event_id))
         return jsonld_value(payload)
 
 

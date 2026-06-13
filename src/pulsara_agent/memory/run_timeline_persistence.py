@@ -9,15 +9,16 @@ from typing import Any, ClassVar
 from pulsara_agent.event import EventType, RunEndEvent
 from pulsara_agent.jsonld import JsonLdEntity, NodeRef, Term, utc_now
 from pulsara_agent.memory.protocols import ArtifactStore
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.ontology.registry import CORE_CONTEXT
 from pulsara_agent.runtime.hooks import HookContext
 from pulsara_agent.runtime.timeline import build_run_timeline
 
 
 @dataclass(frozen=True, slots=True)
 class RunTimelineRecord(JsonLdEntity):
-    CONTEXT: ClassVar[dict[str, Any]] = memory.CONTEXT
-    TYPE: ClassVar[Term] = memory.RUN_TIMELINE
+    CONTEXT: ClassVar[dict[str, Any]] = CORE_CONTEXT
+    TYPE: ClassVar[Term] = rt.RUN_TIMELINE
 
     run_id: str
     turn_id: str
@@ -32,16 +33,16 @@ class RunTimelineRecord(JsonLdEntity):
 
     def properties(self) -> dict[Any, Any]:
         return {
-            memory.SOURCE_SESSION: self.runtime_session_id,
-            memory.SOURCE_RUN: self.run_id,
-            memory.SOURCE_TURN: self.turn_id,
-            memory.SOURCE_REPLY: self.reply_id,
-            memory.SCOPE: self.scope,
-            memory.STATUS: self.status,
-            memory.ITEM_COUNT: self.item_count,
-            memory.CREATED_AT: self.created_at,
-            memory.UPDATED_AT: self.updated_at,
-            memory.STORED_AS: self.stored_as,
+            rt.SOURCE_SESSION: self.runtime_session_id,
+            rt.SOURCE_RUN: self.run_id,
+            rt.SOURCE_TURN: self.turn_id,
+            rt.SOURCE_REPLY: self.reply_id,
+            rt.SCOPE: self.scope,
+            rt.STATUS: self.status,
+            rt.ITEM_COUNT: self.item_count,
+            rt.CREATED_AT: self.created_at,
+            rt.UPDATED_AT: self.updated_at,
+            rt.STORED_AS: self.stored_as,
         }
 
 
@@ -111,7 +112,7 @@ def _existing_created_at(graph: Any, timeline_id: str, graph_id: str | None) -> 
         existing = graph.get_jsonld(timeline_id, graph_id=graph_id)
     except KeyError:
         return None
-    created_at = existing.get(memory.CREATED_AT.name)
+    created_at = existing.get(rt.CREATED_AT.name)
     if isinstance(created_at, str):
         return created_at
     return None

@@ -10,7 +10,7 @@ from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.memory.archive import InMemoryArchiveStore
 from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -58,7 +58,7 @@ def main() -> None:
         result = ledger.record_tool_result(
             turn_id="turn:demo/001",
             tool_name="search_files",
-            status=memory.ToolExecutionStatus.SUCCESS,
+            status=rt.ToolExecutionStatus.SUCCESS,
             input_summary="Search for JSON-LD flattening",
             output="Found JSON-LD flattening in memory graph conversion.",
             scope="ctx:demo",

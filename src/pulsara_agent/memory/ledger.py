@@ -17,7 +17,7 @@ from pulsara_agent.memory.records import ClaimRecord, EvidenceRecord, ToolResult
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.message import DataBlock, TextBlock, ToolResultBlock, ToolResultState
 from pulsara_agent.message.assembler import completed_tool_result_from_events
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import memory, runtime as rt
 
 
 LARGE_OUTPUT_THRESHOLD = 2_000
@@ -35,13 +35,13 @@ class ExecutionEvidenceLedger:
         *,
         turn_id: str,
         tool_name: str,
-        status: memory.ToolExecutionStatus,
+        status: rt.ToolExecutionStatus,
         input_summary: str,
         output: str,
         scope: str,
         event_span: RuntimeEventSpan | None = None,
     ) -> ToolResultRecord:
-        _assert_enum(status, memory.ToolExecutionStatus)
+        _assert_enum(status, rt.ToolExecutionStatus)
         tool_result_id = f"tool-result:{uuid4()}"
         artifact_id: str | None = None
         output_preview = _make_output_preview(output)
@@ -167,7 +167,7 @@ class ExecutionEvidenceLedger:
             Evidence(
                 id=evidence_id,
                 statement=statement,
-                source_type=memory.EvidenceSourceType.TOOL_RESULT,
+                source_type=rt.EvidenceSourceType.TOOL_RESULT,
                 status=memory.NodeStatus.ACTIVE,
                 observed_at=utc_now(),
                 scope=scope,
@@ -175,7 +175,7 @@ class ExecutionEvidenceLedger:
             ).to_jsonld(),
             graph_id=self.graph_id,
         )
-        self._add_relation(tool_result_id, memory.PROVIDES, evidence_id)
+        self._add_relation(tool_result_id, rt.PROVIDES, evidence_id)
         return EvidenceRecord(evidence_id=evidence_id, statement=statement, source_id=tool_result_id)
 
     def submit_claim(
@@ -234,12 +234,12 @@ class ExecutionEvidenceLedger:
                 graph_id=self.graph_id,
             )
             return
-        values = _as_list(document.get(memory.PRODUCED.name))
+        values = _as_list(document.get(rt.PRODUCED.name))
         target = {"@id": tool_result_id}
         if target not in values:
             values.append(target)
-        document[memory.PRODUCED.name] = values
-        document[memory.UPDATED_AT.name] = utc_now()
+        document[rt.PRODUCED.name] = values
+        document[rt.UPDATED_AT.name] = utc_now()
         self.graph.put_jsonld(document, graph_id=self.graph_id)
 
     def _add_relation(self, source_id: str, relation, target_id: str) -> None:
@@ -279,12 +279,12 @@ def _tool_result_output_text(block: ToolResultBlock) -> str:
     return "\n".join(parts)
 
 
-def _to_tool_execution_status(state: ToolResultState) -> memory.ToolExecutionStatus:
+def _to_tool_execution_status(state: ToolResultState) -> rt.ToolExecutionStatus:
     if state is ToolResultState.SUCCESS:
-        return memory.ToolExecutionStatus.SUCCESS
+        return rt.ToolExecutionStatus.SUCCESS
     if state is ToolResultState.INTERRUPTED:
-        return memory.ToolExecutionStatus.CANCELLED
-    return memory.ToolExecutionStatus.ERROR
+        return rt.ToolExecutionStatus.CANCELLED
+    return rt.ToolExecutionStatus.ERROR
 
 
 def _tool_result_from_event_slice(events: list[AgentEvent], tool_call_id: str) -> ToolResultBlock:

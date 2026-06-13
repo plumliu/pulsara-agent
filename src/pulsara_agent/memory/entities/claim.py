@@ -7,11 +7,12 @@ from typing import Any, ClassVar
 
 from pulsara_agent.jsonld import JsonLdEntity, NodeRef, Term
 from pulsara_agent.ontology import memory
+from pulsara_agent.ontology.registry import CORE_CONTEXT
 
 
 @dataclass(frozen=True, slots=True)
 class Claim(JsonLdEntity):
-    CONTEXT: ClassVar[dict[str, Any]] = memory.CONTEXT
+    CONTEXT: ClassVar[dict[str, Any]] = CORE_CONTEXT
     TYPE: ClassVar[Term] = memory.CLAIM
 
     statement: str

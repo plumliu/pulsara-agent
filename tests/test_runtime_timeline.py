@@ -26,7 +26,7 @@ from pulsara_agent.memory import (
     load_run_timeline,
     summarize_run_timeline,
 )
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime import RuntimeSession, build_run_timeline
 
@@ -102,13 +102,13 @@ def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(tmp_pa
 
     asyncio.run(run())
 
-    records = graph.find_by_type(memory.RUN_TIMELINE)
+    records = graph.find_by_type(rt.RUN_TIMELINE)
     assert len(records) == 1
-    assert records[0][memory.SOURCE_RUN.name] == CTX.run_id
-    assert records[0][memory.STATUS.name] == "completed"
-    assert records[0][memory.ITEM_COUNT.name] >= 2
+    assert records[0][rt.SOURCE_RUN.name] == CTX.run_id
+    assert records[0][rt.STATUS.name] == "completed"
+    assert records[0][rt.ITEM_COUNT.name] >= 2
 
-    blob_id = records[0][memory.STORED_AS.name]["@id"]
+    blob_id = records[0][rt.STORED_AS.name]["@id"]
     payload = json.loads(archive.get_text(blob_id))
     assert payload["runtime_session_id"] == runtime.runtime_session_id
     assert payload["run_id"] == CTX.run_id
@@ -132,7 +132,7 @@ def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(t
     async def run() -> None:
         await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
         await runtime.emit(ReplyEndEvent(**CTX.event_fields()))
-        first = graph.find_by_type(memory.RUN_TIMELINE)[0]
+        first = graph.find_by_type(rt.RUN_TIMELINE)[0]
         await runtime.emit(
             RunEndEvent(
                 **CTX.event_fields(),
@@ -140,9 +140,9 @@ def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(t
                 stop_reason="final",
             )
         )
-        second = graph.find_by_type(memory.RUN_TIMELINE)[0]
-        assert first[memory.CREATED_AT.name] == second[memory.CREATED_AT.name]
-        assert first[memory.UPDATED_AT.name] <= second[memory.UPDATED_AT.name]
+        second = graph.find_by_type(rt.RUN_TIMELINE)[0]
+        assert first[rt.CREATED_AT.name] == second[rt.CREATED_AT.name]
+        assert first[rt.UPDATED_AT.name] <= second[rt.UPDATED_AT.name]
 
     asyncio.run(run())
 

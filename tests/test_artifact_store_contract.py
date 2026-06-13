@@ -18,7 +18,7 @@ from pulsara_agent.memory import (
     load_run_timeline,
 )
 from pulsara_agent.memory.protocols import ArtifactStore
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.settings import StorageConfig
 
@@ -277,8 +277,8 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
             run_id=ctx.run_id,
             runtime_session_id=runtime_session_id,
         )
-        record = graph.find_by_type(memory.RUN_TIMELINE)[0]
-        blob_id = record[memory.STORED_AS.name]["@id"]
+        record = graph.find_by_type(rt.RUN_TIMELINE)[0]
+        blob_id = record[rt.STORED_AS.name]["@id"]
 
         assert timeline.run_id == ctx.run_id
         with _connect_or_skip(dsn) as connection:

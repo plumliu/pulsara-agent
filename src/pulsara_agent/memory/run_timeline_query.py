@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsara_agent.memory.protocols import ArtifactStore
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime.timeline import RunTimeline
 
 
@@ -66,7 +66,7 @@ def load_run_timeline(
         runtime_session_id=runtime_session_id,
         graph_id=graph_id,
     )
-    stored_as = record.get(memory.STORED_AS.name)
+    stored_as = record.get(rt.STORED_AS.name)
     stored_as_id = _node_ref_id(stored_as)
     if stored_as_id is None:
         raise ValueError(f"Run timeline record for {run_id} does not reference an archived payload")
@@ -129,13 +129,13 @@ def _find_run_timeline_record(
 ) -> dict[str, Any]:
     records = [
         record
-        for record in graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
-        if record.get(memory.SOURCE_RUN.name) == run_id
-        and (runtime_session_id is None or record.get(memory.SOURCE_SESSION.name) == runtime_session_id)
+        for record in graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
+        if record.get(rt.SOURCE_RUN.name) == run_id
+        and (runtime_session_id is None or record.get(rt.SOURCE_SESSION.name) == runtime_session_id)
     ]
     if not records:
         raise KeyError(run_id)
-    records.sort(key=lambda record: str(record.get(memory.UPDATED_AT.name, "")), reverse=True)
+    records.sort(key=lambda record: str(record.get(rt.UPDATED_AT.name, "")), reverse=True)
     return records[0]
 
 

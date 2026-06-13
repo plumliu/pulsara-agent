@@ -31,7 +31,7 @@ from pulsara_agent.memory import (
     summarize_run_timeline,
 )
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime import AgentRuntime, RuntimeSession, build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
@@ -352,7 +352,7 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
     try:
         result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
         timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
-        records = graph.find_by_type(memory.RUN_TIMELINE)
+        records = graph.find_by_type(rt.RUN_TIMELINE)
         timeline = load_run_timeline(
             graph=graph,
             archive=archive,
@@ -399,8 +399,8 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
     try:
         result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
         timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
-        records = wiring.runtime_wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
-        timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
+        records = wiring.runtime_wiring.graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
+        timeline_blob_id = _artifact_id_from_node_ref(records[0][rt.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
             graph=wiring.runtime_wiring.graph,
             archive=wiring.runtime_wiring.archive,
@@ -530,7 +530,7 @@ async def _run_real_agent_multi_tool_rollout(tmp_path: Path) -> dict:
         tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
         tool_result_events = [event for event in events if isinstance(event, ToolResultStartEvent)]
         errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
-        records = wiring.runtime_wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
+        records = wiring.runtime_wiring.graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
         timeline = load_run_timeline(
             graph=wiring.runtime_wiring.graph,
             archive=wiring.runtime_wiring.archive,

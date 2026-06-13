@@ -54,7 +54,7 @@ from pulsara_agent.runtime.agent import _tool_result_from_event_slice
 from pulsara_agent.runtime.permission import PermissionDecision, PermissionDecisionKind
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.registry import ToolRegistry
 
@@ -754,12 +754,12 @@ def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> No
     result = asyncio.run(agent.run_task("read"))
 
     assert result.status is LoopStatus.FINISHED
-    tool_results = graph.find_by_type(memory.TOOL_RESULT)
+    tool_results = graph.find_by_type(rt.TOOL_RESULT)
     assert len(tool_results) == 1
-    assert graph.find_by_type(memory.EVIDENCE) == []
+    assert graph.find_by_type(rt.EVIDENCE) == []
     assert graph.find_by_type(memory.CLAIM) == []
-    span = tool_results[0][memory.EVENT_SPAN.name]
-    assert span[memory.SOURCE_SESSION.name] == agent.runtime_session.runtime_session_id
+    span = tool_results[0][rt.EVENT_SPAN_PROPERTY.name]
+    assert span[rt.SOURCE_SESSION.name] == agent.runtime_session.runtime_session_id
 
 
 def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> None:

@@ -18,7 +18,7 @@ from pulsara_agent.memory import (
 )
 from pulsara_agent.memory.provenance import RuntimeEventSpan
 from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import build_durable_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
@@ -105,7 +105,7 @@ def test_oxigraph_store_supports_ledger_provenance_round_trip() -> None:
         result = ledger.record_tool_result(
             turn_id="turn:oxigraph",
             tool_name="read_file",
-            status=memory.ToolExecutionStatus.SUCCESS,
+            status=rt.ToolExecutionStatus.SUCCESS,
             input_summary="Read README",
             output="README content",
             scope="ctx:oxigraph",
@@ -115,12 +115,12 @@ def test_oxigraph_store_supports_ledger_provenance_round_trip() -> None:
         tool_result = store.get_jsonld(result.tool_result_id, graph_id=graph_id)
         turn = store.get_jsonld("turn:oxigraph", graph_id=graph_id)
 
-        assert tool_result[memory.EVENT_SPAN.name][memory.SOURCE_EVENT.name] == {
+        assert tool_result[rt.EVENT_SPAN_PROPERTY.name][rt.SOURCE_EVENT.name] == {
             "@id": "event:event-oxigraph"
         }
-        assert tool_result[memory.EVENT_SPAN.name][memory.START_SEQUENCE.name] == 10
-        assert turn[memory.PRODUCED.name] == [{"@id": result.tool_result_id}]
-        assert len(store.find_by_type(memory.TOOL_RESULT, graph_id=graph_id)) == 1
+        assert tool_result[rt.EVENT_SPAN_PROPERTY.name][rt.START_SEQUENCE.name] == 10
+        assert turn[rt.PRODUCED.name] == [{"@id": result.tool_result_id}]
+        assert len(store.find_by_type(rt.TOOL_RESULT, graph_id=graph_id)) == 1
     finally:
         store.delete_graph(graph_id)
 
@@ -152,8 +152,8 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(tmp_p
         import asyncio
 
         asyncio.run(run())
-        records = wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
-        timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
+        records = wiring.graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
+        timeline_blob_id = _artifact_id_from_node_ref(records[0][rt.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
             graph=wiring.graph,
             archive=wiring.archive,
@@ -164,9 +164,9 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(tmp_p
         summary = summarize_run_timeline(timeline)
 
         assert len(records) == 1
-        assert records[0][memory.SOURCE_RUN.name] == ctx.run_id
-        assert records[0][memory.SOURCE_SESSION.name] == runtime_session_id
-        assert records[0][memory.STATUS.name] == "completed"
+        assert records[0][rt.SOURCE_RUN.name] == ctx.run_id
+        assert records[0][rt.SOURCE_SESSION.name] == runtime_session_id
+        assert records[0][rt.STATUS.name] == "completed"
         assert timeline_blob_id.startswith(f"timeline:{runtime_session_id}:{ctx.run_id}:")
         assert "hello oxigraph" in wiring.archive.get_text(timeline_blob_id)
         assert summary.assistant_text == "hello oxigraph"

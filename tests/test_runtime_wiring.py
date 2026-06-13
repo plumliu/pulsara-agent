@@ -12,7 +12,7 @@ from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import load_run_timeline, summarize_run_timeline
-from pulsara_agent.ontology import memory
+from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime import (
     AgentRuntimeWiring,
     build_agent_runtime_wiring,
@@ -90,8 +90,8 @@ def test_durable_runtime_wiring_uses_postgres_oxigraph_and_artifacts(tmp_path) -
     try:
         asyncio.run(_emit_timeline_events(wiring.runtime_session, ctx, "hello durable wiring"))
         events = wiring.event_log.iter(run_id=ctx.run_id)
-        records = wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
-        timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
+        records = wiring.graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
+        timeline_blob_id = _artifact_id_from_node_ref(records[0][rt.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
             graph=wiring.graph,
             archive=wiring.archive,
@@ -104,9 +104,9 @@ def test_durable_runtime_wiring_uses_postgres_oxigraph_and_artifacts(tmp_path) -
         assert wiring.graph_id == graph_id
         assert [event.sequence for event in events] == [1, 2]
         assert len(records) == 1
-        assert records[0][memory.SOURCE_RUN.name] == ctx.run_id
-        assert records[0][memory.SOURCE_SESSION.name] == runtime_session_id
-        assert records[0][memory.STATUS.name] == "completed"
+        assert records[0][rt.SOURCE_RUN.name] == ctx.run_id
+        assert records[0][rt.SOURCE_SESSION.name] == runtime_session_id
+        assert records[0][rt.STATUS.name] == "completed"
         assert timeline_blob_id.startswith(f"timeline:{runtime_session_id}:{ctx.run_id}:")
         assert "hello durable wiring" in wiring.archive.get_text(timeline_blob_id)
         assert summary.assistant_text == "hello durable wiring"
@@ -137,8 +137,8 @@ def test_agent_runtime_wiring_uses_durable_runtime_wiring(tmp_path) -> None:
     try:
         asyncio.run(_emit_timeline_events(wiring.runtime_wiring.runtime_session, ctx, "hello agent durable wiring"))
         events = wiring.runtime_wiring.event_log.iter(run_id=ctx.run_id)
-        records = wiring.runtime_wiring.graph.find_by_type(memory.RUN_TIMELINE, graph_id=graph_id)
-        timeline_blob_id = _artifact_id_from_node_ref(records[0][memory.STORED_AS.name]["@id"])
+        records = wiring.runtime_wiring.graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
+        timeline_blob_id = _artifact_id_from_node_ref(records[0][rt.STORED_AS.name]["@id"])
         timeline = load_run_timeline(
             graph=wiring.runtime_wiring.graph,
             archive=wiring.runtime_wiring.archive,
@@ -151,8 +151,8 @@ def test_agent_runtime_wiring_uses_durable_runtime_wiring(tmp_path) -> None:
         assert wiring.agent_runtime.runtime_session is wiring.runtime_wiring.runtime_session
         assert [event.sequence for event in events] == [1, 2]
         assert len(records) == 1
-        assert records[0][memory.SOURCE_SESSION.name] == runtime_session_id
-        assert records[0][memory.STATUS.name] == "completed"
+        assert records[0][rt.SOURCE_SESSION.name] == runtime_session_id
+        assert records[0][rt.STATUS.name] == "completed"
         assert timeline_blob_id.startswith(f"timeline:{runtime_session_id}:{ctx.run_id}:")
         assert "hello agent durable wiring" in wiring.runtime_wiring.archive.get_text(timeline_blob_id)
         assert summary.assistant_text == "hello agent durable wiring"
