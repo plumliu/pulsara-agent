@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pulsara_agent.graph.store import DEFAULT_GRAPH_ID
-from pulsara_agent.ontology import memory, runtime
+from pulsara_agent.ontology import capability, memory, runtime
 from pulsara_agent.ontology.registry import CORE_CONTEXT
 
 
@@ -26,6 +26,9 @@ FORCE_LIST_KEYS = {
     memory.CONTRADICTS.name,
     memory.SUPERSEDES.name,
     memory.HAS_EVIDENCE.name,
+    capability.PROVIDES_TOOL.name,
+    capability.PROVIDES_SKILL.name,
+    capability.REQUIRES.name,
 }
 
 

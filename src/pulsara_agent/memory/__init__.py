@@ -13,7 +13,7 @@ from pulsara_agent.memory.run_timeline_query import (
     summarize_run_timeline,
 )
 from pulsara_agent.memory.runtime_persistence import ExecutionEvidencePersistenceHook
-from pulsara_agent.memory.run_timeline_persistence import RunTimelinePersistenceHook, RunTimelineRecord
+from pulsara_agent.memory.run_timeline_persistence import RunTimelinePersistenceHook
 
 __all__ = [
     "ArtifactStore",
@@ -26,7 +26,6 @@ __all__ = [
     "RuntimeEventRef",
     "RuntimeEventSpan",
     "RunTimelinePersistenceHook",
-    "RunTimelineRecord",
     "RunTimelineSummary",
     "RunTimelineToolTrace",
     "load_run_timeline",

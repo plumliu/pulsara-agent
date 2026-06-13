@@ -7,8 +7,10 @@ from uuid import uuid4
 
 import pytest
 
+from pulsara_agent.entities.capability import Plugin, Skill
 from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
 from pulsara_agent.graph import OxigraphGraphStore
+from pulsara_agent.jsonld import NodeRef
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.memory import (
     ExecutionEvidenceLedger,
@@ -18,6 +20,7 @@ from pulsara_agent.memory import (
 )
 from pulsara_agent.memory.provenance import RuntimeEventSpan
 from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.ontology import capability as cap
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import build_durable_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
@@ -121,6 +124,36 @@ def test_oxigraph_store_supports_ledger_provenance_round_trip() -> None:
         assert tool_result[rt.EVENT_SPAN_PROPERTY.name][rt.START_SEQUENCE.name] == 10
         assert turn[rt.PRODUCED.name] == [{"@id": result.tool_result_id}]
         assert len(store.find_by_type(rt.TOOL_RESULT, graph_id=graph_id)) == 1
+    finally:
+        store.delete_graph(graph_id)
+
+
+def test_oxigraph_store_preserves_single_capability_edges_as_lists() -> None:
+    graph_id = f"graph:test/{uuid4().hex}"
+    store = OxigraphGraphStore(OXIGRAPH_URL)
+    try:
+        skill = Skill(
+            id="skill:oxigraph-single",
+            version="1.0.0",
+            provides_tool=(NodeRef("tool:rg"),),
+            requires=(NodeRef("tool:fd"),),
+        )
+        plugin = Plugin(
+            id="plugin:oxigraph-single",
+            version="1.0.0",
+            provides_tool=(NodeRef("tool:rg"),),
+            provides_skill=(NodeRef("skill:oxigraph-single"),),
+        )
+        store.put_jsonld(skill.to_jsonld(), graph_id=graph_id)
+        store.put_jsonld(plugin.to_jsonld(), graph_id=graph_id)
+
+        skill_doc = store.get_jsonld("skill:oxigraph-single", graph_id=graph_id)
+        plugin_doc = store.get_jsonld("plugin:oxigraph-single", graph_id=graph_id)
+
+        assert skill_doc[cap.PROVIDES_TOOL.name] == [{"@id": "tool:rg"}]
+        assert skill_doc[cap.REQUIRES.name] == [{"@id": "tool:fd"}]
+        assert plugin_doc[cap.PROVIDES_TOOL.name] == [{"@id": "tool:rg"}]
+        assert plugin_doc[cap.PROVIDES_SKILL.name] == [{"@id": "skill:oxigraph-single"}]
     finally:
         store.delete_graph(graph_id)
 
