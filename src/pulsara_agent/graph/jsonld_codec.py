@@ -22,6 +22,8 @@ FORCE_LIST_KEYS = {
     memory.CONTRADICTS.name,
     memory.SUPERSEDES.name,
     memory.HAS_EVIDENCE.name,
+    memory.BASED_ON.name,
+    memory.DERIVED_FROM.name,
     capability.PROVIDES_TOOL.name,
     capability.PROVIDES_SKILL.name,
     capability.REQUIRES.name,

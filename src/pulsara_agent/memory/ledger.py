@@ -10,11 +10,11 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
-from pulsara_agent.entities.memory import Claim
+from pulsara_agent.entities.memory import ActionBoundary, Claim, Decision, Observation, Preference
 from pulsara_agent.entities.runtime import Artifact, Evidence, ToolResult, Turn
 from pulsara_agent.memory.protocols import ArtifactStore, RuntimeEventReadStore
 from pulsara_agent.memory.provenance import RuntimeEventSpan, runtime_event_span_from_events
-from pulsara_agent.memory.records import ClaimRecord, EvidenceRecord, ToolResultRecord
+from pulsara_agent.memory.records import ClaimRecord, EvidenceRecord, MemoryWriteRecord, ToolResultRecord
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.message import DataBlock, TextBlock, ToolResultBlock, ToolResultState
 from pulsara_agent.message.assembler import completed_tool_result_from_events
@@ -190,10 +190,12 @@ class ExecutionEvidenceLedger:
     ) -> ClaimRecord:
         decision = self.gate.evaluate_claim(
             statement=statement,
+            scope=scope,
             evidence_ids=evidence_ids,
             source_authority=source_authority,
             verification_status=verification_status,
         )
+        self._require_existing_nodes(evidence_ids, role="evidence")
         claim_id = f"claim:{uuid4()}"
         self.graph.put_jsonld(
             Claim(
@@ -215,6 +217,171 @@ class ExecutionEvidenceLedger:
             self._add_relation(evidence_id, memory.SUPPORTS, claim_id)
         return ClaimRecord(
             claim_id=claim_id,
+            statement=statement,
+            status=decision.status,
+            confidence_level=decision.confidence_level,
+            verification_status=verification_status,
+        )
+
+    def submit_preference(
+        self,
+        *,
+        statement: str,
+        scope: str,
+        source_authority: memory.SourceAuthority,
+        verification_status: memory.VerificationStatus,
+    ) -> MemoryWriteRecord:
+        decision = self.gate.evaluate_preference(
+            statement=statement,
+            scope=scope,
+            source_authority=source_authority,
+            verification_status=verification_status,
+        )
+        preference_id = f"preference:{uuid4()}"
+        self.graph.put_jsonld(
+            Preference(
+                id=preference_id,
+                statement=statement,
+                scope=scope,
+                status=decision.status,
+                confidence_level=decision.confidence_level,
+                verification_status=verification_status,
+                source_authority=source_authority,
+                created_at=utc_now(),
+                updated_at=utc_now(),
+                gate_reason=decision.reason,
+            ).to_jsonld(),
+            graph_id=self.graph_id,
+        )
+        return self._memory_write_record(preference_id, statement, decision, verification_status)
+
+    def submit_action_boundary(
+        self,
+        *,
+        statement: str,
+        scope: str,
+        applies_when: str,
+        do_not_apply_when: str,
+        source_authority: memory.SourceAuthority,
+        verification_status: memory.VerificationStatus,
+    ) -> MemoryWriteRecord:
+        decision = self.gate.evaluate_action_boundary(
+            statement=statement,
+            scope=scope,
+            applies_when=applies_when,
+            do_not_apply_when=do_not_apply_when,
+            source_authority=source_authority,
+            verification_status=verification_status,
+        )
+        boundary_id = f"action-boundary:{uuid4()}"
+        self.graph.put_jsonld(
+            ActionBoundary(
+                id=boundary_id,
+                statement=statement,
+                scope=scope,
+                status=decision.status,
+                applies_when=applies_when,
+                do_not_apply_when=do_not_apply_when,
+                source_authority=source_authority,
+                confidence_level=decision.confidence_level,
+                verification_status=verification_status,
+                created_at=utc_now(),
+                updated_at=utc_now(),
+                gate_reason=decision.reason,
+            ).to_jsonld(),
+            graph_id=self.graph_id,
+        )
+        return self._memory_write_record(boundary_id, statement, decision, verification_status)
+
+    def submit_observation(
+        self,
+        *,
+        statement: str,
+        scope: str,
+        evidence_ids: list[str],
+        source_authority: memory.SourceAuthority,
+        verification_status: memory.VerificationStatus,
+    ) -> MemoryWriteRecord:
+        decision = self.gate.evaluate_observation(
+            statement=statement,
+            scope=scope,
+            evidence_ids=evidence_ids,
+            source_authority=source_authority,
+            verification_status=verification_status,
+        )
+        self._require_existing_nodes(evidence_ids, role="evidence")
+        observation_id = f"observation:{uuid4()}"
+        self.graph.put_jsonld(
+            Observation(
+                id=observation_id,
+                statement=statement,
+                scope=scope,
+                status=decision.status,
+                confidence_level=decision.confidence_level,
+                verification_status=verification_status,
+                source_authority=source_authority,
+                created_at=utc_now(),
+                updated_at=utc_now(),
+                gate_reason=decision.reason,
+                evidence=tuple(NodeRef(evidence_id) for evidence_id in evidence_ids),
+            ).to_jsonld(),
+            graph_id=self.graph_id,
+        )
+        for evidence_id in evidence_ids:
+            self._add_relation(evidence_id, memory.SUPPORTS, observation_id)
+        return self._memory_write_record(observation_id, statement, decision, verification_status)
+
+    def submit_decision(
+        self,
+        *,
+        statement: str,
+        scope: str,
+        evidence_ids: list[str],
+        source_authority: memory.SourceAuthority,
+        verification_status: memory.VerificationStatus,
+        based_on_ids: list[str] | None = None,
+    ) -> MemoryWriteRecord:
+        based_on_ids = based_on_ids or []
+        decision = self.gate.evaluate_decision(
+            statement=statement,
+            scope=scope,
+            evidence_ids=evidence_ids,
+            source_authority=source_authority,
+            verification_status=verification_status,
+        )
+        self._require_existing_nodes(evidence_ids, role="evidence")
+        self._require_existing_nodes(based_on_ids, role="basedOn")
+        decision_id = f"decision:{uuid4()}"
+        self.graph.put_jsonld(
+            Decision(
+                id=decision_id,
+                statement=statement,
+                scope=scope,
+                status=decision.status,
+                confidence_level=decision.confidence_level,
+                verification_status=verification_status,
+                source_authority=source_authority,
+                created_at=utc_now(),
+                updated_at=utc_now(),
+                gate_reason=decision.reason,
+                evidence=tuple(NodeRef(evidence_id) for evidence_id in evidence_ids),
+                based_on=tuple(NodeRef(based_on_id) for based_on_id in based_on_ids),
+            ).to_jsonld(),
+            graph_id=self.graph_id,
+        )
+        for evidence_id in evidence_ids:
+            self._add_relation(evidence_id, memory.SUPPORTS, decision_id)
+        return self._memory_write_record(decision_id, statement, decision, verification_status)
+
+    def _memory_write_record(
+        self,
+        memory_id: str,
+        statement: str,
+        decision,
+        verification_status: memory.VerificationStatus,
+    ) -> MemoryWriteRecord:
+        return MemoryWriteRecord(
+            memory_id=memory_id,
             statement=statement,
             status=decision.status,
             confidence_level=decision.confidence_level,
@@ -251,6 +418,16 @@ class ExecutionEvidenceLedger:
             values.append(target)
         document[relation.name] = values
         self.graph.put_jsonld(document, graph_id=self.graph_id)
+
+    def _require_existing_nodes(self, node_ids: list[str], *, role: str) -> None:
+        missing = [
+            node_id
+            for node_id in node_ids
+            if not self.graph.has_jsonld(node_id, graph_id=self.graph_id)
+        ]
+        if missing:
+            joined = ", ".join(missing)
+            raise ValueError(f"Cannot submit memory with missing {role} node(s): {joined}")
 
 
 def _make_output_preview(text: str, limit: int = 500) -> str:

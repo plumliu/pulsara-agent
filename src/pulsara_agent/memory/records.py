@@ -86,3 +86,23 @@ class ClaimRecord:
                 "verification_status": self.verification_status,
             }
         )
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryWriteRecord:
+    memory_id: str
+    statement: str
+    status: memory.NodeStatus
+    confidence_level: memory.ConfidenceLevel
+    verification_status: memory.VerificationStatus
+
+    def to_dict(self) -> dict[str, Any]:
+        return jsonld_value(
+            {
+                "memory_id": self.memory_id,
+                "statement": self.statement,
+                "status": self.status,
+                "confidence_level": self.confidence_level,
+                "verification_status": self.verification_status,
+            }
+        )
