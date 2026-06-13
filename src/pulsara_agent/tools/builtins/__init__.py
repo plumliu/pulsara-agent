@@ -6,6 +6,13 @@ from pulsara_agent.tools.builtins.filesystem import (
     SearchFilesTool,
     WriteFileTool,
 )
+from pulsara_agent.tools.builtins.memory import (
+    RememberActionBoundaryTool,
+    RememberClaimTool,
+    RememberDecisionTool,
+    RememberObservationTool,
+    RememberPreferenceTool,
+)
 from pulsara_agent.tools.builtins.registry import build_core_tool_registry
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.todo import TodoTool
@@ -13,6 +20,11 @@ from pulsara_agent.tools.builtins.todo import TodoTool
 __all__ = [
     "EditFileTool",
     "ReadFileTool",
+    "RememberActionBoundaryTool",
+    "RememberClaimTool",
+    "RememberDecisionTool",
+    "RememberObservationTool",
+    "RememberPreferenceTool",
     "SearchFilesTool",
     "TerminalTool",
     "TodoTool",

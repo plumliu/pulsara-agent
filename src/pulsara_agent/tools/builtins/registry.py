@@ -11,7 +11,13 @@ from pulsara_agent.tools.builtins.filesystem import (
     SearchFilesTool,
     WriteFileTool,
 )
-from pulsara_agent.tools.builtins.propose_memory import ProposeMemoryTool
+from pulsara_agent.tools.builtins.memory import (
+    RememberActionBoundaryTool,
+    RememberClaimTool,
+    RememberDecisionTool,
+    RememberObservationTool,
+    RememberPreferenceTool,
+)
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.registry import ToolRegistry
@@ -33,5 +39,9 @@ def build_core_tool_registry(
     registry.register(WriteFileTool(root))
     registry.register(TodoTool())
     if memory_proposal_sink is not None:
-        registry.register(ProposeMemoryTool(sink=memory_proposal_sink))
+        registry.register(RememberClaimTool(sink=memory_proposal_sink))
+        registry.register(RememberPreferenceTool(sink=memory_proposal_sink))
+        registry.register(RememberObservationTool(sink=memory_proposal_sink))
+        registry.register(RememberActionBoundaryTool(sink=memory_proposal_sink))
+        registry.register(RememberDecisionTool(sink=memory_proposal_sink))
     return registry

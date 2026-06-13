@@ -38,15 +38,24 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
     ]
     assert [spec.name for spec in registry.tool_specs()] == registry.names()
     assert all(spec.parameters["type"] == "object" for spec in registry.tool_specs())
+    assert not any(name.startswith("remember_") for name in registry.names())
+    assert "propose_memory" not in registry.names()
 
 
-def test_core_tool_registry_can_enable_propose_memory(tmp_path) -> None:
+def test_core_tool_registry_can_enable_memory_write_tools(tmp_path) -> None:
     registry = build_core_tool_registry(
         RuntimeSession(tmp_path),
         memory_proposal_sink=MemoryProposalSink(),
     )
 
-    assert "propose_memory" in registry.names()
+    assert "propose_memory" not in registry.names()
+    assert {
+        "remember_action_boundary",
+        "remember_claim",
+        "remember_decision",
+        "remember_observation",
+        "remember_preference",
+    }.issubset(registry.names())
 
 
 def test_read_file_reads_workspace_file_and_blocks_path_escape(tmp_path) -> None:

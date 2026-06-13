@@ -1,4 +1,4 @@
-"""Tests for the durable-memory producer: sink, DurableMemoryHooks, propose_memory.
+"""Tests for the durable-memory producer: sink, DurableMemoryHooks, remember_*.
 
 The producer bridges the agent loop to the durable-memory write path. A tool
 deposits a typed candidate into a sink during tool execution; a hook drains the
@@ -26,7 +26,11 @@ from pulsara_agent.event import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
-from pulsara_agent.event.candidates import PreferenceCandidate
+from pulsara_agent.event.candidates import (
+    ActionBoundaryCandidate,
+    DecisionCandidate,
+    PreferenceCandidate,
+)
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
@@ -39,7 +43,11 @@ from pulsara_agent.memory.write_service import MemoryWriteService
 from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession
 from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools.base import ToolCall
-from pulsara_agent.tools.builtins.propose_memory import ProposeMemoryTool
+from pulsara_agent.tools.builtins.memory import (
+    RememberActionBoundaryTool,
+    RememberDecisionTool,
+    RememberPreferenceTool,
+)
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
 
@@ -127,19 +135,18 @@ def test_durable_hooks_event_context_comes_from_loop_state() -> None:
     assert all(event.reply_id == state.reply_id for event in events)
 
 
-# --- ProposeMemoryTool ----------------------------------------------------
+# --- Remember memory tools ------------------------------------------------
 
 
-def test_propose_memory_tool_valid_deposits_candidate() -> None:
+def test_remember_preference_tool_valid_deposits_candidate() -> None:
     sink = MemoryProposalSink()
-    tool = ProposeMemoryTool(sink=sink)
+    tool = RememberPreferenceTool(sink=sink)
 
     result = tool.execute(
         ToolCall(
             id="call:1",
-            name="propose_memory",
+            name="remember_preference",
             arguments={
-                "kind": "Preference",
                 "statement": "Prefer concise summaries.",
                 "scope": "ctx:user",
                 "source_authority": "explicit_user_instruction",
@@ -153,19 +160,19 @@ def test_propose_memory_tool_valid_deposits_candidate() -> None:
     deposited = sink.drain()[0]
     assert isinstance(deposited, PreferenceCandidate)
     assert deposited.candidate_id.startswith("candidate:")
+    assert deposited.kind == "Preference"
     assert json.loads(result.output)["status"] == "proposed"
 
 
-def test_propose_memory_tool_extra_field_errors_without_deposit() -> None:
+def test_remember_preference_tool_extra_field_errors_without_deposit() -> None:
     sink = MemoryProposalSink()
-    tool = ProposeMemoryTool(sink=sink)
+    tool = RememberPreferenceTool(sink=sink)
 
     result = tool.execute(
         ToolCall(
             id="call:1",
-            name="propose_memory",
+            name="remember_preference",
             arguments={
-                "kind": "Preference",
                 "statement": "x",
                 "scope": "ctx:user",
                 "applies_when": "misplaced action-boundary field",
@@ -180,45 +187,18 @@ def test_propose_memory_tool_extra_field_errors_without_deposit() -> None:
     assert sink.pending_count() == 0
 
 
-def test_propose_memory_tool_omits_empty_other_kind_defaults() -> None:
+def test_remember_action_boundary_tool_missing_condition_errors() -> None:
     sink = MemoryProposalSink()
-    tool = ProposeMemoryTool(sink=sink)
+    tool = RememberActionBoundaryTool(sink=sink)
 
     result = tool.execute(
         ToolCall(
             id="call:1",
-            name="propose_memory",
+            name="remember_action_boundary",
             arguments={
-                "kind": "Preference",
-                "statement": "Prefer concise summaries.",
-                "scope": "ctx:user",
-                "applies_when": "",
-                "do_not_apply_when": "",
-                "based_on_ids": [],
-                "source_authority": "explicit_user_instruction",
-                "verification_status": "user_confirmed",
-            },
-        )
-    )
-
-    assert result.status is ToolResultState.SUCCESS
-    deposited = sink.drain()[0]
-    assert isinstance(deposited, PreferenceCandidate)
-    assert deposited.statement == "Prefer concise summaries."
-
-
-def test_propose_memory_tool_missing_action_boundary_condition_errors() -> None:
-    sink = MemoryProposalSink()
-    tool = ProposeMemoryTool(sink=sink)
-
-    result = tool.execute(
-        ToolCall(
-            id="call:1",
-            name="propose_memory",
-            arguments={
-                "kind": "ActionBoundary",
                 "statement": "Never force-push to main.",
                 "scope": "ctx:workspace",
+                "applies_when": "branch is main",
                 "source_authority": "system_rule",
                 "verification_status": "user_confirmed",
             },
@@ -227,6 +207,56 @@ def test_propose_memory_tool_missing_action_boundary_condition_errors() -> None:
 
     assert result.status is ToolResultState.ERROR
     assert sink.pending_count() == 0
+
+
+def test_remember_action_boundary_tool_valid_deposits_candidate() -> None:
+    sink = MemoryProposalSink()
+    tool = RememberActionBoundaryTool(sink=sink)
+
+    result = tool.execute(
+        ToolCall(
+            id="call:1",
+            name="remember_action_boundary",
+            arguments={
+                "statement": "Never force-push to main.",
+                "scope": "ctx:workspace",
+                "applies_when": "branch is main",
+                "do_not_apply_when": "user explicitly authorizes",
+                "source_authority": "system_rule",
+                "verification_status": "user_confirmed",
+            },
+        )
+    )
+
+    assert result.status is ToolResultState.SUCCESS
+    deposited = sink.drain()[0]
+    assert isinstance(deposited, ActionBoundaryCandidate)
+    assert deposited.applies_when == "branch is main"
+    assert deposited.do_not_apply_when == "user explicitly authorizes"
+
+
+def test_remember_decision_tool_supports_based_on_ids() -> None:
+    sink = MemoryProposalSink()
+    tool = RememberDecisionTool(sink=sink)
+
+    result = tool.execute(
+        ToolCall(
+            id="call:1",
+            name="remember_decision",
+            arguments={
+                "statement": "Adopt JSON-LD for durable memory.",
+                "scope": "ctx:project",
+                "based_on_ids": ["claim:one"],
+                "source_authority": "explicit_user_instruction",
+                "verification_status": "user_confirmed",
+            },
+        )
+    )
+
+    assert result.status is ToolResultState.SUCCESS
+    deposited = sink.drain()[0]
+    assert isinstance(deposited, DecisionCandidate)
+    assert deposited.based_on_ids == ("claim:one",)
 
 
 # --- AgentRuntime integration --------------------------------------------
@@ -298,10 +328,9 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
                 "tool_calls": [
                     {
                         "id": "call:propose",
-                        "name": "propose_memory",
+                        "name": "remember_preference",
                         "arguments": json.dumps(
                             {
-                                "kind": "Preference",
                                 "statement": "Prefer concise summaries.",
                                 "scope": "ctx:user",
                                 "source_authority": "explicit_user_instruction",
@@ -335,7 +364,7 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
     assert result.sequence is not None
 
 
-def test_default_agent_runtime_does_not_expose_propose_memory(tmp_path: Path) -> None:
+def test_default_agent_runtime_does_not_expose_memory_write_tools(tmp_path: Path) -> None:
     runtime_session = RuntimeSession(tmp_path)
     transport = _ScriptedTransport(
         [
@@ -386,10 +415,9 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
                 "tool_calls": [
                     {
                         "id": "call:bad",
-                        "name": "propose_memory",
+                        "name": "remember_preference",
                         "arguments": json.dumps(
                             {
-                                "kind": "Preference",
                                 "statement": "x",
                                 "scope": "ctx:user",
                                 "applies_when": "misplaced",

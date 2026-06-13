@@ -2,10 +2,10 @@
 
 Bridges the agent loop to the durable-memory write path. Memory candidates are
 deposited into a :class:`MemoryProposalSink` from tool-execution threads (by the
-``propose_memory`` tool); this hook drains them at agent-loop-safe points and
-routes each through :meth:`MemoryWriteService.submit`. The hook never emits --
-it *returns* the events ``submit`` produced and lets ``AgentRuntime`` emit them
-with a runtime-managed sequence, keeping publish off the tool thread.
+``remember_*`` tools); this hook drains them at agent-loop-safe points and routes
+each through :meth:`MemoryWriteService.submit`. The hook never emits -- it
+*returns* the events ``submit`` produced and lets ``AgentRuntime`` emit them with
+a runtime-managed sequence, keeping publish off the tool thread.
 """
 
 from __future__ import annotations

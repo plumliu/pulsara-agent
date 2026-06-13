@@ -4,6 +4,11 @@ from pulsara_agent.tools.base import Tool, ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins import (
     EditFileTool,
     ReadFileTool,
+    RememberActionBoundaryTool,
+    RememberClaimTool,
+    RememberDecisionTool,
+    RememberObservationTool,
+    RememberPreferenceTool,
     SearchFilesTool,
     TerminalTool,
     TodoTool,
@@ -16,6 +21,11 @@ from pulsara_agent.tools.registry import ToolRegistry
 __all__ = [
     "EditFileTool",
     "ReadFileTool",
+    "RememberActionBoundaryTool",
+    "RememberClaimTool",
+    "RememberDecisionTool",
+    "RememberObservationTool",
+    "RememberPreferenceTool",
     "SearchFilesTool",
     "TerminalTool",
     "TodoTool",

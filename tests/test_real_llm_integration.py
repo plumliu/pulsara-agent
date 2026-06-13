@@ -9,6 +9,8 @@ import pytest
 
 from pulsara_agent.event import (
     EventContext,
+    MemoryWriteFailedEvent,
+    MemoryWriteResultEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ReplyEndEvent,
@@ -137,7 +139,7 @@ def test_real_agent_runtime_persists_events_to_postgres_and_timeline_with_respon
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["timeline_artifact_text"]
 
 
-def test_real_llm_trajectory_suite_collects_five_rollouts(tmp_path):
+def test_real_llm_trajectory_suite_covers_narrow_memory_tools(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
 
@@ -150,7 +152,11 @@ def test_real_llm_trajectory_suite_collects_five_rollouts(tmp_path):
         "agent_read_file",
         "durable_agent_read_file",
         "durable_multi_tool_rollout",
-        "durable_propose_memory",
+        "durable_remember_claim",
+        "durable_remember_preference",
+        "durable_remember_observation",
+        "durable_remember_action_boundary",
+        "durable_remember_decision",
     ]
     assert all(trajectory["errors"] == [] for trajectory in trajectories)
     assert all(trajectory["status"] in {"finished", "streamed"} for trajectory in trajectories)
@@ -162,11 +168,22 @@ def test_real_llm_trajectory_suite_collects_five_rollouts(tmp_path):
     assert "search_files" in multi_tool["tool_names"]
     assert "PULSARA_MULTI_ALPHA" in multi_tool["final_text"]
     assert "PULSARA_MULTI_BETA" in multi_tool["final_text"]
-    propose = trajectories[-1]
-    assert "propose_memory" in propose["tool_names"]
-    assert "MemoryCandidateProposedEvent" in propose["event_type_names"]
-    assert "MemoryWriteResultEvent" in propose["event_type_names"]
-    assert propose["memory_node_count"] >= 1
+    memory_trajectories = trajectories[5:]
+    assert [trajectory["target_tool"] for trajectory in memory_trajectories] == [
+        "remember_claim",
+        "remember_preference",
+        "remember_observation",
+        "remember_action_boundary",
+        "remember_decision",
+    ]
+    for trajectory in memory_trajectories:
+        assert trajectory["tool_names"].count(trajectory["target_tool"]) == 1
+        assert "MemoryCandidateProposedEvent" in trajectory["event_type_names"]
+        assert "MemoryWriteResultEvent" in trajectory["event_type_names"]
+        assert "MemoryWriteFailedEvent" not in trajectory["event_type_names"]
+        assert trajectory["memory_result_types"] == [trajectory["target_memory_type"]]
+        assert trajectory["memory_statuses"] == ["active"]
+        assert trajectory["target_memory_node_count"] >= 1
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -447,18 +464,25 @@ async def _run_real_llm_trajectory_suite(tmp_path: Path) -> list[dict]:
     agent_read_dir = tmp_path / "agent-read"
     durable_read_dir = tmp_path / "durable-read"
     multi_tool_dir = tmp_path / "multi-tool"
-    propose_memory_dir = tmp_path / "propose-memory"
+    memory_dirs = {
+        case["label"]: tmp_path / case["label"]
+        for case in _REAL_MEMORY_TOOL_CASES
+    }
     agent_read_dir.mkdir()
     durable_read_dir.mkdir()
     multi_tool_dir.mkdir()
-    propose_memory_dir.mkdir()
+    for directory in memory_dirs.values():
+        directory.mkdir()
 
     flash = await _run_real_flash_smoke()
     tool_spec = await _run_real_tool_call_smoke()
     agent_read = await _run_real_agent_tool_loop_smoke(agent_read_dir)
     durable_read = await _run_real_agent_postgres_event_log_timeline_smoke(durable_read_dir)
     multi_tool = await _run_real_agent_multi_tool_rollout(multi_tool_dir)
-    propose_memory = await _run_real_agent_propose_memory_rollout(propose_memory_dir)
+    memory_rollouts = [
+        await _run_real_agent_remember_tool_rollout(memory_dirs[case["label"]], case)
+        for case in _REAL_MEMORY_TOOL_CASES
+    ]
     return [
         _trajectory_from_stream_result(
             "flash_text",
@@ -498,7 +522,7 @@ async def _run_real_llm_trajectory_suite(tmp_path: Path) -> list[dict]:
             "errors": [],
         },
         multi_tool,
-        propose_memory,
+        *memory_rollouts,
     ]
 
 
@@ -581,8 +605,82 @@ _MEMORY_NODE_TYPES = (
     memory.DECISION,
 )
 
+_MEMORY_NODE_BY_TYPE = {
+    "Claim": memory.CLAIM,
+    "Preference": memory.PREFERENCE,
+    "Observation": memory.OBSERVATION,
+    "ActionBoundary": memory.ACTION_BOUNDARY,
+    "Decision": memory.DECISION,
+}
 
-async def _run_real_agent_propose_memory_rollout(tmp_path: Path) -> dict:
+_REAL_MEMORY_TOOL_CASES = (
+    {
+        "label": "durable_remember_claim",
+        "tool_name": "remember_claim",
+        "memory_type": "Claim",
+        "system_prompt": (
+            "You are validating the remember_claim tool. "
+            "Call remember_claim exactly once with statement='Pulsara uses JSON-LD graph nodes for durable memory', "
+            "scope='ctx:project', source_authority='explicit_user_instruction', and "
+            "verification_status='user_confirmed'. Then answer exactly: PULSARA_MEMORY_CLAIM_OK"
+        ),
+        "user_input": "Remember this durable claim: Pulsara uses JSON-LD graph nodes for durable memory.",
+    },
+    {
+        "label": "durable_remember_preference",
+        "tool_name": "remember_preference",
+        "memory_type": "Preference",
+        "system_prompt": (
+            "You are validating the remember_preference tool. "
+            "Call remember_preference exactly once with statement='The user prefers concise summaries', "
+            "scope='ctx:user', source_authority='explicit_user_instruction', and "
+            "verification_status='user_confirmed'. Then answer exactly: PULSARA_MEMORY_PREFERENCE_OK"
+        ),
+        "user_input": "Going forward I always want concise summaries. Remember that preference.",
+    },
+    {
+        "label": "durable_remember_observation",
+        "tool_name": "remember_observation",
+        "memory_type": "Observation",
+        "system_prompt": (
+            "You are validating the remember_observation tool. "
+            "Call remember_observation exactly once with statement='The current workspace is testing narrow memory tools', "
+            "scope='ctx:workspace', source_authority='explicit_user_instruction', and "
+            "verification_status='user_confirmed'. Then answer exactly: PULSARA_MEMORY_OBSERVATION_OK"
+        ),
+        "user_input": "Observe and remember that this workspace is testing narrow memory tools.",
+    },
+    {
+        "label": "durable_remember_action_boundary",
+        "tool_name": "remember_action_boundary",
+        "memory_type": "ActionBoundary",
+        "system_prompt": (
+            "You are validating the remember_action_boundary tool. "
+            "Call remember_action_boundary exactly once with statement='Do not commit code unless the user explicitly asks', "
+            "scope='ctx:project', applies_when='working in a git repository', "
+            "do_not_apply_when='the user explicitly asks for git add and commit', "
+            "source_authority='explicit_user_instruction', and verification_status='user_confirmed'. "
+            "Then answer exactly: PULSARA_MEMORY_ACTION_BOUNDARY_OK"
+        ),
+        "user_input": "Remember this action boundary: do not commit code unless I explicitly ask.",
+    },
+    {
+        "label": "durable_remember_decision",
+        "tool_name": "remember_decision",
+        "memory_type": "Decision",
+        "system_prompt": (
+            "You are validating the remember_decision tool. "
+            "Call remember_decision exactly once with statement='Use type-specific remember tools instead of a single propose_memory tool', "
+            "scope='ctx:project', source_authority='explicit_user_instruction', and "
+            "verification_status='user_confirmed'. Do not include based_on_ids. "
+            "Then answer exactly: PULSARA_MEMORY_DECISION_OK"
+        ),
+        "user_input": "Remember this project decision: use type-specific remember tools instead of propose_memory.",
+    },
+)
+
+
+async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> dict:
     tmp_path.mkdir(parents=True, exist_ok=True)
     settings = _load_settings_for_real_llm()
     graph_id = f"graph:real-llm/{uuid4().hex}"
@@ -592,45 +690,47 @@ async def _run_real_agent_propose_memory_rollout(tmp_path: Path) -> dict:
         durable=True,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
-        system_prompt=(
-            "You are validating the durable-memory producer. "
-            "The user is stating a durable preference. "
-            "Call the propose_memory tool exactly once with kind='Preference', a clear "
-            "statement of the preference, scope='ctx:user', "
-            "source_authority='explicit_user_instruction', and "
-            "verification_status='user_confirmed'. "
-            "For kind='Preference', omit applies_when, do_not_apply_when, and based_on_ids entirely; "
-            "do not send empty strings or empty arrays for fields that do not apply. "
-            "Then answer with exactly: PULSARA_MEMORY_OK"
-        ),
+        system_prompt=case["system_prompt"],
         graph_id=graph_id,
     )
     runtime_session = wiring.runtime_wiring.runtime_session
     timeline_blob_prefix: str | None = None
     try:
-        result = await wiring.agent_runtime.run_task(
-            "Going forward I always want concise summaries. Remember that preference."
-        )
+        result = await wiring.agent_runtime.run_task(case["user_input"])
         timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
         events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
         tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        tool_result_events = [event for event in events if isinstance(event, ToolResultStartEvent)]
+        memory_results = [event for event in events if isinstance(event, MemoryWriteResultEvent)]
+        memory_failures = [event for event in events if isinstance(event, MemoryWriteFailedEvent)]
         errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
-        memory_node_count = sum(
-            len(wiring.runtime_wiring.graph.find_by_type(node_type, graph_id=graph_id))
-            for node_type in _MEMORY_NODE_TYPES
+        target_memory_node_count = len(
+            wiring.runtime_wiring.graph.find_by_type(
+                _MEMORY_NODE_BY_TYPE[case["memory_type"]],
+                graph_id=graph_id,
+            )
         )
         return {
-            "label": "durable_propose_memory",
+            "label": case["label"],
+            "target_tool": case["tool_name"],
+            "target_memory_type": case["memory_type"],
             "status": result.status.value,
             "final_text": result.final_text.strip(),
             "event_type_names": [type(event).__name__ for event in events],
             "tool_call_count": len(tool_call_events),
             "tool_names": [event.tool_call_name for event in tool_call_events],
-            "tool_result_count": len(tool_call_events),
+            "tool_result_count": len(tool_result_events),
             "timeline_status": None,
             "timeline_item_kinds": [],
             "postgres_event_count": len(events),
-            "memory_node_count": memory_node_count,
+            "target_memory_node_count": target_memory_node_count,
+            "memory_node_count": sum(
+                len(wiring.runtime_wiring.graph.find_by_type(node_type, graph_id=graph_id))
+                for node_type in _MEMORY_NODE_TYPES
+            ),
+            "memory_result_types": [event.memory_type for event in memory_results],
+            "memory_statuses": [event.status.value for event in memory_results],
+            "memory_failure_types": [event.error_type for event in memory_failures],
             "errors": errors,
         }
     finally:

@@ -763,6 +763,7 @@ def test_agent_runtime_accepts_memory_hook_without_proposal_sink_property(tmp_pa
 
     assert result.status is LoopStatus.FINISHED
     assert "propose_memory" not in agent.tool_executor.registry.names()
+    assert not any(name.startswith("remember_") for name in agent.tool_executor.registry.names())
 
 
 def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) -> None:
