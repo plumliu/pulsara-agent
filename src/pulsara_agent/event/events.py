@@ -57,6 +57,8 @@ class EventType(StrEnum):
     MEMORY_CANDIDATE_PROPOSED = "MEMORY_CANDIDATE_PROPOSED"
     MEMORY_WRITE_RESULT = "MEMORY_WRITE_RESULT"
     MEMORY_WRITE_FAILED = "MEMORY_WRITE_FAILED"
+    MEMORY_REFLECTION_COMPLETED = "MEMORY_REFLECTION_COMPLETED"
+    MEMORY_REFLECTION_FAILED = "MEMORY_REFLECTION_FAILED"
     MEMORY_SUPERSEDED = "MEMORY_SUPERSEDED"
     MEMORY_MARKED_STALE = "MEMORY_MARKED_STALE"
     MEMORY_MAINTENANCE_PROPOSED = "MEMORY_MAINTENANCE_PROPOSED"
@@ -316,6 +318,33 @@ class MemoryWriteFailedEvent(EventBase):
     message: str
 
 
+class MemoryReflectionCompletedEvent(EventBase):
+    type: Literal[EventType.MEMORY_REFLECTION_COMPLETED] = EventType.MEMORY_REFLECTION_COMPLETED
+    reflection_id: str
+    trigger_reason: str
+    trigger_reasons: list[str] = Field(default_factory=list)
+    safe_point: str = ""
+    should_reflect: bool = True
+    decision_reason: str = ""
+    quoted_evidence: list[str] = Field(default_factory=list)
+    candidate_kinds: list[str] = Field(default_factory=list)
+    proposed_count: int
+    skipped_count: int
+    written_count: int
+    failed_count: int
+    summary: str = ""
+
+
+class MemoryReflectionFailedEvent(EventBase):
+    type: Literal[EventType.MEMORY_REFLECTION_FAILED] = EventType.MEMORY_REFLECTION_FAILED
+    reflection_id: str
+    trigger_reason: str
+    trigger_reasons: list[str] = Field(default_factory=list)
+    safe_point: str = ""
+    error_type: str
+    message: str
+
+
 class MemorySupersededEvent(MemoryEventBase):
     type: Literal[EventType.MEMORY_SUPERSEDED] = EventType.MEMORY_SUPERSEDED
     memory_id: str
@@ -410,6 +439,8 @@ AgentEvent: TypeAlias = (
     | MemoryCandidateProposedEvent
     | MemoryWriteResultEvent
     | MemoryWriteFailedEvent
+    | MemoryReflectionCompletedEvent
+    | MemoryReflectionFailedEvent
     | MemorySupersededEvent
     | MemoryMarkedStaleEvent
     | MemoryMaintenanceProposedEvent

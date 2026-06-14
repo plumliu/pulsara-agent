@@ -2,12 +2,15 @@
 
 from pulsara_agent.event.candidates import (
     ActionBoundaryCandidate,
+    CandidatePayload,
     ClaimCandidate,
     DecisionCandidate,
+    InvalidAttemptPayload,
     MemoryCandidate,
     MemoryCandidateBase,
     ObservationCandidate,
     PreferenceCandidate,
+    ValidCandidatePayload,
 )
 from pulsara_agent.event.events import (
     AgentEvent,
@@ -27,6 +30,8 @@ from pulsara_agent.event.events import (
     MemoryMaintenanceProposedEvent,
     MemoryMaintenanceRejectedEvent,
     MemoryMarkedStaleEvent,
+    MemoryReflectionCompletedEvent,
+    MemoryReflectionFailedEvent,
     MemorySupersededEvent,
     MemoryWriteFailedEvent,
     MemoryWriteResultEvent,
@@ -60,6 +65,7 @@ from pulsara_agent.event.events import (
 __all__ = [
     "AgentEvent",
     "ActionBoundaryCandidate",
+    "CandidatePayload",
     "ClaimCandidate",
     "ConfirmResult",
     "CustomEvent",
@@ -67,6 +73,7 @@ __all__ = [
     "DataBlockEndEvent",
     "DataBlockStartEvent",
     "DecisionCandidate",
+    "InvalidAttemptPayload",
     "EventBase",
     "EventContext",
     "EventType",
@@ -80,6 +87,8 @@ __all__ = [
     "MemoryMaintenanceProposedEvent",
     "MemoryMaintenanceRejectedEvent",
     "MemoryMarkedStaleEvent",
+    "MemoryReflectionCompletedEvent",
+    "MemoryReflectionFailedEvent",
     "MemorySupersededEvent",
     "MemoryWriteFailedEvent",
     "MemoryWriteResultEvent",
@@ -87,6 +96,7 @@ __all__ = [
     "ModelCallStartEvent",
     "ObservationCandidate",
     "PreferenceCandidate",
+    "ValidCandidatePayload",
     "ProjectionFailedEvent",
     "ProjectionReadyEvent",
     "ProjectionRequestedEvent",

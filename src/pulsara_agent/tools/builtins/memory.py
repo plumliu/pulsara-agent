@@ -18,12 +18,15 @@ from pulsara_agent.event.candidates import (
     ActionBoundaryCandidate,
     ClaimCandidate,
     DecisionCandidate,
+    InvalidAttemptPayload,
     MemoryCandidateBase,
     ObservationCandidate,
     PreferenceCandidate,
+    ValidCandidatePayload,
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
+from pulsara_agent.memory.candidate_pool import CandidateOrigin, CandidatePoolProposal
 from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import json_text, object_schema
@@ -126,13 +129,31 @@ class _RememberMemoryTool:
         try:
             candidate = self.candidate_type.model_validate(payload)
         except ValidationError as exc:
+            self.sink.deposit(
+                CandidatePoolProposal(
+                    payload=InvalidAttemptPayload(
+                        attempted_tool_name=call.name,
+                        attempted_kind=self.kind,
+                        raw_arguments=dict(call.arguments),
+                        validation_error=str(exc),
+                    ),
+                    origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                    source_tool_call_id=call.id,
+                )
+            )
             return ToolExecutionResult(
                 call_id=call.id,
                 tool_name=call.name,
                 status=ToolResultState.ERROR,
                 output=f"[INVALID_CANDIDATE] {exc.error_count()} validation error(s): {exc}",
             )
-        self.sink.deposit(candidate)
+        self.sink.deposit(
+            CandidatePoolProposal(
+                payload=ValidCandidatePayload(candidate=candidate),
+                origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                source_tool_call_id=call.id,
+            )
+        )
         return ToolExecutionResult(
             call_id=call.id,
             tool_name=call.name,

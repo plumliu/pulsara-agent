@@ -1,9 +1,9 @@
 """Tests for the durable-memory producer: sink, DurableMemoryHooks, remember_*.
 
-The producer bridges the agent loop to the durable-memory write path. A tool
-deposits a typed candidate into a sink during tool execution; a hook drains the
-sink at an agent-loop-safe point and routes each candidate through
-MemoryWriteService.submit, returning the events for AgentRuntime to emit.
+The producer bridges the agent loop to the durable-memory candidate pool. A
+tool deposits a candidate-pool proposal into a sink during tool execution; a
+hook drains the sink at an agent-loop-safe point and appends the envelope to
+the durable pool. Canonical memory writes are owned by governance.
 """
 
 from __future__ import annotations
@@ -29,7 +29,9 @@ from pulsara_agent.event import (
 from pulsara_agent.event.candidates import (
     ActionBoundaryCandidate,
     DecisionCandidate,
+    InvalidAttemptPayload,
     PreferenceCandidate,
+    ValidCandidatePayload,
 )
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
@@ -37,6 +39,12 @@ from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.archive import InMemoryArchiveStore
 from pulsara_agent.memory.durable_hooks import DurableMemoryHooks
+from pulsara_agent.memory.candidate_pool import (
+    CandidateOrigin,
+    CandidatePoolProposal,
+    InMemoryCandidatePool,
+)
+from pulsara_agent.memory.governance import MemoryGovernanceExecutor
 from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.memory.write_service import MemoryWriteService
@@ -79,12 +87,16 @@ def _preference(candidate_id: str = "candidate:pref") -> PreferenceCandidate:
 
 def test_sink_drain_returns_and_clears() -> None:
     sink = MemoryProposalSink()
-    sink.deposit(_preference("candidate:a"))
-    sink.deposit(_preference("candidate:b"))
+    sink.deposit(_proposal(_preference("candidate:a")))
+    sink.deposit(_proposal(_preference("candidate:b")))
 
     assert sink.pending_count() == 2
     drained = sink.drain()
-    assert [c.candidate_id for c in drained] == ["candidate:a", "candidate:b"]
+    assert [
+        proposal.payload.candidate.candidate_id
+        for proposal in drained
+        if isinstance(proposal.payload, ValidCandidatePayload)
+    ] == ["candidate:a", "candidate:b"]
     assert sink.pending_count() == 0
     assert sink.drain() == []
 
@@ -92,29 +104,28 @@ def test_sink_drain_returns_and_clears() -> None:
 # --- DurableMemoryHooks ---------------------------------------------------
 
 
-def test_durable_hooks_drain_submits_and_returns_events() -> None:
+def test_durable_hooks_drain_appends_candidates_without_writing_graph() -> None:
     graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
     sink = MemoryProposalSink()
-    sink.deposit(_preference())
-    hooks = DurableMemoryHooks(service=_service_on(graph), sink=sink)
+    sink.deposit(_proposal(_preference()))
+    hooks = DurableMemoryHooks(candidate_pool=pool, sink=sink)
     state = LoopState(session_id="runtime:test")
 
     events = asyncio.run(hooks.after_tool_results(state, []))
 
-    assert [event.type for event in events] == [
-        EventType.MEMORY_CANDIDATE_PROPOSED,
-        EventType.MEMORY_WRITE_RESULT,
-    ]
-    result = events[1]
-    assert result.candidate_id == "candidate:pref"
-    assert result.memory_type == "Preference"
-    assert graph.has_jsonld(result.memory_id)
+    assert events == []
+    pending = pool.list_pending()
+    assert len(pending) == 1
+    assert isinstance(pending[0].payload, ValidCandidatePayload)
+    assert pending[0].payload.candidate.candidate_id == "candidate:pref"
+    assert graph.find_by_type(memory.PREFERENCE) == []
     # Drained: a second drain at session end produces nothing.
     assert asyncio.run(hooks.on_session_end(state)) == []
 
 
 def test_durable_hooks_empty_sink_returns_no_events() -> None:
-    hooks = DurableMemoryHooks(service=_service_on(InMemoryGraphStore()), sink=MemoryProposalSink())
+    hooks = DurableMemoryHooks(candidate_pool=InMemoryCandidatePool(), sink=MemoryProposalSink())
     state = LoopState(session_id="runtime:test")
 
     assert asyncio.run(hooks.after_model_reply(state, None)) == []
@@ -123,16 +134,19 @@ def test_durable_hooks_empty_sink_returns_no_events() -> None:
 
 
 def test_durable_hooks_event_context_comes_from_loop_state() -> None:
+    pool = InMemoryCandidatePool()
     sink = MemoryProposalSink()
-    sink.deposit(_preference())
-    hooks = DurableMemoryHooks(service=_service_on(InMemoryGraphStore()), sink=sink)
+    sink.deposit(_proposal(_preference()))
+    hooks = DurableMemoryHooks(candidate_pool=pool, sink=sink)
     state = LoopState(session_id="runtime:test")
 
-    events = asyncio.run(hooks.after_tool_results(state, []))
+    asyncio.run(hooks.after_tool_results(state, []))
 
-    assert all(event.run_id == state.run_id for event in events)
-    assert all(event.turn_id == state.turn_id for event in events)
-    assert all(event.reply_id == state.reply_id for event in events)
+    candidate = pool.list_pending()[0]
+    assert candidate.source_run_id == state.run_id
+    assert candidate.source_turn_id == state.turn_id
+    assert candidate.source_reply_id == state.reply_id
+    assert candidate.source_session_id == state.session_id
 
 
 # --- Remember memory tools ------------------------------------------------
@@ -157,14 +171,18 @@ def test_remember_preference_tool_valid_deposits_candidate() -> None:
 
     assert result.status is ToolResultState.SUCCESS
     assert sink.pending_count() == 1
-    deposited = sink.drain()[0]
+    proposal = sink.drain()[0]
+    assert proposal.origin is CandidateOrigin.MAIN_AGENT_TOOL
+    assert proposal.source_tool_call_id == "call:1"
+    assert isinstance(proposal.payload, ValidCandidatePayload)
+    deposited = proposal.payload.candidate
     assert isinstance(deposited, PreferenceCandidate)
     assert deposited.candidate_id.startswith("candidate:")
     assert deposited.kind == "Preference"
     assert json.loads(result.output)["status"] == "proposed"
 
 
-def test_remember_preference_tool_extra_field_errors_without_deposit() -> None:
+def test_remember_preference_tool_extra_field_errors_and_deposits_invalid_attempt() -> None:
     sink = MemoryProposalSink()
     tool = RememberPreferenceTool(sink=sink)
 
@@ -184,7 +202,12 @@ def test_remember_preference_tool_extra_field_errors_without_deposit() -> None:
 
     assert result.status is ToolResultState.ERROR
     assert "INVALID_CANDIDATE" in result.output
-    assert sink.pending_count() == 0
+    assert sink.pending_count() == 1
+    proposal = sink.drain()[0]
+    assert isinstance(proposal.payload, InvalidAttemptPayload)
+    assert proposal.payload.attempted_tool_name == "remember_preference"
+    assert proposal.payload.attempted_kind == "Preference"
+    assert proposal.payload.raw_arguments["applies_when"] == "misplaced action-boundary field"
 
 
 def test_remember_action_boundary_tool_missing_condition_errors() -> None:
@@ -206,7 +229,10 @@ def test_remember_action_boundary_tool_missing_condition_errors() -> None:
     )
 
     assert result.status is ToolResultState.ERROR
-    assert sink.pending_count() == 0
+    assert sink.pending_count() == 1
+    proposal = sink.drain()[0]
+    assert isinstance(proposal.payload, InvalidAttemptPayload)
+    assert proposal.payload.attempted_kind == "ActionBoundary"
 
 
 def test_remember_action_boundary_tool_valid_deposits_candidate() -> None:
@@ -229,7 +255,9 @@ def test_remember_action_boundary_tool_valid_deposits_candidate() -> None:
     )
 
     assert result.status is ToolResultState.SUCCESS
-    deposited = sink.drain()[0]
+    proposal = sink.drain()[0]
+    assert isinstance(proposal.payload, ValidCandidatePayload)
+    deposited = proposal.payload.candidate
     assert isinstance(deposited, ActionBoundaryCandidate)
     assert deposited.applies_when == "branch is main"
     assert deposited.do_not_apply_when == "user explicitly authorizes"
@@ -254,7 +282,9 @@ def test_remember_decision_tool_supports_based_on_ids() -> None:
     )
 
     assert result.status is ToolResultState.SUCCESS
-    deposited = sink.drain()[0]
+    proposal = sink.drain()[0]
+    assert isinstance(proposal.payload, ValidCandidatePayload)
+    deposited = proposal.payload.candidate
     assert isinstance(deposited, DecisionCandidate)
     assert deposited.based_on_ids == ("claim:one",)
 
@@ -318,8 +348,9 @@ def _make_llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
 def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) -> None:
     runtime_session = RuntimeSession(tmp_path)
     graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
     hooks = DurableMemoryHooks(
-        service=_service_on(graph),
+        candidate_pool=pool,
         sink=runtime_session.memory_proposal_sink,
     )
     transport = _ScriptedTransport(
@@ -352,9 +383,23 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
     events = asyncio.run(_collect(agent, "Remember that I prefer concise summaries."))
 
     event_types = [event.type for event in events]
-    assert EventType.MEMORY_CANDIDATE_PROPOSED in event_types
-    assert EventType.MEMORY_WRITE_RESULT in event_types
-    result = next(e for e in events if e.type is EventType.MEMORY_WRITE_RESULT)
+    assert EventType.MEMORY_CANDIDATE_PROPOSED not in event_types
+    assert EventType.MEMORY_WRITE_RESULT not in event_types
+    pending = pool.list_pending()
+    assert len(pending) == 1
+    assert isinstance(pending[0].payload, ValidCandidatePayload)
+    assert pending[0].payload.candidate.kind == "Preference"
+    assert pending[0].user_quote == "Remember that I prefer concise summaries."
+    assert graph.find_by_type(memory.PREFERENCE) == []
+    governance = MemoryGovernanceExecutor(
+        candidate_pool=pool,
+        memory_write_service=_service_on(graph),
+        event_log=runtime_session.event_log,
+        graph=graph,
+        runtime_session_id=runtime_session.runtime_session_id,
+    )
+    governance_results = governance.submit_pending_as_is()
+    result = next(e for e in governance_results[0].events if e.type is EventType.MEMORY_WRITE_RESULT)
     assert result.memory_type == "Preference"
     assert result.status is memory.NodeStatus.ACTIVE
     assert graph.has_jsonld(result.memory_id)
@@ -405,8 +450,9 @@ def test_default_agent_runtime_does_not_expose_memory_write_tools(tmp_path: Path
 def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -> None:
     runtime_session = RuntimeSession(tmp_path)
     graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
     hooks = DurableMemoryHooks(
-        service=_service_on(graph),
+        candidate_pool=pool,
         sink=runtime_session.memory_proposal_sink,
     )
     transport = _ScriptedTransport(
@@ -444,8 +490,18 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
     assert EventType.MEMORY_WRITE_RESULT not in event_types
     assert EventType.MEMORY_WRITE_FAILED not in event_types
     assert runtime_session.memory_proposal_sink.pending_count() == 0
+    pending = pool.list_pending()
+    assert len(pending) == 1
+    assert isinstance(pending[0].payload, InvalidAttemptPayload)
     assert graph.find_by_type(memory.PREFERENCE) == []
 
 
 async def _collect(agent: AgentRuntime, user_input: str) -> list[AgentEvent]:
     return [event async for event in agent.stream_task(user_input)]
+
+
+def _proposal(candidate: PreferenceCandidate) -> CandidatePoolProposal:
+    return CandidatePoolProposal(
+        payload=ValidCandidatePayload(candidate=candidate),
+        origin=CandidateOrigin.MAIN_AGENT_TOOL,
+    )

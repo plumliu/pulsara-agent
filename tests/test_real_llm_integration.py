@@ -9,6 +9,7 @@ import pytest
 
 from pulsara_agent.event import (
     EventContext,
+    MemoryReflectionFailedEvent,
     MemoryWriteFailedEvent,
     MemoryWriteResultEvent,
     ModelCallEndEvent,
@@ -22,19 +23,29 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
     ToolResultStartEvent,
 )
+from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
-    PostgresArtifactStore,
+    InMemoryArchiveStore,
+    InMemoryCandidatePool,
+    MemoryGovernanceEngine,
+    MemoryGovernanceExecutor,
+    MemoryGovernanceOptions,
     RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
 )
-from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock
+from pulsara_agent.memory.candidate_pool import CandidateOrigin, PooledMemoryCandidate
+from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.reflection import MemoryReflectionEngine, MemoryReflectionHint, MemoryReflectionOptions
+from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserMsg
 from pulsara_agent.ontology import memory, runtime as rt
-from pulsara_agent.runtime import AgentRuntime, RuntimeSession, build_agent_runtime_wiring
+from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession, build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -178,12 +189,50 @@ def test_real_llm_trajectory_suite_covers_narrow_memory_tools(tmp_path):
     ]
     for trajectory in memory_trajectories:
         assert trajectory["tool_names"].count(trajectory["target_tool"]) == 1
-        assert "MemoryCandidateProposedEvent" in trajectory["event_type_names"]
-        assert "MemoryWriteResultEvent" in trajectory["event_type_names"]
+        assert "MemoryCandidateProposedEvent" not in trajectory["source_event_type_names"]
+        assert "MemoryWriteResultEvent" not in trajectory["source_event_type_names"]
+        assert "MemoryCandidateProposedEvent" in trajectory["governance_event_type_names"]
+        assert "MemoryWriteResultEvent" in trajectory["governance_event_type_names"]
         assert "MemoryWriteFailedEvent" not in trajectory["event_type_names"]
+        assert trajectory["candidate_pool_pending_before_governance"] >= 1
+        assert trajectory["candidate_pool_pending_after_governance"] == 0
         assert trajectory["memory_result_types"] == [trajectory["target_memory_type"]]
         assert trajectory["memory_statuses"] == ["active"]
         assert trajectory["target_memory_node_count"] >= 1
+
+
+def test_real_flash_memory_reflection_queues_preference_and_governance_writes_it():
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_flash_memory_reflection_smoke())
+
+    assert result["failed_events"] == []
+    assert result["event_type_names"] == ["MemoryReflectionCompletedEvent"]
+    assert "MemoryWriteResultEvent" in result["governance_event_type_names"]
+    assert result["candidate_pool_pending_after_reflection"] == 1
+    assert result["candidate_pool_pending_after_governance"] == 0
+    assert result["memory_result_types"] == ["Preference"]
+    assert result["memory_statuses"] == ["active"]
+    assert result["preference_count"] == 1
+
+
+def test_real_flash_memory_governance_engine_writes_preference():
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_flash_memory_governance_smoke())
+
+    assert result["error_type"] is None
+    assert result["decision_kinds"] == ["submit_as_is"]
+    assert result["governance_event_type_names"] == [
+        "MemoryCandidateProposedEvent",
+        "MemoryWriteResultEvent",
+    ]
+    assert result["candidate_pool_pending_after_governance"] == 0
+    assert result["memory_result_types"] == ["Preference"]
+    assert result["memory_statuses"] == ["active"]
+    assert result["preference_count"] == 1
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -350,7 +399,7 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
     runtime_session = RuntimeSession(tmp_path)
     graph = InMemoryGraphStore()
-    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
+    archive = InMemoryArchiveStore()
     runtime_session.hook_manager.register_event(
         None,
         RunTimelinePersistenceHook(
@@ -371,29 +420,23 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
         ),
     )
 
-    timeline_blob_prefix: str | None = None
-    try:
-        result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
-        timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
-        records = graph.find_by_type(rt.RUN_TIMELINE)
-        timeline = load_run_timeline(
-            graph=graph,
-            archive=archive,
-            run_id=result.state.run_id,
-            runtime_session_id=runtime_session.runtime_session_id,
-        )
-        summary = summarize_run_timeline(timeline)
-        return {
-            "status": result.status.value,
-            "timeline_records": len(records),
-            "timeline_status": summary.status,
-            "timeline_item_kinds": [item.kind for item in timeline.items],
-            "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
-            "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
-        }
-    finally:
-        if timeline_blob_prefix is not None:
-            _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
+    result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
+    records = graph.find_by_type(rt.RUN_TIMELINE)
+    timeline = load_run_timeline(
+        graph=graph,
+        archive=archive,
+        run_id=result.state.run_id,
+        runtime_session_id=runtime_session.runtime_session_id,
+    )
+    summary = summarize_run_timeline(timeline)
+    return {
+        "status": result.status.value,
+        "timeline_records": len(records),
+        "timeline_status": summary.status,
+        "timeline_item_kinds": [item.kind for item in timeline.items],
+        "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
+        "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
+    }
 
 
 async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> dict:
@@ -695,14 +738,21 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
     )
     runtime_session = wiring.runtime_wiring.runtime_session
     timeline_blob_prefix: str | None = None
+    governance_batch_id = f"governance:real-llm:{uuid4().hex}"
     try:
         result = await wiring.agent_runtime.run_task(case["user_input"])
         timeline_blob_prefix = f"timeline:{runtime_session.runtime_session_id}:{result.state.run_id}:"
         events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
         tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
         tool_result_events = [event for event in events if isinstance(event, ToolResultStartEvent)]
-        memory_results = [event for event in events if isinstance(event, MemoryWriteResultEvent)]
-        memory_failures = [event for event in events if isinstance(event, MemoryWriteFailedEvent)]
+        pending_before_governance = wiring.runtime_wiring.candidate_pool.list_pending()
+        governance_results = wiring.runtime_wiring.memory_governance_executor.submit_pending_as_is(
+            governance_batch_id=governance_batch_id
+        )
+        governance_events = [event for governance in governance_results for event in governance.events]
+        all_events = [*events, *governance_events]
+        memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
+        memory_failures = [event for event in governance_events if isinstance(event, MemoryWriteFailedEvent)]
         errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
         target_memory_node_count = len(
             wiring.runtime_wiring.graph.find_by_type(
@@ -716,7 +766,9 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
             "target_memory_type": case["memory_type"],
             "status": result.status.value,
             "final_text": result.final_text.strip(),
-            "event_type_names": [type(event).__name__ for event in events],
+            "event_type_names": [type(event).__name__ for event in all_events],
+            "source_event_type_names": [type(event).__name__ for event in events],
+            "governance_event_type_names": [type(event).__name__ for event in governance_events],
             "tool_call_count": len(tool_call_events),
             "tool_names": [event.tool_call_name for event in tool_call_events],
             "tool_result_count": len(tool_result_events),
@@ -724,6 +776,8 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
             "timeline_item_kinds": [],
             "postgres_event_count": len(events),
             "target_memory_node_count": target_memory_node_count,
+            "candidate_pool_pending_before_governance": len(pending_before_governance),
+            "candidate_pool_pending_after_governance": len(wiring.runtime_wiring.candidate_pool.list_pending()),
             "memory_node_count": sum(
                 len(wiring.runtime_wiring.graph.find_by_type(node_type, graph_id=graph_id))
                 for node_type in _MEMORY_NODE_TYPES
@@ -734,6 +788,7 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
             "errors": errors,
         }
     finally:
+        _delete_postgres_governance_decisions(settings.storage.postgres_dsn, [governance_batch_id])
         wiring.runtime_wiring.graph.delete_graph(graph_id)
         if timeline_blob_prefix is not None:
             _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
@@ -812,6 +867,127 @@ async def _collect_real_events(
     }
 
 
+async def _run_real_flash_memory_reflection_smoke() -> dict:
+    settings = _load_settings_for_real_llm()
+    graph = InMemoryGraphStore()
+    candidate_pool = InMemoryCandidatePool()
+    event_log = InMemoryEventLog()
+    ledger = ExecutionEvidenceLedger(
+        graph=graph,
+        archive=InMemoryArchiveStore(),
+        gate=MemoryWriteGate(),
+    )
+    engine = MemoryReflectionEngine(
+        llm_runtime=build_llm_runtime(settings.llm),
+        candidate_pool=candidate_pool,
+        graph=graph,
+        options=MemoryReflectionOptions(llm_options=LLMOptions(temperature=0, max_output_tokens=512)),
+    )
+    state = LoopState(session_id="runtime:real-reflection")
+    state.messages.append(
+        UserMsg(
+            name="user",
+            content="Please remember this durable preference: the user prefers concise summaries.",
+        )
+    )
+
+    events = await engine.reflect(
+        state=state,
+        event_store=event_log,
+        trigger_reasons=["cheap_memory_hint"],
+        cheap_hints=[
+            MemoryReflectionHint(
+                source="cheap_string_match",
+                reason="real LLM smoke matched explicit remember wording",
+                signal="remember",
+                excerpt="Please remember this durable preference: the user prefers concise summaries.",
+            )
+        ],
+        safe_point="on_session_end",
+    )
+    pending_after_reflection = len(candidate_pool.list_pending())
+    governance = MemoryGovernanceExecutor(
+        candidate_pool=candidate_pool,
+        memory_write_service=MemoryWriteService(ledger=ledger),
+        event_log=event_log,
+        graph=graph,
+        runtime_session_id=state.session_id,
+    )
+    governance_results = governance.submit_pending_as_is(governance_batch_id="governance:real-reflection")
+    governance_events = [event for result in governance_results for event in result.events]
+    memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
+    failures = [event for event in events if isinstance(event, MemoryReflectionFailedEvent)]
+    return {
+        "event_type_names": [type(event).__name__ for event in events],
+        "governance_event_type_names": [type(event).__name__ for event in governance_events],
+        "candidate_pool_pending_after_reflection": pending_after_reflection,
+        "candidate_pool_pending_after_governance": len(candidate_pool.list_pending()),
+        "memory_result_types": [event.memory_type for event in memory_results],
+        "memory_statuses": [event.status.value for event in memory_results],
+        "failed_events": [event.message for event in failures],
+        "preference_count": len(graph.find_by_type(memory.PREFERENCE)),
+    }
+
+
+async def _run_real_flash_memory_governance_smoke() -> dict:
+    settings = _load_settings_for_real_llm()
+    graph = InMemoryGraphStore()
+    candidate_pool = InMemoryCandidatePool()
+    event_log = InMemoryEventLog()
+    ledger = ExecutionEvidenceLedger(
+        graph=graph,
+        archive=InMemoryArchiveStore(),
+        gate=MemoryWriteGate(),
+    )
+    candidate_pool.append_candidate(
+        PooledMemoryCandidate(
+            payload=ValidCandidatePayload(
+                candidate=PreferenceCandidate(
+                    candidate_id="candidate:real-governance-preference",
+                    statement="The user prefers concise summaries.",
+                    scope="ctx:user",
+                    source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                    verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                )
+            ),
+            origin=CandidateOrigin.MAIN_AGENT_TOOL,
+            source_session_id="runtime:real-governance",
+            source_run_id="run:real-governance-source",
+            source_turn_id="turn:real-governance-source",
+            source_reply_id="reply:real-governance-source",
+        )
+    )
+    executor = MemoryGovernanceExecutor(
+        candidate_pool=candidate_pool,
+        memory_write_service=MemoryWriteService(ledger=ledger),
+        event_log=event_log,
+        graph=graph,
+        runtime_session_id="runtime:real-governance",
+    )
+    engine = MemoryGovernanceEngine(
+        llm_runtime=build_llm_runtime(settings.llm),
+        executor=executor,
+        options=MemoryGovernanceOptions(llm_options=LLMOptions(temperature=0, max_output_tokens=512)),
+    )
+
+    result = await engine.run_pending(
+        trigger_reason="real_llm_governance_smoke",
+        governance_batch_id="governance:real-governance",
+    )
+    governance_events = [event for applied in result.applied for event in applied.events]
+    memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
+    return {
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+        "decision_kinds": [decision.kind for decision in result.decisions],
+        "governance_event_type_names": [type(event).__name__ for event in governance_events],
+        "candidate_pool_pending_after_governance": len(candidate_pool.list_pending()),
+        "memory_result_types": [event.memory_type for event in memory_results],
+        "memory_statuses": [event.status.value for event in memory_results],
+        "preference_count": len(graph.find_by_type(memory.PREFERENCE)),
+    }
+
+
 def _summarize_collected_result(result: dict) -> dict:
     return {
         "event_type_names": [type(event).__name__ for event in result["events"]],
@@ -850,6 +1026,20 @@ def _delete_postgres_artifacts_with_prefix(dsn: str, blob_id_prefix: str) -> Non
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from artifacts where id like %s", (f"{blob_id_prefix}%",))
+
+
+def _delete_postgres_governance_decisions(dsn: str, governance_batch_ids: list[str]) -> None:
+    if not governance_batch_ids:
+        return
+
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "delete from memory_governance_decisions where governance_batch_id = any(%s)",
+                (governance_batch_ids,),
+            )
 
 
 def _artifact_id_from_node_ref(node_id: str) -> str:

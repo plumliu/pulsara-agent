@@ -11,7 +11,7 @@ schema boundary instead of deferring them to runtime dispatch.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -59,4 +59,27 @@ MemoryCandidate = Annotated[
     | ActionBoundaryCandidate
     | DecisionCandidate,
     Field(discriminator="kind"),
+]
+
+
+class ValidCandidatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payload_kind: Literal["valid"] = "valid"
+    candidate: MemoryCandidate
+
+
+class InvalidAttemptPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payload_kind: Literal["invalid"] = "invalid"
+    attempted_tool_name: str
+    attempted_kind: str | None = None
+    raw_arguments: dict[str, Any]
+    validation_error: str
+
+
+CandidatePayload = Annotated[
+    ValidCandidatePayload | InvalidAttemptPayload,
+    Field(discriminator="payload_kind"),
 ]
