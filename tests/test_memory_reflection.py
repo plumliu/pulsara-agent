@@ -21,7 +21,7 @@ from pulsara_agent.event import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
-from pulsara_agent.event.candidates import ValidCandidatePayload
+from pulsara_agent.event.candidates import InvalidAttemptPayload, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
@@ -236,6 +236,44 @@ def test_agent_runtime_main_agent_memory_attempt_suppresses_cheap_hint_reflectio
 
     assert not any(isinstance(event, MemoryReflectionCompletedEvent) for event in events)
     assert len(pool.list_pending()) == 1
+    assert graph.find_by_type(memory.PREFERENCE) == []
+    assert len(transport.contexts) == 2
+
+
+def test_agent_runtime_finalized_invalid_memory_attempt_suppresses_cheap_hint_reflection(tmp_path: Path) -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    transport = _ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bad",
+                        "name": "remember_preference",
+                        "arguments": json.dumps(
+                            {
+                                "statement": "The user prefers concise summaries",
+                                "scope": "ctx:user",
+                                "applies_when": "misplaced action-boundary field",
+                                "source_authority": "explicit_user_instruction",
+                                "verification_status": "user_confirmed",
+                            }
+                        ),
+                    }
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = _agent_with_reflection(tmp_path, graph=graph, pool=pool, transport=transport)
+
+    events = asyncio.run(_collect(agent, "Remember that I prefer concise summaries."))
+
+    assert not any(isinstance(event, MemoryReflectionCompletedEvent) for event in events)
+    pending = pool.list_pending()
+    assert len(pending) == 1
+    assert isinstance(pending[0].payload, InvalidAttemptPayload)
+    assert pending[0].source_tool_call_id == "call:bad"
     assert graph.find_by_type(memory.PREFERENCE) == []
     assert len(transport.contexts) == 2
 

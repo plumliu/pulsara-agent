@@ -47,6 +47,7 @@ from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserM
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession, build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.tools.builtins.memory import RememberPreferenceTool
 
 
 pytestmark = pytest.mark.real_llm
@@ -215,6 +216,22 @@ def test_real_flash_memory_reflection_queues_preference_and_governance_writes_it
     assert result["memory_result_types"] == ["Preference"]
     assert result["memory_statuses"] == ["active"]
     assert result["preference_count"] == 1
+
+
+def test_real_flash_model_retries_memory_tool_after_invalid_json():
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_flash_memory_retry_json_smoke())
+
+    print("\nREAL_LLM_MEMORY_RETRY_JSON=" + json.dumps(result, ensure_ascii=True, indent=2))
+    assert result["errors"] == []
+    assert result["tool_names"] == ["remember_preference"]
+    assert result["tool_arguments"]["statement"] == "The user prefers compact status updates"
+    assert result["tool_arguments"]["scope"] == "ctx:user"
+    assert result["tool_arguments"]["source_authority"] == "explicit_user_instruction"
+    assert result["tool_arguments"]["verification_status"] == "user_confirmed"
+    assert "applies_when" not in result["tool_arguments"]
 
 
 def test_real_flash_memory_governance_engine_writes_preference():
@@ -926,6 +943,76 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
         "memory_statuses": [event.status.value for event in memory_results],
         "failed_events": [event.message for event in failures],
         "preference_count": len(graph.find_by_type(memory.PREFERENCE)),
+    }
+
+
+async def _run_real_flash_memory_retry_json_smoke() -> dict:
+    retry_error = {
+        "status": "invalid_candidate",
+        "retry_allowed": True,
+        "retry_count": 1,
+        "retry_limit": 3,
+        "remaining_retries": 2,
+        "message": (
+            "1 validation error for PreferenceCandidate\n"
+            "applies_when\n  Extra inputs are not permitted"
+        ),
+    }
+    context = LLMContext(
+        system_prompt=(
+            "You are validating memory-tool retry behavior. "
+            "The prior remember_preference call failed with a JSON tool result. "
+            "If the JSON says retry_allowed=true, retry the same memory intent exactly once. "
+            "Use only valid remember_preference arguments. Do not answer normally."
+        ),
+        messages=(
+            LLMMessage.user(
+                "Remember this preference: the user prefers compact status updates."
+            ),
+            LLMMessage.tool_call(
+                tool_call_id="call:invalid-memory",
+                name="remember_preference",
+                arguments=json.dumps(
+                    {
+                        "statement": "The user prefers compact status updates",
+                        "scope": "ctx:user",
+                        "source_authority": "explicit_user_instruction",
+                        "verification_status": "user_confirmed",
+                        "applies_when": "retry validation should fail",
+                    }
+                ),
+            ),
+            LLMMessage.tool_result(
+                json.dumps(retry_error, ensure_ascii=False),
+                tool_call_id="call:invalid-memory",
+            ),
+            LLMMessage.user(
+                "Continue from the invalid_candidate result. Retry only if retry_allowed is true."
+            ),
+        ),
+        tools=(
+            ToolSpec(
+                name=RememberPreferenceTool.name,
+                description=RememberPreferenceTool.description,
+                parameters=RememberPreferenceTool.parameters,
+            ),
+        ),
+    )
+    result = await _collect_real_events(
+        role=ModelRole.FLASH,
+        context=context,
+        options=LLMOptions(temperature=0, max_output_tokens=128),
+        label="real-memory-retry-json",
+    )
+    events = result["events"]
+    tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+    tool_call_arguments = "".join(event.delta for event in events if isinstance(event, ToolCallDeltaEvent))
+    return {
+        "tool_names": [event.tool_call_name for event in tool_call_events],
+        "tool_arguments": json.loads(tool_call_arguments) if tool_call_arguments else {},
+        "event_type_names": [type(event).__name__ for event in events],
+        "text": result["text"],
+        "errors": result["errors"],
     }
 
 

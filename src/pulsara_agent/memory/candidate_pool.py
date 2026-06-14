@@ -51,6 +51,7 @@ class CandidatePoolProposal(BaseModel):
     origin: CandidateOrigin
     source_tool_call_id: str | None = None
     user_quote: str | None = None
+    intent_fingerprint: str | None = None
 
     def to_pooled(self, *, source_session_id: str, source_run_id: str, source_turn_id: str, source_reply_id: str) -> PooledMemoryCandidate:
         return PooledMemoryCandidate(

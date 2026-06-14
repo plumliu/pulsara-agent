@@ -8,6 +8,8 @@ deposited into ``MemoryProposalSink`` for an agent-loop-safe drain.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, ClassVar
 from uuid import uuid4
@@ -27,7 +29,7 @@ from pulsara_agent.event.candidates import (
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
 from pulsara_agent.memory.candidate_pool import CandidateOrigin, CandidatePoolProposal
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.runtime.proposal_sink import MEMORY_INVALID_RETRY_LIMIT, MemoryProposalSink, MemoryRetryState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import json_text, object_schema
 
@@ -121,6 +123,11 @@ class _RememberMemoryTool:
     is_concurrency_safe: ClassVar[bool] = False
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
+        intent_fingerprint = _intent_fingerprint(
+            tool_name=call.name,
+            attempted_kind=self.kind,
+            raw_arguments=call.arguments,
+        )
         payload = {
             **call.arguments,
             "candidate_id": f"candidate:{uuid4().hex}",
@@ -129,7 +136,7 @@ class _RememberMemoryTool:
         try:
             candidate = self.candidate_type.model_validate(payload)
         except ValidationError as exc:
-            self.sink.deposit(
+            retry_state = self.sink.record_invalid(
                 CandidatePoolProposal(
                     payload=InvalidAttemptPayload(
                         attempted_tool_name=call.name,
@@ -139,20 +146,22 @@ class _RememberMemoryTool:
                     ),
                     origin=CandidateOrigin.MAIN_AGENT_TOOL,
                     source_tool_call_id=call.id,
-                )
+                ),
+                intent_fingerprint,
             )
             return ToolExecutionResult(
                 call_id=call.id,
                 tool_name=call.name,
                 status=ToolResultState.ERROR,
-                output=f"[INVALID_CANDIDATE] {exc.error_count()} validation error(s): {exc}",
+                output=json_text(_invalid_candidate_output(exc, retry_state)),
             )
-        self.sink.deposit(
+        self.sink.deposit_valid(
             CandidatePoolProposal(
                 payload=ValidCandidatePayload(candidate=candidate),
                 origin=CandidateOrigin.MAIN_AGENT_TOOL,
                 source_tool_call_id=call.id,
-            )
+            ),
+            intent_fingerprint,
         )
         return ToolExecutionResult(
             call_id=call.id,
@@ -163,9 +172,58 @@ class _RememberMemoryTool:
                     "candidate_id": candidate.candidate_id,
                     "kind": candidate.kind,
                     "status": "proposed",
+                    "retry_cleared": True,
                 }
             ),
         )
+
+
+def _intent_fingerprint(*, tool_name: str, attempted_kind: str, raw_arguments: dict[str, Any]) -> str:
+    statement = _normalize_intent_part(raw_arguments.get("statement"))
+    scope = _normalize_intent_part(raw_arguments.get("scope"))
+    if statement:
+        payload = {
+            "attempted_kind": attempted_kind,
+            "scope": scope,
+            "statement": statement,
+            "tool_name": tool_name,
+        }
+    else:
+        payload = {
+            "attempted_kind": attempted_kind,
+            "raw_arguments_hash": _stable_args_hash(raw_arguments),
+            "tool_name": tool_name,
+        }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"memory-intent:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _normalize_intent_part(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).casefold().split())
+
+
+def _stable_args_hash(raw_arguments: dict[str, Any]) -> str:
+    serialized = json.dumps(raw_arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+
+
+def _invalid_candidate_output(exc: ValidationError, retry_state: MemoryRetryState) -> dict[str, Any]:
+    message = f"{exc.error_count()} validation error(s): {exc}"
+    if not retry_state.retry_allowed:
+        message = (
+            f"{message}\nDo not retry this memory tool for the same memory intent in this run. "
+            "Continue the user task; memory governance will review the final failed attempt."
+        )
+    return {
+        "status": "invalid_candidate",
+        "retry_allowed": retry_state.retry_allowed,
+        "retry_count": retry_state.retry_count,
+        "retry_limit": MEMORY_INVALID_RETRY_LIMIT,
+        "remaining_retries": retry_state.remaining_retries,
+        "message": message,
+    }
 
 
 class RememberClaimTool(_RememberMemoryTool):

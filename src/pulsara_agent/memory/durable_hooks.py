@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog
-from pulsara_agent.memory.candidate_pool import CandidatePool, CandidateOrigin, PooledMemoryCandidate
+from pulsara_agent.memory.candidate_pool import (
+    CandidateOrigin,
+    CandidatePool,
+    CandidatePoolProposal,
+    PooledMemoryCandidate,
+)
 from pulsara_agent.memory.reflection import (
     MemoryReflectionEngine,
     MemoryReflectionHint,
@@ -46,10 +51,22 @@ class DurableMemoryHooks(NoopMemoryHooks):
 
     async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
         self._drain_to_pool(state)
+        self._finalize_invalid_to_pool(state)
         return []
 
     def _drain_to_pool(self, state: LoopState) -> list[PooledMemoryCandidate]:
-        proposals = self.sink.drain()
+        proposals = self.sink.drain_valid()
+        return self._append_to_pool(state, proposals)
+
+    def _finalize_invalid_to_pool(self, state: LoopState) -> list[PooledMemoryCandidate]:
+        proposals = self.sink.finalize_invalid_attempts()
+        return self._append_to_pool(state, proposals)
+
+    def _append_to_pool(
+        self,
+        state: LoopState,
+        proposals: list[CandidatePoolProposal],
+    ) -> list[PooledMemoryCandidate]:
         pooled: list[PooledMemoryCandidate] = []
         for proposal in proposals:
             candidate = proposal.to_pooled(
@@ -101,7 +118,8 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
 
     async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
         drained_candidates = self._drain_to_pool(state)
-        self._remember_attempts(state, drained_candidates)
+        finalized_invalid = self._finalize_invalid_to_pool(state)
+        self._remember_attempts(state, [*drained_candidates, *finalized_invalid])
         self._update_token_delta(state)
         try:
             return await self._maybe_reflect(

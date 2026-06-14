@@ -101,6 +101,57 @@ def test_sink_drain_returns_and_clears() -> None:
     assert sink.drain() == []
 
 
+def test_sink_stages_invalid_attempts_until_finalization() -> None:
+    sink = MemoryProposalSink()
+
+    first = sink.record_invalid(_invalid_proposal("call:1", statement="x"), "intent:one")
+    second = sink.record_invalid(_invalid_proposal("call:2", statement="x revised"), "intent:one")
+    third = sink.record_invalid(_invalid_proposal("call:3", statement="x final"), "intent:one")
+
+    assert first.retry_allowed is True
+    assert second.retry_allowed is True
+    assert third.retry_allowed is False
+    assert third.retry_count == 3
+    assert third.remaining_retries == 0
+    assert sink.pending_count() == 1
+    assert sink.drain_valid() == []
+    finalized = sink.finalize_invalid_attempts()
+    assert len(finalized) == 1
+    assert finalized[0].source_tool_call_id == "call:3"
+    assert isinstance(finalized[0].payload, InvalidAttemptPayload)
+    assert finalized[0].payload.raw_arguments["statement"] == "x final"
+    assert sink.pending_count() == 0
+
+
+def test_sink_valid_candidate_clears_staged_invalid_for_same_intent() -> None:
+    sink = MemoryProposalSink()
+    sink.record_invalid(_invalid_proposal("call:bad", statement="Prefer concise summaries."), "intent:pref")
+
+    sink.deposit_valid(_proposal(_preference("candidate:good")), "intent:pref")
+
+    assert sink.pending_count() == 1
+    drained = sink.drain_valid()
+    assert len(drained) == 1
+    assert isinstance(drained[0].payload, ValidCandidatePayload)
+    assert drained[0].payload.candidate.candidate_id == "candidate:good"
+    assert sink.finalize_invalid_attempts() == []
+
+
+def test_sink_counts_different_invalid_intents_independently() -> None:
+    sink = MemoryProposalSink()
+
+    first_a = sink.record_invalid(_invalid_proposal("call:a1", statement="a"), "intent:a")
+    first_b = sink.record_invalid(_invalid_proposal("call:b1", statement="b"), "intent:b")
+    second_a = sink.record_invalid(_invalid_proposal("call:a2", statement="a again"), "intent:a")
+
+    assert first_a.retry_count == 1
+    assert first_b.retry_count == 1
+    assert second_a.retry_count == 2
+    assert first_b.remaining_retries == 2
+    finalized = sink.finalize_invalid_attempts()
+    assert {proposal.source_tool_call_id for proposal in finalized} == {"call:a2", "call:b1"}
+
+
 # --- DurableMemoryHooks ---------------------------------------------------
 
 
@@ -122,6 +173,27 @@ def test_durable_hooks_drain_appends_candidates_without_writing_graph() -> None:
     assert graph.find_by_type(memory.PREFERENCE) == []
     # Drained: a second drain at session end produces nothing.
     assert asyncio.run(hooks.on_session_end(state)) == []
+
+
+def test_durable_hooks_delays_invalid_attempts_until_session_end() -> None:
+    pool = InMemoryCandidatePool()
+    sink = MemoryProposalSink()
+    sink.record_invalid(_invalid_proposal("call:1", statement="bad"), "intent:bad")
+    sink.record_invalid(_invalid_proposal("call:2", statement="last bad"), "intent:bad")
+    hooks = DurableMemoryHooks(candidate_pool=pool, sink=sink)
+    state = LoopState(session_id="runtime:test")
+
+    assert asyncio.run(hooks.after_tool_results(state, [])) == []
+    assert pool.list_pending() == []
+    assert sink.pending_count() == 1
+
+    assert asyncio.run(hooks.on_session_end(state)) == []
+    pending = pool.list_pending()
+    assert len(pending) == 1
+    assert isinstance(pending[0].payload, InvalidAttemptPayload)
+    assert pending[0].source_tool_call_id == "call:2"
+    assert pending[0].payload.raw_arguments["statement"] == "last bad"
+    assert sink.pending_count() == 0
 
 
 def test_durable_hooks_empty_sink_returns_no_events() -> None:
@@ -182,7 +254,7 @@ def test_remember_preference_tool_valid_deposits_candidate() -> None:
     assert json.loads(result.output)["status"] == "proposed"
 
 
-def test_remember_preference_tool_extra_field_errors_and_deposits_invalid_attempt() -> None:
+def test_remember_preference_tool_extra_field_errors_and_stages_invalid_attempt() -> None:
     sink = MemoryProposalSink()
     tool = RememberPreferenceTool(sink=sink)
 
@@ -201,13 +273,132 @@ def test_remember_preference_tool_extra_field_errors_and_deposits_invalid_attemp
     )
 
     assert result.status is ToolResultState.ERROR
-    assert "INVALID_CANDIDATE" in result.output
+    output = json.loads(result.output)
+    assert output["status"] == "invalid_candidate"
+    assert output["retry_allowed"] is True
+    assert output["retry_count"] == 1
+    assert output["retry_limit"] == 3
+    assert output["remaining_retries"] == 2
     assert sink.pending_count() == 1
-    proposal = sink.drain()[0]
+    assert sink.drain_valid() == []
+    proposal = sink.finalize_invalid_attempts()[0]
     assert isinstance(proposal.payload, InvalidAttemptPayload)
     assert proposal.payload.attempted_tool_name == "remember_preference"
     assert proposal.payload.attempted_kind == "Preference"
     assert proposal.payload.raw_arguments["applies_when"] == "misplaced action-boundary field"
+
+
+def test_remember_preference_tool_invalid_retry_limit_returns_do_not_retry() -> None:
+    sink = MemoryProposalSink()
+    tool = RememberPreferenceTool(sink=sink)
+    arguments = {
+        "statement": "x",
+        "scope": "ctx:user",
+        "applies_when": "misplaced action-boundary field",
+        "source_authority": "explicit_user_instruction",
+        "verification_status": "user_confirmed",
+    }
+
+    outputs = [
+        json.loads(
+            tool.execute(
+                ToolCall(
+                    id=f"call:{index}",
+                    name="remember_preference",
+                    arguments=arguments,
+                )
+            ).output
+        )
+        for index in range(1, 4)
+    ]
+
+    assert [output["retry_allowed"] for output in outputs] == [True, True, False]
+    assert outputs[-1]["retry_count"] == 3
+    assert outputs[-1]["remaining_retries"] == 0
+    assert "Do not retry this memory tool" in outputs[-1]["message"]
+    finalized = sink.finalize_invalid_attempts()
+    assert len(finalized) == 1
+    assert finalized[0].source_tool_call_id == "call:3"
+
+
+def test_remember_preference_tool_valid_after_invalid_clears_staged_invalid() -> None:
+    sink = MemoryProposalSink()
+    tool = RememberPreferenceTool(sink=sink)
+
+    invalid = tool.execute(
+        ToolCall(
+            id="call:bad",
+            name="remember_preference",
+            arguments={
+                "statement": "Prefer concise summaries.",
+                "scope": "ctx:user",
+                "applies_when": "misplaced action-boundary field",
+                "source_authority": "explicit_user_instruction",
+                "verification_status": "user_confirmed",
+            },
+        )
+    )
+    valid = tool.execute(
+        ToolCall(
+            id="call:good",
+            name="remember_preference",
+            arguments={
+                "statement": "Prefer concise summaries.",
+                "scope": "ctx:user",
+                "source_authority": "explicit_user_instruction",
+                "verification_status": "user_confirmed",
+            },
+        )
+    )
+
+    assert invalid.status is ToolResultState.ERROR
+    assert valid.status is ToolResultState.SUCCESS
+    drained = sink.drain_valid()
+    assert len(drained) == 1
+    assert isinstance(drained[0].payload, ValidCandidatePayload)
+    assert drained[0].source_tool_call_id == "call:good"
+    assert sink.finalize_invalid_attempts() == []
+
+
+def test_remember_preference_tool_valid_after_retry_limit_still_clears_invalid() -> None:
+    sink = MemoryProposalSink()
+    tool = RememberPreferenceTool(sink=sink)
+    invalid_arguments = {
+        "statement": "Prefer concise summaries.",
+        "scope": "ctx:user",
+        "applies_when": "misplaced action-boundary field",
+        "source_authority": "explicit_user_instruction",
+        "verification_status": "user_confirmed",
+    }
+
+    for index in range(1, 4):
+        result = tool.execute(
+            ToolCall(
+                id=f"call:bad:{index}",
+                name="remember_preference",
+                arguments=invalid_arguments,
+            )
+        )
+    assert json.loads(result.output)["retry_allowed"] is False
+
+    valid = tool.execute(
+        ToolCall(
+            id="call:good",
+            name="remember_preference",
+            arguments={
+                "statement": "Prefer concise summaries.",
+                "scope": "ctx:user",
+                "source_authority": "explicit_user_instruction",
+                "verification_status": "user_confirmed",
+            },
+        )
+    )
+
+    assert valid.status is ToolResultState.SUCCESS
+    drained = sink.drain_valid()
+    assert len(drained) == 1
+    assert drained[0].source_tool_call_id == "call:good"
+    assert sink.finalize_invalid_attempts() == []
 
 
 def test_remember_action_boundary_tool_missing_condition_errors() -> None:
@@ -230,7 +421,8 @@ def test_remember_action_boundary_tool_missing_condition_errors() -> None:
 
     assert result.status is ToolResultState.ERROR
     assert sink.pending_count() == 1
-    proposal = sink.drain()[0]
+    assert sink.drain_valid() == []
+    proposal = sink.finalize_invalid_attempts()[0]
     assert isinstance(proposal.payload, InvalidAttemptPayload)
     assert proposal.payload.attempted_kind == "ActionBoundary"
 
@@ -496,6 +688,73 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
     assert graph.find_by_type(memory.PREFERENCE) == []
 
 
+def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(tmp_path: Path) -> None:
+    runtime_session = RuntimeSession(tmp_path)
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    hooks = DurableMemoryHooks(
+        candidate_pool=pool,
+        sink=runtime_session.memory_proposal_sink,
+    )
+    transport = _ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bad",
+                        "name": "remember_preference",
+                        "arguments": json.dumps(
+                            {
+                                "statement": "Prefer concise summaries.",
+                                "scope": "ctx:user",
+                                "applies_when": "misplaced",
+                                "source_authority": "explicit_user_instruction",
+                                "verification_status": "user_confirmed",
+                            }
+                        ),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:good",
+                        "name": "remember_preference",
+                        "arguments": json.dumps(
+                            {
+                                "statement": "Prefer concise summaries.",
+                                "scope": "ctx:user",
+                                "source_authority": "explicit_user_instruction",
+                                "verification_status": "user_confirmed",
+                            }
+                        ),
+                    }
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=runtime_session,
+        llm_runtime=_make_llm_runtime(transport),
+        memory_hooks=hooks,
+    )
+
+    events = asyncio.run(_collect(agent, "Remember that I prefer concise summaries."))
+
+    event_types = [event.type for event in events]
+    assert EventType.MEMORY_CANDIDATE_PROPOSED not in event_types
+    assert EventType.MEMORY_WRITE_RESULT not in event_types
+    assert EventType.MEMORY_WRITE_FAILED not in event_types
+    assert runtime_session.memory_proposal_sink.pending_count() == 0
+    pending = pool.list_pending()
+    assert len(pending) == 1
+    assert isinstance(pending[0].payload, ValidCandidatePayload)
+    assert pending[0].payload.candidate.statement == "Prefer concise summaries."
+    assert pending[0].source_tool_call_id == "call:good"
+    assert graph.find_by_type(memory.PREFERENCE) == []
+
+
 async def _collect(agent: AgentRuntime, user_input: str) -> list[AgentEvent]:
     return [event async for event in agent.stream_task(user_input)]
 
@@ -504,4 +763,21 @@ def _proposal(candidate: PreferenceCandidate) -> CandidatePoolProposal:
     return CandidatePoolProposal(
         payload=ValidCandidatePayload(candidate=candidate),
         origin=CandidateOrigin.MAIN_AGENT_TOOL,
+    )
+
+
+def _invalid_proposal(call_id: str, *, statement: str) -> CandidatePoolProposal:
+    return CandidatePoolProposal(
+        payload=InvalidAttemptPayload(
+            attempted_tool_name="remember_preference",
+            attempted_kind="Preference",
+            raw_arguments={
+                "statement": statement,
+                "scope": "ctx:user",
+                "applies_when": "misplaced",
+            },
+            validation_error="validation failed",
+        ),
+        origin=CandidateOrigin.MAIN_AGENT_TOOL,
+        source_tool_call_id=call_id,
     )
