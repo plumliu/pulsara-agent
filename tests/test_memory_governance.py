@@ -14,12 +14,15 @@ from pulsara_agent.memory import (
     InMemoryArchiveStore,
     InMemoryCandidatePool,
     MemoryGovernanceExecutor,
+    MemoryWriteUnitOfWork,
     PooledMemoryCandidate,
     PostgresCandidatePool,
+    PostgresMemoryQuery,
     SubmitAsIsDecision,
     CorrectAndSubmitDecision,
 )
 from pulsara_agent.memory.candidate_pool import CandidateOrigin, WriteFailedOutcome, WriteSucceededOutcome
+from pulsara_agent.memory.dedupe import already_exists
 from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.memory.write_service import MemoryWriteService
@@ -268,6 +271,132 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
                     "delete from memory_governance_decisions where governance_batch_id = %s",
                     (batch_id,),
                 )
+                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+
+
+def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidate(tmp_path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    graph_id = f"graph:test/{uuid4().hex}"
+    source_ctx = EventContext(
+        run_id=f"run:source:{uuid4().hex}",
+        turn_id=f"turn:source:{uuid4().hex}",
+        reply_id=f"reply:source:{uuid4().hex}",
+    )
+    batch_id = f"governance:test:uow:{uuid4().hex}"
+    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    pool = PostgresCandidatePool(dsn=dsn)
+    query = PostgresMemoryQuery(dsn=dsn)
+    try:
+        invalid = pool.append_candidate(
+            PooledMemoryCandidate(
+                payload=InvalidAttemptPayload(
+                    attempted_tool_name="remember_action_boundary",
+                    attempted_kind="ActionBoundary",
+                    raw_arguments={"statement": "Never commit unless explicitly asked."},
+                    validation_error="missing do_not_apply_when",
+                ),
+                origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                source_session_id=runtime_session_id,
+                source_run_id=source_ctx.run_id,
+                source_turn_id=source_ctx.turn_id,
+                source_reply_id=source_ctx.reply_id,
+            )
+        )
+        executor = MemoryGovernanceExecutor(
+            candidate_pool=pool,
+            memory_write_service=_service_on(InMemoryGraphStore()),
+            event_log=log,
+            graph=InMemoryGraphStore(),
+            runtime_session_id=runtime_session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                graph_id=graph_id,
+                workspace_root=tmp_path,
+            ),
+        )
+
+        result = executor.apply_decision(
+            CorrectAndSubmitDecision(
+                target_entry_id=invalid.entry_id,
+                candidate=_preference("candidate:uow-corrected"),
+                reason="Correct invalid attempt.",
+            ),
+            governance_batch_id=batch_id,
+        )
+
+        assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
+        memory_id = result.decision_record.write_outcome.memory_id
+        fetched = query.fetch_nodes([memory_id], graph_id=graph_id)
+        assert len(fetched) == 1
+        assert fetched[0].statement == "The user prefers concise summaries."
+        governance_candidates = [
+            candidate for candidate in pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE
+        ]
+        assert len(governance_candidates) == 1
+        assert governance_candidates[0].source_run_id == f"run:governance/{batch_id}"
+        assert len(pool.list_decisions()) == 1
+        assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select decision_id, target_entry_key, status
+                    from memory_write_outbox
+                    where governance_batch_id = %s
+                    """,
+                    (batch_id,),
+                )
+                rows = cursor.fetchall()
+        assert rows == [(result.decision_record.decision_id, invalid.entry_id, "pending")]
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("delete from memory_write_outbox where governance_batch_id = %s", (batch_id,))
+                cursor.execute(
+                    "delete from memory_governance_decisions where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
+                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+
+
+def test_postgres_uow_dedupe_sees_uncommitted_same_transaction_node(tmp_path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    graph_id = f"graph:test/{uuid4().hex}"
+    context = EventContext(
+        run_id=f"run:governance/test-uow-dedupe/{uuid4().hex}",
+        turn_id=f"turn:governance/test-uow-dedupe/{uuid4().hex}",
+        reply_id=f"reply:governance/test-uow-dedupe/{uuid4().hex}",
+    )
+    try:
+        with MemoryWriteUnitOfWork(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+            graph_id=graph_id,
+            workspace_root=tmp_path,
+        ) as uow:
+            outcome = uow.memory_write_service.submit(
+                _preference("candidate:uow-dedupe-original"),
+                event_context=context,
+            )
+            duplicate = _preference("candidate:uow-dedupe-duplicate")
+
+            assert outcome.record is not None
+            assert already_exists(duplicate, uow.graph, graph_id=uow.resolved_graph_id) is True
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
                 cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
 
 

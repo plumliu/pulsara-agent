@@ -1,0 +1,31 @@
+name: Memory Recall Eval
+
+on:
+  pull_request:
+    paths:
+      - "evals/recall/**"
+      - "src/pulsara_agent/memory/**"
+      - "src/pulsara_agent/graph/**"
+      - "src/pulsara_agent/storage/memory_schema.py"
+      - "src/pulsara_agent/tools/builtins/memory_query.py"
+      - "tests/test_recall*.py"
+      - "tests/test_memory_*"
+      - ".github/workflows/recall-eval.yml"
+  push:
+    branches:
+      - main
+
+jobs:
+  recall-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Sync dev dependencies
+        run: uv sync --dev
+      - name: Ruff
+        run: uv run ruff check
+      - name: Recall eval gate
+        run: uv run python -m evals.recall.runner --gate --json

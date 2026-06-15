@@ -36,6 +36,14 @@ STALE_AFTER = MEMORY.term("staleAfter")
 EXPIRES_AT = MEMORY.term("expiresAt")
 CREATED_AT = MEMORY.term("createdAt")
 UPDATED_AT = MEMORY.term("updatedAt")
+TRIGGER_TOOLS = MEMORY.term("triggerTools")
+TRIGGER_ACTIONS = MEMORY.term("triggerActions")
+TRIGGER_FILE_GLOBS = MEMORY.term("triggerFileGlobs")
+TRIGGER_SCOPES = MEMORY.term("triggerScopes")
+TRIGGER_KEYWORDS = MEMORY.term("triggerKeywords")
+NEGATIVE_TOOLS = MEMORY.term("negativeTools")
+NEGATIVE_ACTIONS = MEMORY.term("negativeActions")
+NEGATIVE_FILE_GLOBS = MEMORY.term("negativeFileGlobs")
 
 CONTEXT: dict[str, Any] = {
     "mem": MEMORY.base,
@@ -70,6 +78,14 @@ CONTEXT: dict[str, Any] = {
     EXPIRES_AT.name: EXPIRES_AT.value,
     CREATED_AT.name: CREATED_AT.value,
     UPDATED_AT.name: UPDATED_AT.value,
+    TRIGGER_TOOLS.name: TRIGGER_TOOLS.value,
+    TRIGGER_ACTIONS.name: TRIGGER_ACTIONS.value,
+    TRIGGER_FILE_GLOBS.name: TRIGGER_FILE_GLOBS.value,
+    TRIGGER_SCOPES.name: TRIGGER_SCOPES.value,
+    TRIGGER_KEYWORDS.name: TRIGGER_KEYWORDS.value,
+    NEGATIVE_TOOLS.name: NEGATIVE_TOOLS.value,
+    NEGATIVE_ACTIONS.name: NEGATIVE_ACTIONS.value,
+    NEGATIVE_FILE_GLOBS.name: NEGATIVE_FILE_GLOBS.value,
 }
 
 

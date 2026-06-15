@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
-from pulsara_agent.graph.store import DEFAULT_GRAPH_ID
 from pulsara_agent.graph.jsonld_codec import (
     compact_iri,
     expand_id,
@@ -14,7 +14,9 @@ from pulsara_agent.graph.jsonld_codec import (
     graph_key as _graph_key,
     normalize_jsonld_document,
 )
+from pulsara_agent.graph.store import DEFAULT_GRAPH_ID
 from pulsara_agent.jsonld import Term
+from pulsara_agent.ontology import memory
 from pulsara_agent.ontology.registry import CORE_CONTEXT
 
 
@@ -56,6 +58,19 @@ class InMemoryGraphStore:
         if target not in values:
             values.append(target)
         document[relation.name] = values
+        self.put_jsonld(document, graph_id=graph_id)
+
+    def set_status(
+        self,
+        node_id: str,
+        status: memory.NodeStatus,
+        *,
+        updated_at: datetime,
+        graph_id: str | None = None,
+    ) -> None:
+        document = self.get_jsonld(node_id, graph_id=graph_id)
+        document[memory.STATUS.name] = status.value
+        document[memory.UPDATED_AT.name] = updated_at.isoformat()
         self.put_jsonld(document, graph_id=graph_id)
 
     def find_by_type(self, type_name: Term, graph_id: str | None = None) -> list[dict[str, Any]]:

@@ -22,10 +22,13 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallStartEvent,
     ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
+from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import InMemoryGraphStore
+from pulsara_agent.jsonld import utc_now
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
@@ -34,6 +37,7 @@ from pulsara_agent.memory import (
     MemoryGovernanceEngine,
     MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
+    MemoryLifecycle,
     RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
@@ -149,6 +153,42 @@ def test_real_agent_runtime_persists_events_to_postgres_and_timeline_with_respon
     assert any("PULSARA_POSTGRES_CHAIN_OK" in summary for summary in result["tool_result_summaries"])
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["replayed_text"]
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["timeline_artifact_text"]
+
+
+def test_real_agent_runtime_reads_recalled_memory_projection_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_recall_projection_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert "PULSARA_RECALL_PROJECTION_OK" in result["final_text"]
+    assert "PULSARA_RECALL_MISSING" not in result["final_text"]
+    assert result["included_memory_ids"] == ["preference:real-recall-concise"]
+
+
+def test_real_agent_runtime_can_call_memory_search_tool_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_memory_search_tool_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert "memory_search" in result["tool_names"]
+    assert any("preference:real-search-concise" in text for text in result["tool_result_texts"])
+    assert "PULSARA_MEMORY_SEARCH_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_can_call_memory_explain_tool_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_memory_explain_tool_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert "memory_explain" in result["tool_names"]
+    assert any("superseded_by" in text for text in result["tool_result_texts"])
+    assert "PULSARA_MEMORY_EXPLAIN_OK" in result["final_text"]
 
 
 def test_real_llm_trajectory_suite_covers_narrow_memory_tools(tmp_path):
@@ -518,6 +558,205 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
         if timeline_blob_prefix is not None:
             _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
         _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
+
+
+async def _run_real_agent_recall_projection_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    graph_id = f"graph:real-recall/{uuid4().hex}"
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=64),
+        system_prompt=(
+            "You are validating recalled memory injection. The model context may include a "
+            "Recalled Memory section. Base your answer only on that section. If it contains a "
+            "memory statement saying that a recall validation code exists, answer exactly "
+            "PULSARA_RECALL_PROJECTION_OK. If no such recalled memory is present, answer exactly "
+            "PULSARA_RECALL_MISSING. "
+            "Do not call tools."
+        ),
+        graph_id=graph_id,
+    )
+    now = utc_now()
+    wiring.runtime_wiring.graph.put_jsonld(
+        Preference(
+            id="preference:real-recall-concise",
+            statement="A recall validation code exists for concise summaries.",
+            scope="ctx:user",
+            status=memory.NodeStatus.ACTIVE,
+            confidence_level=memory.ConfidenceLevel.HIGH,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=now,
+            updated_at=now,
+            gate_reason="real llm recall smoke seed",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
+    result = None
+    try:
+        result = await wiring.agent_runtime.run_task(
+            "Check whether recalled memory includes a recall validation code. Use the validation instruction."
+        )
+        return {
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "included_memory_ids": (result.state.memory_projection or {}).get("included_memory_ids", []),
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
+async def _run_real_agent_memory_search_tool_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    graph_id = f"graph:real-search/{uuid4().hex}"
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=128),
+        system_prompt=(
+            "You are validating the memory_search tool. "
+            "Before answering, you must call memory_search with query 'concise summaries', "
+            "scope 'ctx:user', and kind 'Preference'. "
+            "If the tool result contains preference:real-search-concise, answer exactly "
+            "PULSARA_MEMORY_SEARCH_OK. Otherwise answer exactly PULSARA_MEMORY_SEARCH_MISSING."
+        ),
+        graph_id=graph_id,
+    )
+    now = utc_now()
+    wiring.runtime_wiring.graph.put_jsonld(
+        Preference(
+            id="preference:real-search-concise",
+            statement="The user prefers concise summaries.",
+            scope="ctx:user",
+            status=memory.NodeStatus.ACTIVE,
+            confidence_level=memory.ConfidenceLevel.HIGH,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=now,
+            updated_at=now,
+            gate_reason="real llm memory_search smoke seed",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
+    result = None
+    try:
+        result = await wiring.agent_runtime.run_task("Use memory_search as instructed, then answer with the sentinel.")
+        events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        tool_result_texts = [event.delta for event in events if isinstance(event, ToolResultTextDeltaEvent)]
+        return {
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "tool_names": [event.tool_call_name for event in tool_call_events],
+            "tool_result_texts": tool_result_texts,
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
+async def _run_real_agent_memory_explain_tool_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    graph_id = f"graph:real-explain/{uuid4().hex}"
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=160),
+        system_prompt=(
+            "You are validating the memory_explain tool. "
+            "Before answering, you must call memory_explain with memory_id 'preference:real-explain-old'. "
+            "If the tool result contains an explanation claim with kind 'superseded_by', answer exactly "
+            "PULSARA_MEMORY_EXPLAIN_OK. Otherwise answer exactly PULSARA_MEMORY_EXPLAIN_MISSING."
+        ),
+        graph_id=graph_id,
+    )
+    now = utc_now()
+    wiring.runtime_wiring.graph.put_jsonld(
+        Preference(
+            id="preference:real-explain-old",
+            statement="The user prefers verbose summaries.",
+            scope="ctx:user",
+            status=memory.NodeStatus.ACTIVE,
+            confidence_level=memory.ConfidenceLevel.HIGH,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=now,
+            updated_at=now,
+            gate_reason="real llm memory_explain old seed",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
+    wiring.runtime_wiring.graph.put_jsonld(
+        Preference(
+            id="preference:real-explain-new",
+            statement="The user prefers concise summaries.",
+            scope="ctx:user",
+            status=memory.NodeStatus.ACTIVE,
+            confidence_level=memory.ConfidenceLevel.HIGH,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=now,
+            updated_at=now,
+            gate_reason="real llm memory_explain new seed",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
+    MemoryLifecycle(
+        graph=wiring.runtime_wiring.graph,
+        mutable=wiring.runtime_wiring.graph,
+    ).supersede(
+        old_id="preference:real-explain-old",
+        new_id="preference:real-explain-new",
+        governance_batch_id=f"governance:real-explain/{uuid4().hex}",
+        graph_id=graph_id,
+    )
+    result = None
+    try:
+        result = await wiring.agent_runtime.run_task("Use memory_explain as instructed, then answer with the sentinel.")
+        events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        tool_result_texts = [event.delta for event in events if isinstance(event, ToolResultTextDeltaEvent)]
+        return {
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "tool_names": [event.tool_call_name for event in tool_call_events],
+            "tool_result_texts": tool_result_texts,
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
 
 
 async def _run_real_llm_trajectory_suite(tmp_path: Path) -> list[dict]:

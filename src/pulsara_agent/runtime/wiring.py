@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
-from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore, InMemoryGraphStore, OxigraphGraphStore
+from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore, InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.llm import ModelRole, build_llm_runtime
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import (
@@ -15,9 +15,12 @@ from pulsara_agent.memory import (
     CandidatePool,
     InMemoryArchiveStore,
     InMemoryCandidatePool,
+    LexicalMemoryRecallService,
     MemoryGovernanceEngine,
     MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
+    MemoryRecallService,
+    PostgresMemoryQuery,
     PostgresArtifactStore,
     PostgresCandidatePool,
 )
@@ -26,6 +29,8 @@ from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.reflection import MemoryReflectionEngine, MemoryReflectionOptions
 from pulsara_agent.memory.run_timeline_persistence import RunTimelinePersistenceHook
 from pulsara_agent.memory.runtime_persistence import ExecutionEvidencePersistenceHook
+from pulsara_agent.memory.trace import PostgresRecallTraceStore
+from pulsara_agent.memory.unit_of_work import MemoryWriteUnitOfWork
 from pulsara_agent.memory.write_gate import MemoryWriteGate
 from pulsara_agent.memory.write_service import MemoryWriteService
 from pulsara_agent.runtime.agent import AgentRuntime
@@ -43,6 +48,8 @@ class RuntimeWiring:
     ledger: ExecutionEvidenceLedger
     candidate_pool: CandidatePool
     memory_governance_executor: MemoryGovernanceExecutor
+    memory_recall_service: MemoryRecallService | None = None
+    memory_query: PostgresMemoryQuery | None = None
     memory_governance_engine: MemoryGovernanceEngine | None = None
 
 
@@ -91,6 +98,8 @@ def build_in_memory_runtime_wiring(
         ledger=ledger,
         candidate_pool=candidate_pool,
         memory_governance_executor=memory_governance_executor,
+        memory_recall_service=None,
+        memory_query=None,
     )
 
 
@@ -113,9 +122,14 @@ def build_durable_runtime_wiring(
         event_log=event_log,
     )
     resolved_graph_id = graph_id or f"graph:runtime/{runtime_session.runtime_session_id}"
-    graph = OxigraphGraphStore(settings.storage.oxigraph_url)
+    graph = PostgresGraphStore(settings.storage.postgres_dsn)
     archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
     candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
+    memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)
+    memory_recall_service = LexicalMemoryRecallService(
+        memory_query=memory_query,
+        trace_store=PostgresRecallTraceStore(dsn=settings.storage.postgres_dsn),
+    )
     _register_timeline_hook(
         runtime_session=runtime_session,
         graph=graph,
@@ -130,6 +144,13 @@ def build_durable_runtime_wiring(
         graph=graph,
         graph_id=resolved_graph_id,
         runtime_session_id=runtime_session.runtime_session_id,
+        memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+            dsn=settings.storage.postgres_dsn,
+            runtime_session_id=runtime_session.runtime_session_id,
+            graph_id=resolved_graph_id,
+            archive=archive,
+            workspace_root=workspace_root,
+        ),
     )
     return RuntimeWiring(
         runtime_session=runtime_session,
@@ -140,6 +161,8 @@ def build_durable_runtime_wiring(
         ledger=ledger,
         candidate_pool=candidate_pool,
         memory_governance_executor=memory_governance_executor,
+        memory_recall_service=memory_recall_service,
+        memory_query=memory_query,
     )
 
 
@@ -202,6 +225,8 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         ledger=runtime_wiring.ledger,
         candidate_pool=runtime_wiring.candidate_pool,
         memory_governance_executor=runtime_wiring.memory_governance_executor,
+        memory_recall_service=runtime_wiring.memory_recall_service,
+        memory_query=runtime_wiring.memory_query,
         memory_governance_engine=MemoryGovernanceEngine(
             llm_runtime=llm_runtime,
             executor=runtime_wiring.memory_governance_executor,
@@ -221,6 +246,9 @@ def _build_memory_hooks(
         return DurableMemoryHooks(
             candidate_pool=runtime_wiring.candidate_pool,
             sink=runtime_wiring.runtime_session.memory_proposal_sink,
+            recall=runtime_wiring.memory_recall_service,
+            memory_query=runtime_wiring.memory_query,
+            graph_id=runtime_wiring.graph_id,
         )
     reflection = MemoryReflectionEngine(
         llm_runtime=llm_runtime,
@@ -232,6 +260,9 @@ def _build_memory_hooks(
     return ReflectiveMemoryHooks(
         candidate_pool=runtime_wiring.candidate_pool,
         sink=runtime_wiring.runtime_session.memory_proposal_sink,
+        recall=runtime_wiring.memory_recall_service,
+        memory_query=runtime_wiring.memory_query,
+        graph_id=runtime_wiring.graph_id,
         reflection=reflection,
         event_store=runtime_wiring.event_log,
     )
@@ -259,6 +290,7 @@ def _build_memory_governance_executor(
     graph: GraphStore,
     graph_id: str | None,
     runtime_session_id: str,
+    memory_write_uow_factory=None,
 ) -> MemoryGovernanceExecutor:
     return MemoryGovernanceExecutor(
         candidate_pool=candidate_pool,
@@ -267,6 +299,7 @@ def _build_memory_governance_executor(
         graph=graph,
         graph_id=graph_id,
         runtime_session_id=runtime_session_id,
+        memory_write_uow_factory=memory_write_uow_factory,
     )
 
 

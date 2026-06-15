@@ -1,7 +1,5 @@
 import asyncio
-import urllib.error
 import urllib.parse
-import urllib.request
 from uuid import uuid4
 
 import psycopg
@@ -20,9 +18,6 @@ from pulsara_agent.runtime import (
     build_in_memory_runtime_wiring,
 )
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
-
-
-OXIGRAPH_URL = "http://localhost:7878"
 
 
 def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
@@ -70,10 +65,7 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     assert wiring.agent_runtime.system_prompt == "test prompt"
 
 
-def test_durable_runtime_wiring_uses_postgres_oxigraph_and_artifacts(tmp_path) -> None:
-    if not _oxigraph_available():
-        pytest.skip("Oxigraph is not running at http://localhost:7878")
-
+def test_durable_runtime_wiring_uses_postgres_graph_event_log_and_artifacts(tmp_path) -> None:
     storage = StorageConfig.from_env()
     _connect_or_skip(storage.postgres_dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
@@ -117,9 +109,6 @@ def test_durable_runtime_wiring_uses_postgres_oxigraph_and_artifacts(tmp_path) -
 
 
 def test_agent_runtime_wiring_uses_durable_runtime_wiring(tmp_path) -> None:
-    if not _oxigraph_available():
-        pytest.skip("Oxigraph is not running at http://localhost:7878")
-
     storage = StorageConfig.from_env()
     _connect_or_skip(storage.postgres_dsn).close()
     runtime_session_id = f"runtime:test:{uuid4().hex}"
@@ -149,6 +138,8 @@ def test_agent_runtime_wiring_uses_durable_runtime_wiring(tmp_path) -> None:
         summary = summarize_run_timeline(timeline)
 
         assert wiring.agent_runtime.runtime_session is wiring.runtime_wiring.runtime_session
+        assert "memory_search" in wiring.agent_runtime.tool_executor.registry.names()
+        assert "memory_get" in wiring.agent_runtime.tool_executor.registry.names()
         assert [event.sequence for event in events] == [1, 2]
         assert len(records) == 1
         assert records[0][rt.SOURCE_SESSION.name] == runtime_session_id
@@ -185,21 +176,6 @@ def _settings_for_storage(storage: StorageConfig) -> PulsaraSettings:
         ),
         storage=storage,
     )
-
-
-def _oxigraph_available() -> bool:
-    query = urllib.parse.urlencode({"query": "ASK { ?s ?p ?o }"}).encode("utf-8")
-    request = urllib.request.Request(
-        f"{OXIGRAPH_URL}/query",
-        data=query,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=1):
-            return True
-    except (OSError, urllib.error.URLError):
-        return False
 
 
 def _connect_or_skip(dsn: str):

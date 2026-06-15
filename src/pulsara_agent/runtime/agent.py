@@ -118,6 +118,9 @@ class AgentRuntime:
         self.system_prompt = system_prompt
         self.tool_executor = runtime_session.create_tool_executor(
             memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
+            memory_recall_service=getattr(self.memory_hooks, "recall", None),
+            memory_query=getattr(self.memory_hooks, "memory_query", None),
+            graph_id=getattr(self.memory_hooks, "graph_id", None),
         )
         self._last_result: AgentRunResult | None = None
 
@@ -413,10 +416,27 @@ class AgentRuntime:
             state=state,
         )
         try:
-            projection = await self.memory_hooks.project(
-                state,
-                token_budget=self.budget.projection_token_budget,
+            projection = await asyncio.wait_for(
+                self.memory_hooks.project(
+                    state,
+                    token_budget=self.budget.projection_token_budget,
+                ),
+                timeout=self.budget.recall_hard_timeout_ms / 1000,
             )
+        except TimeoutError:
+            state.memory_projection = None
+            yield await self.runtime_session.emit(
+                ProjectionFailedEvent(
+                    **context.event_fields(),
+                    projection_id=projection_id,
+                    role=self.model_role.value,
+                    scope=state.current_scope or "session",
+                    token_budget=self.budget.projection_token_budget,
+                    error="recall_timeout",
+                ),
+                state=state,
+            )
+            return
         except Exception as exc:
             state.memory_projection = None
             yield await self.runtime_session.emit(

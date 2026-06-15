@@ -96,6 +96,46 @@ _ACTION_BOUNDARY_PARAMETERS = _memory_parameters(
             "type": "string",
             "description": "Condition under which this action boundary does not apply.",
         },
+        "trigger_tools": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional tool names that should trigger this boundary.",
+        },
+        "trigger_actions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional action labels that should trigger this boundary.",
+        },
+        "trigger_file_globs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional file globs that should trigger this boundary.",
+        },
+        "trigger_scopes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional scopes that should trigger this boundary.",
+        },
+        "trigger_keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional literal keywords that should trigger this boundary.",
+        },
+        "negative_tools": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional tool names that should suppress this boundary.",
+        },
+        "negative_actions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional action labels that should suppress this boundary.",
+        },
+        "negative_file_globs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional file globs that should suppress this boundary.",
+        },
     },
     extra_required=["applies_when", "do_not_apply_when"],
 )

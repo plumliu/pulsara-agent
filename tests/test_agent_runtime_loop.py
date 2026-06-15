@@ -612,6 +612,12 @@ class RecordingHooks(NoopMemoryHooks):
         self.calls.append("end")
 
 
+class SlowProjectionHooks(NoopMemoryHooks):
+    async def project(self, state: LoopState, *, token_budget: int):
+        await asyncio.sleep(0.05)
+        return {"summary": "too late", "included_memory_ids": ["mem:late"]}
+
+
 def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     hooks = RecordingHooks()
     transport = ScriptedTransport([{"text": "done"}])
@@ -628,6 +634,26 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     assert any(event.type is EventType.PROJECTION_REQUESTED for event in events)
     assert any(event.type is EventType.PROJECTION_READY for event in events)
     assert "Recalled Memory" in (transport.contexts[0].system_prompt or "")
+
+
+def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        memory_hooks=SlowProjectionHooks(),
+        budget=LoopBudget(recall_hard_timeout_ms=1),
+    )
+
+    result = asyncio.run(agent.run_task("hi"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.final_text == "done"
+    assert result.state.memory_projection is None
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    failed = next(event for event in events if event.type is EventType.PROJECTION_FAILED)
+    assert failed.error == "recall_timeout"
+    assert "Recalled Memory" not in (transport.contexts[0].system_prompt or "")
 
 
 class FailingHook(NoopMemoryHooks):

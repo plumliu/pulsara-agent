@@ -9,9 +9,10 @@ by memory governance, not by this producer hook.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 
 from pulsara_agent.event import AgentEvent
+from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.memory.candidate_pool import (
     CandidateOrigin,
@@ -19,6 +20,10 @@ from pulsara_agent.memory.candidate_pool import (
     CandidatePoolProposal,
     PooledMemoryCandidate,
 )
+from pulsara_agent.memory.projection import ProjectionBuilder
+from pulsara_agent.memory.projection_ledger import ProjectionLedger
+from pulsara_agent.memory.query import MemoryQuery
+from pulsara_agent.memory.recall import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
 from pulsara_agent.memory.reflection import (
     MemoryReflectionEngine,
     MemoryReflectionHint,
@@ -34,10 +39,38 @@ from pulsara_agent.runtime.state import LoopState
 class DurableMemoryHooks(NoopMemoryHooks):
     candidate_pool: CandidatePool
     sink: MemoryProposalSink
+    _: KW_ONLY
+    recall: MemoryRecallService | None = None
+    memory_query: MemoryQuery | None = None
+    projector: ProjectionBuilder = field(default_factory=ProjectionBuilder)
+    projection_ledger: ProjectionLedger = field(default_factory=ProjectionLedger)
+    graph_id: str | None = None
 
     @property
     def memory_proposal_sink(self) -> MemoryProposalSink | None:
         return self.sink
+
+    async def project(self, state: LoopState, *, token_budget: int) -> dict | None:
+        if self.recall is None:
+            return None
+        latest_user_text = _latest_user_quote(state)
+        if latest_user_text is None or _should_skip_recall(latest_user_text):
+            return None
+        query = RecallQuery(
+            text=latest_user_text,
+            scopes=(state.current_scope,) if state.current_scope else (),
+            limit=5,
+            trigger=RecallTrigger.CHEAP_AUTO,
+            session_id=state.session_id,
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        )
+        result = await self.recall.recall(query, graph_id=self.graph_id)
+        if result.status is not RecallStatus.OK or not result.items:
+            return None
+        self.projection_ledger.record(state, result.items)
+        return self.projector.build(result, token_budget=token_budget)
 
     async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:
         self._drain_to_pool(state)
@@ -69,6 +102,8 @@ class DurableMemoryHooks(NoopMemoryHooks):
     ) -> list[PooledMemoryCandidate]:
         pooled: list[PooledMemoryCandidate] = []
         for proposal in proposals:
+            if self._is_projection_echo(proposal, state):
+                continue
             candidate = proposal.to_pooled(
                 source_session_id=state.session_id,
                 source_run_id=state.run_id,
@@ -79,6 +114,12 @@ class DurableMemoryHooks(NoopMemoryHooks):
                 candidate = candidate.model_copy(update={"user_quote": _latest_user_quote(state)})
             pooled.append(self.candidate_pool.append_candidate(candidate))
         return pooled
+
+    def _is_projection_echo(self, proposal: CandidatePoolProposal, state: LoopState) -> bool:
+        payload = proposal.payload
+        if not isinstance(payload, ValidCandidatePayload):
+            return False
+        return self.projection_ledger.is_echo(payload.candidate.statement, state)
 
 
 @dataclass(slots=True)
@@ -205,3 +246,17 @@ def _latest_user_quote(state: LoopState, max_chars: int = 2_000) -> str | None:
             return text
         return text[-max_chars:]
     return None
+
+
+def _should_skip_recall(text: str) -> bool:
+    normalized = " ".join(text.casefold().split())
+    if len(normalized) < 8:
+        return True
+    skip_markers = (
+        "ignore memory",
+        "don't use memory",
+        "do not use memory",
+        "不要使用记忆",
+        "忽略记忆",
+    )
+    return any(marker in normalized for marker in skip_markers)

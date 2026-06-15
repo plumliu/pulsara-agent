@@ -1,0 +1,24 @@
+runner_version: "1.0.0"
+fixture: "evals/recall/fixtures/v1_golden.jsonl"
+floor: "evals/recall/baseline/v1_floor.json"
+baseline_kind: "v1_fused_lexical_bm25"
+golden_set_sha: "sha256:789436a82b57dfb9caec4c8e95e8040856010c4af4e800f91752447821e8c570"
+metrics:
+  included_hit_rate:
+    blocking_from_phase: 1
+    floor_key: "metrics.included_hit_rate"
+  excluded_leak_count:
+    blocking_from_phase: 0
+    expected: 0
+  rejected_leak_count:
+    blocking_from_phase: 0
+    expected: 0
+  superseded_leak_count:
+    blocking_from_phase: 2
+    expected: 0
+  confabulation_count:
+    blocking_from_phase: 2
+    expected: 0
+  projection_over_budget_count:
+    blocking_from_phase: 0
+    expected: 0

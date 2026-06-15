@@ -27,6 +27,14 @@ class ActionBoundary(JsonLdEntity):
     updated_at: str
     gate_reason: str
     evidence: tuple[NodeRef, ...] = ()
+    trigger_tools: tuple[str, ...] = ()
+    trigger_actions: tuple[str, ...] = ()
+    trigger_file_globs: tuple[str, ...] = ()
+    trigger_scopes: tuple[str, ...] = ()
+    trigger_keywords: tuple[str, ...] = ()
+    negative_tools: tuple[str, ...] = ()
+    negative_actions: tuple[str, ...] = ()
+    negative_file_globs: tuple[str, ...] = ()
 
     def properties(self) -> dict[Any, Any]:
         values: dict[Any, Any] = {
@@ -44,4 +52,20 @@ class ActionBoundary(JsonLdEntity):
         }
         if self.evidence:
             values[memory.HAS_EVIDENCE] = list(self.evidence)
+        if self.trigger_tools:
+            values[memory.TRIGGER_TOOLS] = list(self.trigger_tools)
+        if self.trigger_actions:
+            values[memory.TRIGGER_ACTIONS] = list(self.trigger_actions)
+        if self.trigger_file_globs:
+            values[memory.TRIGGER_FILE_GLOBS] = list(self.trigger_file_globs)
+        if self.trigger_scopes:
+            values[memory.TRIGGER_SCOPES] = list(self.trigger_scopes)
+        if self.trigger_keywords:
+            values[memory.TRIGGER_KEYWORDS] = list(self.trigger_keywords)
+        if self.negative_tools:
+            values[memory.NEGATIVE_TOOLS] = list(self.negative_tools)
+        if self.negative_actions:
+            values[memory.NEGATIVE_ACTIONS] = list(self.negative_actions)
+        if self.negative_file_globs:
+            values[memory.NEGATIVE_FILE_GLOBS] = list(self.negative_file_globs)
         return values

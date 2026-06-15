@@ -196,6 +196,28 @@ def test_action_boundary_candidate_requires_conditions_at_construction() -> None
         )
 
 
+def test_action_boundary_structured_trigger_values_must_be_non_empty() -> None:
+    service, _, _ = _service()
+    candidate = ActionBoundaryCandidate(
+        candidate_id="candidate:boundary",
+        statement="Use uv when running project tests.",
+        scope="ctx:project",
+        applies_when="working on this repository",
+        do_not_apply_when="the user asks not to run tests",
+        trigger_keywords=("pytest", "  "),
+        source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+        verification_status=memory.VerificationStatus.USER_CONFIRMED,
+    )
+
+    outcome = service.submit(candidate, event_context=CTX)
+
+    assert outcome.record is not None
+    assert outcome.record.status is memory.NodeStatus.REJECTED
+    result = outcome.events[1]
+    assert result.status is memory.NodeStatus.REJECTED
+    assert "trigger_keywords" in result.gate_reason
+
+
 def test_preference_candidate_forbids_action_boundary_fields() -> None:
     with pytest.raises(ValidationError):
         PreferenceCandidate.model_validate(

@@ -90,6 +90,9 @@ class RuntimeSession:
         *,
         record_event: RuntimeThreadRecorder | None = None,
         memory_proposal_sink: MemoryProposalSink | None = None,
+        memory_recall_service=None,
+        memory_query=None,
+        graph_id: str | None = None,
     ):
         from pulsara_agent.tools import ToolExecutor
         from pulsara_agent.tools.builtins.registry import build_core_tool_registry
@@ -103,6 +106,9 @@ class RuntimeSession:
             registry=build_core_tool_registry(
                 self,
                 memory_proposal_sink=memory_proposal_sink,
+                memory_recall_service=memory_recall_service,
+                memory_query=memory_query,
+                graph_id=graph_id,
             ),
             record_event=record_event,
         )

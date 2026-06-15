@@ -269,16 +269,40 @@ class ExecutionEvidenceLedger:
         scope: str,
         applies_when: str,
         do_not_apply_when: str,
+        trigger_tools: list[str] | None = None,
+        trigger_actions: list[str] | None = None,
+        trigger_file_globs: list[str] | None = None,
+        trigger_scopes: list[str] | None = None,
+        trigger_keywords: list[str] | None = None,
+        negative_tools: list[str] | None = None,
+        negative_actions: list[str] | None = None,
+        negative_file_globs: list[str] | None = None,
         evidence_ids: list[str] | None = None,
         source_authority: memory.SourceAuthority,
         verification_status: memory.VerificationStatus,
     ) -> MemoryWriteRecord:
         evidence_ids = evidence_ids or []
+        trigger_tools = trigger_tools or []
+        trigger_actions = trigger_actions or []
+        trigger_file_globs = trigger_file_globs or []
+        trigger_scopes = trigger_scopes or []
+        trigger_keywords = trigger_keywords or []
+        negative_tools = negative_tools or []
+        negative_actions = negative_actions or []
+        negative_file_globs = negative_file_globs or []
         decision = self.gate.evaluate_action_boundary(
             statement=statement,
             scope=scope,
             applies_when=applies_when,
             do_not_apply_when=do_not_apply_when,
+            trigger_tools=trigger_tools,
+            trigger_actions=trigger_actions,
+            trigger_file_globs=trigger_file_globs,
+            trigger_scopes=trigger_scopes,
+            trigger_keywords=trigger_keywords,
+            negative_tools=negative_tools,
+            negative_actions=negative_actions,
+            negative_file_globs=negative_file_globs,
             source_authority=source_authority,
             verification_status=verification_status,
         )
@@ -299,6 +323,14 @@ class ExecutionEvidenceLedger:
                 updated_at=utc_now(),
                 gate_reason=decision.reason,
                 evidence=tuple(NodeRef(evidence_id) for evidence_id in evidence_ids),
+                trigger_tools=tuple(trigger_tools),
+                trigger_actions=tuple(trigger_actions),
+                trigger_file_globs=tuple(trigger_file_globs),
+                trigger_scopes=tuple(trigger_scopes),
+                trigger_keywords=tuple(trigger_keywords),
+                negative_tools=tuple(negative_tools),
+                negative_actions=tuple(negative_actions),
+                negative_file_globs=tuple(negative_file_globs),
             ).to_jsonld(),
             graph_id=self.graph_id,
         )

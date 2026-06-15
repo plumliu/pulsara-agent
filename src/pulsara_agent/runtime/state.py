@@ -46,6 +46,7 @@ class LoopBudget:
     max_consecutive_model_failures: int = 2
     max_consecutive_tool_failures: int = 8
     projection_token_budget: int = 2_000
+    recall_hard_timeout_ms: int = 500
     tool_result_context_chars: int = 12_000
 
 

@@ -45,6 +45,14 @@ class ActionBoundaryCandidate(MemoryCandidateBase):
     kind: Literal["ActionBoundary"] = "ActionBoundary"
     applies_when: str
     do_not_apply_when: str
+    trigger_tools: tuple[str, ...] = ()
+    trigger_actions: tuple[str, ...] = ()
+    trigger_file_globs: tuple[str, ...] = ()
+    trigger_scopes: tuple[str, ...] = ()
+    trigger_keywords: tuple[str, ...] = ()
+    negative_tools: tuple[str, ...] = ()
+    negative_actions: tuple[str, ...] = ()
+    negative_file_globs: tuple[str, ...] = ()
 
 
 class DecisionCandidate(MemoryCandidateBase):
