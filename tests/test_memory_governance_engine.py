@@ -41,7 +41,7 @@ from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
 from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
     MemoryGovernanceOptions,
-    _existing_memory_matches,
+    _related_existing_memories,
 )
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
@@ -294,7 +294,8 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
     assert any(event["tool_call_name"] == "remember_preference" for event in snapshot["source_events"])
     assert any("status" in event.get("delta", "") for event in snapshot["source_events"])
     assert snapshot["prior_governance_decisions"][0]["write_outcome"]["kind"] == "write_failed"
-    assert snapshot["existing_memory_matches"][0]["memory_id"]
+    assert snapshot["related_existing_memories"][0]["memory_id"]
+    assert snapshot["related_existing_memories"][0]["is_exact_duplicate"] is True
 
 
 def test_memory_governance_engine_empty_pool_does_not_call_llm() -> None:
@@ -314,7 +315,7 @@ def test_memory_governance_engine_empty_pool_does_not_call_llm() -> None:
     assert transport.contexts == []
 
 
-def test_existing_memory_matches_only_returns_true_duplicates() -> None:
+def test_related_existing_memories_returns_active_same_scope_type_ranked_and_marks_duplicates() -> None:
     graph = InMemoryGraphStore()
     service = _service_on(graph)
     service.submit(
@@ -327,10 +328,15 @@ def test_existing_memory_matches_only_returns_true_duplicates() -> None:
     )
     candidate = _pooled_preference()
 
-    matches = _existing_memory_matches(candidate, graph, graph_id=None)
+    matches = _related_existing_memories(candidate, graph, graph_id=None)
 
-    statements = {match["statement"] for match in matches}
-    assert statements == {"The user prefers concise summaries."}
+    statements = [match["statement"] for match in matches]
+    assert statements == [
+        "The user prefers concise summaries.",
+        "The user likes dark mode in the IDE.",
+    ]
+    assert matches[0]["is_exact_duplicate"] is True
+    assert matches[1]["is_exact_duplicate"] is False
 
 
 def _preference(candidate_id: str, statement: str) -> PreferenceCandidate:

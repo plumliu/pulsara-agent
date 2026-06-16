@@ -21,6 +21,7 @@ from pulsara_agent.memory import (
     PooledMemoryCandidate,
     PostgresCandidatePool,
     PostgresMemoryQuery,
+    SupersedeAndSubmitDecision,
 )
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, WriteSucceededOutcome
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
@@ -184,6 +185,114 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
                     (batch_id,),
                 )
                 assert cursor.fetchall() == [("applied",)]
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM memory_write_outbox WHERE governance_batch_id = %s", (batch_id,))
+                cursor.execute(
+                    "DELETE FROM memory_governance_decisions WHERE governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,))
+                cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))
+                cursor.execute("DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,))
+                cursor.execute("DELETE FROM sessions WHERE id = %s", (runtime_session_id,))
+
+
+def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    graph_id = f"graph:test/{uuid4().hex}"
+    source_ctx = EventContext(
+        run_id=f"run:source:{uuid4().hex}",
+        turn_id=f"turn:source:{uuid4().hex}",
+        reply_id=f"reply:source:{uuid4().hex}",
+    )
+    batch_id = f"governance:test:index-sync-supersede:{uuid4().hex}"
+    old_id = "preference:index-sync-supersede-old"
+    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    pool = PostgresCandidatePool(dsn=dsn)
+    store = PostgresGraphStore(dsn=dsn)
+    query = PostgresMemoryQuery(dsn=dsn)
+    try:
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id=old_id,
+            statement="The user prefers verbose summaries.",
+            status=memory.NodeStatus.ACTIVE,
+        )
+        _insert_stale_active_index_row(
+            dsn,
+            graph_id=graph_id,
+            memory_id=old_id,
+            statement="The user prefers verbose summaries.",
+        )
+        candidate = pool.append_candidate(
+            PooledMemoryCandidate(
+                payload=ValidCandidatePayload(candidate=_preference_candidate("candidate:index-sync-supersede")),
+                origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                source_session_id=runtime_session_id,
+                source_run_id=source_ctx.run_id,
+                source_turn_id=source_ctx.turn_id,
+                source_reply_id=source_ctx.reply_id,
+            )
+        )
+        executor = MemoryGovernanceExecutor(
+            candidate_pool=pool,
+            memory_write_service=_service_on(InMemoryGraphStore()),
+            event_log=log,
+            graph=InMemoryGraphStore(),
+            runtime_session_id=runtime_session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                graph_id=graph_id,
+                workspace_root=tmp_path,
+            ),
+        )
+
+        result = executor.apply_decision(
+            SupersedeAndSubmitDecision(
+                target_entry_id=candidate.entry_id,
+                candidate=_preference_candidate("candidate:index-sync-supersede-new"),
+                superseded_memory_ids=(old_id,),
+                reason="Explicitly replace verbose summaries with concise summaries.",
+            ),
+            governance_batch_id=batch_id,
+        )
+        assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
+        assert result.decision_record.write_outcome.superseded_memory_ids == (old_id,)
+        assert query.fts_candidates(
+            query_text="verbose summaries",
+            scopes=["ctx:user"],
+            types=["Preference"],
+            limit=5,
+            graph_id=graph_id,
+        )[0][0] == old_id
+
+        applied = MemorySearchIndexSync(dsn=dsn).consume_outbox(
+            graph_id=graph_id,
+            governance_batch_id=batch_id,
+        )
+
+        assert applied == 1
+        assert query.fts_candidates(
+            query_text="verbose summaries",
+            scopes=["ctx:user"],
+            types=["Preference"],
+            limit=5,
+            graph_id=graph_id,
+        ) == []
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT status FROM memory_search_index WHERE graph_id = %s AND memory_id = %s",
+                    (graph_id, old_id),
+                )
+                assert cursor.fetchall() == [(memory.NodeStatus.SUPERSEDED.value,)]
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:

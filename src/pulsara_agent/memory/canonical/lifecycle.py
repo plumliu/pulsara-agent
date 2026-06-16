@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -13,9 +12,7 @@ from pulsara_agent.event import (
     MemoryMarkedStaleEvent,
     MemorySupersededEvent,
 )
-from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.graph import GraphStore, MutableCanonicalMemoryStore
-from pulsara_agent.jsonld import Term
 from pulsara_agent.memory.candidates.pool import governance_batch_context
 from pulsara_agent.ontology import memory
 
@@ -126,63 +123,6 @@ class MemoryLifecycle:
                 action=f"mark_contradicted_with:{left_id}",
             ),
         ]
-
-    def supersede_matching_existing(
-        self,
-        *,
-        candidate: MemoryCandidate,
-        new_memory_id: str,
-        governance_batch_id: str,
-        graph_id: str | None = None,
-    ) -> list[AgentEvent]:
-        """Supersede active memories that share candidate type/scope but differ in statement."""
-
-        events: list[AgentEvent] = []
-        for old_id in _matching_existing_memory_ids(self.graph, candidate, graph_id=graph_id):
-            if old_id == new_memory_id:
-                continue
-            events.extend(
-                self.supersede(
-                    old_id=old_id,
-                    new_id=new_memory_id,
-                    governance_batch_id=governance_batch_id,
-                    graph_id=graph_id,
-                )
-            )
-        return events
-
-
-def _matching_existing_memory_ids(
-    graph: GraphStore,
-    candidate: MemoryCandidate,
-    *,
-    graph_id: str | None,
-) -> Sequence[str]:
-    type_name = _candidate_type_term(candidate)
-    matches: list[str] = []
-    normalized_statement = _normalize(candidate.statement)
-    for document in graph.find_by_type(type_name, graph_id=graph_id):
-        if document.get(memory.STATUS.name) != memory.NodeStatus.ACTIVE.value:
-            continue
-        if document.get(memory.SCOPE.name) != candidate.scope:
-            continue
-        if _normalize(str(document.get(memory.STATEMENT.name, ""))) == normalized_statement:
-            continue
-        node_id = document.get("@id")
-        if isinstance(node_id, str):
-            matches.append(node_id)
-    return tuple(matches)
-
-
-def _candidate_type_term(candidate: MemoryCandidate) -> Term:
-    return {
-        "Claim": memory.CLAIM,
-        "Preference": memory.PREFERENCE,
-        "Observation": memory.OBSERVATION,
-        "ActionBoundary": memory.ACTION_BOUNDARY,
-        "Decision": memory.DECISION,
-    }[candidate.kind]
-
 
 def _memory_event_fields(document: dict[str, Any]) -> dict[str, str]:
     return {

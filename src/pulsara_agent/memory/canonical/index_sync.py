@@ -190,10 +190,14 @@ def _outbox_memory_ids(payload: Any) -> tuple[str, ...]:
     outcome = decision_record.get("write_outcome")
     if not isinstance(outcome, dict):
         return ()
+    memory_ids: list[str] = []
     memory_id = outcome.get("memory_id")
     if isinstance(memory_id, str):
-        return (memory_id,)
-    return ()
+        memory_ids.append(memory_id)
+    superseded = outcome.get("superseded_memory_ids")
+    if isinstance(superseded, list):
+        memory_ids.extend(item for item in superseded if isinstance(item, str))
+    return tuple(dict.fromkeys(memory_ids))
 
 
 def _sync_memory_with_cursor(cursor, *, graph_id: str, memory_id: str) -> bool:

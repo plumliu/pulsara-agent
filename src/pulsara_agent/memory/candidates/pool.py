@@ -101,8 +101,22 @@ class MergeAndSubmitDecision(BaseModel):
     reason: str
 
 
+class SupersedeAndSubmitDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["supersede_and_submit"] = "supersede_and_submit"
+    target_entry_id: str
+    candidate: MemoryCandidate
+    superseded_memory_ids: tuple[str, ...]
+    reason: str
+
+
 GovernanceDecision = Annotated[
-    SkipDecision | SubmitAsIsDecision | CorrectAndSubmitDecision | MergeAndSubmitDecision,
+    SkipDecision
+    | SubmitAsIsDecision
+    | CorrectAndSubmitDecision
+    | MergeAndSubmitDecision
+    | SupersedeAndSubmitDecision,
     Field(discriminator="kind"),
 ]
 
@@ -124,6 +138,7 @@ class WriteSucceededOutcome(BaseModel):
     verification_status: memory.VerificationStatus
     gate_reason: str
     write_event_ids: tuple[str, ...]
+    superseded_memory_ids: tuple[str, ...] = ()
 
 
 class WriteFailedOutcome(BaseModel):

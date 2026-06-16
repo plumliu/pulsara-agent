@@ -160,7 +160,7 @@ class MemoryGovernanceEngine:
         snapshot = candidate.model_dump(mode="json")
         snapshot["source_events"] = _source_event_summaries(source_events)
         snapshot["prior_governance_decisions"] = _decision_summaries(decisions)
-        snapshot["existing_memory_matches"] = _existing_memory_matches(
+        snapshot["related_existing_memories"] = _related_existing_memories(
             candidate,
             self.executor.graph,
             graph_id=self.executor.graph_id,
@@ -200,6 +200,7 @@ Return this shape:
   "reason": "short summary of the batch decision",
   "decisions": [
     {"kind": "submit_as_is", "target_entry_id": "pool:...", "reason": "..."},
+    {"kind": "supersede_and_submit", "target_entry_id": "pool:...", "candidate": {...}, "superseded_memory_ids": ["preference:..."], "reason": "..."},
     {"kind": "skip", "target_entry_ids": ["pool:..."], "reason": "...", "skip_reason": "not_durable"}
   ]
 }
@@ -212,15 +213,31 @@ Allowed decision kinds:
   from the provided candidate payload and user quote.
 - merge_and_submit: use when multiple candidates should become one cleaner typed
   candidate.
+- supersede_and_submit: use ONLY when the user explicitly asked to replace or
+  change an existing Preference (for example, "change my preference to X" or
+  "stop using Y, use Z"). Provide the new candidate and superseded_memory_ids
+  using canonical memory ids from related_existing_memories. v1 allows only
+  Preference, same scope, and a single superseded memory id.
 
 Rules:
 - Prefer skip over weak memory.
 - Do not invent missing facts. Correct only when the candidate snapshot provides
   enough information.
-- Use source_events, user_quote, prior_governance_decisions, and existing_memory_matches
+- Use source_events, user_quote, prior_governance_decisions, and related_existing_memories
   as audit evidence. They are context, not permission to invent new memory.
-- If existing_memory_matches already contains an active or needs-review memory
+- If related_existing_memories already contains an active memory
   with the same durable content, prefer skip with skip_reason duplicate_existing_memory.
+- supersede_and_submit requires explicit user replacement intent. Do not
+  supersede on mere topical similarity. If unsure whether the new memory
+  replaces an old one, use submit_as_is/correct_and_submit so both memories can
+  coexist.
+- superseded_memory_ids must come from related_existing_memories. Never invent a
+  canonical memory id.
+- Never supersede a related_existing_memories entry whose is_exact_duplicate is
+  true. A statement-exact duplicate means the memory already exists; use skip
+  with skip_reason duplicate_existing_memory instead.
+- If no related_existing_memories entry is a clear replacement target, do not
+  supersede.
 - InvalidAttempt payloads usually need skip unless the raw arguments clearly
   provide all missing semantics.
 - Do not output write results; the host owns write outcomes.
@@ -364,7 +381,7 @@ def _decision_summaries(decisions: list[MemoryGovernanceDecisionRecord]) -> list
     ]
 
 
-def _existing_memory_matches(
+def _related_existing_memories(
     candidate: PooledMemoryCandidate,
     graph,
     *,
@@ -377,25 +394,69 @@ def _existing_memory_matches(
     term = _KIND_TO_TERM.get(memory_candidate.kind)
     if term is None:
         return []
-    matches: list[dict[str, Any]] = []
+    candidate_tokens = _overlap_tokens(memory_candidate.statement, candidate.user_quote)
+    scored: list[tuple[int, str, dict[str, Any]]] = []
     for record in graph.find_by_type(term, graph_id=graph_id):
-        statement = str(record.get(memory.STATEMENT.name, ""))
         scope = str(record.get(memory.SCOPE.name, ""))
-        if _normalize(statement) != _normalize(memory_candidate.statement) or scope != memory_candidate.scope:
+        status = str(record.get(memory.STATUS.name, ""))
+        if scope != memory_candidate.scope:
             continue
-        matches.append(
-            {
-                "memory_id": record.get("@id"),
-                "memory_type": memory_candidate.kind,
-                "statement": statement,
-                "scope": scope,
-                "status": record.get(memory.STATUS.name),
-                "verification_status": record.get(memory.VERIFICATION_STATUS.name),
-            }
+        if status != memory.NodeStatus.ACTIVE.value:
+            continue
+        statement = str(record.get(memory.STATEMENT.name, ""))
+        memory_id = str(record.get("@id", ""))
+        exact_duplicate = _normalize(statement) == _normalize(memory_candidate.statement)
+        overlap = len(candidate_tokens & _overlap_tokens(statement))
+        # Token overlap is only a v1 stopgap for subject relatedness; a future
+        # structured subject key should replace this prompt-ranking hint.
+        scored.append(
+            (
+                overlap,
+                memory_id,
+                {
+                    "memory_id": record.get("@id"),
+                    "memory_type": memory_candidate.kind,
+                    "statement": statement,
+                    "scope": scope,
+                    "status": status,
+                    "verification_status": record.get(memory.VERIFICATION_STATUS.name),
+                    "is_exact_duplicate": exact_duplicate,
+                },
+            )
         )
-        if len(matches) >= limit:
-            break
-    return matches
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [row[2] for row in scored[:limit]]
+
+
+def _overlap_tokens(*texts: Any) -> set[str]:
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "be",
+        "for",
+        "i",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "to",
+        "user",
+        "with",
+    }
+    tokens: set[str] = set()
+    for text in texts:
+        for token in re.findall(r"[\w]+", str(text or "").casefold()):
+            if len(token) < 2 or token in stopwords:
+                continue
+            tokens.add(token)
+    return tokens
 
 
 def _normalize(value: Any) -> str:

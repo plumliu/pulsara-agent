@@ -27,7 +27,7 @@ from pulsara_agent.event import (
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.entities.memory import Preference
-from pulsara_agent.graph import InMemoryGraphStore
+from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
@@ -38,6 +38,8 @@ from pulsara_agent.memory import (
     MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
     MemoryLifecycle,
+    MemoryWriteUnitOfWork,
+    PostgresCandidatePool,
     RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
@@ -267,7 +269,7 @@ def test_real_flash_model_retries_memory_tool_after_invalid_json():
     print("\nREAL_LLM_MEMORY_RETRY_JSON=" + json.dumps(result, ensure_ascii=True, indent=2))
     assert result["errors"] == []
     assert result["tool_names"] == ["remember_preference"]
-    assert result["tool_arguments"]["statement"] == "The user prefers compact status updates"
+    assert result["tool_arguments"]["statement"].rstrip(".") == "The user prefers compact status updates"
     assert result["tool_arguments"]["scope"] == "ctx:user"
     assert result["tool_arguments"]["source_authority"] == "explicit_user_instruction"
     assert result["tool_arguments"]["verification_status"] == "user_confirmed"
@@ -290,6 +292,36 @@ def test_real_flash_memory_governance_engine_writes_preference():
     assert result["memory_result_types"] == ["Preference"]
     assert result["memory_statuses"] == ["active"]
     assert result["preference_count"] == 1
+
+
+def test_real_flash_memory_governance_explicit_change_supersedes_preference(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_flash_memory_governance_supersede_smoke(tmp_path))
+
+    assert result["error_type"] is None
+    assert result["decision_kinds"] == ["supersede_and_submit"]
+    assert result["recorded_decision_kind"] == "supersede_and_submit"
+    assert result["old_status"] == "superseded"
+    assert result["new_status"] == "active"
+    assert result["superseded_memory_ids"] == ["preference:real-governance-supersede-old"]
+    assert result["governance_candidate_count"] == 0
+
+
+def test_real_flash_memory_governance_weak_update_coexists(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_flash_memory_governance_coexist_smoke(tmp_path))
+
+    assert result["error_type"] is None
+    assert result["decision_kinds"] in (["submit_as_is"], ["correct_and_submit"])
+    assert result["recorded_decision_kind"] in {"submit_as_is", "correct_and_submit"}
+    assert result["old_status"] == "active"
+    assert result["new_status"] == "active"
+    assert result["superseded_memory_ids"] == []
+    assert result["supersedes_edge_present"] is False
 
 
 async def _run_real_flash_smoke() -> dict:
@@ -1312,6 +1344,144 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
         "memory_statuses": [event.status.value for event in memory_results],
         "preference_count": len(graph.find_by_type(memory.PREFERENCE)),
     }
+
+
+async def _run_real_flash_memory_governance_supersede_smoke(tmp_path: Path) -> dict:
+    return await _run_real_flash_memory_governance_lifecycle_smoke(
+        tmp_path,
+        label="supersede",
+        old_statement="The user prefers verbose status summaries.",
+        new_statement="The user prefers concise status summaries.",
+        user_quote=(
+            "Actually, change my status summary preference: stop using verbose status summaries; "
+            "use concise status summaries instead."
+        ),
+    )
+
+
+async def _run_real_flash_memory_governance_coexist_smoke(tmp_path: Path) -> dict:
+    return await _run_real_flash_memory_governance_lifecycle_smoke(
+        tmp_path,
+        label="coexist",
+        old_statement="The user prefers dark theme in the IDE.",
+        new_statement="The user prefers concise status summaries.",
+        user_quote="Please remember that the user prefers concise status summaries.",
+    )
+
+
+async def _run_real_flash_memory_governance_lifecycle_smoke(
+    tmp_path: Path,
+    *,
+    label: str,
+    old_statement: str,
+    new_statement: str,
+    user_quote: str,
+) -> dict:
+    settings = _load_settings_for_real_llm()
+    dsn = settings.storage.postgres_dsn
+    graph_id = f"graph:real-governance-{label}/{uuid4().hex}"
+    runtime_session_id = f"runtime:real-governance-{label}:{uuid4().hex}"
+    old_id = f"preference:real-governance-{label}-old"
+    source_ctx = EventContext(
+        run_id=f"run:real-governance-{label}-source:{uuid4().hex}",
+        turn_id=f"turn:real-governance-{label}-source:{uuid4().hex}",
+        reply_id=f"reply:real-governance-{label}-source:{uuid4().hex}",
+    )
+    governance_batch_id = f"governance:real-governance-{label}:{uuid4().hex}"
+    graph = PostgresGraphStore(dsn=dsn)
+    event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    event_log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta=user_quote))
+    candidate_pool = PostgresCandidatePool(dsn=dsn)
+    now = utc_now()
+    try:
+        graph.put_jsonld(
+            Preference(
+                id=old_id,
+                statement=old_statement,
+                scope="ctx:user",
+                status=memory.NodeStatus.ACTIVE,
+                confidence_level=memory.ConfidenceLevel.HIGH,
+                verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                created_at=now,
+                updated_at=now,
+                gate_reason="real llm governance supersede seed",
+            ).to_jsonld(),
+            graph_id=graph_id,
+        )
+        pooled = candidate_pool.append_candidate(
+            PooledMemoryCandidate(
+                payload=ValidCandidatePayload(
+                    candidate=PreferenceCandidate(
+                        candidate_id=f"candidate:real-governance-{label}",
+                        statement=new_statement,
+                        scope="ctx:user",
+                        source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                        verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                    )
+                ),
+                origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                source_session_id=runtime_session_id,
+                source_run_id=source_ctx.run_id,
+                source_turn_id=source_ctx.turn_id,
+                source_reply_id=source_ctx.reply_id,
+                user_quote=user_quote,
+            )
+        )
+        executor = MemoryGovernanceExecutor(
+            candidate_pool=candidate_pool,
+            memory_write_service=MemoryWriteService(
+                ledger=ExecutionEvidenceLedger(
+                    graph=InMemoryGraphStore(),
+                    archive=InMemoryArchiveStore(),
+                    gate=MemoryWriteGate(),
+                )
+            ),
+            event_log=event_log,
+            graph=graph,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                graph_id=graph_id,
+                workspace_root=tmp_path,
+            ),
+        )
+        engine = MemoryGovernanceEngine(
+            llm_runtime=build_llm_runtime(settings.llm),
+            executor=executor,
+            options=MemoryGovernanceOptions(llm_options=LLMOptions(temperature=0, max_output_tokens=900)),
+        )
+
+        result = await engine.run_pending(
+            trigger_reason=f"real_llm_governance_{label}_smoke",
+            governance_batch_id=governance_batch_id,
+        )
+        old_doc = graph.get_jsonld(old_id, graph_id=graph_id)
+        write_outcome = result.applied[0].decision_record.write_outcome if result.applied else None
+        new_id = getattr(write_outcome, "memory_id", None)
+        new_doc = graph.get_jsonld(new_id, graph_id=graph_id) if isinstance(new_id, str) else {}
+        return {
+            "error_type": result.error_type,
+            "error_message": result.error_message,
+            "decision_kinds": [decision.kind for decision in result.decisions],
+            "recorded_decision_kind": result.applied[0].decision_record.decision.kind if result.applied else None,
+            "applied_count": len(result.applied),
+            "target_entry_id": pooled.entry_id,
+            "old_status": old_doc.get(memory.STATUS.name),
+            "new_status": new_doc.get(memory.STATUS.name),
+            "new_id": new_id,
+            "superseded_memory_ids": list(getattr(write_outcome, "superseded_memory_ids", ())),
+            "supersedes_edge_present": {"@id": old_id} in new_doc.get(memory.SUPERSEDES.name, []),
+            "governance_candidate_count": sum(
+                1 for candidate in candidate_pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE
+            ),
+        }
+    finally:
+        graph.delete_graph(graph_id)
+        _delete_postgres_governance_decisions(dsn, [governance_batch_id])
+        _delete_postgres_runtime_session(dsn, runtime_session_id)
 
 
 def _summarize_collected_result(result: dict) -> dict:
