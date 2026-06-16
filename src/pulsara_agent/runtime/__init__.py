@@ -3,7 +3,6 @@
 from pulsara_agent.runtime.agent import (
     AgentRunResult,
     AgentRuntime,
-    build_tool_result_error_events,
 )
 from pulsara_agent.runtime.context import build_llm_context, msg_to_llm_messages
 from pulsara_agent.runtime.hooks import (
@@ -27,6 +26,7 @@ from pulsara_agent.runtime.permission import (
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
 from pulsara_agent.runtime.timeline import RunTimeline, RunTimelineItem, build_run_timeline
+from pulsara_agent.runtime.tool_loop import build_tool_result_error_events
 from pulsara_agent.runtime.terminal import (
     LocalTerminalBackend,
     TerminalBackend,

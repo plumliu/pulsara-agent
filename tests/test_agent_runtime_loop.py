@@ -50,9 +50,9 @@ from pulsara_agent.runtime import (
     build_tool_result_error_events,
     msg_to_llm_messages,
 )
-from pulsara_agent.runtime.agent import _tool_result_from_event_slice
 from pulsara_agent.runtime.permission import PermissionDecision, PermissionDecisionKind
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
+from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult

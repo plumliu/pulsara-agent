@@ -19,27 +19,25 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
-    ToolResultDataDeltaEvent,
     ToolResultEndEvent,
-    ToolResultStartEvent,
-    ToolResultTextDeltaEvent,
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
-from pulsara_agent.memory.foundation.provenance import runtime_event_span_from_events
 from pulsara_agent.message import (
     Msg,
-    TextBlock,
     ToolCallBlock,
     ToolCallState,
-    ToolResultBlock,
     ToolResultState,
     UserMsg,
 )
-from pulsara_agent.message.assembler import completed_tool_result_from_events
 from pulsara_agent.runtime.context import build_llm_context
 from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
-from pulsara_agent.runtime.publisher import RuntimeEventSubscriber, RuntimePublishedEvent
+from pulsara_agent.runtime.loop_helpers import (
+    _accumulate_usage,
+    _final_text,
+    _projection_ids,
+    _projection_summary,
+)
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     PermissionDecisionKind,
@@ -47,6 +45,16 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
+from pulsara_agent.runtime.tool_loop import (
+    _ToolBatchTap,
+    _duplicate_tool_call_ids,
+    _parse_tool_call,
+    _remember_tool_result_event_span,
+    _tool_batches,
+    _tool_call_blocks,
+    _tool_result_from_event_slice,
+    build_tool_result_error_events,
+)
 from pulsara_agent.tools import ToolCall, ToolExecutor
 
 
@@ -69,28 +77,6 @@ class AgentRunResult:
     messages: list[Msg]
     final_text: str
     error_message: str | None = None
-
-
-class _ToolBatchTap(RuntimeEventSubscriber):
-    def __init__(self, tool_call_ids: set[str]) -> None:
-        self._tool_call_ids = tool_call_ids
-        self.queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
-
-    async def on_published_event(self, published: RuntimePublishedEvent) -> None:
-        event = published.event
-        tool_call_id = getattr(event, "tool_call_id", None)
-        if tool_call_id not in self._tool_call_ids:
-            return
-        if isinstance(
-            event,
-            (
-                ToolResultStartEvent,
-                ToolResultTextDeltaEvent,
-                ToolResultDataDeltaEvent,
-                ToolResultEndEvent,
-            ),
-        ):
-            await self.queue.put(event)
 
 
 class AgentRuntime:
@@ -662,123 +648,3 @@ class AgentRuntime:
 
     def _event_context(self, state: LoopState) -> EventContext:
         return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
-
-def build_tool_result_error_events(
-    event_context: EventContext,
-    *,
-    tool_call_id: str,
-    tool_call_name: str,
-    message: str,
-    state: ToolResultState = ToolResultState.ERROR,
-) -> list[AgentEvent]:
-    return [
-        ToolResultStartEvent(
-            **event_context.event_fields(),
-            tool_call_id=tool_call_id,
-            tool_call_name=tool_call_name,
-        ),
-        ToolResultTextDeltaEvent(
-            **event_context.event_fields(),
-            tool_call_id=tool_call_id,
-            delta=message,
-        ),
-        ToolResultEndEvent(
-            **event_context.event_fields(),
-            tool_call_id=tool_call_id,
-            state=state,
-        ),
-    ]
-
-
-def _parse_tool_call(block: ToolCallBlock) -> ToolCall:
-    try:
-        parsed = json.loads(block.input or "{}")
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Malformed JSON arguments for tool {block.name}: {exc.msg}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError(f"Tool arguments for {block.name} must be a JSON object")
-    return ToolCall(id=block.id, name=block.name, arguments=parsed)
-
-
-def _tool_call_blocks(message: Msg) -> list[ToolCallBlock]:
-    return [block for block in message.content if isinstance(block, ToolCallBlock)]
-
-
-def _tool_batches(calls: list[ToolCall], executor: ToolExecutor) -> list[list[ToolCall]]:
-    batches: list[list[ToolCall]] = []
-    current_readonly: list[ToolCall] = []
-    for call in calls:
-        if _call_can_run_concurrently(call, executor):
-            current_readonly.append(call)
-            continue
-        if current_readonly:
-            batches.append(current_readonly)
-            current_readonly = []
-        batches.append([call])
-    if current_readonly:
-        batches.append(current_readonly)
-    return batches
-
-
-def _duplicate_tool_call_ids(calls: list[ToolCall]) -> set[str]:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for call in calls:
-        if call.id in seen:
-            duplicates.add(call.id)
-            continue
-        seen.add(call.id)
-    return duplicates
-
-
-def _call_can_run_concurrently(call: ToolCall, executor: ToolExecutor) -> bool:
-    try:
-        tool = executor.registry.get(call.name)
-    except KeyError:
-        return False
-    return bool(tool.is_read_only and tool.is_concurrency_safe)
-
-
-def _remember_tool_result_event_span(state: LoopState, events: list[AgentEvent], tool_call_id: str) -> None:
-    try:
-        span = runtime_event_span_from_events(events, tool_call_id, session_id=state.session_id)
-    except KeyError:
-        return
-    spans = state.scratchpad.setdefault("tool_result_event_spans", {})
-    spans[tool_call_id] = span
-
-
-def _tool_result_from_event_slice(events: list[AgentEvent], tool_call_id: str) -> ToolResultBlock:
-    return completed_tool_result_from_events(events, tool_call_id)
-
-
-def _accumulate_usage(state: LoopState, message: Msg) -> None:
-    if message.usage is None:
-        return
-    state.token_usage.input_tokens += message.usage.input_tokens
-    state.token_usage.output_tokens += message.usage.output_tokens
-    state.token_usage.total_tokens += message.usage.total_tokens
-
-
-def _final_text(messages: list[Msg]) -> str:
-    for message in reversed(messages):
-        if message.role != "assistant" or _tool_call_blocks(message):
-            continue
-        return "\n".join(block.text for block in message.content if isinstance(block, TextBlock))
-    return ""
-
-
-def _projection_ids(projection: dict | None) -> list[str]:
-    if not projection:
-        return []
-    ids = projection.get("included_memory_ids")
-    if isinstance(ids, list):
-        return [str(item) for item in ids]
-    return []
-
-
-def _projection_summary(projection: dict | None) -> str:
-    if not projection:
-        return ""
-    summary = projection.get("summary")
-    return summary if isinstance(summary, str) else str(projection)
