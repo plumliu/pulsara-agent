@@ -27,10 +27,10 @@ from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.memory.candidate_pool import InMemoryCandidatePool
-from pulsara_agent.memory.durable_hooks import ReflectiveMemoryHooks
-import pulsara_agent.memory.reflection as reflection_module
-from pulsara_agent.memory.reflection import MemoryReflectionEngine, MemoryReflectionHint
+from pulsara_agent.memory.candidates.pool import InMemoryCandidatePool
+from pulsara_agent.memory.hooks.durable import ReflectiveMemoryHooks
+import pulsara_agent.memory.reflection.engine as reflection_module
+from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState, UserMsg
 from pulsara_agent.ontology import memory
 from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession

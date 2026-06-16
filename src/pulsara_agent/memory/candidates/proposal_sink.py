@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 
-from pulsara_agent.memory.candidate_pool import CandidatePoolProposal
+from pulsara_agent.memory.candidates.pool import CandidatePoolProposal
 
 MEMORY_INVALID_RETRY_LIMIT = 3
 

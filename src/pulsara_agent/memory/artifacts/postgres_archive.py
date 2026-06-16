@@ -10,7 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.memory.records import ArtifactWriteResult
+from pulsara_agent.memory.foundation.records import ArtifactWriteResult
 
 
 @dataclass(slots=True)

@@ -14,15 +14,15 @@ from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.memory.candidate_pool import (
+from pulsara_agent.memory.candidates.pool import (
     GovernanceDecision,
     MemoryGovernanceDecisionRecord,
     PooledMemoryCandidate,
     decision_target_entry_ids,
     new_governance_batch_id,
 )
-from pulsara_agent.memory.dedupe import candidate_fingerprint
-from pulsara_agent.memory.governance import MemoryGovernanceApplyResult, MemoryGovernanceExecutor
+from pulsara_agent.memory.governance.dedupe import candidate_fingerprint
+from pulsara_agent.memory.governance.executor import MemoryGovernanceApplyResult, MemoryGovernanceExecutor
 from pulsara_agent.ontology import memory
 
 

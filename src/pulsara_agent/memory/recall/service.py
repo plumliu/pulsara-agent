@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from pulsara_agent.memory.query import CanonicalNodeView, MemoryQuery
-from pulsara_agent.memory.trace import RecallTraceStore
+from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
+from pulsara_agent.memory.recall.trace import RecallTraceStore
 from pulsara_agent.ontology import memory
 
 
@@ -188,7 +188,7 @@ class LexicalMemoryRecallService(MemoryRecallService):
                 break
 
         if self.enable_graph_rerank and items:
-            from pulsara_agent.memory.rerank import direct_relation_rerank
+            from pulsara_agent.memory.recall.rerank import direct_relation_rerank
 
             items = direct_relation_rerank(items, views)[: query.limit]
 

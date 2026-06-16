@@ -21,11 +21,11 @@ from pulsara_agent.memory import (
     SubmitAsIsDecision,
     CorrectAndSubmitDecision,
 )
-from pulsara_agent.memory.candidate_pool import CandidateOrigin, WriteFailedOutcome, WriteSucceededOutcome
-from pulsara_agent.memory.dedupe import already_exists
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.memory.candidates.pool import CandidateOrigin, WriteFailedOutcome, WriteSucceededOutcome
+from pulsara_agent.memory.governance.dedupe import already_exists
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 

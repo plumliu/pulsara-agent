@@ -8,11 +8,11 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.memory.archive import InMemoryArchiveStore
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.provenance import RuntimeEventSpan
-from pulsara_agent.memory.records import ArtifactWriteResult
-from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
+from pulsara_agent.memory.foundation.records import ArtifactWriteResult
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from pulsara_agent.ontology import memory, runtime as rt
 

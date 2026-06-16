@@ -9,7 +9,7 @@ from pulsara_agent.entities.memory import Preference
 from pulsara_agent.entities.runtime import Evidence
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
-from pulsara_agent.memory.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.memory import PostgresMemoryQuery
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.settings import StorageConfig

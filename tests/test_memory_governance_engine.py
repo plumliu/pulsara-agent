@@ -29,7 +29,7 @@ from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import InMemoryArchiveStore
-from pulsara_agent.memory.candidate_pool import (
+from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     InMemoryCandidatePool,
     MemoryGovernanceDecisionRecord,
@@ -37,15 +37,15 @@ from pulsara_agent.memory.candidate_pool import (
     SubmitAsIsDecision,
     WriteFailedOutcome,
 )
-from pulsara_agent.memory.governance import MemoryGovernanceExecutor
-from pulsara_agent.memory.governance_engine import (
+from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
+from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
     MemoryGovernanceOptions,
     _existing_memory_matches,
 )
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
 

@@ -10,7 +10,7 @@ from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.ontology.registry import CORE_CONTEXT
 
 if TYPE_CHECKING:
-    from pulsara_agent.memory.provenance import RuntimeEventSpan
+    from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,7 +9,7 @@ from pulsara_agent.event import AgentEvent, MemoryWriteFailedEvent, MemoryWriteR
 from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.graph import GraphStore
-from pulsara_agent.memory.candidate_pool import (
+from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePool,
     CorrectAndSubmitDecision,
@@ -25,9 +25,9 @@ from pulsara_agent.memory.candidate_pool import (
     governance_batch_context,
     new_governance_batch_id,
 )
-from pulsara_agent.memory.dedupe import already_exists
-from pulsara_agent.memory.unit_of_work import MemoryWriteUnitOfWork
-from pulsara_agent.memory.write_service import MemoryWriteOutcome, MemoryWriteService
+from pulsara_agent.memory.governance.dedupe import already_exists
+from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
+from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, MemoryWriteService
 
 
 @dataclass(frozen=True, slots=True)

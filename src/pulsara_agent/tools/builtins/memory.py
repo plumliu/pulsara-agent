@@ -28,8 +28,8 @@ from pulsara_agent.event.candidates import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
-from pulsara_agent.memory.candidate_pool import CandidateOrigin, CandidatePoolProposal
-from pulsara_agent.runtime.proposal_sink import MEMORY_INVALID_RETRY_LIMIT, MemoryProposalSink, MemoryRetryState
+from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePoolProposal
+from pulsara_agent.memory.candidates.proposal_sink import MEMORY_INVALID_RETRY_LIMIT, MemoryProposalSink, MemoryRetryState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import json_text, object_schema
 

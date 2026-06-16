@@ -10,9 +10,9 @@ from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import PostgresMemoryQuery
-from pulsara_agent.memory.explain import ClaimKind, Explanation, ExplanationClaim, explain_memory, validate_explanation
-from pulsara_agent.memory.lifecycle import MemoryLifecycle
-from pulsara_agent.memory.recall import LexicalMemoryRecallService, RecallQuery
+from pulsara_agent.memory.recall.explain import ClaimKind, Explanation, ExplanationClaim, explain_memory, validate_explanation
+from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
+from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.tools.base import ToolCall

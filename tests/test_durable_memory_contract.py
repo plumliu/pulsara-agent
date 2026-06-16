@@ -18,9 +18,9 @@ import pytest
 from pulsara_agent.entities.memory import Decision
 from pulsara_agent.graph import InMemoryGraphStore, OxigraphGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
-from pulsara_agent.memory.archive import InMemoryArchiveStore
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
 
 

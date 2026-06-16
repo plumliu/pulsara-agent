@@ -16,7 +16,7 @@ from pulsara_agent.event import (
 from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.graph import GraphStore, MutableCanonicalMemoryStore
 from pulsara_agent.jsonld import Term
-from pulsara_agent.memory.candidate_pool import governance_batch_context
+from pulsara_agent.memory.candidates.pool import governance_batch_context
 from pulsara_agent.ontology import memory
 
 

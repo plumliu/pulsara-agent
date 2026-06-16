@@ -53,7 +53,7 @@ from pulsara_agent.runtime import (
 from pulsara_agent.runtime.agent import _tool_result_from_event_slice
 from pulsara_agent.runtime.permission import PermissionDecision, PermissionDecisionKind
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
-from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.registry import ToolRegistry

@@ -36,8 +36,8 @@ from pulsara_agent.event.candidates import (
     ObservationCandidate,
     PreferenceCandidate,
 )
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.records import ClaimRecord, MemoryWriteRecord
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.foundation.records import ClaimRecord, MemoryWriteRecord
 
 
 _CANDIDATE_ADAPTER = TypeAdapter(MemoryCandidate)

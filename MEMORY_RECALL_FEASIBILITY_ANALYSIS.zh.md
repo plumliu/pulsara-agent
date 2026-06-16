@@ -44,7 +44,7 @@ _Created: 2026-06-15_
 
 | 方案隐含/声称 | 代码实际 | 证据 |
 |---|---|---|
-| projection 基础设施已就绪，"只需接真实 recall service" | `project()` **永远返回 `None`**；`DurableMemoryHooks`/`ReflectiveMemoryHooks` 从未 override 它，只继承 `NoopMemoryHooks` 的空实现 | 唯一实现在 [hooks.py:218](src/pulsara_agent/runtime/hooks.py:218)（返回 None）；[durable_hooks.py:34,85](src/pulsara_agent/memory/durable_hooks.py:34) 的方法列表里无 `project` |
+| projection 基础设施已就绪，"只需接真实 recall service" | `project()` **永远返回 `None`**；`DurableMemoryHooks`/`ReflectiveMemoryHooks` 从未 override 它，只继承 `NoopMemoryHooks` 的空实现 | 唯一实现在 [hooks.py:218](src/pulsara_agent/runtime/hooks.py:218)（返回 None）；[durable_hooks.py:34,85](src/pulsara_agent/memory/hooks/durable.py:34) 的方法列表里无 `project` |
 | `MemoryRecallService` 协议待定义（Phase 1 任务） | 全仓**不存在** `MemoryRecallService` / `RecallService` | grep 零命中 |
 | `memory_search` / `memory_get` 只读工具 | 全仓**不存在**这两个工具 | grep 零命中 |
 | §7 SearchIndex、§10 RecallTrace 表 | Postgres schema 只有 sessions/runs/turns/agent_events/artifacts/tool_execution_records；**无** search_index / recall_traces | grep `search_index`/`recall_trace` 零命中；[postgres_schema.py](src/pulsara_agent/storage/postgres_schema.py) |
@@ -58,7 +58,7 @@ _Created: 2026-06-15_
 | §6.5 Ranker 按 ~8 档类型排序（含 UserIdentity / ExplicitRule / ToolQuirk / Workflow / ProjectFact） | 本体**只有 5 种**：Claim / Decision / Preference / ActionBoundary / Observation。其余类型 grep **零命中** | [memory.py:13-17](src/pulsara_agent/ontology/memory.py:13)；`grep -rE 'UserIdentity\|ExplicitRule\|ToolQuirk\|Workflow\|ProjectFact' src/` = 0 |
 | §2.3 节点类型 Project / ArtifactRef / ProjectionPolicy / MemoryPolicyVersion | **均不存在**（无 entity、无 term） | grep 零命中 |
 | §2.3 关系 aboutEntity / touchesArtifact / usesTool / createdFrom / storedAs | **均无 term** | grep 零命中 |
-| §6.4 遍历 supersedes / supersededBy / contradicts / contradictedBy 决定"替代/矛盾" | 这些关系**从未被任何 producer 写入**。ledger 的 `_add_relation` 只发 `PROVIDES` 与 `SUPPORTS` | [ledger.py:179,217,262,306,344,386](src/pulsara_agent/memory/ledger.py:217)；supersedes/contradicts 仅出现在 ontology 定义与 codec force-list，无生产调用 |
+| §6.4 遍历 supersedes / supersededBy / contradicts / contradictedBy 决定"替代/矛盾" | 这些关系**从未被任何 producer 写入**。ledger 的 `_add_relation` 只发 `PROVIDES` 与 `SUPPORTS` | [ledger.py:179,217,262,306,344,386](src/pulsara_agent/memory/canonical/ledger.py:217)；supersedes/contradicts 仅出现在 ontology 定义与 codec force-list，无生产调用 |
 
 也就是说：§6.5 的 8 档优先级里有 **3 档**（含第二高的 UserIdentity/ExplicitRule）映射到系统永远存不出、查不到的类型；§6.4 这个"核心创新"遍历的 supersedes/contradicts 边**今天跑出来是空集**——它的招牌决策（"是否应被更近/更权威节点替代"）**根本无法触发**。
 
@@ -100,11 +100,11 @@ K=3–5 个候选、典型扇出下，这是每轮 **15–40 次阻塞 HTTP POST
 
 ### 3.3【BLOCKER】治理双写非原子 = split-brain，而召回正建立在"canonical graph 是唯一真相"之上
 
-`governance.apply_decision` 顺序执行**三个独立、无事务**的写：`memory_write_service.submit`（经 ledger 写 GraphStore，HTTP）→ `event_log.extend`（另一存储）→ `candidate_pool.append_decision`（独立 `psycopg.connect` 事务，[candidate_pool.py:299](src/pulsara_agent/memory/candidate_pool.py:299)）。无 2PC、无 outbox、无幂等键、无补偿回滚。
+`governance.apply_decision` 顺序执行**三个独立、无事务**的写：`memory_write_service.submit`（经 ledger 写 GraphStore，HTTP）→ `event_log.extend`（另一存储）→ `candidate_pool.append_decision`（独立 `psycopg.connect` 事务，[candidate_pool.py:299](src/pulsara_agent/memory/candidates/pool.py:299)）。无 2PC、无 outbox、无幂等键、无补偿回滚。
 
 任一步之间崩溃，会留下 split-brain：**Oxigraph 里有 canonical `mem:*` 节点，却没有对应的 GovernanceDecisionLog 行**（或反之）。这直接证伪了 §2.2"GovernanceDecisionLog 是 append-only workflow truth"——如果它能在任意部分失败时与 canonical 状态分叉，它就不是可靠的审计真相。
 
-更深一层：**即使在单个存储内部，节点也非原子。** ledger 先 `put_jsonld` 写节点（[ledger.py:200-215](src/pulsara_agent/memory/ledger.py:200)），再逐条 evidence 发 `_add_relation`（[ledger.py:216-217](src/pulsara_agent/memory/ledger.py:216)）作为独立 graph mutation；`OxigraphGraphStore` 是无事务句柄的 HTTP 客户端。`put_jsonld` 成功、SUPPORTS 边未写完时崩溃，会产生一个 **evidence 链被截断的 canonical 节点**——而 §6.4 正是靠遍历这些 supports/hasEvidence 边来裁定可召回性。**于是一个半写入节点会被当作事实静默召回，其证据链却是残缺的。** 方案把召回正确性完全建立在图扩展上，而写路径无法保证它要扩展的图是内部自洽的。
+更深一层：**即使在单个存储内部，节点也非原子。** ledger 先 `put_jsonld` 写节点（[ledger.py:200-215](src/pulsara_agent/memory/canonical/ledger.py:200)），再逐条 evidence 发 `_add_relation`（[ledger.py:216-217](src/pulsara_agent/memory/canonical/ledger.py:216)）作为独立 graph mutation；`OxigraphGraphStore` 是无事务句柄的 HTTP 客户端。`put_jsonld` 成功、SUPPORTS 边未写完时崩溃，会产生一个 **evidence 链被截断的 canonical 节点**——而 §6.4 正是靠遍历这些 supports/hasEvidence 边来裁定可召回性。**于是一个半写入节点会被当作事实静默召回，其证据链却是残缺的。** 方案把召回正确性完全建立在图扩展上，而写路径无法保证它要扩展的图是内部自洽的。
 
 ### 3.4【BLOCKER】"normal recall 只读 Oxigraph"这条不变量自相矛盾
 
@@ -148,7 +148,7 @@ K=3–5 个候选、典型扇出下，这是每轮 **15–40 次阻塞 HTTP POST
 
 ### 3.9【MEDIUM】"两个逻辑 PostgreSQL 角色"是文件组织，不是架构
 
-§开篇把 Postgres 分成 Runtime Truth 与 Durable Sidecars 两个逻辑角色，并 hedge"不一定必须是两个物理实例"。实际是：**一个 DSN、一个 schema**，表只是拆在两个 SQL 常量/文件里（`RUNTIME_TRUTH_SCHEMA_SQL` vs `CANDIDATE_POOL_SCHEMA_SQL`）。sidecar 表**硬 FK 进** runtime 表（[candidate_pool.py:414-416](src/pulsara_agent/memory/candidate_pool.py:414)），无法迁到第二个物理实例而不动 schema——hedge 描述的是一个代码已经堵死的选项。文档还自相矛盾：ArtifactStore 被放进 sidecar 层（§2.2），但 `artifacts` 表定义在 runtime-truth schema 文件里。一个不可拆、FK 耦合、且自身对"哪张表属于哪层"都不一致的"逻辑角色"，是命名约定，不是存储边界。
+§开篇把 Postgres 分成 Runtime Truth 与 Durable Sidecars 两个逻辑角色，并 hedge"不一定必须是两个物理实例"。实际是：**一个 DSN、一个 schema**，表只是拆在两个 SQL 常量/文件里（`RUNTIME_TRUTH_SCHEMA_SQL` vs `CANDIDATE_POOL_SCHEMA_SQL`）。sidecar 表**硬 FK 进** runtime 表（[candidate_pool.py:414-416](src/pulsara_agent/memory/candidates/pool.py:414)），无法迁到第二个物理实例而不动 schema——hedge 描述的是一个代码已经堵死的选项。文档还自相矛盾：ArtifactStore 被放进 sidecar 层（§2.2），但 `artifacts` 表定义在 runtime-truth schema 文件里。一个不可拆、FK 耦合、且自身对"哪张表属于哪层"都不一致的"逻辑角色"，是命名约定，不是存储边界。
 
 ### 3.10【MEDIUM】`do_not_write_back` 只是 prose，无任何强制
 

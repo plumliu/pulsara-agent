@@ -61,10 +61,10 @@ src/pulsara_agent/memory/entities/
   tool_result.py
   turn.py
 
-src/pulsara_agent/memory/provenance.py
-src/pulsara_agent/memory/ledger.py
-src/pulsara_agent/memory/run_timeline_persistence.py
-src/pulsara_agent/memory/run_timeline_query.py
+src/pulsara_agent/memory/foundation/provenance.py
+src/pulsara_agent/memory/canonical/ledger.py
+src/pulsara_agent/memory/hooks/run_timeline_persistence.py
+src/pulsara_agent/memory/foundation/run_timeline_query.py
 ```
 
 当前 GraphStore 基础设施的主要约束：

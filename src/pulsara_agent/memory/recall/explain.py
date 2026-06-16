@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pulsara_agent.memory.query import CanonicalNodeView
+from pulsara_agent.memory.canonical.query import CanonicalNodeView
 from pulsara_agent.ontology import memory
 
 

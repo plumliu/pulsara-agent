@@ -18,8 +18,8 @@ from pulsara_agent.memory import (
     load_run_timeline,
     summarize_run_timeline,
 )
-from pulsara_agent.memory.provenance import RuntimeEventSpan
-from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import capability as cap
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import build_durable_runtime_wiring

@@ -24,15 +24,15 @@ from pulsara_agent.memory import (
     PostgresArtifactStore,
     PostgresCandidatePool,
 )
-from pulsara_agent.memory.durable_hooks import DurableMemoryHooks, ReflectiveMemoryHooks
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.reflection import MemoryReflectionEngine, MemoryReflectionOptions
-from pulsara_agent.memory.run_timeline_persistence import RunTimelinePersistenceHook
-from pulsara_agent.memory.runtime_persistence import ExecutionEvidencePersistenceHook
-from pulsara_agent.memory.trace import PostgresRecallTraceStore
-from pulsara_agent.memory.unit_of_work import MemoryWriteUnitOfWork
-from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.memory.hooks.durable import DurableMemoryHooks, ReflectiveMemoryHooks
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionOptions
+from pulsara_agent.memory.hooks.run_timeline_persistence import RunTimelinePersistenceHook
+from pulsara_agent.memory.hooks.runtime_persistence import ExecutionEvidencePersistenceHook
+from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
+from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.settings import PulsaraSettings

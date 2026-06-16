@@ -1,7 +1,7 @@
 from pulsara_agent.entities.memory import ActionBoundary, Observation, Preference
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
-from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory
 
 

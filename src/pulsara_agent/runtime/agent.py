@@ -26,7 +26,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
-from pulsara_agent.memory.provenance import runtime_event_span_from_events
+from pulsara_agent.memory.foundation.provenance import runtime_event_span_from_events
 from pulsara_agent.message import (
     Msg,
     TextBlock,

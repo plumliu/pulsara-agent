@@ -17,9 +17,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pulsara_agent.memory.explain import explain_memory
-from pulsara_agent.memory.query import CanonicalNodeView
-from pulsara_agent.memory.recall import LexicalMemoryRecallService, RecallQuery
+from pulsara_agent.memory.recall.explain import explain_memory
+from pulsara_agent.memory.canonical.query import CanonicalNodeView
+from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery
 from pulsara_agent.ontology import memory
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from pulsara_agent.event import AgentEvent
-from pulsara_agent.memory.records import ArtifactWriteResult
+from pulsara_agent.memory.foundation.records import ArtifactWriteResult
 
 
 class ArtifactStore(Protocol):

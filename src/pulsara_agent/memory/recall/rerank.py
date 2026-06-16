@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Mapping
 
-from pulsara_agent.memory.query import CanonicalNodeView
-from pulsara_agent.memory.recall import RecallItem
+from pulsara_agent.memory.canonical.query import CanonicalNodeView
+from pulsara_agent.memory.recall.service import RecallItem
 from pulsara_agent.ontology import memory
 
 

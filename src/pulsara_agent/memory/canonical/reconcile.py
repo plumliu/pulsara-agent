@@ -16,7 +16,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from pulsara_agent.graph.jsonld_codec import graph_key as _graph_key
-from pulsara_agent.memory.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
 

@@ -37,19 +37,19 @@ from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.memory.archive import InMemoryArchiveStore
-from pulsara_agent.memory.durable_hooks import DurableMemoryHooks
-from pulsara_agent.memory.candidate_pool import (
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
+from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePoolProposal,
     InMemoryCandidatePool,
 )
-from pulsara_agent.memory.governance import MemoryGovernanceExecutor
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools.base import ToolCall
 from pulsara_agent.tools.builtins.memory import (
     RememberActionBoundaryTool,

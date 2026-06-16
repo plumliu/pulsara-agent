@@ -9,7 +9,7 @@ from typing import Any
 from pulsara_agent.entities.runtime import RunTimelineRecord
 from pulsara_agent.event import EventType, RunEndEvent
 from pulsara_agent.jsonld import NodeRef, utc_now
-from pulsara_agent.memory.protocols import ArtifactStore
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime.hooks import HookContext
 from pulsara_agent.runtime.timeline import build_run_timeline

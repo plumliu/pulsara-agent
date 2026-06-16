@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.provenance import RuntimeEventSpan
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
 from pulsara_agent.message import ToolResultBlock
 from pulsara_agent.runtime.state import LoopState
 

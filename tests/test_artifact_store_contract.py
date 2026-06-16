@@ -18,7 +18,7 @@ from pulsara_agent.memory import (
     RunTimelinePersistenceHook,
     load_run_timeline,
 )
-from pulsara_agent.memory.protocols import ArtifactStore
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.settings import StorageConfig

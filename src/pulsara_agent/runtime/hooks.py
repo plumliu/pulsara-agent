@@ -11,7 +11,7 @@ from pulsara_agent.event import AgentEvent, EventType
 from pulsara_agent.message import Msg, ToolResultBlock
 from pulsara_agent.message.assembler import BlockAssembler, BlockCompletion
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
 
 

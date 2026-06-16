@@ -22,11 +22,11 @@ from pulsara_agent.memory import (
     PostgresCandidatePool,
     PostgresMemoryQuery,
 )
-from pulsara_agent.memory.candidate_pool import CandidateOrigin, WriteSucceededOutcome
-from pulsara_agent.memory.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.recall import LexicalMemoryRecallService, RecallQuery, RecallStatus
-from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.candidates.pool import CandidateOrigin, WriteSucceededOutcome
+from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 

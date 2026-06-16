@@ -14,24 +14,24 @@ from dataclasses import KW_ONLY, dataclass, field
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
-from pulsara_agent.memory.candidate_pool import (
+from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePool,
     CandidatePoolProposal,
     PooledMemoryCandidate,
 )
-from pulsara_agent.memory.projection import ProjectionBuilder
-from pulsara_agent.memory.projection_ledger import ProjectionLedger
-from pulsara_agent.memory.query import MemoryQuery
-from pulsara_agent.memory.recall import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
-from pulsara_agent.memory.reflection import (
+from pulsara_agent.memory.recall.projection import ProjectionBuilder
+from pulsara_agent.memory.recall.projection_ledger import ProjectionLedger
+from pulsara_agent.memory.canonical.query import MemoryQuery
+from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
+from pulsara_agent.memory.reflection.engine import (
     MemoryReflectionEngine,
     MemoryReflectionHint,
     cheap_memory_hints,
 )
 from pulsara_agent.message import Msg, TextBlock, ToolResultBlock
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
 
 

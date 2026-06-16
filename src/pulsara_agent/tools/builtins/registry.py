@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 
-from pulsara_agent.memory.query import MemoryQuery
-from pulsara_agent.memory.recall import MemoryRecallService
+from pulsara_agent.memory.canonical.query import MemoryQuery
+from pulsara_agent.memory.recall.service import MemoryRecallService
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
     ReadFileTool,

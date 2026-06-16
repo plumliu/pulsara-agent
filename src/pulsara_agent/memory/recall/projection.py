@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pulsara_agent.memory.recall import RecallResult
+from pulsara_agent.memory.recall.service import RecallResult
 
 
 @dataclass(frozen=True, slots=True)

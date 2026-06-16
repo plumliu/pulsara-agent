@@ -7,9 +7,9 @@ import json
 
 from pulsara_agent import __version__
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.memory.archive import InMemoryArchiveStore
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.write_gate import MemoryWriteGate
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.settings import PulsaraSettings
 

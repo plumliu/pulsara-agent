@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pulsara_agent.jsonld import jsonld_value
-from pulsara_agent.memory.provenance import RuntimeEventSpan
+from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
 from pulsara_agent.ontology import memory, runtime as rt
 
 

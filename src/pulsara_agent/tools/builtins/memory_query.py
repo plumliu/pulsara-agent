@@ -6,9 +6,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from pulsara_agent.memory.explain import explain_memory, explanation_to_payload
-from pulsara_agent.memory.query import CanonicalNodeView, MemoryQuery
-from pulsara_agent.memory.recall import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
+from pulsara_agent.memory.recall.explain import explain_memory, explanation_to_payload
+from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
+from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import int_arg, json_text, object_schema, required_str_arg, str_arg

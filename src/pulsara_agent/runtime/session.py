@@ -10,7 +10,7 @@ from uuid import uuid4
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog
 from pulsara_agent.runtime.hooks import RuntimeHookManager
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.terminal import TerminalSessionManager

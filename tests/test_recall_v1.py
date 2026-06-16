@@ -12,14 +12,14 @@ from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePa
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import CandidatePoolProposal, InMemoryCandidatePool, PooledMemoryCandidate, PostgresMemoryQuery
-from pulsara_agent.memory.candidate_pool import CandidateOrigin
-from pulsara_agent.memory.durable_hooks import DurableMemoryHooks
-from pulsara_agent.memory.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.recall import LexicalMemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
-from pulsara_agent.memory.trace import PostgresRecallTraceStore
+from pulsara_agent.memory.candidates.pool import CandidateOrigin
+from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
+from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
+from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.message import AssistantMsg, TextBlock, UserMsg
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.tools.base import ToolCall

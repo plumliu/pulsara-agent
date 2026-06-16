@@ -4,7 +4,7 @@ from pulsara_agent.event import EventContext
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from pulsara_agent.runtime import RuntimeSession
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import ToolCall, ToolExecutor, build_core_tool_registry
 
 

@@ -25,7 +25,7 @@ from pulsara_agent.graph import GraphStore
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.memory.candidate_pool import CandidateOrigin, CandidatePool, CandidatePoolProposal
+from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool, CandidatePoolProposal
 from pulsara_agent.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.ontology import runtime as rt
 

@@ -20,8 +20,8 @@ from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import CandidatePayload
 from pulsara_agent.graph import DEFAULT_GRAPH_ID
 from pulsara_agent.graph.postgres import PostgresGraphStore
-from pulsara_agent.memory.archive import InMemoryArchiveStore
-from pulsara_agent.memory.candidate_pool import (
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.memory.candidates.pool import (
     CANDIDATE_POOL_SCHEMA_SQL,
     GovernanceDecision,
     GovernanceWriteOutcome,
@@ -29,11 +29,11 @@ from pulsara_agent.memory.candidate_pool import (
     PooledMemoryCandidate,
     decision_target_entry_ids,
 )
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.lifecycle import MemoryLifecycle
-from pulsara_agent.memory.protocols import ArtifactStore
-from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL, RUNTIME_TRUTH_SCHEMA_SQL
 
 

@@ -7,7 +7,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
-from pulsara_agent.memory.protocols import ArtifactStore
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime.timeline import RunTimeline
 

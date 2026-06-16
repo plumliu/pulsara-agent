@@ -416,7 +416,7 @@ content_key =
 5. 修改 `DurableMemoryHooks._drain()`，从“submit canonical memory”改为“append candidate pool”。
 6. 修改 reflection，让它只 append candidates，不直接 submit，不直接 dedupe。
 7. 新增最小 governance executor：读取 pending，输出显式决策，使用 synthetic context 调用 `MemoryWriteService.submit()`，append decision。
-8. 把 `_candidate_fingerprint` / `_already_exists` 抽到 `memory/dedupe.py`，只在 governance 写入口使用。
+8. 把 `_candidate_fingerprint` / `_already_exists` 抽到 `memory/governance/dedupe.py`，只在 governance 写入口使用。
 9. 再实现 `PostgresCandidatePool`。
 10. 最后考虑 scheduled governance、mutex、lease、`memory_governance_runs`。
 

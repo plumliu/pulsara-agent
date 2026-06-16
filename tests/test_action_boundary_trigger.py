@@ -9,12 +9,12 @@ from pulsara_agent.entities.memory import ActionBoundary
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import InMemoryArchiveStore, PostgresMemoryQuery
-from pulsara_agent.memory.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.tools.base import ToolCall
 from pulsara_agent.tools.builtins.memory import RememberActionBoundaryTool

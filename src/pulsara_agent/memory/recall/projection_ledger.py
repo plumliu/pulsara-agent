@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pulsara_agent.memory.recall import RecallItem
+from pulsara_agent.memory.recall.service import RecallItem
 
 
 _SCRATCHPAD_KEY = "memory_projection_ledger"

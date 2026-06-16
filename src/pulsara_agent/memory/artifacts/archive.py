@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from pulsara_agent.memory.records import ArtifactWriteResult
+from pulsara_agent.memory.foundation.records import ArtifactWriteResult
 
 
 @dataclass(slots=True)

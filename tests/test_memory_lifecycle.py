@@ -11,9 +11,9 @@ from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import PostgresMemoryQuery
-from pulsara_agent.memory.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.lifecycle import MemoryLifecycle
-from pulsara_agent.memory.recall import LexicalMemoryRecallService, RecallQuery, RecallStatus
+from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
+from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
+from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 

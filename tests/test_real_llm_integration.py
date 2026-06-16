@@ -42,11 +42,11 @@ from pulsara_agent.memory import (
     load_run_timeline,
     summarize_run_timeline,
 )
-from pulsara_agent.memory.candidate_pool import CandidateOrigin, PooledMemoryCandidate
-from pulsara_agent.memory.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.reflection import MemoryReflectionEngine, MemoryReflectionHint, MemoryReflectionOptions
-from pulsara_agent.memory.write_gate import MemoryWriteGate
-from pulsara_agent.memory.write_service import MemoryWriteService
+from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
+from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint, MemoryReflectionOptions
+from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserMsg
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession, build_agent_runtime_wiring
