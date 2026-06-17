@@ -33,6 +33,8 @@ from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
+from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
+from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.settings import PulsaraSettings
@@ -51,6 +53,8 @@ class RuntimeWiring:
     memory_recall_service: MemoryRecallService | None = None
     memory_query: PostgresMemoryQuery | None = None
     memory_governance_engine: MemoryGovernanceEngine | None = None
+    memory_domain: MemoryDomainContext | None = None
+    working_context_store: PostgresWorkingContextStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +68,10 @@ def build_in_memory_runtime_wiring(
     *,
     runtime_session_id: str | None = None,
     graph_id: str | None = None,
+    memory_domain: MemoryDomainContext | None = None,
 ) -> RuntimeWiring:
+    resolved_graph_id = graph_id or (memory_domain.graph_id if memory_domain is not None else None)
+    _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     event_log = InMemoryEventLog()
     graph = InMemoryGraphStore()
     archive = InMemoryArchiveStore()
@@ -78,28 +85,31 @@ def build_in_memory_runtime_wiring(
         runtime_session=runtime_session,
         graph=graph,
         archive=archive,
-        graph_id=graph_id,
+        graph_id=resolved_graph_id,
     )
-    ledger, memory_write_service = _build_ledger_and_service(graph, archive, graph_id)
+    ledger, memory_write_service = _build_ledger_and_service(graph, archive, resolved_graph_id)
     memory_governance_executor = _build_memory_governance_executor(
         candidate_pool=candidate_pool,
         memory_write_service=memory_write_service,
         event_log=event_log,
         graph=graph,
-        graph_id=graph_id,
+        graph_id=resolved_graph_id,
         runtime_session_id=runtime_session.runtime_session_id,
+        allowed_write_scopes=_allowed_write_scopes(memory_domain),
     )
     return RuntimeWiring(
         runtime_session=runtime_session,
         event_log=event_log,
         graph=graph,
         archive=archive,
-        graph_id=graph_id,
+        graph_id=resolved_graph_id,
         ledger=ledger,
         candidate_pool=candidate_pool,
         memory_governance_executor=memory_governance_executor,
         memory_recall_service=None,
         memory_query=None,
+        memory_domain=memory_domain,
+        working_context_store=None,
     )
 
 
@@ -109,6 +119,7 @@ def build_durable_runtime_wiring(
     *,
     runtime_session_id: str | None = None,
     graph_id: str | None = None,
+    memory_domain: MemoryDomainContext | None = None,
 ) -> RuntimeWiring:
     runtime_session_id = runtime_session_id or _new_runtime_session_id()
     event_log = PostgresEventLog(
@@ -121,11 +132,21 @@ def build_durable_runtime_wiring(
         runtime_session_id=event_log.runtime_session_id,
         event_log=event_log,
     )
-    resolved_graph_id = graph_id or f"graph:runtime/{runtime_session.runtime_session_id}"
+    resolved_graph_id = graph_id or (
+        memory_domain.graph_id
+        if memory_domain is not None
+        else f"graph:runtime/{runtime_session.runtime_session_id}"
+    )
+    _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     graph = PostgresGraphStore(settings.storage.postgres_dsn)
     archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
     candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
     memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)
+    working_context_store = (
+        PostgresWorkingContextStore(dsn=settings.storage.postgres_dsn)
+        if memory_domain is not None
+        else None
+    )
     memory_recall_service = LexicalMemoryRecallService(
         memory_query=memory_query,
         trace_store=PostgresRecallTraceStore(dsn=settings.storage.postgres_dsn),
@@ -151,6 +172,7 @@ def build_durable_runtime_wiring(
             archive=archive,
             workspace_root=workspace_root,
         ),
+        allowed_write_scopes=_allowed_write_scopes(memory_domain),
     )
     return RuntimeWiring(
         runtime_session=runtime_session,
@@ -163,6 +185,8 @@ def build_durable_runtime_wiring(
         memory_governance_executor=memory_governance_executor,
         memory_recall_service=memory_recall_service,
         memory_query=memory_query,
+        memory_domain=memory_domain,
+        working_context_store=working_context_store,
     )
 
 
@@ -176,6 +200,7 @@ def build_agent_runtime_wiring(
     system_prompt: str | None = None,
     runtime_session_id: str | None = None,
     graph_id: str | None = None,
+    memory_domain: MemoryDomainContext | None = None,
     memory_reflection: bool = True,
     memory_reflection_options: MemoryReflectionOptions | None = None,
 ) -> AgentRuntimeWiring:
@@ -185,12 +210,14 @@ def build_agent_runtime_wiring(
             workspace_root,
             runtime_session_id=runtime_session_id,
             graph_id=graph_id,
+            memory_domain=memory_domain,
         )
         if durable
         else build_in_memory_runtime_wiring(
             workspace_root,
             runtime_session_id=runtime_session_id,
             graph_id=graph_id,
+            memory_domain=memory_domain,
         )
     )
     llm_runtime = build_llm_runtime(settings.llm)
@@ -227,6 +254,8 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         memory_governance_executor=runtime_wiring.memory_governance_executor,
         memory_recall_service=runtime_wiring.memory_recall_service,
         memory_query=runtime_wiring.memory_query,
+        memory_domain=runtime_wiring.memory_domain,
+        working_context_store=runtime_wiring.working_context_store,
         memory_governance_engine=MemoryGovernanceEngine(
             llm_runtime=llm_runtime,
             executor=runtime_wiring.memory_governance_executor,
@@ -246,25 +275,33 @@ def _build_memory_hooks(
         return DurableMemoryHooks(
             candidate_pool=runtime_wiring.candidate_pool,
             sink=runtime_wiring.runtime_session.memory_proposal_sink,
+            event_store=runtime_wiring.event_log,
             recall=runtime_wiring.memory_recall_service,
             memory_query=runtime_wiring.memory_query,
             graph_id=runtime_wiring.graph_id,
+            read_scopes=_read_scopes(runtime_wiring.memory_domain),
+            working_context_store=runtime_wiring.working_context_store,
+            working_context_domain=runtime_wiring.memory_domain,
         )
     reflection = MemoryReflectionEngine(
         llm_runtime=llm_runtime,
         candidate_pool=runtime_wiring.candidate_pool,
         graph=runtime_wiring.graph,
         graph_id=runtime_wiring.graph_id,
+        allowed_scopes=_allowed_write_scopes(runtime_wiring.memory_domain),
         options=memory_reflection_options or MemoryReflectionOptions(),
     )
     return ReflectiveMemoryHooks(
         candidate_pool=runtime_wiring.candidate_pool,
         sink=runtime_wiring.runtime_session.memory_proposal_sink,
+        event_store=runtime_wiring.event_log,
         recall=runtime_wiring.memory_recall_service,
         memory_query=runtime_wiring.memory_query,
         graph_id=runtime_wiring.graph_id,
+        read_scopes=_read_scopes(runtime_wiring.memory_domain),
+        working_context_store=runtime_wiring.working_context_store,
+        working_context_domain=runtime_wiring.memory_domain,
         reflection=reflection,
-        event_store=runtime_wiring.event_log,
     )
 
 
@@ -291,6 +328,7 @@ def _build_memory_governance_executor(
     graph_id: str | None,
     runtime_session_id: str,
     memory_write_uow_factory=None,
+    allowed_write_scopes: frozenset[str],
 ) -> MemoryGovernanceExecutor:
     return MemoryGovernanceExecutor(
         candidate_pool=candidate_pool,
@@ -300,6 +338,7 @@ def _build_memory_governance_executor(
         graph_id=graph_id,
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=memory_write_uow_factory,
+        allowed_write_scopes=allowed_write_scopes,
     )
 
 
@@ -329,3 +368,23 @@ def _runtime_session_id_kwargs(runtime_session_id: str | None) -> dict[str, str]
 
 def _new_runtime_session_id() -> str:
     return f"runtime:{uuid4().hex}"
+
+
+def _allowed_write_scopes(memory_domain: MemoryDomainContext | None) -> frozenset[str]:
+    if memory_domain is None:
+        return frozenset({CTX_USER})
+    return memory_domain.allowed_write_scopes
+
+
+def _read_scopes(memory_domain: MemoryDomainContext | None) -> frozenset[str]:
+    if memory_domain is None:
+        return frozenset({CTX_USER})
+    return memory_domain.read_scopes
+
+
+def _validate_graph_domain_coupling(
+    graph_id: str | None,
+    memory_domain: MemoryDomainContext | None,
+) -> None:
+    if graph_id is not None and graph_id.startswith("graph:user/") and memory_domain is None:
+        raise ValueError("graph:user/* memory graphs require memory_domain so read scopes are explicit")

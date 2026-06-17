@@ -69,6 +69,14 @@ StopReason = Literal[
 ]
 
 
+def _with_memory_context_prompt(system_prompt: str | None, memory_prompt: str | None) -> str | None:
+    if not memory_prompt:
+        return system_prompt
+    if not system_prompt:
+        return memory_prompt
+    return "\n\n".join([system_prompt, memory_prompt])
+
+
 @dataclass(slots=True)
 class AgentRunResult:
     status: LoopStatus
@@ -107,6 +115,7 @@ class AgentRuntime:
             memory_recall_service=getattr(self.memory_hooks, "recall", None),
             memory_query=getattr(self.memory_hooks, "memory_query", None),
             graph_id=getattr(self.memory_hooks, "graph_id", None),
+            memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
         )
         self._last_result: AgentRunResult | None = None
 
@@ -160,7 +169,10 @@ class AgentRuntime:
             context = build_llm_context(
                 state=state,
                 registry=self.tool_executor.registry,
-                system_prompt=self.system_prompt,
+                system_prompt=_with_memory_context_prompt(
+                    self.system_prompt,
+                    getattr(self.memory_hooks, "memory_context_prompt", lambda: None)(),
+                ),
                 budget=self.budget,
             )
 

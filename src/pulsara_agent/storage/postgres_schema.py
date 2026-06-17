@@ -15,6 +15,7 @@ RUNTIME_TRUTH_TABLES = (
     "agent_events",
     "tool_execution_records",
     "artifacts",
+    "working_context_summaries",
 )
 
 RUNTIME_TRUTH_SCHEMA_SQL = """
@@ -113,4 +114,21 @@ CREATE INDEX IF NOT EXISTS idx_tool_execution_records_run_id
 
 CREATE INDEX IF NOT EXISTS idx_tool_execution_records_artifact_id
     ON tool_execution_records(artifact_id);
+
+CREATE TABLE IF NOT EXISTS working_context_summaries (
+    summary_id TEXT PRIMARY KEY,
+    memory_domain_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    workspace_label TEXT,
+    workspace_key TEXT,
+    source_session_id TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (memory_domain_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_working_context_domain
+    ON working_context_summaries(memory_domain_id, updated_at);
 """.strip()

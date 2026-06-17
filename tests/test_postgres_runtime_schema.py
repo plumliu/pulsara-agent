@@ -31,3 +31,8 @@ def test_tool_execution_records_allow_cross_run_tool_call_id_reuse() -> None:
 def test_runtime_fact_tables_reference_runs_and_turns() -> None:
     assert "run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE" in RUNTIME_TRUTH_SCHEMA_SQL
     assert "turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE" in RUNTIME_TRUTH_SCHEMA_SQL
+
+
+def test_working_context_is_runtime_operational_state_not_semantic_memory() -> None:
+    assert "CREATE TABLE IF NOT EXISTS working_context_summaries" in RUNTIME_TRUTH_SCHEMA_SQL
+    assert "UNIQUE (memory_domain_id)" in RUNTIME_TRUTH_SCHEMA_SQL

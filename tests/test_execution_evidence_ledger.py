@@ -75,7 +75,7 @@ def test_tool_result_creates_ledger_nodes() -> None:
         status=rt.ToolExecutionStatus.SUCCESS,
         input_summary="Read README",
         output="Pulsara README",
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
     )
 
     assert ledger.graph.get_jsonld(result.tool_result_id)["@type"] == [rt.TOOL_RESULT.name]
@@ -92,7 +92,7 @@ def test_turn_can_produce_multiple_tool_results() -> None:
         status=rt.ToolExecutionStatus.SUCCESS,
         input_summary="Read pyproject",
         output="pyproject content",
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
     )
     second = ledger.record_tool_result(
         turn_id="turn:test/multi",
@@ -100,7 +100,7 @@ def test_turn_can_produce_multiple_tool_results() -> None:
         status=rt.ToolExecutionStatus.SUCCESS,
         input_summary="Read README",
         output="README content",
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
     )
 
     assert ledger.graph.get_jsonld("turn:test/multi")[rt.PRODUCED.name] == [
@@ -119,7 +119,7 @@ def test_large_tool_result_creates_artifact() -> None:
         status=rt.ToolExecutionStatus.SUCCESS,
         input_summary="Search",
         output=output,
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
     )
 
     assert result.artifact_id is not None
@@ -156,7 +156,7 @@ def test_record_tool_result_block_does_not_create_evidence_or_claim() -> None:
             state=ToolResultState.SUCCESS,
         ),
         input_summary='{"path":"README.md"}',
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
     )
 
     assert ledger.graph.find_by_type(rt.TOOL_RESULT)
@@ -173,17 +173,17 @@ def test_evidence_supports_claim() -> None:
         status=rt.ToolExecutionStatus.SUCCESS,
         input_summary="Search JSON-LD",
         output="Found JSON-LD flattening.",
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
     )
     evidence = ledger.create_evidence_from_tool_result(
         result.tool_result_id,
         statement="The result mentions JSON-LD flattening.",
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
     )
 
     claim = ledger.submit_claim(
         statement="The implementation needs JSON-LD semantic preservation.",
-        scope="ctx:test",
+        scope="ctx:workspace/test_project",
         evidence_ids=[evidence.evidence_id],
         source_authority=memory.SourceAuthority.TOOL_RESULT,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -415,7 +415,7 @@ def test_record_tool_result_from_event_slice_start_without_end_raises_value_erro
 
 def test_named_graph_supports_put_get_and_delete() -> None:
     graph = InMemoryGraphStore()
-    document = {"@id": "tool-result:1", "@type": ["ToolResult"], "scope": "ctx:test"}
+    document = {"@id": "tool-result:1", "@type": ["ToolResult"], "scope": "ctx:workspace/test_project"}
 
     graph.put_jsonld(document, graph_id="graph:test")
     assert graph.get_jsonld("tool-result:1", graph_id="graph:test")["@id"] == "tool-result:1"

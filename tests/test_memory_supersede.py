@@ -183,7 +183,7 @@ def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candida
     log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-scope-old"
     try:
-        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries.", scope="ctx:project"), graph_id=graph_id)
+        store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries.", scope="ctx:workspace/test_project"), graph_id=graph_id)
         pooled = pool.append_candidate(
             _pooled_valid(
                 runtime_session_id=runtime_session_id,

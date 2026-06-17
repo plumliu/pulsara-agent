@@ -38,6 +38,7 @@ def build_core_tool_registry(
     memory_recall_service: MemoryRecallService | None = None,
     memory_query: MemoryQuery | None = None,
     graph_id: str | None = None,
+    memory_read_scopes: frozenset[str] | None = None,
 ) -> ToolRegistry:
     if not isinstance(runtime_session, RuntimeSession):
         raise TypeError("build_core_tool_registry requires a RuntimeSession")
@@ -50,11 +51,35 @@ def build_core_tool_registry(
     registry.register(WriteFileTool(root))
     registry.register(TodoTool())
     if memory_recall_service is not None:
-        registry.register(MemorySearchTool(recall=memory_recall_service, graph_id=graph_id))
+        registry.register(
+            MemorySearchTool(
+                recall=memory_recall_service,
+                graph_id=graph_id,
+                read_scopes=memory_read_scopes,
+            )
+        )
     if memory_query is not None:
-        registry.register(MemoryGetTool(memory_query=memory_query, graph_id=graph_id))
-        registry.register(MemoryRelatedTool(memory_query=memory_query, graph_id=graph_id))
-        registry.register(MemoryExplainTool(memory_query=memory_query, graph_id=graph_id))
+        registry.register(
+            MemoryGetTool(
+                memory_query=memory_query,
+                graph_id=graph_id,
+                read_scopes=memory_read_scopes,
+            )
+        )
+        registry.register(
+            MemoryRelatedTool(
+                memory_query=memory_query,
+                graph_id=graph_id,
+                read_scopes=memory_read_scopes,
+            )
+        )
+        registry.register(
+            MemoryExplainTool(
+                memory_query=memory_query,
+                graph_id=graph_id,
+                read_scopes=memory_read_scopes,
+            )
+        )
     if memory_proposal_sink is not None:
         registry.register(RememberClaimTool(sink=memory_proposal_sink))
         registry.register(RememberPreferenceTool(sink=memory_proposal_sink))

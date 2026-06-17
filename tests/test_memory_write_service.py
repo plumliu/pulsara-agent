@@ -66,11 +66,11 @@ def _seed_evidence(ledger: ExecutionEvidenceLedger, *, scope: str) -> str:
 
 def test_submit_claim_candidate_active_emits_proposed_and_result() -> None:
     service, ledger, graph = _service()
-    evidence_id = _seed_evidence(ledger, scope="ctx:project")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
     candidate = ClaimCandidate(
         candidate_id="candidate:claim",
         statement="JSON-LD preserves graph semantics.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=(evidence_id,),
         source_authority=memory.SourceAuthority.TOOL_RESULT,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -97,11 +97,11 @@ def test_submit_claim_candidate_active_emits_proposed_and_result() -> None:
 
 def test_submit_decision_candidate_without_authority_lands_needs_review() -> None:
     service, ledger, _ = _service()
-    evidence_id = _seed_evidence(ledger, scope="ctx:project")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
     candidate = DecisionCandidate(
         candidate_id="candidate:decision",
         statement="Adopt JSON-LD for durable memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=(evidence_id,),
         source_authority=memory.SourceAuthority.TOOL_RESULT,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -142,7 +142,7 @@ def test_submit_observation_with_missing_evidence_emits_failed_and_writes_no_nod
     candidate = ObservationCandidate(
         candidate_id="candidate:obs",
         statement="The integration suite is flaky on macOS runners.",
-        scope="ctx:task",
+        scope="ctx:workspace/test_project",
         evidence_ids=("evidence:missing",),
         source_authority=memory.SourceAuthority.CONVERSATION_EVIDENCE,
         verification_status=memory.VerificationStatus.INFERRED,
@@ -165,11 +165,11 @@ def test_submit_observation_with_missing_evidence_emits_failed_and_writes_no_nod
 
 def test_submit_decision_with_missing_based_on_emits_failed() -> None:
     service, ledger, graph = _service()
-    evidence_id = _seed_evidence(ledger, scope="ctx:project")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
     candidate = DecisionCandidate(
         candidate_id="candidate:decision",
         statement="Adopt JSON-LD for durable memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=(evidence_id,),
         source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
         verification_status=memory.VerificationStatus.USER_CONFIRMED,
@@ -190,7 +190,7 @@ def test_action_boundary_candidate_requires_conditions_at_construction() -> None
         ActionBoundaryCandidate(
             candidate_id="candidate:boundary",
             statement="Never force-push to main.",
-            scope="ctx:workspace",
+            scope="ctx:workspace/test_workspace",
             source_authority=memory.SourceAuthority.SYSTEM_RULE,
             verification_status=memory.VerificationStatus.USER_CONFIRMED,
         )
@@ -201,7 +201,7 @@ def test_action_boundary_structured_trigger_values_must_be_non_empty() -> None:
     candidate = ActionBoundaryCandidate(
         candidate_id="candidate:boundary",
         statement="Use uv when running project tests.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         applies_when="working on this repository",
         do_not_apply_when="the user asks not to run tests",
         trigger_keywords=("pytest", "  "),
@@ -260,7 +260,7 @@ def test_proposed_event_round_trips_candidate_discriminator() -> None:
         candidate=ActionBoundaryCandidate(
             candidate_id="candidate:boundary",
             statement="Never force-push to main.",
-            scope="ctx:workspace",
+            scope="ctx:workspace/test_workspace",
             applies_when="branch is main",
             do_not_apply_when="user explicitly authorizes",
             source_authority=memory.SourceAuthority.SYSTEM_RULE,
@@ -283,7 +283,7 @@ def test_submit_raw_action_boundary_payload_normalizes_candidate() -> None:
             "kind": "ActionBoundary",
             "candidate_id": "candidate:boundary",
             "statement": "Never force-push to main.",
-            "scope": "ctx:workspace",
+            "scope": "ctx:workspace/test_workspace",
             "applies_when": "branch is main",
             "do_not_apply_when": "user explicitly authorizes",
             "source_authority": memory.SourceAuthority.SYSTEM_RULE.value,
@@ -355,11 +355,11 @@ def test_submit_preference_with_evidence_links_provenance() -> None:
 
 def test_submit_action_boundary_with_evidence_links_provenance() -> None:
     service, ledger, graph = _service()
-    evidence_id = _seed_evidence(ledger, scope="ctx:workspace")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_workspace")
     candidate = ActionBoundaryCandidate(
         candidate_id="candidate:boundary",
         statement="Never force-push to main.",
-        scope="ctx:workspace",
+        scope="ctx:workspace/test_workspace",
         evidence_ids=(evidence_id,),
         applies_when="branch is main",
         do_not_apply_when="user explicitly authorizes",
@@ -395,7 +395,7 @@ def test_submit_action_boundary_with_evidence_links_provenance() -> None:
             ActionBoundaryCandidate(
                 candidate_id="candidate:boundary",
                 statement="Never force-push to main.",
-                scope="ctx:workspace",
+                scope="ctx:workspace/test_workspace",
                 evidence_ids=("evidence:missing",),
                 applies_when="branch is main",
                 do_not_apply_when="user explicitly authorizes",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from pulsara_agent.memory.scope import is_valid_scope
 from pulsara_agent.ontology import memory
 
 
@@ -36,7 +37,7 @@ class MemoryWriteGate:
         _assert_enum(verification_status, memory.VerificationStatus)
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
-        if not scope.strip():
+        if not is_valid_scope(scope):
             return WriteDecision(False, memory.NodeStatus.REJECTED, "claim needs scope")
         if not evidence_ids and source_authority is not memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION:
             return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "claim needs evidence")
@@ -55,7 +56,7 @@ class MemoryWriteGate:
         _assert_enum(verification_status, memory.VerificationStatus)
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
-        if not scope.strip():
+        if not is_valid_scope(scope):
             return WriteDecision(False, memory.NodeStatus.REJECTED, "preference needs scope")
         if source_authority is memory.SourceAuthority.MODEL_INFERENCE:
             return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "preference needs user or tool authority")
@@ -84,7 +85,7 @@ class MemoryWriteGate:
         _assert_enum(verification_status, memory.VerificationStatus)
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
-        if not scope.strip():
+        if not is_valid_scope(scope):
             return WriteDecision(False, memory.NodeStatus.REJECTED, "action boundary needs scope")
         if not applies_when.strip() or not do_not_apply_when.strip():
             return WriteDecision(
@@ -129,7 +130,7 @@ class MemoryWriteGate:
         _assert_enum(verification_status, memory.VerificationStatus)
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
-        if not scope.strip():
+        if not is_valid_scope(scope):
             return WriteDecision(False, memory.NodeStatus.REJECTED, "observation needs scope")
         if not evidence_ids and source_authority not in {
             memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
@@ -152,7 +153,7 @@ class MemoryWriteGate:
         _assert_enum(verification_status, memory.VerificationStatus)
         if not statement.strip():
             return WriteDecision(False, memory.NodeStatus.REJECTED, "empty statement")
-        if not scope.strip():
+        if not is_valid_scope(scope):
             return WriteDecision(False, memory.NodeStatus.REJECTED, "decision needs scope")
         if not evidence_ids and source_authority is not memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION:
             return WriteDecision(False, memory.NodeStatus.NEEDS_REVIEW, "decision needs evidence")

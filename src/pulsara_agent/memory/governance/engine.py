@@ -23,6 +23,7 @@ from pulsara_agent.memory.candidates.pool import (
 )
 from pulsara_agent.memory.governance.dedupe import candidate_fingerprint
 from pulsara_agent.memory.governance.executor import MemoryGovernanceApplyResult, MemoryGovernanceExecutor
+from pulsara_agent.memory.scope import format_scope_list
 from pulsara_agent.ontology import memory
 
 
@@ -33,6 +34,7 @@ class MemoryGovernanceInput(BaseModel):
     governance_batch_id: str
     trigger_reason: str
     candidates: list[dict[str, Any]]
+    allowed_scopes: list[str] = Field(default_factory=list)
 
 
 class MemoryGovernanceOutput(BaseModel):
@@ -93,6 +95,7 @@ class MemoryGovernanceEngine:
             governance_batch_id=batch_id,
             trigger_reason=trigger_reason,
             candidates=[self._candidate_snapshot(candidate) for candidate in pending],
+            allowed_scopes=sorted(self.executor.allowed_write_scopes),
         )
         try:
             output = _parse_governance_output(await self._call_flash(governance_input))
@@ -128,7 +131,7 @@ class MemoryGovernanceEngine:
         async for event in self.llm_runtime.stream(
             role=self.options.model_role,
             context=LLMContext(
-                system_prompt=_GOVERNANCE_SYSTEM_PROMPT,
+                system_prompt=_governance_system_prompt(self.executor.allowed_write_scopes),
                 messages=(
                     LLMMessage.user(
                         "Govern these memory candidates and output JSON only:\n"
@@ -223,6 +226,11 @@ Rules:
 - Prefer skip over weak memory.
 - Do not invent missing facts. Correct only when the candidate snapshot provides
   enough information.
+- Candidate scopes must be one of allowed_scopes. If a candidate uses a scope
+  outside allowed_scopes, skip rather than rewriting it.
+- Use ctx:user only for durable user-wide preferences or habits.
+- Use ctx:workspace/<flat_key> only for durable current-project facts or decisions.
+- Do not submit durable memory for one-off task details.
 - Use source_events, user_quote, prior_governance_decisions, and related_existing_memories
   as audit evidence. They are context, not permission to invent new memory.
 - If related_existing_memories already contains an active memory
@@ -322,6 +330,16 @@ Output:
   ]
 }
 """.strip()
+
+
+def _governance_system_prompt(allowed_scopes: frozenset[str]) -> str:
+    return "\n".join(
+        [
+            _GOVERNANCE_SYSTEM_PROMPT,
+            "",
+            "Allowed scopes for this run: " + format_scope_list(allowed_scopes) + ".",
+        ]
+    )
 
 
 _KIND_TO_TERM = {

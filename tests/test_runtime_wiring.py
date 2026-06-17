@@ -10,6 +10,7 @@ from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import load_run_timeline, summarize_run_timeline
+from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime import (
     AgentRuntimeWiring,
@@ -63,6 +64,46 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     assert wiring.agent_runtime.model_role.name == "FLASH"
     assert wiring.agent_runtime.options == LLMOptions(temperature=0, max_output_tokens=32)
     assert wiring.agent_runtime.system_prompt == "test prompt"
+
+
+def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -> None:
+    domain = MemoryDomainContext(
+        memory_domain_id="u_test",
+        workspace_kind="project",
+        stable_project_key="repo_test",
+    )
+
+    wiring = build_in_memory_runtime_wiring(
+        tmp_path,
+        runtime_session_id=f"runtime:test:{uuid4().hex}",
+        memory_domain=domain,
+    )
+
+    assert wiring.graph_id == "graph:user/u_test"
+    assert wiring.memory_governance_executor.allowed_write_scopes == frozenset(
+        {"ctx:user", "ctx:workspace/repo_test"}
+    )
+
+
+def test_in_memory_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> None:
+    with pytest.raises(ValueError, match="graph:user"):
+        build_in_memory_runtime_wiring(
+            tmp_path,
+            runtime_session_id=f"runtime:test:{uuid4().hex}",
+            graph_id="graph:user/u_test",
+        )
+
+
+def test_durable_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> None:
+    storage = StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1")
+
+    with pytest.raises(ValueError, match="graph:user"):
+        build_durable_runtime_wiring(
+            _settings_for_storage(storage),
+            tmp_path,
+            runtime_session_id=f"runtime:test:{uuid4().hex}",
+            graph_id="graph:user/u_test",
+        )
 
 
 def test_durable_runtime_wiring_uses_postgres_graph_event_log_and_artifacts(tmp_path) -> None:

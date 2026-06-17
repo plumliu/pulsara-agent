@@ -30,6 +30,7 @@ from pulsara_agent.memory.candidates.pool import (
 from pulsara_agent.memory.governance.dedupe import already_exists
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
 from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, MemoryWriteService
+from pulsara_agent.memory.scope import CTX_USER
 from pulsara_agent.ontology import memory
 
 
@@ -53,6 +54,7 @@ class MemoryGovernanceExecutor:
     runtime_session_id: str
     graph_id: str | None = None
     memory_write_uow_factory: Callable[[], MemoryWriteUnitOfWork] | None = None
+    allowed_write_scopes: frozenset[str] = frozenset({CTX_USER})
 
     def apply_decision(
         self,
@@ -82,6 +84,13 @@ class MemoryGovernanceExecutor:
         if candidate is None:
             record = self._append_decision(
                 decision=_skip_for_invalid(effective_decision),
+                governance_batch_id=batch_id,
+                write_outcome=NoWriteOutcome(),
+            )
+            return MemoryGovernanceApplyResult(decision_record=record, events=[])
+        if candidate.scope not in self.allowed_write_scopes:
+            record = self._append_decision(
+                decision=_skip_out_of_scope(effective_decision, candidate.scope),
                 governance_batch_id=batch_id,
                 write_outcome=NoWriteOutcome(),
             )
@@ -137,6 +146,15 @@ class MemoryGovernanceExecutor:
         if candidate is None:
             record = _decision_record(
                 decision=_skip_for_invalid(decision),
+                governance_batch_id=governance_batch_id,
+                write_outcome=NoWriteOutcome(),
+            )
+            with self.memory_write_uow_factory() as uow:
+                uow.decisions.append_decision(record)
+            return MemoryGovernanceApplyResult(decision_record=record, events=[])
+        if candidate.scope not in self.allowed_write_scopes:
+            record = _decision_record(
+                decision=_skip_out_of_scope(decision, candidate.scope),
                 governance_batch_id=governance_batch_id,
                 write_outcome=NoWriteOutcome(),
             )
@@ -313,9 +331,14 @@ class MemoryGovernanceExecutor:
             )
         )
 
-    def _validate_target_entries(self, decision: GovernanceDecision) -> None:
+    def _validate_target_entries(self, decision: GovernanceDecision) -> tuple[PooledMemoryCandidate, ...]:
+        targets: list[PooledMemoryCandidate] = []
         for entry_id in _target_entry_ids(decision):
-            self.candidate_pool.get_candidate(entry_id)
+            target = self.candidate_pool.get_candidate(entry_id)
+            if target.source_session_id != self.runtime_session_id:
+                raise ValueError(f"governance decision targets candidate from another runtime: {entry_id}")
+            targets.append(target)
+        return tuple(targets)
 
     def _validate_supersede_targets(
         self,
@@ -396,6 +419,14 @@ def _skip_for_invalid(decision: GovernanceDecision) -> SkipDecision:
         target_entry_ids=_target_entry_ids(decision),
         reason="Governance decision targets an invalid candidate payload.",
         skip_reason="invalid_attempt",
+    )
+
+
+def _skip_out_of_scope(decision: GovernanceDecision, scope: str) -> SkipDecision:
+    return SkipDecision(
+        target_entry_ids=_target_entry_ids(decision),
+        reason=f"Memory candidate scope is not writable in this runtime: {scope}",
+        skip_reason="scope_not_allowed",
     )
 
 

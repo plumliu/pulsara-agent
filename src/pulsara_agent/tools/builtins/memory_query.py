@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 from pulsara_agent.memory.recall.explain import explain_memory, explanation_to_payload
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
 from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
+from pulsara_agent.memory.scope import CTX_USER, format_scope_list, is_valid_scope
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import int_arg, json_text, object_schema, required_str_arg, str_arg
@@ -22,7 +23,7 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         },
         "scope": {
             "type": "string",
-            "description": "Optional exact memory scope, e.g. ctx:user or ctx:workspace/project.",
+            "description": "Optional exact visible memory scope, e.g. ctx:user or ctx:workspace/<flat_key>.",
         },
         "kind": {
             "type": "string",
@@ -71,6 +72,7 @@ _MEMORY_EXPLAIN_PARAMETERS = object_schema(
 class MemorySearchTool:
     recall: MemoryRecallService
     graph_id: str | None = None
+    read_scopes: frozenset[str] | None = None
 
     name: ClassVar[str] = "memory_search"
     description: ClassVar[str] = (
@@ -84,13 +86,20 @@ class MemorySearchTool:
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         query_text = required_str_arg(call.arguments, "query")
         scope = str_arg(call.arguments, "scope")
+        scope = scope.strip() if scope is not None else None
+        if scope == "":
+            scope = None
         kind = str_arg(call.arguments, "kind")
         limit = max(1, min(int_arg(call.arguments, "limit", 5), 20))
+        scope_error = _scope_error_payload(scope, self.read_scopes)
+        if scope_error is not None:
+            return _tool_success(call, scope_error)
+        scopes = (scope,) if scope else _default_scopes(self.read_scopes)
         result = asyncio.run(
             self.recall.recall(
                 RecallQuery(
                     text=query_text,
-                    scopes=(scope,) if scope else (),
+                    scopes=scopes,
                     types=(kind,) if kind else (),
                     limit=limit,
                     trigger=RecallTrigger.EXPLICIT_SEARCH,
@@ -131,18 +140,14 @@ class MemorySearchTool:
                 ],
                 "filtered_ids": list(result.filtered_ids),
             }
-        return ToolExecutionResult(
-            call_id=call.id,
-            tool_name=call.name,
-            status=ToolResultState.SUCCESS,
-            output=json_text(payload),
-        )
+        return _tool_success(call, payload)
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryGetTool:
     memory_query: MemoryQuery
     graph_id: str | None = None
+    read_scopes: frozenset[str] | None = None
 
     name: ClassVar[str] = "memory_get"
     description: ClassVar[str] = (
@@ -170,20 +175,18 @@ class MemoryGetTool:
                     "memory_id": memory_id,
                     "guidance": ["No canonical memory with this id was found."],
                 }
+            elif not _is_view_visible(views[0], self.read_scopes):
+                payload = _forbidden_memory_payload(memory_id)
             else:
                 payload = {"status": "ok", "memory": _view_payload(views[0])}
-        return ToolExecutionResult(
-            call_id=call.id,
-            tool_name=call.name,
-            status=ToolResultState.SUCCESS,
-            output=json_text(payload),
-        )
+        return _tool_success(call, payload)
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryRelatedTool:
     memory_query: MemoryQuery
     graph_id: str | None = None
+    read_scopes: frozenset[str] | None = None
 
     name: ClassVar[str] = "memory_related"
     description: ClassVar[str] = (
@@ -208,6 +211,8 @@ class MemoryRelatedTool:
                     "relations": [],
                     "guidance": ["No canonical memory with this id was found."],
                 }
+            elif not _is_view_visible(views[0], self.read_scopes):
+                payload = _forbidden_memory_payload(memory_id) | {"relations": []}
             else:
                 view = views[0]
                 payload = {
@@ -222,18 +227,14 @@ class MemoryRelatedTool:
                         for predicate, target_id in view.outgoing
                     ],
                 }
-        return ToolExecutionResult(
-            call_id=call.id,
-            tool_name=call.name,
-            status=ToolResultState.SUCCESS,
-            output=json_text(payload),
-        )
+        return _tool_success(call, payload)
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryExplainTool:
     memory_query: MemoryQuery
     graph_id: str | None = None
+    read_scopes: frozenset[str] | None = None
 
     name: ClassVar[str] = "memory_explain"
     description: ClassVar[str] = (
@@ -257,17 +258,66 @@ class MemoryExplainTool:
                     "memory_id": memory_id,
                     "guidance": ["No canonical memory with this id was found."],
                 }
+            elif not _is_view_visible(views[0], self.read_scopes):
+                payload = _forbidden_memory_payload(memory_id)
             else:
                 payload = {
                     "status": "ok",
                     "explanation": explanation_to_payload(explain_memory(views[0])),
                 }
-        return ToolExecutionResult(
-            call_id=call.id,
-            tool_name=call.name,
-            status=ToolResultState.SUCCESS,
-            output=json_text(payload),
-        )
+        return _tool_success(call, payload)
+
+
+def _tool_success(call: ToolCall, payload: dict[str, Any]) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        call_id=call.id,
+        tool_name=call.name,
+        status=ToolResultState.SUCCESS,
+        output=json_text(payload),
+    )
+
+
+def _default_scopes(read_scopes: frozenset[str] | None) -> tuple[str, ...]:
+    return tuple(sorted(_effective_read_scopes(read_scopes)))
+
+
+def _scope_error_payload(scope: str | None, read_scopes: frozenset[str] | None) -> dict[str, Any] | None:
+    if scope is None:
+        return None
+    if not is_valid_scope(scope):
+        return {
+            "status": "empty",
+            "results": [],
+            "reason": "invalid_scope",
+            "guidance": ["Use ctx:user or ctx:workspace/<flat_key>."],
+        }
+    effective_read_scopes = _effective_read_scopes(read_scopes)
+    if scope not in effective_read_scopes:
+        return {
+            "status": "empty",
+            "results": [],
+            "reason": "scope_not_visible",
+            "visible_scopes": format_scope_list(effective_read_scopes),
+            "guidance": ["The requested memory scope is not visible in this runtime."],
+        }
+    return None
+
+
+def _is_view_visible(view: CanonicalNodeView, read_scopes: frozenset[str] | None) -> bool:
+    return view.scope in _effective_read_scopes(read_scopes)
+
+
+def _effective_read_scopes(read_scopes: frozenset[str] | None) -> frozenset[str]:
+    return frozenset({CTX_USER}) if read_scopes is None else read_scopes
+
+
+def _forbidden_memory_payload(memory_id: str) -> dict[str, Any]:
+    return {
+        "status": "empty",
+        "memory_id": memory_id,
+        "reason": "scope_not_visible",
+        "guidance": ["No canonical memory with this id was found in the visible scopes."],
+    }
 
 
 def _view_payload(view: CanonicalNodeView) -> dict[str, Any]:

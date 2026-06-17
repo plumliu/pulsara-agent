@@ -93,6 +93,7 @@ class RuntimeSession:
         memory_recall_service=None,
         memory_query=None,
         graph_id: str | None = None,
+        memory_read_scopes: frozenset[str] | None = None,
     ):
         from pulsara_agent.tools import ToolExecutor
         from pulsara_agent.tools.builtins.registry import build_core_tool_registry
@@ -109,6 +110,7 @@ class RuntimeSession:
                 memory_recall_service=memory_recall_service,
                 memory_query=memory_query,
                 graph_id=graph_id,
+                memory_read_scopes=memory_read_scopes,
             ),
             record_event=record_event,
         )

@@ -33,7 +33,7 @@ def test_action_boundary_round_trips_with_conditions() -> None:
     boundary = ActionBoundary(
         id="action-boundary:no-force-push",
         statement="Never force-push to main.",
-        scope="ctx:workspace",
+        scope="ctx:workspace/test_workspace",
         status=memory.NodeStatus.ACTIVE,
         applies_when="branch is main",
         do_not_apply_when="user explicitly authorizes",
@@ -58,7 +58,7 @@ def test_observation_round_trips() -> None:
     observation = Observation(
         id="observation:ci-flaky",
         statement="The integration suite is flaky on macOS runners.",
-        scope="ctx:task",
+        scope="ctx:workspace/test_project",
         status=memory.NodeStatus.ACTIVE,
         confidence_level=memory.ConfidenceLevel.MEDIUM,
         verification_status=memory.VerificationStatus.INFERRED,
@@ -121,10 +121,25 @@ def test_preference_gate_rejects_empty_scope() -> None:
     assert decision.status is memory.NodeStatus.REJECTED
 
 
+def test_preference_gate_rejects_unknown_or_hierarchical_scope() -> None:
+    gate = MemoryWriteGate()
+
+    for scope in ("ctx:乱填", "ctx:project", "ctx:workspace/a/b", "ctx:workspace"):
+        decision = gate.evaluate_preference(
+            statement="Prefer tabs over spaces.",
+            scope=scope,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+        )
+
+        assert not decision.accepted
+        assert decision.status is memory.NodeStatus.REJECTED
+
+
 def test_action_boundary_gate_requires_both_conditions() -> None:
     decision = MemoryWriteGate().evaluate_action_boundary(
         statement="Never force-push to main.",
-        scope="ctx:workspace",
+        scope="ctx:workspace/test_workspace",
         applies_when="branch is main",
         do_not_apply_when="   ",
         source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
@@ -137,7 +152,7 @@ def test_action_boundary_gate_requires_both_conditions() -> None:
 def test_action_boundary_gate_requires_authoritative_source() -> None:
     decision = MemoryWriteGate().evaluate_action_boundary(
         statement="Never force-push to main.",
-        scope="ctx:workspace",
+        scope="ctx:workspace/test_workspace",
         applies_when="branch is main",
         do_not_apply_when="user explicitly authorizes",
         source_authority=memory.SourceAuthority.MODEL_INFERENCE,
@@ -150,7 +165,7 @@ def test_action_boundary_gate_requires_authoritative_source() -> None:
 def test_action_boundary_gate_accepts_complete_boundary() -> None:
     decision = MemoryWriteGate().evaluate_action_boundary(
         statement="Never force-push to main.",
-        scope="ctx:workspace",
+        scope="ctx:workspace/test_workspace",
         applies_when="branch is main",
         do_not_apply_when="user explicitly authorizes",
         source_authority=memory.SourceAuthority.SYSTEM_RULE,
@@ -176,7 +191,7 @@ def test_action_boundary_gate_rejects_empty_scope() -> None:
 def test_observation_gate_requires_evidence_for_conversation_evidence() -> None:
     decision = MemoryWriteGate().evaluate_observation(
         statement="The integration suite is flaky on macOS runners.",
-        scope="ctx:task",
+        scope="ctx:workspace/test_project",
         evidence_ids=[],
         source_authority=memory.SourceAuthority.CONVERSATION_EVIDENCE,
         verification_status=memory.VerificationStatus.INFERRED,
@@ -188,7 +203,7 @@ def test_observation_gate_requires_evidence_for_conversation_evidence() -> None:
 def test_observation_gate_accepts_evidence_backed_observation() -> None:
     decision = MemoryWriteGate().evaluate_observation(
         statement="The integration suite is flaky on macOS runners.",
-        scope="ctx:task",
+        scope="ctx:workspace/test_project",
         evidence_ids=["evidence:ci-flaky"],
         source_authority=memory.SourceAuthority.CONVERSATION_EVIDENCE,
         verification_status=memory.VerificationStatus.INFERRED,
@@ -201,7 +216,7 @@ def test_observation_gate_accepts_evidence_backed_observation() -> None:
 def test_observation_gate_rejects_empty_statement() -> None:
     decision = MemoryWriteGate().evaluate_observation(
         statement="",
-        scope="ctx:task",
+        scope="ctx:workspace/test_project",
         evidence_ids=["evidence:ci-flaky"],
         source_authority=memory.SourceAuthority.CONVERSATION_EVIDENCE,
         verification_status=memory.VerificationStatus.INFERRED,
@@ -225,7 +240,7 @@ def test_observation_gate_rejects_empty_scope() -> None:
 def test_decision_gate_rejects_empty_statement() -> None:
     decision = MemoryWriteGate().evaluate_decision(
         statement="   ",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=["evidence:x"],
         source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
         verification_status=memory.VerificationStatus.USER_CONFIRMED,
@@ -249,7 +264,7 @@ def test_decision_gate_rejects_empty_scope() -> None:
 def test_decision_gate_needs_review_without_evidence() -> None:
     decision = MemoryWriteGate().evaluate_decision(
         statement="Adopt JSON-LD for memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=[],
         source_authority=memory.SourceAuthority.TOOL_RESULT,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -261,7 +276,7 @@ def test_decision_gate_needs_review_without_evidence() -> None:
 def test_decision_gate_needs_review_without_authoritative_source() -> None:
     decision = MemoryWriteGate().evaluate_decision(
         statement="Adopt JSON-LD for memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=["evidence:x"],
         source_authority=memory.SourceAuthority.TOOL_RESULT,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -273,7 +288,7 @@ def test_decision_gate_needs_review_without_authoritative_source() -> None:
 def test_decision_gate_accepts_user_instruction() -> None:
     decision = MemoryWriteGate().evaluate_decision(
         statement="Adopt JSON-LD for memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=[],
         source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
         verification_status=memory.VerificationStatus.USER_CONFIRMED,
@@ -286,7 +301,7 @@ def test_decision_gate_accepts_user_instruction() -> None:
 def test_decision_gate_accepts_system_rule_with_evidence() -> None:
     decision = MemoryWriteGate().evaluate_decision(
         statement="Adopt JSON-LD for memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=["evidence:x"],
         source_authority=memory.SourceAuthority.SYSTEM_RULE,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -299,7 +314,7 @@ def test_decision_gate_is_not_looser_than_action_boundary() -> None:
     gate = MemoryWriteGate()
     boundary = gate.evaluate_action_boundary(
         statement="Never auto-merge.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         applies_when="any branch",
         do_not_apply_when="user authorizes",
         source_authority=memory.SourceAuthority.MODEL_INFERENCE,
@@ -307,7 +322,7 @@ def test_decision_gate_is_not_looser_than_action_boundary() -> None:
     )
     decision = gate.evaluate_decision(
         statement="Never auto-merge.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=["evidence:x"],
         source_authority=memory.SourceAuthority.MODEL_INFERENCE,
         verification_status=memory.VerificationStatus.INFERRED,

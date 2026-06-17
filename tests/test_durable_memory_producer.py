@@ -411,7 +411,7 @@ def test_remember_action_boundary_tool_missing_condition_errors() -> None:
             name="remember_action_boundary",
             arguments={
                 "statement": "Never force-push to main.",
-                "scope": "ctx:workspace",
+                "scope": "ctx:workspace/test_workspace",
                 "applies_when": "branch is main",
                 "source_authority": "system_rule",
                 "verification_status": "user_confirmed",
@@ -437,7 +437,7 @@ def test_remember_action_boundary_tool_valid_deposits_candidate() -> None:
             name="remember_action_boundary",
             arguments={
                 "statement": "Never force-push to main.",
-                "scope": "ctx:workspace",
+                "scope": "ctx:workspace/test_workspace",
                 "applies_when": "branch is main",
                 "do_not_apply_when": "user explicitly authorizes",
                 "source_authority": "system_rule",
@@ -465,7 +465,7 @@ def test_remember_decision_tool_supports_based_on_ids() -> None:
             name="remember_decision",
             arguments={
                 "statement": "Adopt JSON-LD for durable memory.",
-                "scope": "ctx:project",
+                "scope": "ctx:workspace/test_project",
                 "based_on_ids": ["claim:one"],
                 "source_authority": "explicit_user_instruction",
                 "verification_status": "user_confirmed",

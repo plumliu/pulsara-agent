@@ -23,7 +23,12 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.tools.base import ToolCall
-from pulsara_agent.tools.builtins.memory_query import MemoryGetTool, MemorySearchTool
+from pulsara_agent.tools.builtins.memory_query import (
+    MemoryExplainTool,
+    MemoryGetTool,
+    MemoryRelatedTool,
+    MemorySearchTool,
+)
 
 
 def test_lexical_recall_returns_active_memory_and_filters_rejected() -> None:
@@ -81,7 +86,7 @@ def test_durable_memory_project_builds_recalled_memory_projection() -> None:
             graph_id=graph_id,
         )
         state = LoopState(session_id="runtime:test")
-        state.current_scope = "ctx:user"
+        state.current_scope = "ctx:workspace/other_project"
         state.messages.append(UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")]))
 
         projection = asyncio.run(hooks.project(state, token_budget=200))
@@ -91,6 +96,47 @@ def test_durable_memory_project_builds_recalled_memory_projection() -> None:
         assert projection["included_memory_ids"] == ["preference:project-concise"]
         assert "<recalled-memory-projection" in projection["summary"]
         assert "memory_get preference:project-concise" in projection["summary"]
+    finally:
+        store.delete_graph(graph_id)
+
+
+def test_durable_memory_project_uses_read_scope_set() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    store = PostgresGraphStore(dsn=dsn)
+    try:
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id="preference:user-concise",
+            statement="The user prefers concise summaries.",
+            status=memory.NodeStatus.ACTIVE,
+            scope="ctx:user",
+        )
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id="preference:other-workspace-concise",
+            statement="The other workspace prefers concise summaries.",
+            status=memory.NodeStatus.ACTIVE,
+            scope="ctx:workspace/other_project",
+        )
+        hooks = DurableMemoryHooks(
+            candidate_pool=InMemoryCandidatePool(),
+            sink=MemoryProposalSink(),
+            recall=LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn)),
+            graph_id=graph_id,
+            read_scopes=frozenset({"ctx:user", "ctx:workspace/test_project"}),
+        )
+        state = LoopState(session_id="runtime:test")
+        state.messages.append(UserMsg(name="user", content=[TextBlock(text="Can you keep this concise?")]))
+
+        projection = asyncio.run(hooks.project(state, token_budget=200))
+
+        assert projection is not None
+        assert projection["included_memory_ids"] == ["preference:user-concise"]
+        assert "preference:other-workspace-concise" not in projection["summary"]
     finally:
         store.delete_graph(graph_id)
 
@@ -214,9 +260,25 @@ def test_memory_search_and_get_tools_return_structured_canonical_results() -> No
             statement="The user prefers concise summaries.",
             status=memory.NodeStatus.ACTIVE,
         )
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id="preference:tool-hidden-workspace",
+            statement="The hidden workspace prefers concise summaries.",
+            status=memory.NodeStatus.ACTIVE,
+            scope="ctx:workspace/hidden_project",
+        )
         search = MemorySearchTool(recall=recall, graph_id=graph_id)
         get = MemoryGetTool(memory_query=query, graph_id=graph_id)
 
+        default_search_result = search.execute(
+            ToolCall(
+                id="call:memory-search-default",
+                name="memory_search",
+                arguments={"query": "concise summaries", "kind": "Preference"},
+            )
+        )
+        default_search_payload = json.loads(default_search_result.output)
         search_result = search.execute(
             ToolCall(
                 id="call:memory-search",
@@ -233,13 +295,130 @@ def test_memory_search_and_get_tools_return_structured_canonical_results() -> No
             )
         )
         get_payload = json.loads(get_result.output)
+        hidden_get_result = get.execute(
+            ToolCall(
+                id="call:memory-get-hidden",
+                name="memory_get",
+                arguments={"memory_id": "preference:tool-hidden-workspace"},
+            )
+        )
+        hidden_get_payload = json.loads(hidden_get_result.output)
 
+        assert default_search_payload["status"] == "ok"
+        assert [item["memory_id"] for item in default_search_payload["results"]] == ["preference:tool-concise"]
         assert search_payload["status"] == "ok"
         assert search_payload["results"][0]["memory_id"] == "preference:tool-concise"
         assert search_payload["results"][0]["deep_recall"] == "memory_get preference:tool-concise"
         assert get_payload["status"] == "ok"
         assert get_payload["memory"]["statement"] == "The user prefers concise summaries."
         assert get_payload["memory"]["status"] == "active"
+        assert hidden_get_payload["status"] == "empty"
+        assert hidden_get_payload["reason"] == "scope_not_visible"
+        assert "hidden workspace" not in json.dumps(hidden_get_payload).lower()
+    finally:
+        store.delete_graph(graph_id)
+
+
+def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    store = PostgresGraphStore(dsn=dsn)
+    query = PostgresMemoryQuery(dsn=dsn)
+    recall = LexicalMemoryRecallService(query)
+    try:
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id="preference:visible-concise",
+            statement="The user prefers concise summaries.",
+            status=memory.NodeStatus.ACTIVE,
+            scope="ctx:user",
+        )
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id="preference:hidden-concise",
+            statement="The hidden workspace prefers concise summaries.",
+            status=memory.NodeStatus.ACTIVE,
+            scope="ctx:workspace/other_project",
+        )
+        read_scopes = frozenset({"ctx:user", "ctx:workspace/test_project"})
+        search = MemorySearchTool(recall=recall, graph_id=graph_id, read_scopes=read_scopes)
+        get = MemoryGetTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
+        related = MemoryRelatedTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
+        explain = MemoryExplainTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
+
+        default_payload = json.loads(
+            search.execute(
+                ToolCall(
+                    id="call:memory-search-default",
+                    name="memory_search",
+                    arguments={"query": "concise summaries"},
+                )
+            ).output
+        )
+        empty_scope_payload = json.loads(
+            search.execute(
+                ToolCall(
+                    id="call:memory-search-empty-scope",
+                    name="memory_search",
+                    arguments={"query": "concise summaries", "scope": ""},
+                )
+            ).output
+        )
+        hidden_scope_payload = json.loads(
+            search.execute(
+                ToolCall(
+                    id="call:memory-search-hidden",
+                    name="memory_search",
+                    arguments={"query": "concise summaries", "scope": "ctx:workspace/other_project"},
+                )
+            ).output
+        )
+        hidden_get_payload = json.loads(
+            get.execute(
+                ToolCall(
+                    id="call:memory-get-hidden",
+                    name="memory_get",
+                    arguments={"memory_id": "preference:hidden-concise"},
+                )
+            ).output
+        )
+        hidden_related_payload = json.loads(
+            related.execute(
+                ToolCall(
+                    id="call:memory-related-hidden",
+                    name="memory_related",
+                    arguments={"memory_id": "preference:hidden-concise"},
+                )
+            ).output
+        )
+        hidden_explain_payload = json.loads(
+            explain.execute(
+                ToolCall(
+                    id="call:memory-explain-hidden",
+                    name="memory_explain",
+                    arguments={"memory_id": "preference:hidden-concise"},
+                )
+            ).output
+        )
+
+        assert default_payload["status"] == "ok"
+        assert [item["memory_id"] for item in default_payload["results"]] == ["preference:visible-concise"]
+        assert empty_scope_payload["status"] == "ok"
+        assert [item["memory_id"] for item in empty_scope_payload["results"]] == ["preference:visible-concise"]
+        assert hidden_scope_payload["status"] == "empty"
+        assert hidden_scope_payload["reason"] == "scope_not_visible"
+        assert hidden_get_payload["status"] == "empty"
+        assert hidden_get_payload["reason"] == "scope_not_visible"
+        assert hidden_related_payload["status"] == "empty"
+        assert hidden_related_payload["reason"] == "scope_not_visible"
+        assert hidden_explain_payload["status"] == "empty"
+        assert hidden_explain_payload["reason"] == "scope_not_visible"
+        assert "hidden workspace" not in json.dumps(hidden_get_payload).lower()
+        assert "hidden workspace" not in json.dumps(hidden_related_payload).lower()
+        assert "hidden workspace" not in json.dumps(hidden_explain_payload).lower()
     finally:
         store.delete_graph(graph_id)
 
@@ -353,13 +532,14 @@ def _put_preference(
     memory_id: str,
     statement: str,
     status: memory.NodeStatus,
+    scope: str = "ctx:user",
 ) -> None:
     now = utc_now()
     store.put_jsonld(
         Preference(
             id=memory_id,
             statement=statement,
-            scope="ctx:user",
+            scope=scope,
             status=status,
             confidence_level=memory.ConfidenceLevel.HIGH,
             verification_status=memory.VerificationStatus.USER_CONFIRMED,

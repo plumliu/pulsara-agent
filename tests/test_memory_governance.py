@@ -181,6 +181,51 @@ def test_governance_limit_applies_after_runtime_session_filter() -> None:
     assert [candidate.source_session_id for candidate in pool.list_pending()] == ["runtime:other"]
 
 
+def test_governance_skips_candidate_outside_allowed_write_scopes() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    candidate = pool.append_candidate(
+        _pooled_valid(
+            candidate=_preference(
+                "candidate:workspace-out-of-scope",
+                scope="ctx:workspace/test_project",
+            )
+        )
+    )
+    executor = _executor(pool=pool, graph=graph, log=log, allowed_write_scopes=frozenset({"ctx:user"}))
+
+    result = executor.apply_decision(
+        SubmitAsIsDecision(target_entry_id=candidate.entry_id, reason="try workspace"),
+        governance_batch_id="governance:test:out-of-scope",
+    )
+
+    assert result.events == []
+    assert result.decision_record.decision.kind == "skip"
+    assert result.decision_record.decision.skip_reason == "scope_not_allowed"
+    assert "ctx:workspace/test_project" in result.decision_record.decision.reason
+    assert graph.find_by_type(memory.PREFERENCE) == []
+
+
+def test_governance_rejects_cross_runtime_target_entry() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    candidate = pool.append_candidate(
+        _pooled_valid().model_copy(update={"source_session_id": "runtime:other"})
+    )
+    executor = _executor(pool=pool, graph=graph, log=log)
+
+    with pytest.raises(ValueError, match="another runtime"):
+        executor.apply_decision(
+            SubmitAsIsDecision(target_entry_id=candidate.entry_id, reason="wrong runtime"),
+            governance_batch_id="governance:test:wrong-runtime",
+        )
+
+    assert graph.find_by_type(memory.PREFERENCE) == []
+    assert pool.list_decisions() == []
+
+
 def test_governance_correct_and_submit_adds_governance_audit_candidate_without_pending_residue() -> None:
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
@@ -405,6 +450,7 @@ def _executor(
     pool: InMemoryCandidatePool,
     graph: InMemoryGraphStore,
     log: InMemoryEventLog,
+    allowed_write_scopes: frozenset[str] = frozenset({"ctx:user"}),
 ) -> MemoryGovernanceExecutor:
     return MemoryGovernanceExecutor(
         candidate_pool=pool,
@@ -412,6 +458,7 @@ def _executor(
         event_log=log,
         graph=graph,
         runtime_session_id="runtime:test",
+        allowed_write_scopes=allowed_write_scopes,
     )
 
 
@@ -454,11 +501,16 @@ def _pooled_invalid() -> PooledMemoryCandidate:
     )
 
 
-def _preference(candidate_id: str, evidence_ids: tuple[str, ...] = ()) -> PreferenceCandidate:
+def _preference(
+    candidate_id: str,
+    evidence_ids: tuple[str, ...] = (),
+    *,
+    scope: str = "ctx:user",
+) -> PreferenceCandidate:
     return PreferenceCandidate(
         candidate_id=candidate_id,
         statement="The user prefers concise summaries.",
-        scope="ctx:user",
+        scope=scope,
         evidence_ids=evidence_ids,
         source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
         verification_status=memory.VerificationStatus.USER_CONFIRMED,

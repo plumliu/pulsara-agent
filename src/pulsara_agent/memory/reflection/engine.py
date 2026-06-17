@@ -26,6 +26,7 @@ from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool, CandidatePoolProposal
+from pulsara_agent.memory.scope import format_scope_list
 from pulsara_agent.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.ontology import runtime as rt
 
@@ -92,6 +93,7 @@ class MemoryReflectionInput(BaseModel):
     memory_projection_ids: list[str] = Field(default_factory=list)
     memory_tool_attempts: list[MemoryToolAttempt] = Field(default_factory=list)
     available_evidence_ids: list[str] = Field(default_factory=list)
+    allowed_scopes: list[str] = Field(default_factory=list)
 
 
 class MemoryReflectionOutput(BaseModel):
@@ -123,6 +125,7 @@ class MemoryReflectionEngine:
     candidate_pool: CandidatePool
     graph: GraphStore
     graph_id: str | None = None
+    allowed_scopes: frozenset[str] | None = None
     options: MemoryReflectionOptions = field(default_factory=MemoryReflectionOptions)
 
     async def reflect(
@@ -241,6 +244,7 @@ class MemoryReflectionEngine:
             memory_projection_ids=_projection_ids(state.memory_projection),
             memory_tool_attempts=attempts,
             available_evidence_ids=_available_evidence_ids(self.graph, self.graph_id),
+            allowed_scopes=sorted(self.allowed_scopes or ()),
         )
 
     async def _call_flash(self, reflection_id: str, reflection_input: MemoryReflectionInput) -> str:
@@ -248,7 +252,7 @@ class MemoryReflectionEngine:
         async for event in self.llm_runtime.stream(
             role=self.options.model_role,
             context=LLMContext(
-                system_prompt=_REFLECTION_SYSTEM_PROMPT,
+                system_prompt=_reflection_system_prompt(self.allowed_scopes),
                 messages=(
                     LLMMessage.user(
                         "Reflect on this run and output JSON only:\n"
@@ -517,6 +521,10 @@ Rules:
   critically before proposing candidates.
 - If there is no durable future-use memory, set should_reflect=false and
   candidates=[].
+- Candidate scopes must be one of allowed_scopes when allowed_scopes is non-empty.
+- Use ctx:user only for durable user-wide preferences or habits.
+- Use ctx:workspace/<flat_key> only for durable current-project facts or decisions.
+- Do not propose durable memory for one-off task details.
 - Do not propose a candidate if memory_tool_attempts already attempted or
   proposed the same memory; governance owns repair and final writing.
 - Do not write recalled memory_projection ids back as new memory.
@@ -634,7 +642,7 @@ Output:
     {
       "kind": "Observation",
       "statement": "The current workspace contains PULSARA_CONFIG_OK in the inspected file.",
-      "scope": "ctx:workspace",
+      "scope": "ctx:workspace/test_workspace",
       "source_authority": "tool_result",
       "verification_status": "tool_verified",
       "evidence_ids": ["evidence:tool-result-1"]
@@ -643,3 +651,15 @@ Output:
   "skipped_candidates": []
 }
 """.strip()
+
+
+def _reflection_system_prompt(allowed_scopes: frozenset[str] | None) -> str:
+    if not allowed_scopes:
+        return _REFLECTION_SYSTEM_PROMPT
+    return "\n".join(
+        [
+            _REFLECTION_SYSTEM_PROMPT,
+            "",
+            "Allowed scopes for this run: " + format_scope_list(allowed_scopes) + ".",
+        ]
+    )

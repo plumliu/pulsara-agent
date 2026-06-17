@@ -59,6 +59,23 @@ from pulsara_agent.memory.recall.service import (
 )
 from pulsara_agent.memory.foundation.records import ArtifactWriteResult
 from pulsara_agent.memory.recall.rerank import direct_relation_rerank
+from pulsara_agent.memory.scope import (
+    CTX_USER,
+    MemoryDomainContext,
+    format_scope_list,
+    is_valid_flat_id,
+    is_valid_scope,
+    parse_scope,
+    scopes_for_domain,
+    workspace_scope,
+)
+from pulsara_agent.memory.working_context import (
+    PostgresWorkingContextStore,
+    WorkingContextSummary,
+    WorkingContextUpdate,
+    propose_working_context_update,
+    working_context_projection,
+)
 from pulsara_agent.memory.reflection.engine import (
     MemoryReflectionEngine,
     MemoryReflectionHint,
@@ -83,6 +100,7 @@ __all__ = [
     "CanonicalNodeView",
     "CandidatePool",
     "CandidatePoolProposal",
+    "CTX_USER",
     "ClaimKind",
     "CorrectAndSubmitDecision",
     "DamagedMemoryNode",
@@ -95,6 +113,7 @@ __all__ = [
     "InMemoryArchiveStore",
     "InMemoryCandidatePool",
     "MemoryGovernanceApplyResult",
+    "MemoryDomainContext",
     "MemoryGovernanceEngine",
     "MemoryGovernanceExecutor",
     "MemoryGovernanceInput",
@@ -116,6 +135,7 @@ __all__ = [
     "PooledMemoryCandidate",
     "PostgresArtifactStore",
     "PostgresCandidatePool",
+    "PostgresWorkingContextStore",
     "PostgresMemoryQuery",
     "PostgresMemoryReconciler",
     "PostgresRecallTraceStore",
@@ -140,15 +160,25 @@ __all__ = [
     "SupersedeAndSubmitDecision",
     "WriteFailedOutcome",
     "WriteSucceededOutcome",
+    "WorkingContextSummary",
+    "WorkingContextUpdate",
     "already_exists",
     "candidate_fingerprint",
     "direct_relation_rerank",
     "explain_memory",
     "explanation_to_payload",
+    "format_scope_list",
     "governance_batch_context",
+    "is_valid_flat_id",
+    "is_valid_scope",
     "load_run_timeline",
     "new_governance_batch_id",
+    "parse_scope",
+    "propose_working_context_update",
     "runtime_event_span_from_events",
+    "scopes_for_domain",
     "summarize_run_timeline",
     "validate_explanation",
+    "workspace_scope",
+    "working_context_projection",
 ]

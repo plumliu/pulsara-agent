@@ -10,6 +10,7 @@ by memory governance, not by this producer hook.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, dataclass, field
+from datetime import timedelta
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event.candidates import ValidCandidatePayload
@@ -29,10 +30,18 @@ from pulsara_agent.memory.reflection.engine import (
     MemoryReflectionHint,
     cheap_memory_hints,
 )
+from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext, format_scope_list
+from pulsara_agent.memory.working_context import (
+    PostgresWorkingContextStore,
+    WorkingContextSummary,
+    propose_working_context_update,
+    working_context_projection,
+)
 from pulsara_agent.message import Msg, TextBlock, ToolResultBlock
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.timeline import build_run_timeline
 
 
 @dataclass(slots=True)
@@ -40,25 +49,31 @@ class DurableMemoryHooks(NoopMemoryHooks):
     candidate_pool: CandidatePool
     sink: MemoryProposalSink
     _: KW_ONLY
+    event_store: EventLog | None = None
     recall: MemoryRecallService | None = None
     memory_query: MemoryQuery | None = None
     projector: ProjectionBuilder = field(default_factory=ProjectionBuilder)
     projection_ledger: ProjectionLedger = field(default_factory=ProjectionLedger)
     graph_id: str | None = None
+    read_scopes: frozenset[str] | None = None
+    working_context_store: PostgresWorkingContextStore | None = None
+    working_context_domain: MemoryDomainContext | None = None
+    working_context_ttl: timedelta | None = timedelta(days=14)
 
     @property
     def memory_proposal_sink(self) -> MemoryProposalSink | None:
         return self.sink
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict | None:
+        working_context = self._working_context_projection(token_budget=token_budget)
         if self.recall is None:
-            return None
+            return working_context
         latest_user_text = _latest_user_quote(state)
         if latest_user_text is None or _should_skip_recall(latest_user_text):
-            return None
+            return working_context
         query = RecallQuery(
             text=latest_user_text,
-            scopes=(state.current_scope,) if state.current_scope else (),
+            scopes=_recall_scopes(self.read_scopes),
             limit=5,
             trigger=RecallTrigger.CHEAP_AUTO,
             session_id=state.session_id,
@@ -68,9 +83,10 @@ class DurableMemoryHooks(NoopMemoryHooks):
         )
         result = await self.recall.recall(query, graph_id=self.graph_id)
         if result.status is not RecallStatus.OK or not result.items:
-            return None
+            return working_context
         self.projection_ledger.record(state, result.items)
-        return self.projector.build(result, token_budget=token_budget)
+        recalled = self.projector.build(result, token_budget=token_budget)
+        return _merge_projections(working_context, recalled)
 
     async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:
         self._drain_to_pool(state)
@@ -85,6 +101,7 @@ class DurableMemoryHooks(NoopMemoryHooks):
     async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
         self._drain_to_pool(state)
         self._finalize_invalid_to_pool(state)
+        self._update_working_context(state)
         return []
 
     def _drain_to_pool(self, state: LoopState) -> list[PooledMemoryCandidate]:
@@ -121,13 +138,70 @@ class DurableMemoryHooks(NoopMemoryHooks):
             return False
         return self.projection_ledger.is_echo(payload.candidate.statement, state)
 
+    def memory_context_prompt(self) -> str | None:
+        if not self.read_scopes:
+            return None
+        scopes = format_scope_list(self.read_scopes)
+        return (
+            "Durable memory scope rules for this run:\n"
+            f"- Visible scopes: {scopes}.\n"
+            f"- Writable scopes: {scopes}.\n"
+            "- Use ctx:user only for durable user-wide preferences or habits.\n"
+            "- Use ctx:workspace/<flat_key> only for durable facts or decisions about the current project.\n"
+            "- Do not create durable memory for one-off task details."
+        )
+
+    def _working_context_projection(self, *, token_budget: int) -> dict | None:
+        if self.working_context_store is None or self.working_context_domain is None:
+            return None
+        summary = self.working_context_store.get_latest(
+            memory_domain_id=self.working_context_domain.memory_domain_id
+        )
+        if summary is None:
+            return None
+        return working_context_projection(summary, token_budget=token_budget)
+
+    def _update_working_context(self, state: LoopState) -> WorkingContextSummary | None:
+        if (
+            self.working_context_store is None
+            or self.working_context_domain is None
+            or self.event_store is None
+        ):
+            return None
+        try:
+            timeline = build_run_timeline(
+                self.event_store.iter(run_id=state.run_id),
+                runtime_session_id=state.session_id,
+                run_id=state.run_id,
+            )
+        except ValueError:
+            return None
+        from pulsara_agent.memory.foundation.run_timeline_query import summarize_run_timeline
+
+        existing = self.working_context_store.get_latest(
+            memory_domain_id=self.working_context_domain.memory_domain_id
+        )
+        update = propose_working_context_update(
+            summarize_run_timeline(timeline),
+            existing_summary=existing,
+        )
+        if not update.should_update:
+            return None
+        return self.working_context_store.upsert(
+            domain=self.working_context_domain,
+            source_session_id=state.session_id,
+            source_run_id=state.run_id,
+            summary=update.summary,
+            metadata=update.metadata | {"update_reason": update.reason},
+            ttl=self.working_context_ttl,
+        )
+
 
 @dataclass(slots=True)
 class ReflectiveMemoryHooks(DurableMemoryHooks):
     """Single authority for explicit proposals and Flash memory reflection."""
 
     reflection: MemoryReflectionEngine
-    event_store: EventLog
     turns_since_last_reflection: int = 0
     tool_calls_since_last_reflection: int = 0
     token_delta_since_last_reflection: int = 0
@@ -163,10 +237,12 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
         self._remember_attempts(state, [*drained_candidates, *finalized_invalid])
         self._update_token_delta(state)
         try:
-            return await self._maybe_reflect(
+            events = await self._maybe_reflect(
                 state,
                 safe_point="on_session_end",
             )
+            self._update_working_context(state)
+            return events
         finally:
             self._cheap_hints_by_run.pop(state.run_id, None)
             self._last_token_total_by_run.pop(state.run_id, None)
@@ -260,3 +336,36 @@ def _should_skip_recall(text: str) -> bool:
         "忽略记忆",
     )
     return any(marker in normalized for marker in skip_markers)
+
+
+def _recall_scopes(read_scopes: frozenset[str] | None) -> tuple[str, ...]:
+    if read_scopes is None:
+        return (CTX_USER,)
+    return tuple(sorted(read_scopes))
+
+
+def _merge_projections(first: dict | None, second: dict | None) -> dict | None:
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return {
+        "summary": "\n\n".join(
+            part
+            for part in (
+                first.get("summary") if isinstance(first.get("summary"), str) else "",
+                second.get("summary") if isinstance(second.get("summary"), str) else "",
+            )
+            if part
+        ),
+        "items": [*list(first.get("items") or []), *list(second.get("items") or [])],
+        "included_memory_ids": [
+            *list(first.get("included_memory_ids") or []),
+            *list(second.get("included_memory_ids") or []),
+        ],
+        "filtered_memory_ids": [
+            *list(first.get("filtered_memory_ids") or []),
+            *list(second.get("filtered_memory_ids") or []),
+        ],
+        "do_not_write_back": True,
+    }

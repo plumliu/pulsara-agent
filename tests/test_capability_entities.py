@@ -9,7 +9,7 @@ def test_skill_serializes_tool_edges() -> None:
         version="1.0.0",
         provides_tool=(NodeRef("tool:rg"),),
         requires=(NodeRef("tool:fd"),),
-        allowed_in_scope="ctx:workspace",
+        allowed_in_scope="ctx:workspace/test_workspace",
         source_data_uri="https://pulsara.dev/skill/search.md",
     )
 
@@ -26,13 +26,13 @@ def test_tool_serializes_schemas() -> None:
         version="14.1.0",
         has_input_schema="https://pulsara.dev/tool/rg/input.json",
         has_output_schema="https://pulsara.dev/tool/rg/output.json",
-        allowed_in_scope="ctx:workspace",
+        allowed_in_scope="ctx:workspace/test_workspace",
     )
 
     doc = tool.to_jsonld()
     assert doc["@type"] == [cap.TOOL.name]
     assert doc[cap.HAS_INPUT_SCHEMA.name] == "https://pulsara.dev/tool/rg/input.json"
-    assert doc[cap.ALLOWED_IN_SCOPE.name] == "ctx:workspace"
+    assert doc[cap.ALLOWED_IN_SCOPE.name] == "ctx:workspace/test_workspace"
 
 
 def test_plugin_serializes_provides_edges() -> None:

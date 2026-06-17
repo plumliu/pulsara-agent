@@ -97,7 +97,7 @@ def test_decision_single_element_edges_round_trip(graph_store) -> None:
     decision = Decision(
         id="decision:single-edge",
         statement="Adopt JSON-LD for durable memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         status=memory.NodeStatus.ACTIVE,
         confidence_level=memory.ConfidenceLevel.VERIFIED,
         verification_status=memory.VerificationStatus.USER_CONFIRMED,
@@ -124,10 +124,10 @@ def test_decision_single_element_edges_round_trip(graph_store) -> None:
 def test_submit_decision_routes_through_gate_and_links_evidence(graph_store) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
-    evidence_id = _seed_evidence(ledger, scope="ctx:project")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
     based_on = ledger.submit_claim(
         statement="JSON-LD preserves graph semantics.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=[evidence_id],
         source_authority=memory.SourceAuthority.TOOL_RESULT,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -135,7 +135,7 @@ def test_submit_decision_routes_through_gate_and_links_evidence(graph_store) -> 
 
     record = ledger.submit_decision(
         statement="Adopt JSON-LD for durable memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=[evidence_id],
         source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
         verification_status=memory.VerificationStatus.USER_CONFIRMED,
@@ -154,11 +154,11 @@ def test_submit_decision_routes_through_gate_and_links_evidence(graph_store) -> 
 def test_submit_decision_without_authoritative_source_needs_review(graph_store) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
-    evidence_id = _seed_evidence(ledger, scope="ctx:project")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
 
     record = ledger.submit_decision(
         statement="Adopt JSON-LD for durable memory.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         evidence_ids=[evidence_id],
         source_authority=memory.SourceAuthority.TOOL_RESULT,
         verification_status=memory.VerificationStatus.TOOL_VERIFIED,
@@ -172,11 +172,11 @@ def test_submit_decision_without_authoritative_source_needs_review(graph_store) 
 def test_submit_observation_links_single_evidence(graph_store) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
-    evidence_id = _seed_evidence(ledger, scope="ctx:task")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
 
     record = ledger.submit_observation(
         statement="The integration suite is flaky on macOS runners.",
-        scope="ctx:task",
+        scope="ctx:workspace/test_project",
         evidence_ids=[evidence_id],
         source_authority=memory.SourceAuthority.CONVERSATION_EVIDENCE,
         verification_status=memory.VerificationStatus.INFERRED,
@@ -198,7 +198,7 @@ def test_submit_observation_with_missing_evidence_does_not_write_partial_node(gr
     with pytest.raises(ValueError, match="missing evidence node"):
         ledger.submit_observation(
             statement="The integration suite is flaky on macOS runners.",
-            scope="ctx:task",
+            scope="ctx:workspace/test_project",
             evidence_ids=["evidence:missing"],
             source_authority=memory.SourceAuthority.CONVERSATION_EVIDENCE,
             verification_status=memory.VerificationStatus.INFERRED,
@@ -210,12 +210,12 @@ def test_submit_observation_with_missing_evidence_does_not_write_partial_node(gr
 def test_submit_decision_with_missing_based_on_does_not_write_partial_node(graph_store) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
-    evidence_id = _seed_evidence(ledger, scope="ctx:project")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_project")
 
     with pytest.raises(ValueError, match="missing basedOn node"):
         ledger.submit_decision(
             statement="Adopt JSON-LD for durable memory.",
-            scope="ctx:project",
+            scope="ctx:workspace/test_project",
             evidence_ids=[evidence_id],
             source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
             verification_status=memory.VerificationStatus.USER_CONFIRMED,
@@ -303,7 +303,7 @@ def test_submit_action_boundary_persists_conditions(graph_store) -> None:
 
     record = ledger.submit_action_boundary(
         statement="Never force-push to main.",
-        scope="ctx:workspace",
+        scope="ctx:workspace/test_workspace",
         applies_when="branch is main",
         do_not_apply_when="user explicitly authorizes",
         source_authority=memory.SourceAuthority.SYSTEM_RULE,
@@ -320,11 +320,11 @@ def test_submit_action_boundary_persists_conditions(graph_store) -> None:
 def test_submit_action_boundary_links_single_evidence(graph_store) -> None:
     store, graph_id = graph_store
     ledger = _ledger(store, graph_id)
-    evidence_id = _seed_evidence(ledger, scope="ctx:workspace")
+    evidence_id = _seed_evidence(ledger, scope="ctx:workspace/test_workspace")
 
     record = ledger.submit_action_boundary(
         statement="Never force-push to main.",
-        scope="ctx:workspace",
+        scope="ctx:workspace/test_workspace",
         applies_when="branch is main",
         do_not_apply_when="user explicitly authorizes",
         evidence_ids=[evidence_id],
@@ -350,7 +350,7 @@ def test_submit_action_boundary_with_missing_evidence_does_not_write_partial_nod
     with pytest.raises(ValueError, match="missing evidence node"):
         ledger.submit_action_boundary(
             statement="Never force-push to main.",
-            scope="ctx:workspace",
+            scope="ctx:workspace/test_workspace",
             applies_when="branch is main",
             do_not_apply_when="user explicitly authorizes",
             evidence_ids=["evidence:missing"],

@@ -34,12 +34,14 @@ from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
     InMemoryArchiveStore,
     InMemoryCandidatePool,
+    MemoryDomainContext,
     MemoryGovernanceEngine,
     MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
     MemoryLifecycle,
     MemoryWriteUnitOfWork,
     PostgresCandidatePool,
+    PostgresWorkingContextStore,
     RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
@@ -181,6 +183,22 @@ def test_real_agent_runtime_can_call_memory_search_tool_with_responses_api(tmp_p
     assert "PULSARA_MEMORY_SEARCH_OK" in result["final_text"]
 
 
+def test_real_agent_runtime_memory_domain_search_is_scope_aware_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_memory_domain_search_scope_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["graph_id"] == "graph:user/u_real_scope"
+    assert "memory_search" in result["tool_names"]
+    arguments = json.loads(result["tool_call_arguments"] or "{}")
+    assert arguments.get("scope") in (None, "")
+    assert any("preference:real-domain-visible" in text for text in result["tool_result_texts"])
+    assert not any("preference:real-domain-hidden" in text for text in result["tool_result_texts"])
+    assert "PULSARA_DOMAIN_SCOPE_OK" in result["final_text"]
+
+
 def test_real_agent_runtime_can_call_memory_explain_tool_with_responses_api(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
@@ -191,6 +209,32 @@ def test_real_agent_runtime_can_call_memory_explain_tool_with_responses_api(tmp_
     assert "memory_explain" in result["tool_names"]
     assert any("superseded_by" in text for text in result["tool_result_texts"])
     assert "PULSARA_MEMORY_EXPLAIN_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_reads_working_context_projection_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_working_context_projection_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert "PULSARA_WORKING_CONTEXT_OK" in result["final_text"]
+    assert result["projection_kind"] == "working_context"
+    assert "working-context-projection" in result["projection_summary"]
+
+
+def test_real_agent_runtime_transient_domain_does_not_memorize_workspace_task_detail(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_transient_scope_discipline_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["errors"] == []
+    assert not result["memory_tool_names"]
+    assert result["candidate_pool_pending"] == 0
+    assert result["memory_node_count"] == 0
+    assert "PULSARA_TRANSIENT_SCOPE_OK" in result["final_text"]
 
 
 def test_real_llm_trajectory_suite_covers_narrow_memory_tools(tmp_path):
@@ -709,6 +753,93 @@ async def _run_real_agent_memory_search_tool_smoke(tmp_path: Path) -> dict:
         )
 
 
+async def _run_real_agent_memory_domain_search_scope_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    domain = MemoryDomainContext(
+        memory_domain_id="u_real_scope",
+        workspace_kind="project",
+        stable_project_key="repo_visible",
+    )
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=160),
+        system_prompt=(
+            "You are validating memory_domain scoped memory_search. "
+            "Before answering, call memory_search exactly once with query 'domain scope sentinel', "
+            "kind 'Preference', and limit 5. Omit the scope argument. "
+            "If the tool result contains preference:real-domain-visible and does not contain "
+            "preference:real-domain-hidden, answer exactly PULSARA_DOMAIN_SCOPE_OK. "
+            "Otherwise answer exactly PULSARA_DOMAIN_SCOPE_BAD."
+        ),
+        memory_domain=domain,
+    )
+    now = utc_now()
+    graph_id = wiring.runtime_wiring.graph_id
+    assert graph_id is not None
+    for memory_id, scope, statement in (
+        (
+            "preference:real-domain-visible",
+            "ctx:user",
+            "The domain scope sentinel says visible user memory.",
+        ),
+        (
+            "preference:real-domain-visible-workspace",
+            "ctx:workspace/repo_visible",
+            "The domain scope sentinel says visible workspace memory.",
+        ),
+        (
+            "preference:real-domain-hidden",
+            "ctx:workspace/other_repo",
+            "The domain scope sentinel says hidden workspace memory.",
+        ),
+    ):
+        wiring.runtime_wiring.graph.put_jsonld(
+            Preference(
+                id=memory_id,
+                statement=statement,
+                scope=scope,
+                status=memory.NodeStatus.ACTIVE,
+                confidence_level=memory.ConfidenceLevel.HIGH,
+                verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                created_at=now,
+                updated_at=now,
+                gate_reason="real llm memory_domain scope seed",
+            ).to_jsonld(),
+            graph_id=graph_id,
+        )
+    result = None
+    try:
+        result = await wiring.agent_runtime.run_task("Use memory_search as instructed, then answer with the sentinel.")
+        events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        tool_call_arguments = "".join(event.delta for event in events if isinstance(event, ToolCallDeltaEvent))
+        tool_result_texts = [event.delta for event in events if isinstance(event, ToolResultTextDeltaEvent)]
+        return {
+            "status": result.status.value,
+            "graph_id": graph_id,
+            "final_text": result.final_text.strip(),
+            "tool_names": [event.tool_call_name for event in tool_call_events],
+            "tool_call_arguments": tool_call_arguments,
+            "tool_result_texts": tool_result_texts,
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_working_context(settings.storage.postgres_dsn, domain.memory_domain_id)
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
 async def _run_real_agent_memory_explain_tool_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
     graph_id = f"graph:real-explain/{uuid4().hex}"
@@ -785,6 +916,113 @@ async def _run_real_agent_memory_explain_tool_smoke(tmp_path: Path) -> dict:
                 settings.storage.postgres_dsn,
                 f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
             )
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
+async def _run_real_agent_working_context_projection_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    domain = MemoryDomainContext(memory_domain_id="u_real_working_context", workspace_kind="transient")
+    store = PostgresWorkingContextStore(dsn=settings.storage.postgres_dsn)
+    store.upsert(
+        domain=domain,
+        source_session_id="runtime:seed-working-context",
+        source_run_id="run:seed-working-context",
+        summary="The user recently validated the working context projection sentinel PULSARA_WORKING_CONTEXT_OK.",
+    )
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=96),
+        system_prompt=(
+            "You are validating working context injection. "
+            "Use the Recalled Memory section only. If it contains the working context sentinel, "
+            "answer exactly PULSARA_WORKING_CONTEXT_OK. Otherwise answer exactly PULSARA_WORKING_CONTEXT_MISSING. "
+            "Do not call tools."
+        ),
+        memory_domain=domain,
+    )
+    result = None
+    try:
+        result = await wiring.agent_runtime.run_task("Check the working context projection for the sentinel.")
+        projection = result.state.memory_projection or {}
+        return {
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "projection_summary": projection.get("summary", ""),
+            "projection_kind": projection.get("projection_kind"),
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(wiring.runtime_wiring.graph_id)
+        if result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_working_context(settings.storage.postgres_dsn, domain.memory_domain_id)
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
+async def _run_real_agent_transient_scope_discipline_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    domain = MemoryDomainContext(
+        memory_domain_id=f"u_real_transient_{uuid4().hex[:12]}",
+        workspace_kind="transient",
+    )
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=128),
+        system_prompt=(
+            "You are validating transient memory scope discipline. "
+            "Only create durable memory when the injected durable-memory rules allow it. "
+            "If the user asks to remember a one-off scratch task detail in this transient run, "
+            "do not call any remember_* tool; answer exactly PULSARA_TRANSIENT_SCOPE_OK."
+        ),
+        memory_domain=domain,
+        memory_reflection=False,
+    )
+    graph_id = wiring.runtime_wiring.graph_id
+    assert graph_id is not None
+    result = None
+    try:
+        result = await wiring.agent_runtime.run_task(
+            "Remember for this temporary task that scratch file /tmp/pulsara-one-off.txt is the next file to inspect."
+        )
+        events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        memory_tool_names = [
+            event.tool_call_name for event in tool_call_events if event.tool_call_name.startswith("remember_")
+        ]
+        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        return {
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "errors": errors,
+            "memory_tool_names": memory_tool_names,
+            "candidate_pool_pending": len(wiring.runtime_wiring.candidate_pool.list_pending()),
+            "memory_node_count": sum(
+                len(wiring.runtime_wiring.graph.find_by_type(node_type, graph_id=graph_id))
+                for node_type in _MEMORY_NODE_TYPES
+            ),
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_working_context(settings.storage.postgres_dsn, domain.memory_domain_id)
         _delete_postgres_runtime_session(
             settings.storage.postgres_dsn,
             wiring.runtime_wiring.runtime_session.runtime_session_id,
@@ -952,7 +1190,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_claim tool. "
             "Call remember_claim exactly once with statement='Pulsara uses JSON-LD graph nodes for durable memory', "
-            "scope='ctx:project', source_authority='explicit_user_instruction', and "
+            "scope='ctx:workspace/test_project', source_authority='explicit_user_instruction', and "
             "verification_status='user_confirmed'. Then answer exactly: PULSARA_MEMORY_CLAIM_OK"
         ),
         "user_input": "Remember this durable claim: Pulsara uses JSON-LD graph nodes for durable memory.",
@@ -976,7 +1214,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_observation tool. "
             "Call remember_observation exactly once with statement='The current workspace is testing narrow memory tools', "
-            "scope='ctx:workspace', source_authority='explicit_user_instruction', and "
+            "scope='ctx:workspace/test_project', source_authority='explicit_user_instruction', and "
             "verification_status='user_confirmed'. Then answer exactly: PULSARA_MEMORY_OBSERVATION_OK"
         ),
         "user_input": "Observe and remember that this workspace is testing narrow memory tools.",
@@ -988,7 +1226,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_action_boundary tool. "
             "Call remember_action_boundary exactly once with statement='Do not commit code unless the user explicitly asks', "
-            "scope='ctx:project', applies_when='working in a git repository', "
+            "scope='ctx:workspace/test_project', applies_when='working in a git repository', "
             "do_not_apply_when='the user explicitly asks for git add and commit', "
             "source_authority='explicit_user_instruction', and verification_status='user_confirmed'. "
             "Then answer exactly: PULSARA_MEMORY_ACTION_BOUNDARY_OK"
@@ -1002,7 +1240,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_decision tool. "
             "Call remember_decision exactly once with statement='Use type-specific remember tools instead of a single propose_memory tool', "
-            "scope='ctx:project', source_authority='explicit_user_instruction', and "
+            "scope='ctx:workspace/test_project', source_authority='explicit_user_instruction', and "
             "verification_status='user_confirmed'. Do not include based_on_ids. "
             "Then answer exactly: PULSARA_MEMORY_DECISION_OK"
         ),
@@ -1014,7 +1252,11 @@ _REAL_MEMORY_TOOL_CASES = (
 async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> dict:
     tmp_path.mkdir(parents=True, exist_ok=True)
     settings = _load_settings_for_real_llm()
-    graph_id = f"graph:real-llm/{uuid4().hex}"
+    memory_domain = MemoryDomainContext(
+        memory_domain_id=f"u_real_memory_tools_{uuid4().hex[:12]}",
+        workspace_kind="project",
+        stable_project_key="test_project",
+    )
     wiring = build_agent_runtime_wiring(
         settings,
         tmp_path,
@@ -1022,8 +1264,10 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt=case["system_prompt"],
-        graph_id=graph_id,
+        memory_domain=memory_domain,
     )
+    graph_id = wiring.runtime_wiring.graph_id
+    assert graph_id is not None
     runtime_session = wiring.runtime_wiring.runtime_session
     timeline_blob_prefix: str | None = None
     governance_batch_id = f"governance:real-llm:{uuid4().hex}"
@@ -1078,6 +1322,7 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
     finally:
         _delete_postgres_governance_decisions(settings.storage.postgres_dsn, [governance_batch_id])
         wiring.runtime_wiring.graph.delete_graph(graph_id)
+        _delete_working_context(settings.storage.postgres_dsn, memory_domain.memory_domain_id)
         if timeline_blob_prefix is not None:
             _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
         _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
@@ -1535,6 +1780,17 @@ def _delete_postgres_governance_decisions(dsn: str, governance_batch_ids: list[s
             cursor.execute(
                 "delete from memory_governance_decisions where governance_batch_id = any(%s)",
                 (governance_batch_ids,),
+            )
+
+
+def _delete_working_context(dsn: str, memory_domain_id: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "delete from working_context_summaries where memory_domain_id = %s",
+                (memory_domain_id,),
             )
 
 

@@ -30,7 +30,7 @@ def test_remember_action_boundary_preserves_structured_trigger_fields() -> None:
             name="remember_action_boundary",
             arguments={
                 "statement": "Run tests through uv.",
-                "scope": "ctx:project",
+                "scope": "ctx:workspace/test_project",
                 "applies_when": "working on this repository",
                 "do_not_apply_when": "the user asks not to run tests",
                 "trigger_tools": ["terminal"],
@@ -64,7 +64,7 @@ def test_action_boundary_triggers_are_written_to_jsonld() -> None:
 
     service.ledger.submit_action_boundary(
         statement="Run tests through uv.",
-        scope="ctx:project",
+        scope="ctx:workspace/test_project",
         applies_when="working on this repository",
         do_not_apply_when="the user asks not to run tests",
         trigger_tools=["terminal"],
@@ -90,7 +90,7 @@ def test_action_boundary_structured_triggers_are_indexed_for_fts() -> None:
             ActionBoundary(
                 id="action-boundary:trigger-pytest",
                 statement="Run tests through uv.",
-                scope="ctx:project",
+                scope="ctx:workspace/test_project",
                 status=memory.NodeStatus.ACTIVE,
                 applies_when="working on this repository",
                 do_not_apply_when="the user asks not to run tests",
@@ -113,7 +113,7 @@ def test_action_boundary_structured_triggers_are_indexed_for_fts() -> None:
 
         hits = query.fts_candidates(
             query_text="pytest",
-            scopes=["ctx:project"],
+            scopes=["ctx:workspace/test_project"],
             types=["ActionBoundary"],
             limit=5,
             graph_id=graph_id,
