@@ -8,7 +8,7 @@ from typing import Any
 
 from pulsara_agent.event import (
     AgentEvent,
-    MemoryMaintenanceAppliedEvent,
+    MemoryContradictionLinkedEvent,
     MemoryMarkedStaleEvent,
     MemorySupersededEvent,
 )
@@ -77,7 +77,7 @@ class MemoryLifecycle:
             )
         ]
 
-    def mark_contradicted(
+    def link_contradiction(
         self,
         *,
         left_id: str,
@@ -85,42 +85,27 @@ class MemoryLifecycle:
         governance_batch_id: str,
         graph_id: str | None = None,
     ) -> list[AgentEvent]:
-        """Materialize a symmetric contradiction and mark both nodes contradicted."""
+        """Materialize a symmetric contradiction edge without changing node status."""
 
-        updated_at = _now()
         left_doc = self.graph.get_jsonld(left_id, graph_id=graph_id)
         right_doc = self.graph.get_jsonld(right_id, graph_id=graph_id)
         _append_node_ref(left_doc, memory.CONTRADICTS.name, right_id)
         _append_node_ref(right_doc, memory.CONTRADICTS.name, left_id)
         self.graph.put_jsonld(left_doc, graph_id=graph_id)
         self.graph.put_jsonld(right_doc, graph_id=graph_id)
-        self.mutable.set_status(
-            left_id,
-            memory.NodeStatus.CONTRADICTED,
-            updated_at=updated_at,
-            graph_id=graph_id,
-        )
-        self.mutable.set_status(
-            right_id,
-            memory.NodeStatus.CONTRADICTED,
-            updated_at=updated_at,
-            graph_id=graph_id,
-        )
         ctx = governance_batch_context(governance_batch_id)
         return [
-            MemoryMaintenanceAppliedEvent(
+            MemoryContradictionLinkedEvent(
                 **ctx.event_fields(),
                 **_memory_event_fields(left_doc),
-                proposal_id=f"{governance_batch_id}:contradiction:{left_id}",
-                target_memory_id=left_id,
-                action=f"mark_contradicted_with:{right_id}",
+                memory_id=left_id,
+                contradicts=right_id,
             ),
-            MemoryMaintenanceAppliedEvent(
+            MemoryContradictionLinkedEvent(
                 **ctx.event_fields(),
                 **_memory_event_fields(right_doc),
-                proposal_id=f"{governance_batch_id}:contradiction:{right_id}",
-                target_memory_id=right_id,
-                action=f"mark_contradicted_with:{left_id}",
+                memory_id=right_id,
+                contradicts=left_id,
             ),
         ]
 

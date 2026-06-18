@@ -368,6 +368,7 @@ def _merge_projections(first: dict | None, second: dict | None) -> dict | None:
             *list(first.get("filtered_memory_ids") or []),
             *list(second.get("filtered_memory_ids") or []),
         ],
+        "conflict_groups": _merge_conflict_groups(first, second),
         "do_not_write_back": True,
         "projection_kind": projection_kinds[0] if len(projection_kinds) == 1 else "mixed",
         "projection_kinds": projection_kinds,
@@ -381,3 +382,20 @@ def _projection_kinds(first: dict, second: dict) -> list[str]:
         if isinstance(kind, str) and kind not in kinds:
             kinds.append(kind)
     return kinds
+
+
+def _merge_conflict_groups(first: dict, second: dict) -> list[dict]:
+    groups: list[dict] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for projection in (first, second):
+        for group in projection.get("conflict_groups") or []:
+            if not isinstance(group, dict):
+                continue
+            kind = str(group.get("kind") or "")
+            memory_ids = tuple(sorted(str(memory_id) for memory_id in group.get("memory_ids") or []))
+            key = (kind, memory_ids)
+            if not kind or not memory_ids or key in seen:
+                continue
+            seen.add(key)
+            groups.append({"kind": kind, "memory_ids": list(memory_ids)})
+    return groups

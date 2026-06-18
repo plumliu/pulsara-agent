@@ -13,6 +13,7 @@ from pulsara_agent.graph import GraphStore
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePool,
+    ContradictAndSubmitDecision,
     CorrectAndSubmitDecision,
     GovernanceDecision,
     MemoryGovernanceDecisionRecord,
@@ -37,6 +38,9 @@ from pulsara_agent.ontology import memory
 _SUPERSEDABLE_TYPES: frozenset[str] = frozenset({"Preference"})
 _MAX_SUPERSEDED_PER_DECISION = 1
 _SUPERSEDE_DOWNGRADE_SENTINEL = "supersede_downgraded_to_coexist"
+_CONTRADICTABLE_TYPES: frozenset[str] = frozenset({"Preference"})
+_MAX_CONTRADICTED_PER_DECISION = 1
+_CONTRADICTION_DOWNGRADE_SENTINEL = "contradiction_downgraded_to_coexist"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,8 +80,13 @@ class MemoryGovernanceExecutor:
             return MemoryGovernanceApplyResult(decision_record=record, events=[])
 
         is_supersede_origin = isinstance(decision, SupersedeAndSubmitDecision)
+        is_contradiction_origin = isinstance(decision, ContradictAndSubmitDecision)
         effective_decision: GovernanceDecision = (
-            _downgrade_to_coexist(decision, "legacy_no_uow") if is_supersede_origin else decision
+            _downgrade_to_coexist(decision, "legacy_no_uow")
+            if is_supersede_origin
+            else _downgrade_contradiction_to_coexist(decision, "legacy_no_uow")
+            if is_contradiction_origin
+            else decision
         )
 
         candidate = self._candidate_for_decision(effective_decision)
@@ -113,7 +122,7 @@ class MemoryGovernanceExecutor:
             event_context=governance_batch_context(batch_id),
         )
         stored_events = self.event_log.extend(outcome.events)
-        if not is_supersede_origin:
+        if not (is_supersede_origin or is_contradiction_origin):
             governance_candidate = self._governance_candidate_for_decision(
                 effective_decision, governance_batch_id=batch_id
             )
@@ -182,6 +191,10 @@ class MemoryGovernanceExecutor:
             supersede_blocked_reason: str | None = None
             if isinstance(decision, SupersedeAndSubmitDecision):
                 valid_old_ids, supersede_blocked_reason = self._validate_supersede_targets(decision, uow)
+            valid_contradicted_ids: tuple[str, ...] = ()
+            contradiction_blocked_reason: str | None = None
+            if isinstance(decision, ContradictAndSubmitDecision):
+                valid_contradicted_ids, contradiction_blocked_reason = self._validate_contradiction_targets(decision, uow)
 
             context = governance_batch_context(governance_batch_id)
             outcome = uow.memory_write_service.submit(candidate, event_context=context)
@@ -205,18 +218,42 @@ class MemoryGovernanceExecutor:
                             graph_id=uow.resolved_graph_id,
                         )
                     )
+            contradiction_events: list[AgentEvent] = []
+            did_contradict = bool(
+                isinstance(decision, ContradictAndSubmitDecision)
+                and contradiction_blocked_reason is None
+                and valid_contradicted_ids
+                and new_active_id is not None
+            )
+            if did_contradict:
+                for old_id in valid_contradicted_ids:
+                    contradiction_events.extend(
+                        uow.lifecycle.link_contradiction(
+                            left_id=old_id,
+                            right_id=new_active_id,
+                            governance_batch_id=governance_batch_id,
+                            graph_id=uow.resolved_graph_id,
+                        )
+                    )
 
             if isinstance(decision, SupersedeAndSubmitDecision) and not did_supersede:
                 effective_decision = _downgrade_to_coexist(
                     decision,
                     supersede_blocked_reason or "write_not_active",
                 )
+            elif isinstance(decision, ContradictAndSubmitDecision) and not did_contradict:
+                effective_decision = _downgrade_contradiction_to_coexist(
+                    decision,
+                    contradiction_blocked_reason or "write_not_active",
+                )
             else:
                 effective_decision = decision
             recorded_superseded_ids = valid_old_ids if did_supersede else ()
+            recorded_contradicted_ids = valid_contradicted_ids if did_contradict else ()
 
             is_supersede_origin = isinstance(decision, SupersedeAndSubmitDecision)
-            if not is_supersede_origin:
+            is_contradiction_origin = isinstance(decision, ContradictAndSubmitDecision)
+            if not (is_supersede_origin or is_contradiction_origin):
                 governance_candidate = self._governance_candidate_for_decision(
                     effective_decision,
                     governance_batch_id=governance_batch_id,
@@ -230,12 +267,13 @@ class MemoryGovernanceExecutor:
                     outcome,
                     outcome.events,
                     superseded_memory_ids=recorded_superseded_ids,
+                    contradicted_memory_ids=recorded_contradicted_ids,
                 ),
             )
             uow.decisions.append_decision(record)
             uow.outbox.append_decision(record, graph_id=uow.resolved_graph_id)
 
-        stored_events = self.event_log.extend(outcome.events + supersede_events)
+        stored_events = self.event_log.extend(outcome.events + supersede_events + contradiction_events)
         return MemoryGovernanceApplyResult(decision_record=record, events=stored_events)
 
     def submit_pending_as_is(
@@ -276,6 +314,8 @@ class MemoryGovernanceExecutor:
         if isinstance(decision, MergeAndSubmitDecision):
             return decision.candidate
         if isinstance(decision, SupersedeAndSubmitDecision):
+            return decision.candidate
+        if isinstance(decision, ContradictAndSubmitDecision):
             return decision.candidate
         raise TypeError(f"Unsupported governance decision: {decision!r}")
 
@@ -371,12 +411,44 @@ class MemoryGovernanceExecutor:
             valid.append(old_id)
         return tuple(valid), None
 
+    def _validate_contradiction_targets(
+        self,
+        decision: ContradictAndSubmitDecision,
+        uow: MemoryWriteUnitOfWork,
+    ) -> tuple[tuple[str, ...], str | None]:
+        candidate = decision.candidate
+        if candidate.kind not in _CONTRADICTABLE_TYPES:
+            return (), f"type_not_contradictable:{candidate.kind}"
+        if not decision.contradicted_memory_ids:
+            return (), "missing_contradiction_target"
+        if len(decision.contradicted_memory_ids) > _MAX_CONTRADICTED_PER_DECISION:
+            return (), "too_many_contradiction_targets"
+
+        valid: list[str] = []
+        for old_id in decision.contradicted_memory_ids:
+            try:
+                old_doc = uow.graph.get_jsonld(old_id, graph_id=uow.resolved_graph_id)
+            except KeyError:
+                return (), f"contradiction_target_missing:{old_id}"
+            old_status = str(old_doc.get(memory.STATUS.name, ""))
+            old_scope = str(old_doc.get(memory.SCOPE.name, ""))
+            old_types = _jsonld_type_names(old_doc)
+            if old_status != memory.NodeStatus.ACTIVE.value:
+                return (), f"contradiction_target_not_active:{old_id}:{old_status}"
+            if old_scope != candidate.scope:
+                return (), f"contradiction_target_scope_mismatch:{old_id}"
+            if not (old_types & _CONTRADICTABLE_TYPES):
+                return (), f"contradiction_target_type_not_contradictable:{old_id}:{sorted(old_types)}"
+            valid.append(old_id)
+        return tuple(valid), None
+
 
 def _write_outcome(
     outcome: MemoryWriteOutcome,
     events: list[AgentEvent],
     *,
     superseded_memory_ids: tuple[str, ...] = (),
+    contradicted_memory_ids: tuple[str, ...] = (),
 ):
     event_ids = tuple(event.id for event in events)
     result = next((event for event in events if isinstance(event, MemoryWriteResultEvent)), None)
@@ -390,6 +462,7 @@ def _write_outcome(
             gate_reason=result.gate_reason,
             write_event_ids=event_ids,
             superseded_memory_ids=superseded_memory_ids,
+            contradicted_memory_ids=contradicted_memory_ids,
         )
     failed = next((event for event in events if isinstance(event, MemoryWriteFailedEvent)), None)
     if failed is not None:
@@ -441,6 +514,17 @@ def _downgrade_to_coexist(decision: SupersedeAndSubmitDecision, reason: str) -> 
         target_entry_id=decision.target_entry_id,
         candidate=decision.candidate,
         reason=f"{_SUPERSEDE_DOWNGRADE_SENTINEL}: {reason}; original: {decision.reason}",
+    )
+
+
+def _downgrade_contradiction_to_coexist(
+    decision: ContradictAndSubmitDecision,
+    reason: str,
+) -> CorrectAndSubmitDecision:
+    return CorrectAndSubmitDecision(
+        target_entry_id=decision.target_entry_id,
+        candidate=decision.candidate,
+        reason=f"{_CONTRADICTION_DOWNGRADE_SENTINEL}: {reason}; original: {decision.reason}",
     )
 
 

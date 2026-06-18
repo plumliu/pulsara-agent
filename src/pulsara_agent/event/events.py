@@ -60,6 +60,7 @@ class EventType(StrEnum):
     MEMORY_REFLECTION_COMPLETED = "MEMORY_REFLECTION_COMPLETED"
     MEMORY_REFLECTION_FAILED = "MEMORY_REFLECTION_FAILED"
     MEMORY_SUPERSEDED = "MEMORY_SUPERSEDED"
+    MEMORY_CONTRADICTION_LINKED = "MEMORY_CONTRADICTION_LINKED"
     MEMORY_MARKED_STALE = "MEMORY_MARKED_STALE"
     MEMORY_MAINTENANCE_PROPOSED = "MEMORY_MAINTENANCE_PROPOSED"
     MEMORY_MAINTENANCE_APPLIED = "MEMORY_MAINTENANCE_APPLIED"
@@ -351,6 +352,12 @@ class MemorySupersededEvent(MemoryEventBase):
     superseded_by: str
 
 
+class MemoryContradictionLinkedEvent(MemoryEventBase):
+    type: Literal[EventType.MEMORY_CONTRADICTION_LINKED] = EventType.MEMORY_CONTRADICTION_LINKED
+    memory_id: str
+    contradicts: str
+
+
 class MemoryMarkedStaleEvent(MemoryEventBase):
     type: Literal[EventType.MEMORY_MARKED_STALE] = EventType.MEMORY_MARKED_STALE
     memory_id: str
@@ -442,6 +449,7 @@ AgentEvent: TypeAlias = (
     | MemoryReflectionCompletedEvent
     | MemoryReflectionFailedEvent
     | MemorySupersededEvent
+    | MemoryContradictionLinkedEvent
     | MemoryMarkedStaleEvent
     | MemoryMaintenanceProposedEvent
     | MemoryMaintenanceAppliedEvent

@@ -7,7 +7,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -50,6 +50,7 @@ class RecallItem:
     score: float
     why: tuple[str, ...]
     deep_recall: str
+    conflicts_with: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,14 +164,14 @@ class LexicalMemoryRecallService(MemoryRecallService):
         filtered_ids: list[str] = []
         for memory_id in ranked_ids:
             if memory_id in suppressed_ids:
-                filtered_ids.append(memory_id)
+                _append_filtered_id(filtered_ids, memory_id)
                 continue
             view = views.get(memory_id)
             if view is None:
-                filtered_ids.append(memory_id)
+                _append_filtered_id(filtered_ids, memory_id)
                 continue
             if not self._passes_canonical_filter(view, query):
-                filtered_ids.append(memory_id)
+                _append_filtered_id(filtered_ids, memory_id)
                 continue
             items.append(
                 RecallItem(
@@ -187,24 +188,102 @@ class LexicalMemoryRecallService(MemoryRecallService):
             if len(items) >= query.limit:
                 break
 
+        if items:
+            items, views = self._expand_contradiction_companions(
+                items,
+                views,
+                query,
+                graph_id=graph_id,
+                suppressed_ids=suppressed_ids,
+                filtered_ids=filtered_ids,
+            )
+
         if self.enable_graph_rerank and items:
             from pulsara_agent.memory.recall.rerank import direct_relation_rerank
 
-            items = direct_relation_rerank(items, views)[: query.limit]
+            items = direct_relation_rerank(items, views)
+        items = _stabilize_visible_conflicts(_trim_recall_items(items, query.limit))
 
         if not items:
             return RecallResult(
                 status=RecallStatus.EMPTY,
-                filtered_ids=tuple(filtered_ids),
+                filtered_ids=_dedupe_ids(filtered_ids),
                 guidance=_empty_guidance(),
                 warnings=tuple(warnings),
             ), candidate_ids
         return RecallResult(
             status=RecallStatus.OK,
             items=tuple(items),
-            filtered_ids=tuple(filtered_ids),
+            filtered_ids=_dedupe_ids(filtered_ids),
             warnings=tuple(warnings),
         ), candidate_ids
+
+    def _expand_contradiction_companions(
+        self,
+        items: list[RecallItem],
+        views: dict[str, CanonicalNodeView],
+        query: RecallQuery,
+        *,
+        graph_id: str | None,
+        suppressed_ids: set[str],
+        filtered_ids: list[str],
+    ) -> tuple[list[RecallItem], dict[str, CanonicalNodeView]]:
+        selected_ids = {item.memory_id for item in items}
+        companion_sources: defaultdict[str, list[str]] = defaultdict(list)
+        for item in items:
+            view = views.get(item.memory_id)
+            if view is None:
+                continue
+            for counterpart_id in _contradiction_ids(view):
+                if counterpart_id == item.memory_id:
+                    continue
+                companion_sources[counterpart_id].append(item.memory_id)
+
+        fetch_ids = sorted(
+            memory_id
+            for memory_id in companion_sources
+            if memory_id not in selected_ids and memory_id not in suppressed_ids
+        )
+        if not fetch_ids:
+            return _mark_visible_conflicts(items, views, selected_ids), views
+
+        companion_views = {
+            view.id: view for view in self.memory_query.fetch_nodes(fetch_ids, graph_id=graph_id)
+        }
+        views = {**views, **companion_views}
+        companion_items: list[RecallItem] = []
+        visible_ids = set(selected_ids)
+        scores_by_id = _score_by_id(items)
+        for memory_id in fetch_ids:
+            view = companion_views.get(memory_id)
+            if view is None:
+                _append_filtered_id(filtered_ids, memory_id)
+                continue
+            if not self._passes_canonical_filter(view, query):
+                _append_filtered_id(filtered_ids, memory_id)
+                continue
+            source_ids = tuple(
+                source_id for source_id in dict.fromkeys(companion_sources[memory_id]) if source_id in selected_ids
+            )
+            if not source_ids:
+                continue
+            companion_items.append(
+                RecallItem(
+                    memory_id=view.id,
+                    memory_type=view.memory_type,
+                    scope=view.scope,
+                    status=view.status,
+                    snippet=_snippet(view),
+                    score=max((scores_by_id.get(source_id, 0.0) for source_id in source_ids), default=0.0),
+                    why=("contradiction_companion", "contradiction_warning"),
+                    deep_recall=f"memory_get {view.id}",
+                    conflicts_with=source_ids,
+                )
+            )
+            visible_ids.add(view.id)
+
+        marked_items = _mark_visible_conflicts(items, views, visible_ids)
+        return [*marked_items, *companion_items], views
 
     def _passes_canonical_filter(self, view: CanonicalNodeView, query: RecallQuery) -> bool:
         if view.status is memory.NodeStatus.REJECTED:
@@ -335,3 +414,94 @@ def _elapsed_ms(started: float) -> int:
 
 def _has_trace_coordinates(query: RecallQuery) -> bool:
     return all((query.session_id, query.run_id, query.turn_id, query.reply_id))
+
+
+def _contradiction_ids(view: CanonicalNodeView) -> tuple[str, ...]:
+    ids: list[str] = []
+    for predicate, memory_id in (*view.outgoing, *view.incoming):
+        if predicate == memory.CONTRADICTS.name and memory_id not in ids:
+            ids.append(memory_id)
+    return tuple(ids)
+
+
+def _mark_visible_conflicts(
+    items: list[RecallItem],
+    views: dict[str, CanonicalNodeView],
+    visible_ids: set[str],
+) -> list[RecallItem]:
+    marked: list[RecallItem] = []
+    for item in items:
+        view = views.get(item.memory_id)
+        if view is None:
+            marked.append(item)
+            continue
+        conflicts = tuple(memory_id for memory_id in _contradiction_ids(view) if memory_id in visible_ids)
+        if not conflicts:
+            marked.append(item)
+            continue
+        why = tuple(dict.fromkeys((*item.why, "contradiction_warning")))
+        marked.append(replace(item, why=why, conflicts_with=conflicts))
+    return marked
+
+
+def _score_by_id(items: Sequence[RecallItem]) -> dict[str, float]:
+    return {item.memory_id: item.score for item in items}
+
+
+def _append_filtered_id(filtered_ids: list[str], memory_id: str) -> None:
+    if memory_id not in filtered_ids:
+        filtered_ids.append(memory_id)
+
+
+def _dedupe_ids(memory_ids: Sequence[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(memory_ids))
+
+
+def _trim_recall_items(items: list[RecallItem], limit: int) -> list[RecallItem]:
+    if limit <= 0:
+        return []
+    if len(items) <= limit:
+        return items
+
+    trimmed = list(items)
+    while len(trimmed) > limit:
+        companion_source_ids = {
+            source_id
+            for item in trimmed
+            if "contradiction_companion" in item.why
+            for source_id in item.conflicts_with
+        }
+        removable_indexes = [
+            index
+            for index, item in enumerate(trimmed)
+            if "contradiction_companion" not in item.why and item.memory_id not in companion_source_ids
+        ]
+        if not removable_indexes:
+            non_companions = [item for item in trimmed if "contradiction_companion" not in item.why]
+            return (non_companions or trimmed)[:limit]
+        trimmed.pop(removable_indexes[-1])
+    return trimmed
+
+
+def _stabilize_visible_conflicts(items: list[RecallItem]) -> list[RecallItem]:
+    visible_ids = {item.memory_id for item in items}
+    stabilized: list[RecallItem] = []
+    for item in items:
+        conflicts = tuple(memory_id for memory_id in item.conflicts_with if memory_id in visible_ids)
+        why_base = tuple(
+            reason
+            for reason in item.why
+            if reason not in {"contradiction_companion", "contradiction_warning"}
+        )
+        if not conflicts:
+            if "contradiction_companion" in item.why:
+                continue
+            stabilized.append(replace(item, why=why_base, conflicts_with=()))
+            continue
+        why = (
+            (*why_base, "contradiction_companion", "contradiction_warning")
+            if "contradiction_companion" in item.why
+            else (*why_base, "contradiction_warning")
+        )
+        stabilized.append(replace(item, why=tuple(dict.fromkeys(why)), conflicts_with=conflicts))
+    return stabilized

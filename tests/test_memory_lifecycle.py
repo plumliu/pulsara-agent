@@ -8,6 +8,7 @@ import psycopg
 import pytest
 
 from pulsara_agent.entities.memory import Preference
+from pulsara_agent.event import EventType
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import PostgresMemoryQuery
@@ -100,13 +101,13 @@ def test_postgres_lifecycle_superseded_node_is_not_recalled_and_edge_is_material
         store.delete_graph(graph_id)
 
 
-def test_in_memory_lifecycle_contradiction_updates_both_nodes_edges_and_events() -> None:
+def test_lifecycle_link_contradiction_keeps_both_nodes_active_and_adds_edges() -> None:
     graph = InMemoryGraphStore()
     lifecycle = MemoryLifecycle(graph=graph, mutable=graph)
     graph.put_jsonld(_preference("preference:left", "The user prefers verbose summaries."))
     graph.put_jsonld(_preference("preference:right", "The user prefers concise summaries."))
 
-    events = lifecycle.mark_contradicted(
+    events = lifecycle.link_contradiction(
         left_id="preference:left",
         right_id="preference:right",
         governance_batch_id="governance:test:contradiction",
@@ -114,12 +115,18 @@ def test_in_memory_lifecycle_contradiction_updates_both_nodes_edges_and_events()
 
     left_doc = graph.get_jsonld("preference:left")
     right_doc = graph.get_jsonld("preference:right")
-    assert left_doc[memory.STATUS.name] == memory.NodeStatus.CONTRADICTED.value
-    assert right_doc[memory.STATUS.name] == memory.NodeStatus.CONTRADICTED.value
+    assert left_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+    assert right_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
     assert {"@id": "preference:right"} in left_doc[memory.CONTRADICTS.name]
     assert {"@id": "preference:left"} in right_doc[memory.CONTRADICTS.name]
-    assert [event.target_memory_id for event in events] == ["preference:left", "preference:right"]
-    assert all(event.action.startswith("mark_contradicted_with:") for event in events)
+    assert [event.type for event in events] == [
+        EventType.MEMORY_CONTRADICTION_LINKED,
+        EventType.MEMORY_CONTRADICTION_LINKED,
+    ]
+    assert [(event.memory_id, event.contradicts) for event in events] == [
+        ("preference:left", "preference:right"),
+        ("preference:right", "preference:left"),
+    ]
 
 
 def _preference(memory_id: str, statement: str) -> dict:

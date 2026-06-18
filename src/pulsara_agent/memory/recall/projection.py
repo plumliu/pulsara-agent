@@ -18,6 +18,12 @@ class ProjectionBuilder:
             rendered = _render_item(item, max_chars=self.max_item_chars)
             items.append(rendered)
             lines.append(f"- {rendered}")
+        conflict_groups = _conflict_groups(result)
+        if conflict_groups:
+            lines.append("")
+            lines.append("Conflicting recalled memories:")
+            for group in conflict_groups:
+                lines.append("- " + " <-> ".join(group["memory_ids"]))
         lines.append("</recalled-memory-projection>")
         summary = _clip("\n".join(lines), max_chars=max(200, token_budget * 4))
         return {
@@ -25,6 +31,7 @@ class ProjectionBuilder:
             "items": items,
             "included_memory_ids": [item.memory_id for item in result.items],
             "filtered_memory_ids": list(result.filtered_ids),
+            "conflict_groups": conflict_groups,
             "do_not_write_back": True,
         }
 
@@ -34,9 +41,25 @@ def _render_item(item, *, max_chars: int) -> str:
     rendered = (
         f"[{item.memory_id}] {item.snippet} "
         f"(type={item.memory_type}; scope={item.scope}; status={item.status.value}; "
-        f"why={why}; deep_recall=\"{item.deep_recall}\")"
+        f"why={why}; conflicts_with={list(item.conflicts_with)!r}; deep_recall=\"{item.deep_recall}\")"
     )
     return _clip(rendered, max_chars=max_chars)
+
+
+def _conflict_groups(result: RecallResult) -> list[dict[str, list[str] | str]]:
+    groups: list[dict[str, list[str] | str]] = []
+    seen: set[tuple[str, ...]] = set()
+    included = {item.memory_id for item in result.items}
+    for item in result.items:
+        for peer_id in item.conflicts_with:
+            if peer_id not in included:
+                continue
+            ids = tuple(sorted((item.memory_id, peer_id)))
+            if ids in seen:
+                continue
+            seen.add(ids)
+            groups.append({"kind": "contradiction", "memory_ids": list(ids)})
+    return groups
 
 
 def _clip(text: str, *, max_chars: int) -> str:

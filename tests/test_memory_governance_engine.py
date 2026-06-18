@@ -41,6 +41,7 @@ from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
 from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
     MemoryGovernanceOptions,
+    _parse_governance_output,
     _related_existing_memories,
 )
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
@@ -144,6 +145,36 @@ def test_memory_governance_engine_invalid_json_does_not_write_or_decide() -> Non
     assert pool.list_decisions() == []
     assert len(pool.list_pending()) == 1
     assert graph.find_by_type(memory.PREFERENCE) == []
+
+
+def test_memory_governance_parser_accepts_contradict_and_submit() -> None:
+    output = _parse_governance_output(
+        json.dumps(
+            {
+                "reason": "Non-explicit same-subject preference conflict.",
+                "decisions": [
+                    {
+                        "kind": "contradict_and_submit",
+                        "target_entry_id": "pool:new",
+                        "candidate": {
+                            "kind": "Preference",
+                            "candidate_id": "candidate:hate-egg-tarts",
+                            "statement": "The user hates egg tarts.",
+                            "scope": "ctx:user",
+                            "source_authority": "explicit_user_instruction",
+                            "verification_status": "user_confirmed",
+                            "evidence_ids": [],
+                        },
+                        "contradicted_memory_ids": ["preference:likes-egg-tarts"],
+                        "reason": "The new preference conflicts with the existing preference.",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert [decision.kind for decision in output.decisions] == ["contradict_and_submit"]
+    assert output.decisions[0].contradicted_memory_ids == ("preference:likes-egg-tarts",)
 
 
 def test_memory_governance_engine_invalid_target_returns_error_without_write() -> None:

@@ -408,6 +408,25 @@ def test_real_flash_memory_governance_explicit_change_supersedes_preference(tmp_
     assert result["governance_candidate_count"] == 0
 
 
+def test_real_flash_memory_governance_non_explicit_conflict_links_contradiction(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_flash_memory_governance_contradiction_smoke(tmp_path))
+
+    print("\nREAL_LLM_GOVERNANCE_CONTRADICTION=" + json.dumps(result, ensure_ascii=True, indent=2))
+    assert result["error_type"] is None
+    assert result["decision_kinds"] == ["contradict_and_submit"]
+    assert result["recorded_decision_kind"] == "contradict_and_submit"
+    assert result["old_status"] == "active"
+    assert result["new_status"] == "active"
+    assert result["superseded_memory_ids"] == []
+    assert result["contradicted_memory_ids"] == ["preference:real-governance-contradiction-old"]
+    assert result["supersedes_edge_present"] is False
+    assert result["contradicts_edge_present"] is True
+    assert result["governance_candidate_count"] == 0
+
+
 def test_real_flash_memory_governance_weak_update_coexists(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
@@ -1976,6 +1995,16 @@ async def _run_real_flash_memory_governance_coexist_smoke(tmp_path: Path) -> dic
     )
 
 
+async def _run_real_flash_memory_governance_contradiction_smoke(tmp_path: Path) -> dict:
+    return await _run_real_flash_memory_governance_lifecycle_smoke(
+        tmp_path,
+        label="contradiction",
+        old_statement="The user likes egg tarts.",
+        new_statement="The user hates egg tarts.",
+        user_quote="Please remember that the user hates egg tarts.",
+    )
+
+
 async def _run_real_flash_memory_governance_lifecycle_smoke(
     tmp_path: Path,
     *,
@@ -2069,18 +2098,25 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
         write_outcome = result.applied[0].decision_record.write_outcome if result.applied else None
         new_id = getattr(write_outcome, "memory_id", None)
         new_doc = graph.get_jsonld(new_id, graph_id=graph_id) if isinstance(new_id, str) else {}
+        governance_events = [event for applied in result.applied for event in applied.events]
         return {
             "error_type": result.error_type,
             "error_message": result.error_message,
             "decision_kinds": [decision.kind for decision in result.decisions],
             "recorded_decision_kind": result.applied[0].decision_record.decision.kind if result.applied else None,
             "applied_count": len(result.applied),
+            "governance_event_type_names": [type(event).__name__ for event in governance_events],
             "target_entry_id": pooled.entry_id,
             "old_status": old_doc.get(memory.STATUS.name),
             "new_status": new_doc.get(memory.STATUS.name),
             "new_id": new_id,
             "superseded_memory_ids": list(getattr(write_outcome, "superseded_memory_ids", ())),
+            "contradicted_memory_ids": list(getattr(write_outcome, "contradicted_memory_ids", ())),
             "supersedes_edge_present": {"@id": old_id} in new_doc.get(memory.SUPERSEDES.name, []),
+            "contradicts_edge_present": (
+                {"@id": old_id} in new_doc.get(memory.CONTRADICTS.name, [])
+                and {"@id": new_id} in old_doc.get(memory.CONTRADICTS.name, [])
+            ),
             "governance_candidate_count": sum(
                 1 for candidate in candidate_pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE
             ),

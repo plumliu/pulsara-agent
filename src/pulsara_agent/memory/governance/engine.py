@@ -204,6 +204,7 @@ Return this shape:
   "decisions": [
     {"kind": "submit_as_is", "target_entry_id": "pool:...", "reason": "..."},
     {"kind": "supersede_and_submit", "target_entry_id": "pool:...", "candidate": {...}, "superseded_memory_ids": ["preference:..."], "reason": "..."},
+    {"kind": "contradict_and_submit", "target_entry_id": "pool:...", "candidate": {...}, "contradicted_memory_ids": ["preference:..."], "reason": "..."},
     {"kind": "skip", "target_entry_ids": ["pool:..."], "reason": "...", "skip_reason": "not_durable"}
   ]
 }
@@ -221,6 +222,10 @@ Allowed decision kinds:
   "stop using Y, use Z"). Provide the new candidate and superseded_memory_ids
   using canonical memory ids from related_existing_memories. v1 allows only
   Preference, same scope, and a single superseded memory id.
+- contradict_and_submit: use when a new durable Preference clearly conflicts
+  with exactly one active same-scope Preference from related_existing_memories,
+  but the user did not explicitly ask to replace the old one. This keeps both
+  memories active and links a non-destructive contradiction warning.
 
 Rules:
 - Prefer skip over weak memory.
@@ -246,6 +251,18 @@ Rules:
   with skip_reason duplicate_existing_memory instead.
 - If no related_existing_memories entry is a clear replacement target, do not
   supersede.
+- contradict_and_submit is non-destructive but still noisy if wrong. Use it
+  only for a clear same-subject conflict where both preferences cannot be true
+  together, such as "likes egg tarts" vs "hates egg tarts".
+- contradicted_memory_ids must come from related_existing_memories. Never invent
+  a canonical memory id.
+- Never contradict an exact duplicate, a different scope, a temporary mood,
+  a story/roleplay context, or a narrower variant where both statements could
+  be true. If subject match is uncertain, choose submit_as_is/correct_and_submit
+  so both memories coexist without a warning.
+- v2 allows only a single contradiction target. If more than one existing memory
+  would need a contradiction edge, choose submit_as_is/correct_and_submit rather
+  than contradict_and_submit.
 - InvalidAttempt payloads usually need skip unless the raw arguments clearly
   provide all missing semantics.
 - Do not output write results; the host owns write outcomes.

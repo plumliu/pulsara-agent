@@ -111,12 +111,23 @@ class SupersedeAndSubmitDecision(BaseModel):
     reason: str
 
 
+class ContradictAndSubmitDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["contradict_and_submit"] = "contradict_and_submit"
+    target_entry_id: str
+    candidate: MemoryCandidate
+    contradicted_memory_ids: tuple[str, ...]
+    reason: str
+
+
 GovernanceDecision = Annotated[
     SkipDecision
     | SubmitAsIsDecision
     | CorrectAndSubmitDecision
     | MergeAndSubmitDecision
-    | SupersedeAndSubmitDecision,
+    | SupersedeAndSubmitDecision
+    | ContradictAndSubmitDecision,
     Field(discriminator="kind"),
 ]
 
@@ -139,6 +150,7 @@ class WriteSucceededOutcome(BaseModel):
     gate_reason: str
     write_event_ids: tuple[str, ...]
     superseded_memory_ids: tuple[str, ...] = ()
+    contradicted_memory_ids: tuple[str, ...] = ()
 
 
 class WriteFailedOutcome(BaseModel):
