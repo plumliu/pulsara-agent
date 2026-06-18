@@ -23,7 +23,7 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         },
         "scope": {
             "type": "string",
-            "description": "Optional exact visible memory scope, e.g. ctx:user or ctx:workspace/<flat_key>.",
+            "description": "Optional exact visible memory scope, e.g. ctx:user or the current ctx:workspace/<id>.",
         },
         "kind": {
             "type": "string",
@@ -289,7 +289,7 @@ def _scope_error_payload(scope: str | None, read_scopes: frozenset[str] | None) 
             "status": "empty",
             "results": [],
             "reason": "invalid_scope",
-            "guidance": ["Use ctx:user or ctx:workspace/<flat_key>."],
+            "guidance": ["Use ctx:user or one of the visible ctx:workspace/<id> scopes."],
         }
     effective_read_scopes = _effective_read_scopes(read_scopes)
     if scope not in effective_read_scopes:

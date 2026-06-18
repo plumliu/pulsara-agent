@@ -46,7 +46,7 @@ def _common_properties() -> dict[str, Any]:
         },
         "scope": {
             "type": "string",
-            "description": "Scope this memory applies to, e.g. ctx:user, ctx:workspace/test_project, or ctx:workspace/test_workspace.",
+            "description": "Exact visible scope this memory applies to, e.g. ctx:user or the current ctx:workspace/<id>.",
         },
         "source_authority": {
             "type": "string",

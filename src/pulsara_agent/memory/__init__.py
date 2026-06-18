@@ -63,11 +63,13 @@ from pulsara_agent.memory.recall.rerank import direct_relation_rerank
 from pulsara_agent.memory.scope import (
     CTX_USER,
     MemoryDomainContext,
+    canonical_project_key,
     format_scope_list,
     is_valid_flat_id,
     is_valid_scope,
     parse_scope,
     scopes_for_domain,
+    workspace_scope_key,
     workspace_scope,
 )
 from pulsara_agent.memory.working_context import (
@@ -166,6 +168,7 @@ __all__ = [
     "WorkingContextUpdate",
     "already_exists",
     "candidate_fingerprint",
+    "canonical_project_key",
     "direct_relation_rerank",
     "explain_memory",
     "explanation_to_payload",
@@ -181,6 +184,7 @@ __all__ = [
     "scopes_for_domain",
     "summarize_run_timeline",
     "validate_explanation",
+    "workspace_scope_key",
     "workspace_scope",
     "working_context_projection",
 ]

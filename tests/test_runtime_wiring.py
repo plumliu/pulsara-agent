@@ -10,7 +10,7 @@ from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import load_run_timeline, summarize_run_timeline
-from pulsara_agent.memory.scope import MemoryDomainContext
+from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.runtime import (
     AgentRuntimeWiring,
@@ -67,10 +67,11 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
 
 
 def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -> None:
+    project_root = tmp_path / "repo_test"
     domain = MemoryDomainContext(
         memory_domain_id="u_test",
         workspace_kind="project",
-        stable_project_key="repo_test",
+        stable_project_key=str(project_root),
     )
 
     wiring = build_in_memory_runtime_wiring(
@@ -81,7 +82,7 @@ def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -
 
     assert wiring.graph_id == "graph:user/u_test"
     assert wiring.memory_governance_executor.allowed_write_scopes == frozenset(
-        {"ctx:user", "ctx:workspace/repo_test"}
+        {"ctx:user", workspace_scope(str(project_root))}
     )
 
 

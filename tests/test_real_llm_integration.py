@@ -45,6 +45,7 @@ from pulsara_agent.memory import (
     RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
+    workspace_scope,
 )
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
@@ -228,7 +229,7 @@ def test_real_agent_runtime_cross_dialogue_working_context_is_domain_shared_with
     assert result["dialogue_b_status"] == "finished"
     assert result["graph_id"].startswith("graph:user/")
     assert result["stored_working_context_source_run_id"] == result["dialogue_a_run_id"]
-    assert result["stored_working_context_workspace_key"] == "repo_a"
+    assert result["stored_working_context_workspace_key"] == result["expected_workspace_key"]
     assert "PULSARA_WORKING_CONTEXT_CROSS_DIALOGUE_A" in result["stored_working_context_summary"]
     assert result["dialogue_b_projection_kind"] == "working_context"
     assert "PULSARA_WORKING_CONTEXT_CROSS_DIALOGUE_A" in result["dialogue_b_projection_summary"]
@@ -249,7 +250,7 @@ def test_real_agent_runtime_scope_assignment_trajectory_samples_with_responses_a
     assert trajectories[0]["memory_tool_names"] == ["remember_preference"]
     assert trajectories[0]["memory_scopes"] == ["ctx:user"]
     assert trajectories[1]["memory_tool_names"] == ["remember_decision"]
-    assert trajectories[1]["memory_scopes"] == ["ctx:workspace/scope_repo"]
+    assert trajectories[1]["memory_scopes"] == [trajectories[1]["expected_workspace_scope"]]
     assert trajectories[2]["memory_tool_names"] == []
     assert trajectories[2]["candidate_pool_pending"] == 0
 
@@ -829,11 +830,15 @@ async def _run_real_agent_memory_search_tool_smoke(tmp_path: Path) -> dict:
 
 async def _run_real_agent_memory_domain_search_scope_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
+    project_root = tmp_path / "repo-visible"
+    hidden_project_root = tmp_path / "repo-hidden"
     domain = MemoryDomainContext(
         memory_domain_id="u_real_scope",
         workspace_kind="project",
-        stable_project_key="repo_visible",
+        stable_project_key=str(project_root),
     )
+    visible_workspace_scope = workspace_scope(str(project_root))
+    hidden_workspace_scope = workspace_scope(str(hidden_project_root))
     wiring = build_agent_runtime_wiring(
         settings,
         tmp_path,
@@ -861,12 +866,12 @@ async def _run_real_agent_memory_domain_search_scope_smoke(tmp_path: Path) -> di
         ),
         (
             "preference:real-domain-visible-workspace",
-            "ctx:workspace/repo_visible",
+            visible_workspace_scope,
             "The domain scope sentinel says visible workspace memory.",
         ),
         (
             "preference:real-domain-hidden",
-            "ctx:workspace/other_repo",
+            hidden_workspace_scope,
             "The domain scope sentinel says hidden workspace memory.",
         ),
     ):
@@ -925,15 +930,16 @@ async def _run_real_agent_cross_dialogue_domain_recall_smoke(tmp_path: Path) -> 
     domain_a = MemoryDomainContext(
         memory_domain_id=memory_domain_id,
         workspace_kind="project",
-        stable_project_key="repo_a",
+        stable_project_key=str(dialogue_a_root),
         workspace_label="repo-a",
     )
     domain_b = MemoryDomainContext(
         memory_domain_id=memory_domain_id,
         workspace_kind="project",
-        stable_project_key="repo_b",
+        stable_project_key=str(dialogue_b_root),
         workspace_label="repo-b",
     )
+    workspace_a_scope = workspace_scope(str(dialogue_a_root))
     wiring_a = build_agent_runtime_wiring(
         settings,
         dialogue_a_root,
@@ -946,7 +952,7 @@ async def _run_real_agent_cross_dialogue_domain_recall_smoke(tmp_path: Path) -> 
             "sentinel PULSARA_CROSS_DIALOGUE_USER when asked about bridge sentinel recall', scope='ctx:user', "
             "source_authority='explicit_user_instruction', and verification_status='user_confirmed'. "
             "Then call remember_decision exactly once with statement='Workspace A owns the bridge sentinel "
-            "PULSARA_CROSS_DIALOGUE_WORKSPACE_A', scope='ctx:workspace/repo_a', "
+            f"PULSARA_CROSS_DIALOGUE_WORKSPACE_A', scope='{workspace_a_scope}', "
             "source_authority='explicit_user_instruction', verification_status='user_confirmed', and no based_on_ids. "
             "After both tool calls, answer exactly PULSARA_CROSS_DIALOGUE_A_WRITTEN."
         ),
@@ -1046,13 +1052,13 @@ async def _run_real_agent_cross_dialogue_working_context_smoke(tmp_path: Path) -
     domain_a = MemoryDomainContext(
         memory_domain_id=memory_domain_id,
         workspace_kind="project",
-        stable_project_key="repo_a",
+        stable_project_key=str(dialogue_a_root),
         workspace_label="repo-a",
     )
     domain_b = MemoryDomainContext(
         memory_domain_id=memory_domain_id,
         workspace_kind="project",
-        stable_project_key="repo_b",
+        stable_project_key=str(dialogue_b_root),
         workspace_label="repo-b",
     )
     _delete_working_context(dsn, memory_domain_id)
@@ -1107,6 +1113,7 @@ async def _run_real_agent_cross_dialogue_working_context_smoke(tmp_path: Path) -
             "dialogue_a_final_text": result_a.final_text.strip(),
             "stored_working_context_source_run_id": stored.source_run_id,
             "stored_working_context_workspace_key": stored.workspace_key,
+            "expected_workspace_key": domain_a.stable_project_key,
             "stored_working_context_summary": stored.summary,
             "dialogue_b_status": result_b.status.value,
             "dialogue_b_final_text": result_b.final_text.strip(),
@@ -1158,11 +1165,13 @@ async def _run_real_agent_scope_assignment_trajectory_samples(tmp_path: Path) ->
 
 async def _run_real_agent_scope_assignment_case(tmp_path: Path, case: dict) -> dict:
     settings = _load_settings_for_real_llm()
+    project_root = tmp_path / "scope-repo"
     domain = MemoryDomainContext(
         memory_domain_id=f"u_real_scope_assign_{uuid4().hex[:12]}",
         workspace_kind="project",
-        stable_project_key="scope_repo",
+        stable_project_key=str(project_root),
     )
+    workspace_scope_value = workspace_scope(str(project_root))
     wiring = build_agent_runtime_wiring(
         settings,
         tmp_path,
@@ -1173,7 +1182,7 @@ async def _run_real_agent_scope_assignment_case(tmp_path: Path, case: dict) -> d
             "You are collecting real LLM memory scope-assignment trajectories. "
             "If the user explicitly asks to remember durable user-wide information, call exactly one appropriate "
             "remember_* tool with scope ctx:user. If the user explicitly asks to remember a durable current-project "
-            "fact or decision, call exactly one appropriate remember_* tool with scope ctx:workspace/scope_repo. "
+            f"fact or decision, call exactly one appropriate remember_* tool with scope {workspace_scope_value}. "
             "If the user asks to remember a one-off task detail, do not call memory tools. "
             f"After following those rules, answer exactly {case['expected_final']}."
         ),
@@ -1206,6 +1215,7 @@ async def _run_real_agent_scope_assignment_case(tmp_path: Path, case: dict) -> d
             "memory_scopes": [args.get("scope") for args in memory_arguments if isinstance(args, dict)],
             "memory_arguments": memory_arguments,
             "candidate_pool_pending": len(wiring.runtime_wiring.candidate_pool.list_pending()),
+            "expected_workspace_scope": workspace_scope_value,
         }
     finally:
         wiring.runtime_wiring.graph.delete_graph(graph_id)
@@ -1571,7 +1581,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_claim tool. "
             "Call remember_claim exactly once with statement='Pulsara uses JSON-LD graph nodes for durable memory', "
-            "scope='ctx:workspace/test_project', source_authority='explicit_user_instruction', and "
+            "scope='{workspace_scope}', source_authority='explicit_user_instruction', and "
             "verification_status='user_confirmed'. Then answer exactly: PULSARA_MEMORY_CLAIM_OK"
         ),
         "user_input": "Remember this durable claim: Pulsara uses JSON-LD graph nodes for durable memory.",
@@ -1595,7 +1605,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_observation tool. "
             "Call remember_observation exactly once with statement='The current workspace is testing narrow memory tools', "
-            "scope='ctx:workspace/test_project', source_authority='explicit_user_instruction', and "
+            "scope='{workspace_scope}', source_authority='explicit_user_instruction', and "
             "verification_status='user_confirmed'. Then answer exactly: PULSARA_MEMORY_OBSERVATION_OK"
         ),
         "user_input": "Observe and remember that this workspace is testing narrow memory tools.",
@@ -1607,7 +1617,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_action_boundary tool. "
             "Call remember_action_boundary exactly once with statement='Do not commit code unless the user explicitly asks', "
-            "scope='ctx:workspace/test_project', applies_when='working in a git repository', "
+            "scope='{workspace_scope}', applies_when='working in a git repository', "
             "do_not_apply_when='the user explicitly asks for git add and commit', "
             "source_authority='explicit_user_instruction', and verification_status='user_confirmed'. "
             "Then answer exactly: PULSARA_MEMORY_ACTION_BOUNDARY_OK"
@@ -1621,7 +1631,7 @@ _REAL_MEMORY_TOOL_CASES = (
         "system_prompt": (
             "You are validating the remember_decision tool. "
             "Call remember_decision exactly once with statement='Use type-specific remember tools instead of a single propose_memory tool', "
-            "scope='ctx:workspace/test_project', source_authority='explicit_user_instruction', and "
+            "scope='{workspace_scope}', source_authority='explicit_user_instruction', and "
             "verification_status='user_confirmed'. Do not include based_on_ids. "
             "Then answer exactly: PULSARA_MEMORY_DECISION_OK"
         ),
@@ -1633,18 +1643,20 @@ _REAL_MEMORY_TOOL_CASES = (
 async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> dict:
     tmp_path.mkdir(parents=True, exist_ok=True)
     settings = _load_settings_for_real_llm()
+    project_root = tmp_path / "test-project"
     memory_domain = MemoryDomainContext(
         memory_domain_id=f"u_real_memory_tools_{uuid4().hex[:12]}",
         workspace_kind="project",
-        stable_project_key="test_project",
+        stable_project_key=str(project_root),
     )
+    workspace_scope_value = workspace_scope(str(project_root))
     wiring = build_agent_runtime_wiring(
         settings,
         tmp_path,
         durable=True,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
-        system_prompt=case["system_prompt"],
+        system_prompt=case["system_prompt"].format(workspace_scope=workspace_scope_value),
         memory_domain=memory_domain,
     )
     graph_id = wiring.runtime_wiring.graph_id

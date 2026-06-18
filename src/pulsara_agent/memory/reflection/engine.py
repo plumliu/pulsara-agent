@@ -523,7 +523,7 @@ Rules:
   candidates=[].
 - Candidate scopes must be one of allowed_scopes when allowed_scopes is non-empty.
 - Use ctx:user only for durable user-wide preferences or habits.
-- Use ctx:workspace/<flat_key> only for durable current-project facts or decisions.
+- Use the exact allowed ctx:workspace/<id> scope only for durable current-project facts or decisions.
 - Do not propose durable memory for one-off task details.
 - Do not propose a candidate if memory_tool_attempts already attempted or
   proposed the same memory; governance owns repair and final writing.

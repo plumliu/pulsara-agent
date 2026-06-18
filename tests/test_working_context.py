@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -49,10 +50,11 @@ def test_working_context_guard_rejects_low_signal_run() -> None:
 def test_working_context_store_upserts_domain_latest() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
+    project_root = Path("/tmp/pulsara-working-context-test-project")
     domain = MemoryDomainContext(
         memory_domain_id=f"u_{uuid4().hex[:16]}",
         workspace_kind="project",
-        stable_project_key="test_project",
+        stable_project_key=str(project_root),
         workspace_label="test-project",
     )
     store = PostgresWorkingContextStore(dsn=dsn)
@@ -75,7 +77,7 @@ def test_working_context_store_upserts_domain_latest() -> None:
         assert first.summary_id == second.summary_id
         assert latest is not None
         assert latest.summary == second.summary
-        assert latest.workspace_key == "test_project"
+        assert latest.workspace_key == project_root.resolve().as_posix()
     finally:
         _delete_working_context(dsn, domain.memory_domain_id)
 

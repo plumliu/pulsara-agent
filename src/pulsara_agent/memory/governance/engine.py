@@ -234,7 +234,7 @@ Rules:
 - Candidate scopes must be one of allowed_scopes. If a candidate uses a scope
   outside allowed_scopes, skip rather than rewriting it.
 - Use ctx:user only for durable user-wide preferences or habits.
-- Use ctx:workspace/<flat_key> only for durable current-project facts or decisions.
+- Use the exact allowed ctx:workspace/<id> scope only for durable current-project facts or decisions.
 - Do not submit durable memory for one-off task details.
 - Use source_events, user_quote, prior_governance_decisions, and related_existing_memories
   as audit evidence. They are context, not permission to invent new memory.

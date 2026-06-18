@@ -44,14 +44,14 @@ _Created: 2026-06-17_
 
 ```text
 ctx:user                      # 用户级，跨所有对话
-ctx:workspace/<flat_key>      # 项目级，仅 project 模式存在
+ctx:workspace/<hash_id>       # 项目级，仅 project 模式存在；由后端从 stable_project_key 派生
 ```
 
 规则：
 
 - **扁平精确匹配**：召回 `view.scope in query.scopes` 是精确相等（[recall/service.py:215](src/pulsara_agent/memory/recall/service.py:215) 现状）。v1 **不做前缀/层级匹配**。
-- **`<flat_key>` 必须是 slug/hash，不含 `/`**：否则 `ctx:workspace/a/b` 看起来像层级、破坏精确匹配的扁平假设。`<flat_key>` 由宿主从稳定标识派生（推荐 git remote URL 的 hash；无 remote 用 repo 根路径 hash）——**跨机器稳定优先于可读**，可读名另存 `workspace_label`。
-- **字符集硬约束**：`memory_domain_id` 和 `<flat_key>` 都使用同一个 flat id 规则：ASCII 小写字母/数字开头，后续仅允许小写字母、数字、`.`、`_`、`-`，长度 1-128。推荐宿主传 hash/slug，例如 `u_8f3a...`、`repo_4d91...`。不允许空格、`/`、`:`、中文或 URL 原文进入 scope/graph id 的可变段。
+- **`<hash_id>` 必须是扁平 id，不含 `/`**：否则 `ctx:workspace/a/b` 看起来像层级、破坏精确匹配的扁平假设。`<hash_id>` **不由宿主拼接**，由后端从 `stable_project_key` canonicalize 后 `sha256(... )[:16]` 派生。可读名另存 `workspace_label`。
+- **字符集硬约束**：`memory_domain_id` 和 workspace scope 的 `<hash_id>` 都使用 flat id 规则：ASCII 小写字母/数字开头，后续仅允许小写字母、数字、`.`、`_`、`-`，长度 1-128。`stable_project_key` 可以是宿主提供的真实项目绝对路径；它不会原样进入 scope/graph id。
 - **语法校验集中一处**：新增 `memory/scope.py`，提供 `is_valid_scope(s) -> bool` 与 `parse_scope`，**读写两侧共用**，避免词汇漂移。
 
 ```python
@@ -83,7 +83,7 @@ def is_valid_scope(scope: str) -> bool:
 class MemoryDomainContext:
     memory_domain_id: str               # 稳定用户级 flat id（local-user hash/slug）
     workspace_kind: Literal["project", "transient"]
-    stable_project_key: str | None      # project 才有（flat slug/hash，无 "/"）；transient = None
+    stable_project_key: str | None      # project 才有；通常是真实项目绝对路径；transient = None
     workspace_label: str | None = None  # 可读名，如 "tau3-agenticrl"，仅展示用
 
     @property
@@ -96,7 +96,8 @@ class MemoryDomainContext:
 - 「这个 cwd 是真项目还是 codex-like 临时目录」**只有宿主知道**——后端看到的两者都只是路径，无法分辨。宿主必须给 `workspace_kind` + `stable_project_key`。
 - `transient` → `stable_project_key = None` → 不产 workspace scope。
 - `memory_domain_id` 谁来算也是宿主职责（如机器本地用户 hash）。
-- `memory_domain_id` 与 `stable_project_key` 必须先通过 `is_valid_flat_id`；不合法即 wiring-time fail-fast。后端接收宿主判定，但仍校验格式，避免把 URL/path/中文名直接拼进 graph id 或 scope。
+- `memory_domain_id` 仍必须通过 `is_valid_flat_id`，因为它会进入 `graph:user/<id>`。
+- `stable_project_key` 只要求非空；后端负责 `expanduser`/`resolve(strict=False)` 规范化路径样式 key，并从 canonical key 派生 workspace hash scope。宿主不拼 `ctx:workspace/...`，避免 scope 协议散落到 UI/入口层。
 
 ## 4. Phase 1：写侧 scope 纪律（前置，必须早于共享 graph）
 
@@ -107,7 +108,7 @@ class MemoryDomainContext:
 ```text
 allowed_write_scopes(domain):
   transient: {ctx:user}
-  project:   {ctx:user, ctx:workspace/<stable_project_key>}
+  project:   {ctx:user, workspace_scope(stable_project_key)}
 ```
 
 两层闸，职责严格分离:
@@ -118,7 +119,7 @@ allowed_write_scopes(domain):
 
 - 把现有 `if not scope.strip()` 升级为 `if not is_valid_scope(scope)`（§2 共用函数）。
 - 拒绝:空串、`ctx:乱填`、未知前缀、`ctx:workspace/a/b`（层级歧义）。
-- 通过:`ctx:user`、`ctx:workspace/<flat_key>`。
+- 通过:`ctx:user`、`ctx:workspace/<hash_id>`。
 - 失败 → 维持现有 `WriteDecision(False, REJECTED, ...)` 语义。
 
 ### 4.2 governance executor —— 成员闸（有 runtime 上下文，判「该不该写到这个 scope」）
@@ -179,7 +180,7 @@ def _validate_target_entries(self, decision: GovernanceDecision) -> tuple[Pooled
   - 把动态 allowed scopes 放进 runtime/system prompt，不改工具 schema；
   - 或把 `parameters` 改为实例级 property / factory，让 registry 按 domain 构造工具实例。
   v1 推荐先用 runtime/system prompt 注入，避免全局 schema 被某个 runtime 污染。
-- 现有 fixture / prompt / real-LLM smoke 里还有 `ctx:project` 与裸 `ctx:workspace`（如 durable memory tests 与 reflection Example F）。PR1/PR3 必须迁移为 `ctx:user` 或 `ctx:workspace/<flat_key>`，否则新语法闸会把旧测试当非法 scope 拒掉。
+- 现有 fixture / prompt / real-LLM smoke 里还有 `ctx:project`、裸 `ctx:workspace` 或语义化 workspace scope（如 durable memory tests 与 reflection Example F）。PR1/PR3 必须迁移为 `ctx:user` 或后端派生的 `ctx:workspace/<id>`，否则新语法闸/成员闸会把旧测试当非法或越界 scope 拒掉。
 
 > 为什么 prompt 不够、必须有 §4 硬闸：prompt 是概率性的，LLM 仍可能把任务细节误标 `ctx:workspace`。§4.2 成员闸是确定性兜底——LLM 提议，gate 裁定。和 supersede 同构。
 
@@ -200,7 +201,7 @@ graph_id = graph:user/<memory_domain_id>     # 来自 MemoryDomainContext.graph_
 ```text
 read_scopes(domain):
   transient: {ctx:user}
-  project:   {ctx:user, ctx:workspace/<stable_project_key>}
+  project:   {ctx:user, workspace_scope(stable_project_key)}
 ```
 
 落地:
@@ -227,7 +228,7 @@ read_scopes(domain):
 - 用户未传 `scope` 时，`RecallQuery.scopes=tuple(read_scopes)`，而不是 `()`。
 - 用户显式传 `scope` 时，先校验 `is_valid_scope(scope)`，再校验 `scope in read_scopes`；越界返回 tool error/empty + guidance，**不执行跨 scope 查询**。
 - `MemoryGetTool` / `MemoryRelatedTool` / `MemoryExplainTool` 按 id 读取 canonical node，也需要在返回前检查 fetched node 的 `scope in read_scopes`；否则共享 graph 下用户知道 memory id 就可跨 workspace 读。若 node scope 越界，返回 not_found/forbidden-style payload，避免泄露内容。
-- tool schema 的 scope 描述也要从 `ctx:workspace/project` 更新为 `ctx:workspace/<flat_key>`，并提示“默认只搜索当前可见 scopes”。
+- tool schema 的 scope 描述也要从 `ctx:workspace/project` 更新为“当前可见的精确 `ctx:workspace/<id>`”，并提示“默认只搜索当前可见 scopes”。
 
 这一步可以和 Phase 3 同 PR 做；若拆 PR，必须保持 graph 仍是 per-session fallback，不允许出现「共享 graph + memory_search 无 read-scope」的中间状态。
 
@@ -336,7 +337,7 @@ PR6  working_context_summaries 入库不入图（§8）
 3. **补 governance-detached 对齐（原计划缺）**：成员闸该按「发起 runtime」校验。本文修正为：当前 orchestrated path 会过滤本 runtime 候选，但 executor 仍必须新增 target ownership gate，硬性拒绝跨 runtime target；之后 v1 才能不持久化 allowed scopes 到候选。v2 若做跨 runtime governance，则需把 allowed scopes 或 domain context 持久化到候选（§4.3）。
 4. **补共享 graph 与 read resolver 的原子落地要求**：graph:user 共享不能早于 normal recall ScopeResolver；显式 `memory_search/get/related/explain` 也必须受 read scopes 约束（§6/§7）。否则共享 graph 会被 `scopes=()` 或按 id 读取绕过。
 5. **working context 定位修正(本轮纠正)**:working context 的核心**不是「同一项目接着干」**(那是延伸价值),而是**像 `ctx:user` 一样持续注入的「用户最近在做什么」小摘要**。因此它是 **domain 级、所有对话(含 transient)都有资格写、实质活动 last-write-wins**;`workspace_key`/`workspace_label` 退为可选元数据,非过滤键(§8)。**这条推翻了上一版「transient 不写 working context / 仅 project 写」的规则,但保留 `should_update=false` 防止低信号 run 覆盖旧摘要。**
-6. **`<flat_key>` 无 `/` + flat id regex 硬约束 + scope 校验集中 `scope.py`**：守住「扁平精确匹配」假设，读写词汇不漂移（§2）。
+6. **workspace scope id 无 `/` + flat id regex 硬约束 + scope 校验集中 `scope.py`**：守住「扁平精确匹配」假设，读写词汇不漂移（§2）。
 
 未改方向：核心原则、目标、graph:user 共享、ScopeResolver、working 入库不入图——这些原计划都对。
 

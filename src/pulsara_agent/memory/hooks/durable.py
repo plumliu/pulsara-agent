@@ -147,7 +147,7 @@ class DurableMemoryHooks(NoopMemoryHooks):
             f"- Visible scopes: {scopes}.\n"
             f"- Writable scopes: {scopes}.\n"
             "- Use ctx:user only for durable user-wide preferences or habits.\n"
-            "- Use ctx:workspace/<flat_key> only for durable facts or decisions about the current project.\n"
+            "- Use the exact visible ctx:workspace/<id> scope only for durable facts or decisions about the current project.\n"
             "- Do not create durable memory for one-off task details."
         )
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 from typing import Literal
 
 
@@ -11,16 +13,30 @@ CTX_USER = "ctx:user"
 WORKSPACE_SCOPE_PREFIX = "ctx:workspace/"
 
 _FLAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_WORKSPACE_SCOPE_KEY_CHARS = 16
 
 
 def is_valid_flat_id(value: str) -> bool:
     return bool(_FLAT_ID_RE.fullmatch(value))
 
 
+def canonical_project_key(stable_project_key: str) -> str:
+    value = stable_project_key.strip()
+    if not value:
+        raise ValueError("stable_project_key must not be empty")
+    path = Path(value).expanduser()
+    if path.is_absolute() or "/" in value:
+        return path.resolve(strict=False).as_posix()
+    return value
+
+
+def workspace_scope_key(stable_project_key: str) -> str:
+    canonical = canonical_project_key(stable_project_key)
+    return sha256(canonical.encode("utf-8")).hexdigest()[:_WORKSPACE_SCOPE_KEY_CHARS]
+
+
 def workspace_scope(stable_project_key: str) -> str:
-    if not is_valid_flat_id(stable_project_key):
-        raise ValueError(f"workspace scope key must be a flat id: {stable_project_key!r}")
-    return f"{WORKSPACE_SCOPE_PREFIX}{stable_project_key}"
+    return f"{WORKSPACE_SCOPE_PREFIX}{workspace_scope_key(stable_project_key)}"
 
 
 def is_valid_scope(scope: str) -> bool:
@@ -57,8 +73,7 @@ class MemoryDomainContext:
         if self.workspace_kind == "project":
             if self.stable_project_key is None:
                 raise ValueError("project memory domain requires stable_project_key")
-            if not is_valid_flat_id(self.stable_project_key):
-                raise ValueError(f"stable_project_key must be a flat id: {self.stable_project_key!r}")
+            object.__setattr__(self, "stable_project_key", canonical_project_key(self.stable_project_key))
         elif self.stable_project_key is not None:
             raise ValueError("transient memory domain must not set stable_project_key")
 
