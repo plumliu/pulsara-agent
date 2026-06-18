@@ -163,9 +163,5 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _normalize(value: str) -> str:
-    return " ".join(value.casefold().split())
-
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)

@@ -349,6 +349,7 @@ def _merge_projections(first: dict | None, second: dict | None) -> dict | None:
         return second
     if second is None:
         return first
+    projection_kinds = _projection_kinds(first, second)
     return {
         "summary": "\n\n".join(
             part
@@ -368,4 +369,15 @@ def _merge_projections(first: dict | None, second: dict | None) -> dict | None:
             *list(second.get("filtered_memory_ids") or []),
         ],
         "do_not_write_back": True,
+        "projection_kind": projection_kinds[0] if len(projection_kinds) == 1 else "mixed",
+        "projection_kinds": projection_kinds,
     }
+
+
+def _projection_kinds(first: dict, second: dict) -> list[str]:
+    kinds: list[str] = []
+    for projection, fallback in ((first, "working_context"), (second, "recalled_memory")):
+        kind = projection.get("projection_kind") or fallback
+        if isinstance(kind, str) and kind not in kinds:
+            kinds.append(kind)
+    return kinds

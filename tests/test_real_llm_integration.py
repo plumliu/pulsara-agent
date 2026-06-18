@@ -199,6 +199,61 @@ def test_real_agent_runtime_memory_domain_search_is_scope_aware_with_responses_a
     assert "PULSARA_DOMAIN_SCOPE_OK" in result["final_text"]
 
 
+def test_real_agent_runtime_cross_dialogue_domain_recall_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_cross_dialogue_domain_recall_smoke(tmp_path))
+
+    print("\nREAL_LLM_CROSS_DIALOGUE_DOMAIN=" + json.dumps(result, ensure_ascii=True, indent=2))
+    assert result["dialogue_a_status"] == "finished"
+    assert result["dialogue_b_status"] == "finished"
+    assert result["graph_id"].startswith("graph:user/")
+    assert result["dialogue_a_memory_tools"] == ["remember_preference", "remember_decision"]
+    assert result["dialogue_a_memory_statuses"] == ["active", "active"]
+    assert result["dialogue_a_user_memory_id"] in result["dialogue_b_projection_ids"]
+    assert result["dialogue_a_workspace_memory_id"] not in result["dialogue_b_projection_ids"]
+    assert "PULSARA_CROSS_DIALOGUE_USER" in result["dialogue_b_projection_summary"]
+    assert "PULSARA_CROSS_DIALOGUE_WORKSPACE_A" not in result["dialogue_b_projection_summary"]
+
+
+def test_real_agent_runtime_cross_dialogue_working_context_is_domain_shared_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_cross_dialogue_working_context_smoke(tmp_path))
+
+    print("\nREAL_LLM_CROSS_DIALOGUE_WORKING_CONTEXT=" + json.dumps(result, ensure_ascii=True, indent=2))
+    assert result["dialogue_a_status"] == "finished"
+    assert result["dialogue_b_status"] == "finished"
+    assert result["graph_id"].startswith("graph:user/")
+    assert result["stored_working_context_source_run_id"] == result["dialogue_a_run_id"]
+    assert result["stored_working_context_workspace_key"] == "repo_a"
+    assert "PULSARA_WORKING_CONTEXT_CROSS_DIALOGUE_A" in result["stored_working_context_summary"]
+    assert result["dialogue_b_projection_kind"] == "working_context"
+    assert "PULSARA_WORKING_CONTEXT_CROSS_DIALOGUE_A" in result["dialogue_b_projection_summary"]
+
+
+def test_real_agent_runtime_scope_assignment_trajectory_samples_with_responses_api(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    trajectories = asyncio.run(_run_real_agent_scope_assignment_trajectory_samples(tmp_path))
+
+    print("\nREAL_LLM_SCOPE_ASSIGNMENT_TRAJECTORIES=" + json.dumps(trajectories, ensure_ascii=True, indent=2))
+    assert [trajectory["label"] for trajectory in trajectories] == [
+        "user_preference",
+        "workspace_decision",
+        "one_off_task_detail",
+    ]
+    assert trajectories[0]["memory_tool_names"] == ["remember_preference"]
+    assert trajectories[0]["memory_scopes"] == ["ctx:user"]
+    assert trajectories[1]["memory_tool_names"] == ["remember_decision"]
+    assert trajectories[1]["memory_scopes"] == ["ctx:workspace/scope_repo"]
+    assert trajectories[2]["memory_tool_names"] == []
+    assert trajectories[2]["candidate_pool_pending"] == 0
+
+
 def test_real_agent_runtime_can_call_memory_explain_tool_with_responses_api(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
@@ -825,6 +880,313 @@ async def _run_real_agent_memory_domain_search_scope_smoke(tmp_path: Path) -> di
             "tool_names": [event.tool_call_name for event in tool_call_events],
             "tool_call_arguments": tool_call_arguments,
             "tool_result_texts": tool_result_texts,
+        }
+    finally:
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        if result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_working_context(settings.storage.postgres_dsn, domain.memory_domain_id)
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
+async def _run_real_agent_cross_dialogue_domain_recall_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    dsn = settings.storage.postgres_dsn
+    memory_domain_id = f"u_real_cross_{uuid4().hex[:12]}"
+    dialogue_a_root = tmp_path / "dialogue-a"
+    dialogue_b_root = tmp_path / "dialogue-b"
+    dialogue_a_root.mkdir()
+    dialogue_b_root.mkdir()
+    domain_a = MemoryDomainContext(
+        memory_domain_id=memory_domain_id,
+        workspace_kind="project",
+        stable_project_key="repo_a",
+        workspace_label="repo-a",
+    )
+    domain_b = MemoryDomainContext(
+        memory_domain_id=memory_domain_id,
+        workspace_kind="project",
+        stable_project_key="repo_b",
+        workspace_label="repo-b",
+    )
+    wiring_a = build_agent_runtime_wiring(
+        settings,
+        dialogue_a_root,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=384),
+        system_prompt=(
+            "You are dialogue A in a cross-dialogue memory integration test. "
+            "Call remember_preference exactly once with statement='The user prefers the cross-dialogue bridge "
+            "sentinel PULSARA_CROSS_DIALOGUE_USER when asked about bridge sentinel recall', scope='ctx:user', "
+            "source_authority='explicit_user_instruction', and verification_status='user_confirmed'. "
+            "Then call remember_decision exactly once with statement='Workspace A owns the bridge sentinel "
+            "PULSARA_CROSS_DIALOGUE_WORKSPACE_A', scope='ctx:workspace/repo_a', "
+            "source_authority='explicit_user_instruction', verification_status='user_confirmed', and no based_on_ids. "
+            "After both tool calls, answer exactly PULSARA_CROSS_DIALOGUE_A_WRITTEN."
+        ),
+        memory_domain=domain_a,
+        memory_reflection=False,
+    )
+    graph_id = wiring_a.runtime_wiring.graph_id
+    assert graph_id is not None
+    governance_batch_id = f"governance:real-cross-dialogue:{uuid4().hex}"
+    result_a = None
+    result_b = None
+    wiring_b = None
+    try:
+        result_a = await wiring_a.agent_runtime.run_task(
+            "Write the cross-dialogue user preference and the workspace A decision exactly as instructed."
+        )
+        events_a = wiring_a.runtime_wiring.event_log.iter(run_id=result_a.state.run_id)
+        tool_call_events_a = [event for event in events_a if isinstance(event, ToolCallStartEvent)]
+        pending_before_governance = wiring_a.runtime_wiring.candidate_pool.list_pending()
+        governance_results = wiring_a.runtime_wiring.memory_governance_executor.submit_pending_as_is(
+            governance_batch_id=governance_batch_id
+        )
+        governance_events = [event for applied in governance_results for event in applied.events]
+        memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
+        memory_failures = [event for event in governance_events if isinstance(event, MemoryWriteFailedEvent)]
+        memory_ids_by_type = {event.memory_type: event.memory_id for event in memory_results}
+        _delete_working_context(dsn, memory_domain_id)
+
+        wiring_b = build_agent_runtime_wiring(
+            settings,
+            dialogue_b_root,
+            durable=True,
+            model_role=ModelRole.FLASH,
+            options=LLMOptions(temperature=0, max_output_tokens=128),
+            system_prompt=(
+                "You are dialogue B in a cross-dialogue memory integration test. "
+                "Do not call tools. Use only the Recalled Memory section. "
+                "If it contains PULSARA_CROSS_DIALOGUE_USER and does not contain "
+                "PULSARA_CROSS_DIALOGUE_WORKSPACE_A, answer exactly PULSARA_CROSS_DIALOGUE_OK. "
+                "Otherwise answer exactly PULSARA_CROSS_DIALOGUE_BAD."
+            ),
+            memory_domain=domain_b,
+            memory_reflection=False,
+        )
+        result_b = await wiring_b.agent_runtime.run_task(
+            "Please check bridge sentinel recall for the cross-dialogue integration test."
+        )
+        projection_b = result_b.state.memory_projection or {}
+        return {
+            "graph_id": graph_id,
+            "dialogue_a_status": result_a.status.value,
+            "dialogue_a_final_text": result_a.final_text.strip(),
+            "dialogue_a_memory_tools": [
+                event.tool_call_name
+                for event in tool_call_events_a
+                if event.tool_call_name.startswith("remember_")
+            ],
+            "dialogue_a_pending_before_governance": len(pending_before_governance),
+            "dialogue_a_memory_statuses": [event.status.value for event in memory_results],
+            "dialogue_a_memory_types": [event.memory_type for event in memory_results],
+            "dialogue_a_user_memory_id": memory_ids_by_type.get("Preference"),
+            "dialogue_a_workspace_memory_id": memory_ids_by_type.get("Decision"),
+            "dialogue_a_memory_failures": [event.error_type for event in memory_failures],
+            "dialogue_a_memory_failure_messages": [event.message for event in memory_failures],
+            "dialogue_b_status": result_b.status.value,
+            "dialogue_b_final_text": result_b.final_text.strip(),
+            "dialogue_b_projection_ids": list(projection_b.get("included_memory_ids") or []),
+            "dialogue_b_projection_summary": projection_b.get("summary", ""),
+        }
+    finally:
+        wiring_a.runtime_wiring.graph.delete_graph(graph_id)
+        _delete_postgres_governance_decisions(dsn, [governance_batch_id])
+        _delete_working_context(dsn, memory_domain_id)
+        if result_a is not None:
+            _delete_postgres_artifacts_with_prefix(
+                dsn,
+                f"timeline:{wiring_a.runtime_wiring.runtime_session.runtime_session_id}:{result_a.state.run_id}:",
+            )
+        if wiring_b is not None and result_b is not None:
+            _delete_postgres_artifacts_with_prefix(
+                dsn,
+                f"timeline:{wiring_b.runtime_wiring.runtime_session.runtime_session_id}:{result_b.state.run_id}:",
+            )
+        _delete_postgres_runtime_session(dsn, wiring_a.runtime_wiring.runtime_session.runtime_session_id)
+        if wiring_b is not None:
+            _delete_postgres_runtime_session(dsn, wiring_b.runtime_wiring.runtime_session.runtime_session_id)
+
+
+async def _run_real_agent_cross_dialogue_working_context_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    dsn = settings.storage.postgres_dsn
+    memory_domain_id = f"u_real_wc_cross_{uuid4().hex[:12]}"
+    dialogue_a_root = tmp_path / "working-context-dialogue-a"
+    dialogue_b_root = tmp_path / "working-context-dialogue-b"
+    dialogue_a_root.mkdir()
+    dialogue_b_root.mkdir()
+    domain_a = MemoryDomainContext(
+        memory_domain_id=memory_domain_id,
+        workspace_kind="project",
+        stable_project_key="repo_a",
+        workspace_label="repo-a",
+    )
+    domain_b = MemoryDomainContext(
+        memory_domain_id=memory_domain_id,
+        workspace_kind="project",
+        stable_project_key="repo_b",
+        workspace_label="repo-b",
+    )
+    _delete_working_context(dsn, memory_domain_id)
+    wiring_a = build_agent_runtime_wiring(
+        settings,
+        dialogue_a_root,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=128),
+        system_prompt=(
+            "You are dialogue A in a working-context integration test. Do not call tools. "
+            "Answer exactly this sentence: Dialogue A recently validated the domain-shared working context "
+            "sentinel PULSARA_WORKING_CONTEXT_CROSS_DIALOGUE_A so a later dialogue in the same memory domain "
+            "can recover recent activity without using canonical memory."
+        ),
+        memory_domain=domain_a,
+        memory_reflection=False,
+    )
+    graph_id = wiring_a.runtime_wiring.graph_id
+    assert graph_id is not None
+    result_a = None
+    result_b = None
+    wiring_b = None
+    try:
+        result_a = await wiring_a.agent_runtime.run_task("Write the working-context sentinel sentence exactly.")
+        store = PostgresWorkingContextStore(dsn=dsn)
+        stored = store.get_latest(memory_domain_id=memory_domain_id)
+        # This text-only run intentionally exceeds the working-context substantive-signal floor.
+        assert stored is not None
+
+        wiring_b = build_agent_runtime_wiring(
+            settings,
+            dialogue_b_root,
+            durable=True,
+            model_role=ModelRole.FLASH,
+            options=LLMOptions(temperature=0, max_output_tokens=96),
+            system_prompt=(
+                "You are dialogue B in a working-context integration test. Do not call tools. "
+                "Use only the Recalled Memory section. If it contains "
+                "PULSARA_WORKING_CONTEXT_CROSS_DIALOGUE_A, answer exactly PULSARA_WORKING_CONTEXT_OK. "
+                "Otherwise answer exactly PULSARA_WORKING_CONTEXT_MISSING."
+            ),
+            memory_domain=domain_b,
+            memory_reflection=False,
+        )
+        result_b = await wiring_b.agent_runtime.run_task("Check whether recent activity from dialogue A is visible.")
+        projection_b = result_b.state.memory_projection or {}
+        return {
+            "graph_id": graph_id,
+            "dialogue_a_status": result_a.status.value,
+            "dialogue_a_run_id": result_a.state.run_id,
+            "dialogue_a_final_text": result_a.final_text.strip(),
+            "stored_working_context_source_run_id": stored.source_run_id,
+            "stored_working_context_workspace_key": stored.workspace_key,
+            "stored_working_context_summary": stored.summary,
+            "dialogue_b_status": result_b.status.value,
+            "dialogue_b_final_text": result_b.final_text.strip(),
+            "dialogue_b_projection_kind": projection_b.get("projection_kind"),
+            "dialogue_b_projection_summary": projection_b.get("summary", ""),
+            "dialogue_b_projection_ids": list(projection_b.get("included_memory_ids") or []),
+        }
+    finally:
+        wiring_a.runtime_wiring.graph.delete_graph(graph_id)
+        _delete_working_context(dsn, memory_domain_id)
+        if result_a is not None:
+            _delete_postgres_artifacts_with_prefix(
+                dsn,
+                f"timeline:{wiring_a.runtime_wiring.runtime_session.runtime_session_id}:{result_a.state.run_id}:",
+            )
+        if wiring_b is not None and result_b is not None:
+            _delete_postgres_artifacts_with_prefix(
+                dsn,
+                f"timeline:{wiring_b.runtime_wiring.runtime_session.runtime_session_id}:{result_b.state.run_id}:",
+            )
+        _delete_postgres_runtime_session(dsn, wiring_a.runtime_wiring.runtime_session.runtime_session_id)
+        if wiring_b is not None:
+            _delete_postgres_runtime_session(dsn, wiring_b.runtime_wiring.runtime_session.runtime_session_id)
+
+
+async def _run_real_agent_scope_assignment_trajectory_samples(tmp_path: Path) -> list[dict]:
+    cases = (
+        {
+            "label": "user_preference",
+            "user_input": "Please remember this across all projects: I prefer compact final summaries.",
+            "expected_final": "PULSARA_SCOPE_USER_OK",
+        },
+        {
+            "label": "workspace_decision",
+            "user_input": "Please remember this project decision for the current repository: run scope tests with pytest -q.",
+            "expected_final": "PULSARA_SCOPE_WORKSPACE_OK",
+        },
+        {
+            "label": "one_off_task_detail",
+            "user_input": "For this one-off task only, remember that /tmp/pulsara-scratch.txt is the scratch file to inspect next.",
+            "expected_final": "PULSARA_SCOPE_SKIP_OK",
+        },
+    )
+    results: list[dict] = []
+    for case in cases:
+        results.append(await _run_real_agent_scope_assignment_case(tmp_path / case["label"], case))
+    return results
+
+
+async def _run_real_agent_scope_assignment_case(tmp_path: Path, case: dict) -> dict:
+    settings = _load_settings_for_real_llm()
+    domain = MemoryDomainContext(
+        memory_domain_id=f"u_real_scope_assign_{uuid4().hex[:12]}",
+        workspace_kind="project",
+        stable_project_key="scope_repo",
+    )
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=192),
+        system_prompt=(
+            "You are collecting real LLM memory scope-assignment trajectories. "
+            "If the user explicitly asks to remember durable user-wide information, call exactly one appropriate "
+            "remember_* tool with scope ctx:user. If the user explicitly asks to remember a durable current-project "
+            "fact or decision, call exactly one appropriate remember_* tool with scope ctx:workspace/scope_repo. "
+            "If the user asks to remember a one-off task detail, do not call memory tools. "
+            f"After following those rules, answer exactly {case['expected_final']}."
+        ),
+        memory_domain=domain,
+        memory_reflection=False,
+    )
+    graph_id = wiring.runtime_wiring.graph_id
+    assert graph_id is not None
+    result = None
+    try:
+        result = await wiring.agent_runtime.run_task(case["user_input"])
+        events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        memory_tool_events = [
+            event for event in tool_call_events if event.tool_call_name.startswith("remember_")
+        ]
+        tool_arguments = _tool_arguments_by_call_id(events)
+        memory_arguments = [
+            tool_arguments.get(event.tool_call_id, {})
+            for event in memory_tool_events
+            if event.tool_call_name.startswith("remember_")
+        ]
+        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        return {
+            "label": case["label"],
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "errors": errors,
+            "memory_tool_names": [event.tool_call_name for event in memory_tool_events],
+            "memory_scopes": [args.get("scope") for args in memory_arguments if isinstance(args, dict)],
+            "memory_arguments": memory_arguments,
+            "candidate_pool_pending": len(wiring.runtime_wiring.candidate_pool.list_pending()),
         }
     finally:
         wiring.runtime_wiring.graph.delete_graph(graph_id)
@@ -1736,6 +2098,23 @@ def _summarize_collected_result(result: dict) -> dict:
         "thinking": result["thinking"],
         "errors": result["errors"],
     }
+
+
+def _tool_arguments_by_call_id(events) -> dict[str, dict]:
+    deltas_by_call: dict[str, list[str]] = {}
+    for event in events:
+        if isinstance(event, ToolCallDeltaEvent):
+            deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
+    parsed: dict[str, dict] = {}
+    for tool_call_id, deltas in deltas_by_call.items():
+        raw = "".join(deltas)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed[tool_call_id] = {"_raw": raw}
+        else:
+            parsed[tool_call_id] = payload if isinstance(payload, dict) else {"_raw": raw}
+    return parsed
 
 
 def _load_settings_for_real_llm() -> PulsaraSettings:

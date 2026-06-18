@@ -18,7 +18,7 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.memory import InMemoryCandidatePool, MemoryDomainContext
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
-from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
+from pulsara_agent.memory.hooks.durable import DurableMemoryHooks, _merge_projections
 from pulsara_agent.memory.working_context import (
     PostgresWorkingContextStore,
     propose_working_context_update,
@@ -125,6 +125,34 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
         assert "do_not_write_back" in projection["summary"]
     finally:
         _delete_working_context(dsn, domain.memory_domain_id)
+
+
+def test_merge_projection_preserves_mixed_projection_metadata() -> None:
+    working_context = {
+        "summary": '<working-context-projection do_not_write_back="true">recent activity</working-context-projection>',
+        "items": ["recent activity"],
+        "included_memory_ids": [],
+        "filtered_memory_ids": [],
+        "do_not_write_back": True,
+        "projection_kind": "working_context",
+    }
+    recalled = {
+        "summary": '<recalled-memory-projection do_not_write_back="true">durable preference</recalled-memory-projection>',
+        "items": ["durable preference"],
+        "included_memory_ids": ["preference:1"],
+        "filtered_memory_ids": ["decision:2"],
+        "do_not_write_back": True,
+    }
+
+    projection = _merge_projections(working_context, recalled)
+
+    assert projection is not None
+    assert projection["projection_kind"] == "mixed"
+    assert projection["projection_kinds"] == ["working_context", "recalled_memory"]
+    assert "working-context-projection" in projection["summary"]
+    assert "recalled-memory-projection" in projection["summary"]
+    assert projection["included_memory_ids"] == ["preference:1"]
+    assert projection["filtered_memory_ids"] == ["decision:2"]
 
 
 def _ctx() -> EventContext:
