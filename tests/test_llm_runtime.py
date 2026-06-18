@@ -17,6 +17,14 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
 )
 from pulsara_agent.llm.adapters.mock import MockTransport
+from pulsara_agent.llm.adapters.openai.chat_completions import (
+    ChatToolCallAccumulator,
+    OpenAIChatCompletionsTransport,
+    build_chat_completions_payload,
+    translate_chat_completion_chunk,
+)
+from pulsara_agent.llm.adapters.openai.client import OPENAI_CHAT_COMPLETIONS_API
+from pulsara_agent.llm.adapters.openai.events import AgentEventBuilder
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     build_responses_payload,
@@ -385,21 +393,33 @@ def test_openai_responses_streaming_arguments_map_item_id_to_call_id() -> None:
     assert events[2].tool_call_id == "call_responses_1"
 
 
-def test_openai_responses_transport_posts_to_configured_base_url(monkeypatch) -> None:
+def test_openai_responses_error_event_emits_run_error_without_model_end() -> None:
+    builder = transport_builder_for_test()
+
+    events = translate_responses_event(
+        {"type": "error", "message": "provider exploded", "code": "bad_request"},
+        builder=builder,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], RunErrorEvent)
+    assert events[0].message == "provider exploded"
+    assert events[0].code == "openai_responses_error"
+
+
+def test_openai_responses_transport_uses_sdk_stream() -> None:
     import asyncio
-    from pulsara_agent.llm.adapters.openai import responses
 
-    captured = {}
-
-    def fake_post_responses(*, base_url, api_key, payload, timeout_seconds):
-        captured["base_url"] = base_url
-        captured["api_key"] = api_key
-        captured["payload"] = payload
-        captured["timeout_seconds"] = timeout_seconds
-        return {"status": "completed", "output_text": "pong"}
-
-    monkeypatch.setattr(responses, "_post_responses", fake_post_responses)
-    transport = OpenAIResponsesTransport(api_key="sk-test", timeout_seconds=7)
+    fake_client = FakeOpenAIClient(
+        responses_events=[
+            {"type": "response.output_text.delta", "delta": "pong"},
+            {
+                "type": "response.completed",
+                "response": {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
+            },
+        ]
+    )
+    transport = OpenAIResponsesTransport(api_key="sk-test", timeout_seconds=7, _client=fake_client)
     config = LLMConfig(
         api_key="sk-test",
         base_url="https://example.test/v1",
@@ -419,24 +439,21 @@ def test_openai_responses_transport_posts_to_configured_base_url(monkeypatch) ->
 
     events = asyncio.run(collect())
 
-    assert captured["base_url"] == "https://example.test/v1"
-    assert captured["api_key"] == "sk-test"
-    assert captured["payload"]["model"] == "flash"
-    assert captured["timeout_seconds"] == 7
+    assert fake_client.responses.calls[0]["model"] == "flash"
+    assert fake_client.responses.calls[0]["stream"] is True
     assert isinstance(events[1], TextBlockStartEvent)
     assert events[2].delta == "pong"
     assert isinstance(events[-1], ModelCallEndEvent)
+    assert events[-1].input_tokens == 1
+    assert events[-1].output_tokens == 2
+    assert events[-1].total_tokens == 3
 
 
-def test_openai_responses_transport_emits_run_error_event(monkeypatch) -> None:
+def test_openai_responses_transport_emits_run_error_event() -> None:
     import asyncio
-    from pulsara_agent.llm.adapters.openai import responses
 
-    def fake_post_responses(*, base_url, api_key, payload, timeout_seconds):
-        raise responses.OpenAIResponsesError("boom", {"status": 500})
-
-    monkeypatch.setattr(responses, "_post_responses", fake_post_responses)
-    transport = OpenAIResponsesTransport(api_key="sk-test")
+    fake_client = FakeOpenAIClient(responses_error=RuntimeError("boom"))
+    transport = OpenAIResponsesTransport(api_key="sk-test", _client=fake_client)
     config = LLMConfig(
         api_key="sk-test",
         base_url="https://example.test/v1",
@@ -461,7 +478,263 @@ def test_openai_responses_transport_emits_run_error_event(monkeypatch) -> None:
     assert events[1].type is EventType.RUN_ERROR
     assert events[1].message == "boom"
     assert events[1].code == "openai_responses_error"
-    assert events[1].metadata == {"provider_data": {"status": 500}}
+    assert events[1].metadata["provider_data"]["type"] == "RuntimeError"
+
+
+def test_openai_chat_completions_payload_uses_internal_context() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+    context = LLMContext(
+        system_prompt="You are Pulsara.",
+        messages=(
+            LLMMessage.user("Use lookup."),
+            LLMMessage.tool_call(
+                tool_call_id="call_chat_123",
+                name="lookup",
+                arguments='{"q":"pulsara"}',
+            ),
+            LLMMessage.tool_result("found", tool_call_id="call_chat_123"),
+        ),
+        tools=(
+            ToolSpec(
+                name="lookup",
+                description="Look up a value.",
+                parameters={"type": "object", "properties": {"q": {"type": "string"}}},
+            ),
+        ),
+    )
+
+    payload = build_chat_completions_payload(
+        model=config.model_for(ModelRole.PRO),
+        context=context,
+        options=LLMOptions(reasoning_effort="medium", max_output_tokens=64),
+    )
+
+    assert payload["model"] == "pro"
+    assert payload["messages"][0] == {"role": "system", "content": "You are Pulsara."}
+    assert payload["messages"][1] == {"role": "user", "content": "Use lookup."}
+    assert payload["messages"][2]["role"] == "assistant"
+    assert payload["messages"][2]["tool_calls"][0]["id"] == "call_chat_123"
+    assert payload["messages"][3] == {
+        "role": "tool",
+        "tool_call_id": "call_chat_123",
+        "content": "found",
+    }
+    assert payload["tools"][0]["function"]["name"] == "lookup"
+    assert payload["max_completion_tokens"] == 64
+    assert payload["reasoning_effort"] == "medium"
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("Use both tools."),
+            LLMMessage.tool_call(
+                tool_call_id="call_1",
+                name="first_tool",
+                arguments='{"a":1}',
+            ),
+            LLMMessage.tool_call(
+                tool_call_id="call_2",
+                name="second_tool",
+                arguments='{"b":2}',
+            ),
+            LLMMessage.tool_result("first result", tool_call_id="call_1"),
+            LLMMessage.tool_result("second result", tool_call_id="call_2"),
+        )
+    )
+
+    payload = build_chat_completions_payload(model=config.model_for(ModelRole.PRO), context=context)
+
+    assert payload["messages"][0] == {"role": "user", "content": "Use both tools."}
+    assert payload["messages"][1]["role"] == "assistant"
+    assert [call["id"] for call in payload["messages"][1]["tool_calls"]] == ["call_1", "call_2"]
+    assert payload["messages"][2]["role"] == "tool"
+    assert payload["messages"][2]["tool_call_id"] == "call_1"
+    assert payload["messages"][3]["role"] == "tool"
+    assert payload["messages"][3]["tool_call_id"] == "call_2"
+
+
+def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
+    import asyncio
+
+    transport = OpenAIChatCompletionsTransport(
+        api_key="sk-test",
+        _mock_chunks=[
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_chat_1",
+                                    "function": {"name": "lookup", "arguments": '{"q"'},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": ':"pulsara"}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 4, "total_tokens": 6},
+            },
+        ],
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.PRO),
+                context=LLMContext(messages=(LLMMessage.user("hi"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert isinstance(events[0], ModelCallStartEvent)
+    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "hi" for event in events)
+    assert any(
+        isinstance(event, ToolCallStartEvent) and event.tool_call_id == "call_chat_1"
+        for event in events
+    )
+    assert [event.delta for event in events if isinstance(event, ToolCallDeltaEvent)] == [
+        '{"q"',
+        ':"pulsara"}',
+    ]
+    assert any(
+        isinstance(event, ToolCallEndEvent) and event.tool_call_id == "call_chat_1"
+        for event in events
+    )
+    assert isinstance(events[-1], ModelCallEndEvent)
+    assert events[-1].input_tokens == 2
+    assert events[-1].output_tokens == 4
+    assert events[-1].total_tokens == 6
+
+
+def test_openai_chat_completions_transport_uses_sdk_stream() -> None:
+    import asyncio
+
+    fake_client = FakeOpenAIClient(
+        chat_chunks=[
+            {"choices": [{"delta": {"content": "pong"}}]},
+            {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}},
+        ]
+    )
+    transport = OpenAIChatCompletionsTransport(api_key="sk-test", _client=fake_client)
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert fake_client.chat.completions.calls[0]["model"] == "flash"
+    assert fake_client.chat.completions.calls[0]["stream"] is True
+    assert isinstance(events[1], TextBlockStartEvent)
+    assert events[2].delta == "pong"
+    assert isinstance(events[-1], ModelCallEndEvent)
+    assert events[-1].input_tokens == 1
+    assert events[-1].output_tokens == 2
+    assert events[-1].total_tokens == 3
+
+
+def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -> None:
+    builder = transport_builder_for_test()
+    accumulator = ChatToolCallAccumulator(builder=builder)
+
+    first_events = translate_chat_completion_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": '{"q"'}}
+                        ]
+                    }
+                }
+            ]
+        },
+        builder=builder,
+        accumulator=accumulator,
+    )
+    second_events = translate_chat_completion_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_late",
+                                "function": {"name": "lookup"},
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+        builder=builder,
+        accumulator=accumulator,
+    )
+
+    assert first_events == []
+    assert isinstance(second_events[0], ToolCallStartEvent)
+    assert second_events[0].tool_call_id == "call_late"
+    assert isinstance(second_events[1], ToolCallDeltaEvent)
+    assert second_events[1].tool_call_id == "call_late"
+    assert second_events[1].delta == '{"q"'
+    assert isinstance(second_events[2], ToolCallEndEvent)
 
 
 def test_default_llm_runtime_registers_openai_responses_transport() -> None:
@@ -478,15 +751,63 @@ def test_default_llm_runtime_registers_openai_responses_transport() -> None:
 
 
 def transport_builder_for_test(config: LLMConfig | None = None):
-    from pulsara_agent.llm.adapters.openai.responses import _AgentEventBuilder
-
     config = config or LLMConfig(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
     )
-    return _AgentEventBuilder(
+    return AgentEventBuilder(
         model=config.model_for(ModelRole.PRO),
         event_context=EVENT_CONTEXT,
     )
+
+
+class FakeAsyncStream:
+    def __init__(self, events):
+        self._events = list(events)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._events:
+            raise StopAsyncIteration
+        return self._events.pop(0)
+
+
+class FakeResponsesEndpoint:
+    def __init__(self, *, events=None, error=None):
+        self.events = events or []
+        self.error = error
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return FakeAsyncStream(self.events)
+
+
+class FakeOpenAIClient:
+    def __init__(self, *, responses_events=None, responses_error=None, chat_chunks=None, chat_error=None):
+        self.responses = FakeResponsesEndpoint(events=responses_events, error=responses_error)
+        self.chat = FakeChatNamespace(chunks=chat_chunks, error=chat_error)
+
+
+class FakeChatCompletionsEndpoint:
+    def __init__(self, *, chunks=None, error=None):
+        self.chunks = chunks or []
+        self.error = error
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return FakeAsyncStream(self.chunks)
+
+
+class FakeChatNamespace:
+    def __init__(self, *, chunks=None, error=None):
+        self.completions = FakeChatCompletionsEndpoint(chunks=chunks, error=error)

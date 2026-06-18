@@ -9,6 +9,7 @@ from pulsara_agent.llm.models import ModelProfile, ModelRole
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_API = "openai_responses"
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +24,7 @@ class LLMConfig:
     base_url: str
     pro_model: str
     flash_model: str
-    api: str = "openai_responses"
+    api: str = DEFAULT_OPENAI_API
     provider: str = "openai"
 
     @classmethod
@@ -33,6 +34,7 @@ class LLMConfig:
             base_url=os.getenv(f"{prefix}_BASE_URL", DEFAULT_OPENAI_BASE_URL).strip(),
             pro_model=_required_env(f"{prefix}_PRO_MODEL"),
             flash_model=_required_env(f"{prefix}_FLASH_MODEL"),
+            api=os.getenv(f"{prefix}_API", DEFAULT_OPENAI_API).strip() or DEFAULT_OPENAI_API,
         )
 
     def model_for(self, role: ModelRole) -> ModelProfile:

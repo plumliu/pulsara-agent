@@ -2,37 +2,29 @@
 
 from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from pulsara_agent.event import (
-    AgentEvent,
-    EventContext,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
-    RunErrorEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
-    ThinkingBlockEndEvent,
-    ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
+from pulsara_agent.event import AgentEvent, EventContext
+from pulsara_agent.llm.adapters.openai.client import (
+    OPENAI_RESPONSES_API,
+    build_async_openai_client,
+    provider_error_data,
+)
+from pulsara_agent.llm.adapters.openai.events import (
+    AgentEventBuilder,
+    arguments_to_json_string,
+    event_includes_model_end,
+    event_includes_run_error,
+    sdk_event_to_dict,
+    usage_from_mapping,
 )
 from pulsara_agent.llm.input import LLMMessage, MessageRole, ToolSpec
 from pulsara_agent.llm.models import ModelProfile
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.transport import LLMTransport
 from pulsara_agent.llm.usage import Usage
-
-
-OPENAI_RESPONSES_API = "openai_responses"
 
 
 @dataclass(slots=True)
@@ -43,6 +35,7 @@ class OpenAIResponsesTransport(LLMTransport):
     api: str = OPENAI_RESPONSES_API
     timeout_seconds: float = 60.0
     _mock_events: list[dict[str, Any]] = field(default_factory=list)
+    _client: Any | None = None
 
     async def stream(
         self,
@@ -52,41 +45,60 @@ class OpenAIResponsesTransport(LLMTransport):
         event_context: EventContext,
         options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        builder = _AgentEventBuilder(model=model, event_context=event_context)
+        builder = AgentEventBuilder(model=model, event_context=event_context)
         yield builder.model_start()
 
-        if not self._mock_events:
-            payload = build_responses_payload(model=model, context=context, options=options)
-            try:
-                response = _post_responses(
-                    base_url=model.base_url,
-                    api_key=self.api_key,
-                    payload=payload,
-                    timeout_seconds=self.timeout_seconds,
-                )
-            except OpenAIResponsesError as exc:
-                yield RunErrorEvent(
-                    **event_context.event_fields(),
-                    message=str(exc),
-                    code="openai_responses_error",
-                    metadata={"provider_data": exc.provider_data},
-                )
-                return
-
-            for event in response_to_agent_events(
-                response=response,
-                builder=builder,
-            ):
-                yield event
+        if self._mock_events:
+            model_end_emitted = False
+            for raw_event in self._mock_events:
+                events = translate_responses_event(raw_event, builder=builder)
+                model_end_emitted = model_end_emitted or event_includes_model_end(events)
+                run_error_emitted = event_includes_run_error(events)
+                for event in events:
+                    yield event
+                if run_error_emitted:
+                    return
+            if not model_end_emitted:
+                for event in builder.close_active_blocks():
+                    yield event
+                yield builder.model_end()
             return
 
-        for raw_event in self._mock_events:
-            for event in translate_responses_event(raw_event, builder=builder):
+        payload = build_responses_payload(model=model, context=context, options=options)
+        should_close_client = self._client is None
+        client = self._client or build_async_openai_client(
+            api_key=self.api_key,
+            base_url=model.base_url,
+            timeout_seconds=self.timeout_seconds,
+        )
+        model_end_emitted = False
+        try:
+            stream = await client.responses.create(**payload, stream=True)
+            async for raw_event in stream:
+                events = translate_responses_event(raw_event, builder=builder)
+                model_end_emitted = model_end_emitted or event_includes_model_end(events)
+                run_error_emitted = event_includes_run_error(events)
+                for event in events:
+                    yield event
+                if run_error_emitted:
+                    return
+        except Exception as exc:
+            for event in builder.close_active_blocks():
                 yield event
+            yield builder.run_error(
+                message=str(exc),
+                code="openai_responses_error",
+                provider_data=provider_error_data(exc),
+            )
+            return
+        finally:
+            if should_close_client:
+                await client.close()
 
-        for event in builder.close_active_blocks():
-            yield event
-        yield builder.model_end()
+        if not model_end_emitted:
+            for event in builder.close_active_blocks():
+                yield event
+            yield builder.model_end()
 
 
 def build_responses_payload(
@@ -118,7 +130,7 @@ def build_responses_payload(
 def response_to_agent_events(
     *,
     response: dict[str, Any],
-    builder: "_AgentEventBuilder",
+    builder: AgentEventBuilder,
 ) -> list[AgentEvent]:
     events: list[AgentEvent] = []
     thinking = _extract_reasoning_summary(response)
@@ -141,17 +153,18 @@ def response_to_agent_events(
 
 
 def translate_responses_event(
-    raw_event: dict[str, Any],
+    raw_event: Any,
     *,
-    builder: "_AgentEventBuilder",
+    builder: AgentEventBuilder,
 ) -> list[AgentEvent]:
-    event_type = raw_event.get("type")
+    event = sdk_event_to_dict(raw_event)
+    event_type = event.get("type")
     if event_type == "response.output_text.delta":
-        return builder.text_delta(str(raw_event.get("delta", "")))
-    if event_type == "response.reasoning_summary_text.delta":
-        return builder.thinking_delta(str(raw_event.get("delta", "")))
+        return builder.text_delta(str(event.get("delta", "")))
+    if event_type in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
+        return builder.thinking_delta(str(event.get("delta", "")))
     if event_type == "response.output_item.added":
-        item = raw_event.get("item")
+        item = event.get("item")
         if isinstance(item, dict) and item.get("type") == "function_call":
             provider_item_id = str(item.get("id") or "")
             tool_call_id = str(item.get("call_id") or item.get("id") or uuid4())
@@ -161,13 +174,13 @@ def translate_responses_event(
                 provider_item_id=provider_item_id,
             )
     if event_type == "response.function_call_arguments.delta":
-        item_id = str(raw_event.get("item_id") or raw_event.get("call_id") or "")
+        item_id = str(event.get("item_id") or event.get("call_id") or "")
         return builder.tool_call_delta(
             tool_call_id=builder.resolve_tool_call_id(item_id),
-            delta=str(raw_event.get("delta", "")),
+            delta=str(event.get("delta", "")),
         )
     if event_type == "response.output_item.done":
-        item = raw_event.get("item")
+        item = event.get("item")
         if isinstance(item, dict) and item.get("type") == "function_call":
             provider_item_id = str(item.get("id") or "")
             tool_call_id = str(item.get("call_id") or item.get("id") or "")
@@ -181,197 +194,30 @@ def translate_responses_event(
                 events.extend(
                     builder.tool_call_delta(
                         tool_call_id=tool_call_id,
-                        delta=_arguments_to_json_string(arguments),
+                        delta=arguments_to_json_string(arguments),
                     )
                 )
             events.extend(builder.tool_call_end(tool_call_id=tool_call_id))
             return events
     if event_type == "response.completed":
-        response = raw_event.get("response")
+        response = event.get("response")
         events = builder.close_active_blocks()
         events.append(builder.model_end(usage=_usage(response if isinstance(response, dict) else {})))
         return events
-    return []
-
-
-@dataclass(slots=True)
-class _AgentEventBuilder:
-    model: ModelProfile
-    event_context: EventContext
-    text_block_id: str | None = None
-    thinking_block_id: str | None = None
-    active_tool_call_ids: set[str] = field(default_factory=set)
-    item_id_to_tool_call_id: dict[str, str] = field(default_factory=dict)
-    tool_call_has_arguments: set[str] = field(default_factory=set)
-
-    def event_fields(self) -> dict[str, str]:
-        return self.event_context.event_fields()
-
-    def model_start(self) -> ModelCallStartEvent:
-        return ModelCallStartEvent(
-            **self.event_fields(),
-            model_name=self.model.id,
-            model_role=self.model.role.value,
-            provider=self.model.provider,
-        )
-
-    def model_end(self, usage: Usage | None = None) -> ModelCallEndEvent:
-        usage = usage or Usage()
-        return ModelCallEndEvent(
-            **self.event_fields(),
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-        )
-
-    def text_delta(self, delta: str) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
-        if self.text_block_id is None:
-            self.text_block_id = f"text:{uuid4()}"
-            events.append(TextBlockStartEvent(**self.event_fields(), block_id=self.text_block_id))
-        events.append(TextBlockDeltaEvent(**self.event_fields(), block_id=self.text_block_id, delta=delta))
-        return events
-
-    def thinking_delta(self, delta: str) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
-        if self.thinking_block_id is None:
-            self.thinking_block_id = f"thinking:{uuid4()}"
-            events.append(
-                ThinkingBlockStartEvent(**self.event_fields(), block_id=self.thinking_block_id)
-            )
+    if event_type in {"response.failed", "response.error", "response.incomplete", "error"}:
+        response = event.get("response")
+        provider_data = response if isinstance(response, dict) else event
+        message = _response_error_message(provider_data)
+        events = builder.close_active_blocks()
         events.append(
-            ThinkingBlockDeltaEvent(
-                **self.event_fields(),
-                block_id=self.thinking_block_id,
-                delta=delta,
+            builder.run_error(
+                message=message,
+                code="openai_responses_error",
+                provider_data=provider_data,
             )
         )
         return events
-
-    def tool_call_start(
-        self,
-        *,
-        tool_call_id: str,
-        tool_call_name: str,
-        provider_item_id: str | None = None,
-    ) -> list[AgentEvent]:
-        if provider_item_id:
-            self.item_id_to_tool_call_id[provider_item_id] = tool_call_id
-        if tool_call_id in self.active_tool_call_ids:
-            return []
-        self.active_tool_call_ids.add(tool_call_id)
-        return [
-            ToolCallStartEvent(
-                **self.event_fields(),
-                tool_call_id=tool_call_id,
-                tool_call_name=tool_call_name,
-            )
-        ]
-
-    def tool_call_delta(self, *, tool_call_id: str, delta: str) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
-        if tool_call_id and tool_call_id not in self.active_tool_call_ids:
-            events.extend(self.tool_call_start(tool_call_id=tool_call_id, tool_call_name=""))
-        if tool_call_id and delta:
-            self.tool_call_has_arguments.add(tool_call_id)
-        events.append(ToolCallDeltaEvent(**self.event_fields(), tool_call_id=tool_call_id, delta=delta))
-        return events
-
-    def tool_call_end(self, *, tool_call_id: str) -> list[AgentEvent]:
-        if not tool_call_id or tool_call_id not in self.active_tool_call_ids:
-            return []
-        self.active_tool_call_ids.remove(tool_call_id)
-        return [ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id)]
-
-    def tool_call(self, *, tool_call_id: str, tool_call_name: str, arguments: str) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
-        events.extend(self.tool_call_start(tool_call_id=tool_call_id, tool_call_name=tool_call_name))
-        if arguments:
-            events.extend(self.tool_call_delta(tool_call_id=tool_call_id, delta=arguments))
-        events.extend(self.tool_call_end(tool_call_id=tool_call_id))
-        return events
-
-    def resolve_tool_call_id(self, item_id_or_call_id: str) -> str:
-        return self.item_id_to_tool_call_id.get(item_id_or_call_id, item_id_or_call_id)
-
-    def has_arguments(self, tool_call_id: str) -> bool:
-        return tool_call_id in self.tool_call_has_arguments
-
-    def close_active_blocks(self) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
-        if self.text_block_id is not None:
-            events.append(TextBlockEndEvent(**self.event_fields(), block_id=self.text_block_id))
-            self.text_block_id = None
-        if self.thinking_block_id is not None:
-            events.append(ThinkingBlockEndEvent(**self.event_fields(), block_id=self.thinking_block_id))
-            self.thinking_block_id = None
-        for tool_call_id in list(self.active_tool_call_ids):
-            events.append(ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id))
-            self.active_tool_call_ids.remove(tool_call_id)
-        return events
-
-
-@dataclass(frozen=True, slots=True)
-class OpenAIResponsesError(Exception):
-    message: str
-    provider_data: dict[str, Any] | None = None
-
-    def __str__(self) -> str:
-        return self.message
-
-
-def _post_responses(
-    *,
-    base_url: str,
-    api_key: str,
-    payload: dict[str, Any],
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    request = urllib.request.Request(
-        _responses_url(base_url),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise OpenAIResponsesError(
-            message=f"OpenAI Responses request failed with HTTP {exc.code}: {body}",
-            provider_data={"status": exc.code, "body": body},
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise OpenAIResponsesError(
-            message=f"OpenAI Responses request failed: {exc.reason}",
-            provider_data={"reason": str(exc.reason)},
-        ) from exc
-
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise OpenAIResponsesError(
-            message="OpenAI Responses request returned invalid JSON.",
-            provider_data={"body": body},
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise OpenAIResponsesError(
-            message="OpenAI Responses request returned a non-object JSON payload.",
-            provider_data={"body": parsed},
-        )
-    return parsed
-
-
-def _responses_url(base_url: str) -> str:
-    normalized = base_url.rstrip("/")
-    if normalized.endswith("/responses"):
-        return normalized
-    return f"{normalized}/responses"
+    return []
 
 
 def _message_to_responses_input(message: LLMMessage) -> dict[str, Any]:
@@ -455,18 +301,10 @@ def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, str]]:
                 {
                     "id": str(item.get("call_id") or item.get("id") or ""),
                     "name": str(item.get("name") or ""),
-                    "arguments": _arguments_to_json_string(item.get("arguments") or "{}"),
+                    "arguments": arguments_to_json_string(item.get("arguments") or "{}"),
                 }
             )
     return calls
-
-
-def _arguments_to_json_string(raw_arguments: Any) -> str:
-    if isinstance(raw_arguments, str):
-        return raw_arguments
-    if isinstance(raw_arguments, dict):
-        return json.dumps(raw_arguments)
-    return "{}"
 
 
 def _iter_output_items(response: dict[str, Any]) -> list[dict[str, Any]]:
@@ -477,11 +315,19 @@ def _iter_output_items(response: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _usage(response: dict[str, Any]) -> Usage:
-    usage = response.get("usage")
-    if not isinstance(usage, dict):
-        return Usage()
-    return Usage(
-        input_tokens=int(usage.get("input_tokens") or 0),
-        output_tokens=int(usage.get("output_tokens") or 0),
-        total_tokens=int(usage.get("total_tokens") or 0),
-    )
+    return usage_from_mapping(response.get("usage"))
+
+
+def _response_error_message(provider_data: dict[str, Any]) -> str:
+    message = provider_data.get("message")
+    if isinstance(message, str) and message:
+        return message
+    error = provider_data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    status = provider_data.get("status")
+    if isinstance(status, str) and status:
+        return f"OpenAI Responses stream ended with status: {status}"
+    return "OpenAI Responses stream failed."
