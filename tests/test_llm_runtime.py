@@ -1,4 +1,5 @@
 from pulsara_agent.event import (
+    CustomEvent,
     EventContext,
     EventType,
     ModelCallEndEvent,
@@ -16,6 +17,7 @@ from pulsara_agent.event import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
+from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.adapters.mock import MockTransport
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     ChatToolCallAccumulator,
@@ -23,7 +25,11 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
     build_chat_completions_payload,
     translate_chat_completion_chunk,
 )
-from pulsara_agent.llm.adapters.openai.client import OPENAI_CHAT_COMPLETIONS_API, provider_error_data
+from pulsara_agent.llm.adapters.openai.client import (
+    OPENAI_CHAT_COMPLETIONS_API,
+    OPENAI_RESPONSES_API,
+    provider_error_data,
+)
 from pulsara_agent.llm.adapters.openai.events import AgentEventBuilder
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
@@ -42,6 +48,10 @@ from pulsara_agent.llm.runtime import LLMRuntime
 
 
 EVENT_CONTEXT = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+
+
+async def no_retry_sleep(_delay: float) -> None:
+    return None
 
 
 async def collect_events(runtime: LLMRuntime, role: ModelRole, context: LLMContext):
@@ -524,6 +534,244 @@ def test_openai_responses_transport_emits_run_error_event() -> None:
     assert "RuntimeError" in events[1].metadata["provider_data"]["repr"]
 
 
+def test_openai_responses_transport_retries_pre_output_failure() -> None:
+    import asyncio
+
+    try:
+        try:
+            raise OSError("socket reset by peer")
+        except OSError as exc:
+            raise RuntimeError("Connection error.") from exc
+    except RuntimeError as exc:
+        connection_error = exc
+    fake_client = FakeOpenAIClient(
+        responses_script=[
+            connection_error,
+            [
+                {"type": "response.output_text.delta", "delta": "pong"},
+                {"type": "response.completed", "response": {}},
+            ],
+        ]
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert len(fake_client.responses.calls) == 2
+    assert fake_client.close_count == 0
+    assert isinstance(events[0], ModelCallStartEvent)
+    retry_events = [event for event in events if isinstance(event, CustomEvent)]
+    assert len(retry_events) == 1
+    assert retry_events[0].name == "llm.retry"
+    assert retry_events[0].value["attempt"] == 1
+    assert retry_events[0].value["reason"] == "transport_error"
+    assert [type(event) for event in events].count(ModelCallStartEvent) == 1
+    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "pong" for event in events)
+    assert isinstance(events[-1], ModelCallEndEvent)
+
+
+def test_openai_responses_transport_owned_client_closes_once_after_retry(monkeypatch) -> None:
+    import asyncio
+    from pulsara_agent.llm.adapters.openai import responses as responses_module
+
+    fake_client = FakeOpenAIClient(
+        responses_script=[
+            ConnectionError("reset one"),
+            [{"type": "response.completed", "response": {}}],
+        ]
+    )
+    builder_calls = []
+
+    def fake_build_async_openai_client(**kwargs):
+        builder_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(responses_module, "build_async_openai_client", fake_build_async_openai_client)
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    asyncio.run(collect())
+
+    assert len(builder_calls) == 1
+    assert builder_calls[0]["max_retries"] == 0
+    assert len(fake_client.responses.calls) == 2
+    assert fake_client.close_count == 1
+
+
+def test_openai_responses_transport_does_not_retry_after_text_delta() -> None:
+    import asyncio
+
+    fake_client = FakeOpenAIClient(
+        responses_script=[
+            [
+                {"type": "response.output_text.delta", "delta": "partial"},
+                RuntimeError("stream broke after text"),
+            ],
+        ]
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=3, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert len(fake_client.responses.calls) == 1
+    assert not any(isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events)
+    error = next(event for event in events if isinstance(event, RunErrorEvent))
+    assert error.metadata["provider_data"]["retry"]["skipped_reason"] == "semantic_output_started"
+    assert any(isinstance(event, TextBlockEndEvent) for event in events)
+
+
+def test_openai_responses_transport_retry_exhausted_has_trace() -> None:
+    import asyncio
+
+    fake_client = FakeOpenAIClient(
+        responses_script=[
+            ConnectionError("reset one"),
+            ConnectionError("reset two"),
+        ]
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    retry_events = [event for event in events if isinstance(event, CustomEvent)]
+    assert len(retry_events) == 1
+    error = next(event for event in events if isinstance(event, RunErrorEvent))
+    retry = error.metadata["provider_data"]["retry"]
+    assert retry["exhausted"] is True
+    assert retry["attempts"] == 2
+    assert retry["traces"][0]["error_message"] == "reset one"
+
+
+def test_llm_runtime_preserves_retry_custom_event_in_reply_stream() -> None:
+    import asyncio
+
+    fake_client = FakeOpenAIClient(
+        responses_script=[
+            ConnectionError("reset one"),
+            [
+                {"type": "response.output_text.delta", "delta": "ok"},
+                {"type": "response.completed", "response": {}},
+            ],
+        ]
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+    registry = LLMTransportRegistry()
+    registry.register(transport)
+    runtime = LLMRuntime(config=config, registry=registry)
+
+    events = asyncio.run(
+        collect_events(
+            runtime,
+            ModelRole.FLASH,
+            LLMContext(messages=(LLMMessage.user("ping"),)),
+        )
+    )
+
+    retry_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, CustomEvent) and event.name == "llm.retry"
+    )
+    assert isinstance(events[0], ReplyStartEvent)
+    assert isinstance(events[1], ModelCallStartEvent)
+    assert retry_index > 1
+    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "ok" for event in events)
+    assert isinstance(events[-1], ReplyEndEvent)
+
+
 def test_provider_error_data_includes_exception_chain() -> None:
     try:
         try:
@@ -551,7 +799,11 @@ def test_openai_chat_completions_transport_error_metadata_includes_cause() -> No
             raise RuntimeError("Connection error.") from exc
     except RuntimeError as exc:
         fake_client = FakeOpenAIClient(chat_error=exc)
-    transport = OpenAIChatCompletionsTransport(api_key="sk-test", _client=fake_client)
+    transport = OpenAIChatCompletionsTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(enabled=False),
+        _client=fake_client,
+    )
     config = LLMConfig(
         api_key="sk-test",
         base_url="https://example.test/v1",
@@ -875,6 +1127,205 @@ def test_openai_chat_completions_transport_uses_sdk_stream() -> None:
     assert events[-1].total_tokens == 3
 
 
+def test_openai_chat_completions_transport_retries_pre_output_failure() -> None:
+    import asyncio
+
+    fake_client = FakeOpenAIClient(
+        chat_script=[
+            ConnectionError("stream create reset"),
+            [
+                {"choices": [{"delta": {"content": "pong"}}]},
+                {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}},
+            ],
+        ]
+    )
+    transport = OpenAIChatCompletionsTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert len(fake_client.chat.completions.calls) == 2
+    assert fake_client.close_count == 0
+    assert [type(event) for event in events].count(ModelCallStartEvent) == 1
+    retry_events = [event for event in events if isinstance(event, CustomEvent)]
+    assert len(retry_events) == 1
+    assert retry_events[0].value["reason"] == "transport_error"
+    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "pong" for event in events)
+    assert isinstance(events[-1], ModelCallEndEvent)
+
+
+def test_openai_chat_completions_owned_client_closes_once_after_retry(monkeypatch) -> None:
+    import asyncio
+    from pulsara_agent.llm.adapters.openai import chat_completions as chat_module
+
+    fake_client = FakeOpenAIClient(
+        chat_script=[
+            ConnectionError("reset one"),
+            [{"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}}],
+        ]
+    )
+    builder_calls = []
+
+    def fake_build_async_openai_client(**kwargs):
+        builder_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(chat_module, "build_async_openai_client", fake_build_async_openai_client)
+    transport = OpenAIChatCompletionsTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    asyncio.run(collect())
+
+    assert len(builder_calls) == 1
+    assert builder_calls[0]["max_retries"] == 0
+    assert len(fake_client.chat.completions.calls) == 2
+    assert fake_client.close_count == 1
+
+
+def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> None:
+    import asyncio
+
+    fake_client = FakeOpenAIClient(
+        chat_script=[
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_chat_1",
+                                        "function": {"name": "lookup", "arguments": '{"q"'},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                ConnectionError("stream broke after tool delta"),
+            ],
+        ]
+    )
+    transport = OpenAIChatCompletionsTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=3, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert len(fake_client.chat.completions.calls) == 1
+    assert not any(isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events)
+    assert any(isinstance(event, ToolCallDeltaEvent) and event.delta == '{"q"' for event in events)
+    assert any(isinstance(event, ToolCallEndEvent) for event in events)
+    error = next(event for event in events if isinstance(event, RunErrorEvent))
+    assert error.metadata["provider_data"]["retry"]["skipped_reason"] == "semantic_output_started"
+
+
+def test_openai_chat_completions_retry_exhausted_has_trace() -> None:
+    import asyncio
+
+    fake_client = FakeOpenAIClient(
+        chat_script=[
+            ConnectionError("reset one"),
+            ConnectionError("reset two"),
+        ]
+    )
+    transport = OpenAIChatCompletionsTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    retry_events = [event for event in events if isinstance(event, CustomEvent)]
+    assert len(retry_events) == 1
+    error = next(event for event in events if isinstance(event, RunErrorEvent))
+    retry = error.metadata["provider_data"]["retry"]
+    assert retry["exhausted"] is True
+    assert retry["attempts"] == 2
+    assert retry["traces"][0]["error_message"] == "reset one"
+
+
 def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -> None:
     builder = transport_builder_for_test()
     accumulator = ChatToolCallAccumulator(builder=builder)
@@ -925,16 +1376,26 @@ def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -
 
 
 def test_default_llm_runtime_registers_openai_responses_transport() -> None:
+    retry_config = LLMRetryConfig(attempts=4, base_delay_seconds=0.1, jitter_ratio=0)
     config = LLMConfig(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
+        retry=retry_config,
+        openai_sdk_max_retries=0,
     )
 
     runtime = build_llm_runtime(config)
 
-    assert runtime is not None
+    responses_transport = runtime._registry.get(OPENAI_RESPONSES_API)
+    chat_transport = runtime._registry.get(OPENAI_CHAT_COMPLETIONS_API)
+    assert isinstance(responses_transport, OpenAIResponsesTransport)
+    assert isinstance(chat_transport, OpenAIChatCompletionsTransport)
+    assert responses_transport.retry_config is retry_config
+    assert chat_transport.retry_config is retry_config
+    assert responses_transport.openai_sdk_max_retries == 0
+    assert chat_transport.openai_sdk_max_retries == 0
 
 
 def transport_builder_for_test(config: LLMConfig | None = None):
@@ -960,41 +1421,73 @@ class FakeAsyncStream:
     async def __anext__(self):
         if not self._events:
             raise StopAsyncIteration
-        return self._events.pop(0)
+        event = self._events.pop(0)
+        if isinstance(event, BaseException):
+            raise event
+        return event
 
 
 class FakeResponsesEndpoint:
-    def __init__(self, *, events=None, error=None):
+    def __init__(self, *, events=None, error=None, script=None):
         self.events = events or []
         self.error = error
+        self.script = list(script) if script is not None else None
         self.calls = []
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
+        if self.script is not None:
+            item = self.script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return FakeAsyncStream(item)
         if self.error is not None:
             raise self.error
         return FakeAsyncStream(self.events)
 
 
 class FakeOpenAIClient:
-    def __init__(self, *, responses_events=None, responses_error=None, chat_chunks=None, chat_error=None):
-        self.responses = FakeResponsesEndpoint(events=responses_events, error=responses_error)
-        self.chat = FakeChatNamespace(chunks=chat_chunks, error=chat_error)
+    def __init__(
+        self,
+        *,
+        responses_events=None,
+        responses_error=None,
+        responses_script=None,
+        chat_chunks=None,
+        chat_error=None,
+        chat_script=None,
+    ):
+        self.responses = FakeResponsesEndpoint(
+            events=responses_events,
+            error=responses_error,
+            script=responses_script,
+        )
+        self.chat = FakeChatNamespace(chunks=chat_chunks, error=chat_error, script=chat_script)
+        self.close_count = 0
+
+    async def close(self):
+        self.close_count += 1
 
 
 class FakeChatCompletionsEndpoint:
-    def __init__(self, *, chunks=None, error=None):
+    def __init__(self, *, chunks=None, error=None, script=None):
         self.chunks = chunks or []
         self.error = error
+        self.script = list(script) if script is not None else None
         self.calls = []
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
+        if self.script is not None:
+            item = self.script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return FakeAsyncStream(item)
         if self.error is not None:
             raise self.error
         return FakeAsyncStream(self.chunks)
 
 
 class FakeChatNamespace:
-    def __init__(self, *, chunks=None, error=None):
-        self.completions = FakeChatCompletionsEndpoint(chunks=chunks, error=error)
+    def __init__(self, *, chunks=None, error=None, script=None):
+        self.completions = FakeChatCompletionsEndpoint(chunks=chunks, error=error, script=script)

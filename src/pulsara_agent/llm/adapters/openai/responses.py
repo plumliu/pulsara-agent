@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 from uuid import uuid4
@@ -12,6 +14,7 @@ from pulsara_agent.llm.adapters.openai.client import (
     build_async_openai_client,
     provider_error_data,
 )
+from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     AgentEventBuilder,
     arguments_to_json_string,
@@ -20,9 +23,23 @@ from pulsara_agent.llm.adapters.openai.events import (
     sdk_event_to_dict,
     usage_from_mapping,
 )
+from pulsara_agent.llm.adapters.openai.retrying import (
+    log_retry_attempt,
+    make_retry_trace,
+    provider_data_with_retry,
+    retry_event,
+    sdk_max_retries_for_transport,
+)
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.models import ModelProfile
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.retry import (
+    LLMRetryConfig,
+    RetryAttemptTrace,
+    RetryDecisionKind,
+    apply_retry_after_cap,
+    compute_retry_delay,
+)
 from pulsara_agent.llm.transport import LLMTransport
 from pulsara_agent.llm.usage import Usage
 
@@ -34,6 +51,9 @@ class OpenAIResponsesTransport(LLMTransport):
     api_key: str
     api: str = OPENAI_RESPONSES_API
     timeout_seconds: float = 60.0
+    retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
+    openai_sdk_max_retries: int | None = None
+    retry_sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
     _mock_events: list[dict[str, Any]] = field(default_factory=list)
     _client: Any | None = None
 
@@ -70,27 +90,99 @@ class OpenAIResponsesTransport(LLMTransport):
             api_key=self.api_key,
             base_url=model.base_url,
             timeout_seconds=self.timeout_seconds,
+            max_retries=sdk_max_retries_for_transport(
+                retry_config=self.retry_config,
+                explicit_max_retries=self.openai_sdk_max_retries,
+            ),
         )
         model_end_emitted = False
+        retry_traces: list[RetryAttemptTrace] = []
         try:
-            stream = await client.responses.create(**payload, stream=True)
-            async for raw_event in stream:
-                events = translate_responses_event(raw_event, builder=builder)
-                model_end_emitted = model_end_emitted or event_includes_model_end(events)
-                run_error_emitted = event_includes_run_error(events)
-                for event in events:
-                    yield event
-                if run_error_emitted:
+            attempt = 1
+            max_attempts = self.retry_config.attempts if self.retry_config.enabled else 1
+            while True:
+                try:
+                    stream = await client.responses.create(**payload, stream=True)
+                    async for raw_event in stream:
+                        events = translate_responses_event(raw_event, builder=builder)
+                        model_end_emitted = model_end_emitted or event_includes_model_end(events)
+                        run_error_emitted = event_includes_run_error(events)
+                        for event in events:
+                            yield event
+                        if run_error_emitted:
+                            return
+                    break
+                except Exception as exc:
+                    decision = apply_retry_after_cap(
+                        classify_llm_error(exc),
+                        config=self.retry_config,
+                    )
+                    can_retry = (
+                        self.retry_config.enabled
+                        and decision.kind is RetryDecisionKind.RETRY
+                        and not builder.has_semantic_output
+                        and attempt < max_attempts
+                    )
+                    if can_retry:
+                        delay = compute_retry_delay(
+                            attempt_index=attempt,
+                            config=self.retry_config,
+                            retry_after_seconds=decision.retry_after_seconds,
+                        )
+                        trace = make_retry_trace(
+                            exc=exc,
+                            decision=decision,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            delay_seconds=delay,
+                        )
+                        retry_traces.append(trace)
+                        log_retry_attempt(
+                            api=self.api,
+                            model=model,
+                            trace=trace,
+                            has_semantic_output=builder.has_semantic_output,
+                        )
+                        yield retry_event(
+                            api=self.api,
+                            model=model,
+                            event_context=event_context,
+                            trace=trace,
+                            has_semantic_output=builder.has_semantic_output,
+                        )
+                        await self.retry_sleep(delay)
+                        attempt += 1
+                        continue
+
+                    skipped_reason = _retry_skipped_reason(
+                        retry_config=self.retry_config,
+                        decision=decision,
+                        has_semantic_output=builder.has_semantic_output,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                    )
+                    for event in builder.close_active_blocks():
+                        yield event
+                    yield builder.run_error(
+                        message=str(exc),
+                        code="openai_responses_error",
+                        provider_data=provider_data_with_retry(
+                            provider_error_data(exc),
+                            config=self.retry_config,
+                            traces=retry_traces,
+                            final_decision=decision,
+                            final_attempt=attempt,
+                            has_semantic_output=builder.has_semantic_output,
+                            exhausted=(
+                                self.retry_config.enabled
+                                and decision.kind is RetryDecisionKind.RETRY
+                                and not builder.has_semantic_output
+                                and attempt >= max_attempts
+                            ),
+                            skipped_reason=skipped_reason,
+                        ),
+                    )
                     return
-        except Exception as exc:
-            for event in builder.close_active_blocks():
-                yield event
-            yield builder.run_error(
-                message=str(exc),
-                code="openai_responses_error",
-                provider_data=provider_error_data(exc),
-            )
-            return
         finally:
             if should_close_client:
                 await client.close()
@@ -99,6 +191,25 @@ class OpenAIResponsesTransport(LLMTransport):
             for event in builder.close_active_blocks():
                 yield event
             yield builder.model_end()
+
+
+def _retry_skipped_reason(
+    *,
+    retry_config: LLMRetryConfig,
+    decision: Any,
+    has_semantic_output: bool,
+    attempt: int,
+    max_attempts: int,
+) -> str | None:
+    if not retry_config.enabled:
+        return "retry_disabled"
+    if has_semantic_output:
+        return "semantic_output_started"
+    if decision.kind is not RetryDecisionKind.RETRY:
+        return decision.reason
+    if attempt >= max_attempts:
+        return "attempts_exhausted"
+    return None
 
 
 def build_responses_payload(

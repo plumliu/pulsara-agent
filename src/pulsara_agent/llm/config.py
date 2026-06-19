@@ -9,6 +9,7 @@ from typing import Any
 
 from pulsara_agent.llm.models import ModelProfile, ModelRole
 from pulsara_agent.llm.provider import ProviderProfile, ThinkingProfile, ThinkingReplayPolicy
+from pulsara_agent.llm.retry import LLMRetryConfig, retry_config_from_env
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -37,6 +38,8 @@ class LLMConfig:
     api: str = DEFAULT_OPENAI_API
     provider: str = "custom"
     provider_profile: ProviderProfile | None = None
+    retry: LLMRetryConfig = LLMRetryConfig()
+    openai_sdk_max_retries: int | None = None
 
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "LLMConfig":
@@ -51,6 +54,8 @@ class LLMConfig:
             api=api,
             provider=provider,
             provider_profile=provider_profile,
+            retry=retry_config_from_env(prefix=prefix),
+            openai_sdk_max_retries=_optional_int_env(f"{prefix}_OPENAI_SDK_MAX_RETRIES"),
         )
 
     def model_for(self, role: ModelRole) -> ModelProfile:
@@ -164,6 +169,13 @@ def _bool_env(name: str, *, default: bool) -> bool:
     if raw is None or not raw.strip():
         return default
     return _parse_bool(raw)
+
+
+def _optional_int_env(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    return int(raw)
 
 
 def _parse_bool(raw: str) -> bool:

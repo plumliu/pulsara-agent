@@ -36,6 +36,7 @@ class AgentEventBuilder:
     active_tool_call_ids: set[str] = field(default_factory=set)
     item_id_to_tool_call_id: dict[str, str] = field(default_factory=dict)
     tool_call_has_arguments: set[str] = field(default_factory=set)
+    has_semantic_output: bool = False
 
     def event_fields(self) -> dict[str, str]:
         return self.event_context.event_fields()
@@ -64,6 +65,7 @@ class AgentEventBuilder:
         code: str,
         provider_data: dict[str, Any] | None = None,
     ) -> RunErrorEvent:
+        self.has_semantic_output = True
         return RunErrorEvent(
             **self.event_fields(),
             message=message,
@@ -74,6 +76,7 @@ class AgentEventBuilder:
     def text_delta(self, delta: str) -> list[AgentEvent]:
         if not delta:
             return []
+        self.has_semantic_output = True
         events: list[AgentEvent] = []
         if self.text_block_id is None:
             self.text_block_id = f"text:{uuid4()}"
@@ -84,6 +87,7 @@ class AgentEventBuilder:
     def thinking_delta(self, delta: str) -> list[AgentEvent]:
         if not delta:
             return []
+        self.has_semantic_output = True
         events: list[AgentEvent] = []
         if self.thinking_block_id is None:
             self.thinking_block_id = f"thinking:{uuid4()}"
@@ -110,6 +114,7 @@ class AgentEventBuilder:
             self.item_id_to_tool_call_id[provider_item_id] = tool_call_id
         if tool_call_id in self.active_tool_call_ids:
             return []
+        self.has_semantic_output = True
         self.active_tool_call_ids.add(tool_call_id)
         return [
             ToolCallStartEvent(
@@ -122,6 +127,7 @@ class AgentEventBuilder:
     def tool_call_delta(self, *, tool_call_id: str, delta: str) -> list[AgentEvent]:
         if not tool_call_id or not delta:
             return []
+        self.has_semantic_output = True
         events: list[AgentEvent] = []
         if tool_call_id not in self.active_tool_call_ids:
             events.extend(self.tool_call_start(tool_call_id=tool_call_id, tool_call_name=""))
@@ -132,6 +138,7 @@ class AgentEventBuilder:
     def tool_call_end(self, *, tool_call_id: str) -> list[AgentEvent]:
         if not tool_call_id or tool_call_id not in self.active_tool_call_ids:
             return []
+        self.has_semantic_output = True
         self.active_tool_call_ids.remove(tool_call_id)
         return [ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id)]
 

@@ -17,6 +17,18 @@ def build_llm_runtime(config: LLMConfig) -> LLMRuntime:
     """
 
     registry = LLMTransportRegistry()
-    registry.register(OpenAIResponsesTransport(api_key=config.api_key))
-    registry.register(OpenAIChatCompletionsTransport(api_key=config.api_key))
+    registry.register(
+        OpenAIResponsesTransport(
+            api_key=config.api_key,
+            retry_config=config.retry,
+            openai_sdk_max_retries=config.openai_sdk_max_retries,
+        )
+    )
+    registry.register(
+        OpenAIChatCompletionsTransport(
+            api_key=config.api_key,
+            retry_config=config.retry,
+            openai_sdk_max_retries=config.openai_sdk_max_retries,
+        )
+    )
     return LLMRuntime(config=config, registry=registry)
