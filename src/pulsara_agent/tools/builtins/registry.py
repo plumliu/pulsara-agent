@@ -27,6 +27,7 @@ from pulsara_agent.tools.builtins.memory_query import (
     MemorySearchTool,
 )
 from pulsara_agent.tools.builtins.terminal import TerminalTool
+from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.registry import ToolRegistry
 
@@ -47,6 +48,7 @@ def build_core_tool_registry(
     registry.register(ReadFileTool(root))
     registry.register(SearchFilesTool(root))
     registry.register(TerminalTool(root, runtime_session.terminal_sessions))
+    registry.register(TerminalProcessTool(root, runtime_session.terminal_sessions))
     registry.register(EditFileTool(root))
     registry.register(WriteFileTool(root))
     registry.register(TodoTool())

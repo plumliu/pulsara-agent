@@ -14,6 +14,7 @@ from pulsara_agent.event import (
     MemoryWriteResultEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    RequireUserConfirmEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RunErrorEvent,
@@ -60,6 +61,22 @@ from pulsara_agent.tools.builtins.memory import RememberPreferenceTool
 
 
 pytestmark = pytest.mark.real_llm
+
+
+def _run_error_diagnostic(event: RunErrorEvent) -> dict:
+    return {
+        "message": event.message,
+        "code": event.code,
+        "metadata": event.metadata,
+    }
+
+
+def _run_error_diagnostics(events) -> list[dict]:
+    return [
+        _run_error_diagnostic(event)
+        for event in events
+        if isinstance(event, RunErrorEvent)
+    ]
 
 
 def test_real_flash_model_emits_replayable_agent_events():
@@ -144,6 +161,107 @@ def test_real_agent_runtime_completes_tool_loop_with_responses_api(tmp_path):
     assert result["tool_result_ids"] == result["tool_call_ids"]
     assert result["final_text"]
     assert "PULSARA_RESPONSES_TOOL_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_uses_terminal_process_tool(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_terminal_process_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_names"][:2] == ["terminal", "terminal_process"]
+    assert result["terminal_status"] == "running"
+    assert result["terminal_process_status"] == "killed"
+    assert "PULSARA_TERMINAL_PROCESS_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_submits_terminal_stdin(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_terminal_stdin_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_names"][:3] == ["terminal", "terminal_process", "terminal_process"]
+    assert result["terminal_status"] == "running"
+    assert result["submit_action"] == "submit"
+    assert result["wait_status"] == "success"
+    assert "PULSARA_STDIN_OK" in result["wait_output"]
+    assert "PULSARA_TERMINAL_STDIN_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_uses_terminal_pty(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_terminal_pty_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_names"][:4] == ["terminal", "terminal_process", "terminal_process", "terminal_process"]
+    assert result["terminal_status"] == "running"
+    assert result["terminal_io_mode"] == "pty"
+    assert result["submit_action"] == "submit"
+    assert result["close_action"] == "close_stdin"
+    assert result["wait_status"] == "success"
+    assert "PULSARA_PTY_REAL_OK" in result["wait_output"]
+    assert "PULSARA_TERMINAL_PTY_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_streams_terminal_foreground_output(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_terminal_streaming_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_names"][:1] == ["terminal"]
+    assert result["terminal_delta_count"] >= 3
+    assert result["terminal_status"] == "success"
+    assert result["terminal_output"] == "PULSARA_STREAM_REAL_FIRST\nPULSARA_STREAM_REAL_SECOND"
+    assert result["terminal_shell_path"]
+    assert "PULSARA_TERMINAL_STREAMING_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_terminal_large_output_has_full_output_ref(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_terminal_large_output_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_names"][:1] == ["terminal"]
+    assert result["terminal_status"] == "success"
+    assert result["terminal_truncated"] is True
+    assert result["full_output_ref"]
+    assert result["preview_chars"] < 1000
+    assert result["artifact_exists"] is True
+    assert "PULSARA_LARGE_HEAD" in result["artifact_text_sample"]
+    assert "PULSARA_TERMINAL_LARGE_OUTPUT_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_terminal_policy_requires_confirmation(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_terminal_policy_smoke(tmp_path))
+
+    assert result["status"] == "waiting_user"
+    assert result["stop_reason"] == "waiting_user"
+    assert result["tool_names"] == ["terminal"]
+    assert result["confirm_count"] == 1
+    assert result["tool_result_count"] == 0
+    assert result["suggested_rule_reason"] == "dangerous_terminal_command"
 
 
 def test_real_agent_runtime_persists_run_timeline_with_responses_api(tmp_path):
@@ -474,7 +592,7 @@ async def _run_real_flash_smoke() -> dict:
     context = LLMContext(messages=(LLMMessage.user("Reply with exactly: PULSARA_OK"),))
     log = InMemoryEventLog()
     text_parts: list[str] = []
-    errors: list[str] = []
+    errors: list[dict] = []
 
     async for event in runtime.stream(
         role=ModelRole.FLASH,
@@ -486,7 +604,7 @@ async def _run_real_flash_smoke() -> dict:
         if isinstance(event, TextBlockDeltaEvent):
             text_parts.append(event.delta)
         if isinstance(event, RunErrorEvent):
-            errors.append(event.message)
+            errors.append(_run_error_diagnostic(event))
 
     events = log.iter(reply_id=event_context.reply_id)
     message = log.replay(event_context.reply_id)
@@ -627,7 +745,7 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
     )
 
     result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
-    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
     tool_call_ids = [
         event.tool_call_id
         for event in events
@@ -638,7 +756,7 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
         for event in events
         if isinstance(event, ToolResultStartEvent)
     ]
-    errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+    errors = _run_error_diagnostics(events)
     return {
         "status": result.status.value,
         "stop_reason": result.stop_reason,
@@ -646,6 +764,291 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
         "tool_call_ids": tool_call_ids,
         "tool_result_ids": tool_result_ids,
         "errors": errors,
+    }
+
+
+async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=256),
+        system_prompt=(
+            "You are validating managed terminal background processes. "
+            "First call terminal with command exactly 'sleep 5' and background exactly true. "
+            "Then call terminal_process with action exactly 'kill' using the process_id returned by terminal. "
+            "After the kill tool result, answer exactly: PULSARA_TERMINAL_PROCESS_OK"
+        ),
+    )
+
+    result = await agent.run_task("Run the terminal background process validation exactly as instructed.")
+    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    tool_result_payloads = [
+        json.loads(event.delta)
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent)
+    ]
+    errors = _run_error_diagnostics(events)
+    terminal_payload = next(
+        payload for payload in tool_result_payloads if payload.get("process_id") and payload.get("status") == "running"
+    )
+    terminal_process_payload = next(
+        payload for payload in tool_result_payloads if payload.get("status") == "killed"
+    )
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_names": tool_names,
+        "terminal_status": terminal_payload["status"],
+        "terminal_process_status": terminal_process_payload["status"],
+        "errors": errors,
+    }
+
+
+async def _run_real_agent_terminal_stdin_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=320),
+        system_prompt=(
+            "You are validating managed terminal stdin. "
+            "First call terminal with command exactly \"python -c 'import sys; print(sys.stdin.readline().strip())'\" "
+            "and background exactly true. Do not pass timeout_seconds. "
+            "Then call terminal_process with action exactly 'submit', the returned process_id, and data exactly 'PULSARA_STDIN_OK'. "
+            "Then call terminal_process with action exactly 'wait' and the same process_id. "
+            "After the wait tool result, answer exactly: PULSARA_TERMINAL_STDIN_OK"
+        ),
+    )
+
+    result = await agent.run_task("Run the terminal stdin validation exactly as instructed.")
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    tool_result_payloads = [
+        json.loads(event.delta)
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent)
+    ]
+    errors = _run_error_diagnostics(events)
+    terminal_payload = next(
+        payload for payload in tool_result_payloads if payload.get("process_id") and payload.get("status") == "running"
+    )
+    submit_payload = next(
+        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
+    )
+    wait_payload = next(
+        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
+    )
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_names": tool_names,
+        "terminal_status": terminal_payload["status"],
+        "submit_action": submit_payload["terminal_process_action"],
+        "wait_status": wait_payload["status"],
+        "wait_output": wait_payload["output"],
+        "errors": errors,
+    }
+
+
+async def _run_real_agent_terminal_pty_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=384),
+        system_prompt=(
+            "You are validating managed terminal PTY mode. "
+            "First call terminal with command exactly 'python', background exactly true, and tty exactly true. "
+            "Then call terminal_process with action exactly 'submit', the returned process_id, "
+            "and data exactly 'print(\"PULSARA_PTY_REAL_OK\")'. "
+            "Then call terminal_process with action exactly 'close_stdin' and the same process_id. "
+            "Then call terminal_process with action exactly 'wait' and the same process_id. "
+            "After the wait tool result, answer exactly: PULSARA_TERMINAL_PTY_OK"
+        ),
+    )
+
+    result = await agent.run_task("Run the terminal PTY validation exactly as instructed.")
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    tool_result_payloads = [
+        json.loads(event.delta)
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent)
+    ]
+    errors = _run_error_diagnostics(events)
+    terminal_payload = next(
+        payload
+        for payload in tool_result_payloads
+        if payload.get("process_id") and payload.get("status") == "running" and payload.get("io_mode") == "pty"
+    )
+    submit_payload = next(
+        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
+    )
+    close_payload = next(
+        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "close_stdin"
+    )
+    wait_payload = next(
+        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
+    )
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_names": tool_names,
+        "terminal_status": terminal_payload["status"],
+        "terminal_io_mode": terminal_payload["io_mode"],
+        "submit_action": submit_payload["terminal_process_action"],
+        "close_action": close_payload["terminal_process_action"],
+        "wait_status": wait_payload["status"],
+        "wait_output": wait_payload["output"],
+        "errors": errors,
+    }
+
+
+async def _run_real_agent_terminal_streaming_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=384),
+        system_prompt=(
+            "You are validating terminal foreground output streaming. "
+            "First call terminal with command exactly "
+            "\"printf 'PULSARA_STREAM_REAL_FIRST\\n'; sleep 0.5; printf PULSARA_STREAM_REAL_SECOND\". "
+            "Do not use background, tty, terminal_process, or any file tools. "
+            "After the terminal tool result, answer exactly: PULSARA_TERMINAL_STREAMING_OK"
+        ),
+    )
+
+    result = await agent.run_task("Run the terminal streaming validation exactly as instructed.")
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    terminal_deltas = [
+        event.delta
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent)
+    ]
+    errors = _run_error_diagnostics(events)
+    terminal_payload = json.loads("".join(terminal_deltas))
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_names": tool_names,
+        "terminal_delta_count": len(terminal_deltas),
+        "terminal_status": terminal_payload["status"],
+        "terminal_output": terminal_payload["output"],
+        "terminal_shell_path": terminal_payload["shell"]["path"],
+        "errors": errors,
+    }
+
+
+async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=384),
+        system_prompt=(
+            "You are validating terminal large-output artifact refs. "
+            "First call terminal with command exactly "
+            "\"python -c 'print(\\\"PULSARA_LARGE_HEAD\\\"); print(\\\"q\\\" * 50000); print(\\\"PULSARA_LARGE_TAIL\\\")'\" "
+            "and max_output_chars exactly 120. Do not use background, tty, terminal_process, or file tools. "
+            "After the terminal tool result, answer exactly: PULSARA_TERMINAL_LARGE_OUTPUT_OK"
+        ),
+    )
+
+    result = await agent.run_task("Run the terminal large-output validation exactly as instructed.")
+    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    terminal_deltas = [
+        event.delta
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent)
+    ]
+    errors = _run_error_diagnostics(events)
+    terminal_payload = json.loads("".join(terminal_deltas))
+    full_output_ref = terminal_payload["full_output_ref"]
+    artifact_path = tmp_path / full_output_ref
+    artifact_text_sample = artifact_path.read_text(encoding="utf-8")[:500] if artifact_path.exists() else ""
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_names": tool_names,
+        "terminal_status": terminal_payload["status"],
+        "terminal_truncated": terminal_payload["truncated"],
+        "full_output_ref": full_output_ref,
+        "preview_chars": len(terminal_payload["output"]),
+        "artifact_exists": artifact_path.exists(),
+        "artifact_text_sample": artifact_text_sample,
+        "errors": errors,
+    }
+
+
+async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=256),
+        system_prompt=(
+            "You are validating terminal permission policy. "
+            "Call the terminal tool exactly once with command exactly "
+            "'rm -rf ./PULSARA_POLICY_SENTINEL_DO_NOT_CREATE'. "
+            "Do not call any other tools. Do not answer with text before calling the tool."
+        ),
+    )
+
+    result = await agent.run_task("Run the terminal permission-policy validation exactly as instructed.")
+    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    confirm_events = [event for event in events if isinstance(event, RequireUserConfirmEvent)]
+    tool_result_count = sum(1 for event in events if isinstance(event, ToolResultStartEvent))
+    suggested_rule_reason = None
+    if confirm_events and confirm_events[0].tool_calls and confirm_events[0].tool_calls[0].suggested_rules:
+        suggested_rule_reason = confirm_events[0].tool_calls[0].suggested_rules[0].get("reason")
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "tool_names": tool_names,
+        "confirm_count": len(confirm_events),
+        "tool_result_count": tool_result_count,
+        "suggested_rule_reason": suggested_rule_reason,
     }
 
 
@@ -1253,7 +1656,7 @@ async def _run_real_agent_scope_assignment_case(tmp_path: Path, case: dict) -> d
             for event in memory_tool_events
             if event.tool_call_name.startswith("remember_")
         ]
-        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        errors = _run_error_diagnostics(events)
         return {
             "label": case["label"],
             "status": result.status.value,
@@ -1442,7 +1845,7 @@ async def _run_real_agent_transient_scope_discipline_smoke(tmp_path: Path) -> di
         memory_tool_names = [
             event.tool_call_name for event in tool_call_events if event.tool_call_name.startswith("remember_")
         ]
-        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        errors = _run_error_diagnostics(events)
         return {
             "status": result.status.value,
             "final_text": result.final_text.strip(),
@@ -1571,7 +1974,7 @@ async def _run_real_agent_multi_tool_rollout(tmp_path: Path) -> dict:
         events = wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
         tool_call_events = [event for event in events if isinstance(event, ToolCallStartEvent)]
         tool_result_events = [event for event in events if isinstance(event, ToolResultStartEvent)]
-        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        errors = _run_error_diagnostics(events)
         records = wiring.runtime_wiring.graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
         timeline = load_run_timeline(
             graph=wiring.runtime_wiring.graph,
@@ -1726,7 +2129,7 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
         all_events = [*events, *governance_events]
         memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
         memory_failures = [event for event in governance_events if isinstance(event, MemoryWriteFailedEvent)]
-        errors = [event.message for event in events if isinstance(event, RunErrorEvent)]
+        errors = _run_error_diagnostics(events)
         target_memory_node_count = len(
             wiring.runtime_wiring.graph.find_by_type(
                 _MEMORY_NODE_BY_TYPE[case["memory_type"]],
@@ -1810,7 +2213,7 @@ async def _collect_real_events(
     log = InMemoryEventLog()
     text_parts: list[str] = []
     thinking_parts: list[str] = []
-    errors: list[str] = []
+    errors: list[dict] = []
 
     async for event in runtime.stream(
         role=role,
@@ -1824,7 +2227,7 @@ async def _collect_real_events(
         if isinstance(event, ThinkingBlockDeltaEvent):
             thinking_parts.append(event.delta)
         if isinstance(event, RunErrorEvent):
-            errors.append(event.message)
+            errors.append(_run_error_diagnostic(event))
 
     events = log.iter(reply_id=event_context.reply_id)
     message = log.replay(event_context.reply_id)

@@ -15,6 +15,7 @@ from pulsara_agent.tools.builtins.memory import (
 )
 from pulsara_agent.tools.builtins.registry import build_core_tool_registry
 from pulsara_agent.tools.builtins.terminal import TerminalTool
+from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "RememberObservationTool",
     "RememberPreferenceTool",
     "SearchFilesTool",
+    "TerminalProcessTool",
     "TerminalTool",
     "TodoTool",
     "WriteFileTool",

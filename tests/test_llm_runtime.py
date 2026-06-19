@@ -23,7 +23,7 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
     build_chat_completions_payload,
     translate_chat_completion_chunk,
 )
-from pulsara_agent.llm.adapters.openai.client import OPENAI_CHAT_COMPLETIONS_API
+from pulsara_agent.llm.adapters.openai.client import OPENAI_CHAT_COMPLETIONS_API, provider_error_data
 from pulsara_agent.llm.adapters.openai.events import AgentEventBuilder
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
@@ -520,6 +520,66 @@ def test_openai_responses_transport_emits_run_error_event() -> None:
     assert events[1].message == "boom"
     assert events[1].code == "openai_responses_error"
     assert events[1].metadata["provider_data"]["type"] == "RuntimeError"
+    assert events[1].metadata["provider_data"]["message"] == "boom"
+    assert "RuntimeError" in events[1].metadata["provider_data"]["repr"]
+
+
+def test_provider_error_data_includes_exception_chain() -> None:
+    try:
+        try:
+            raise OSError("socket reset by peer")
+        except OSError as exc:
+            raise RuntimeError("Connection error.") from exc
+    except RuntimeError as exc:
+        data = provider_error_data(exc)
+
+    assert data["type"] == "RuntimeError"
+    assert data["message"] == "Connection error."
+    assert "RuntimeError" in data["repr"]
+    assert data["causes"][0]["relation"] == "cause"
+    assert data["causes"][0]["type"] == "OSError"
+    assert data["causes"][0]["message"] == "socket reset by peer"
+
+
+def test_openai_chat_completions_transport_error_metadata_includes_cause() -> None:
+    import asyncio
+
+    try:
+        try:
+            raise OSError("deepseek stream closed")
+        except OSError as exc:
+            raise RuntimeError("Connection error.") from exc
+    except RuntimeError as exc:
+        fake_client = FakeOpenAIClient(chat_error=exc)
+    transport = OpenAIChatCompletionsTransport(api_key="sk-test", _client=fake_client)
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+
+    async def collect():
+        return [
+            event
+            async for event in transport.stream(
+                model=config.model_for(ModelRole.FLASH),
+                context=LLMContext(messages=(LLMMessage.user("ping"),)),
+                event_context=EVENT_CONTEXT,
+            )
+        ]
+
+    events = asyncio.run(collect())
+    provider_data = events[1].metadata["provider_data"]
+
+    assert isinstance(events[0], ModelCallStartEvent)
+    assert isinstance(events[1], RunErrorEvent)
+    assert events[1].message == "Connection error."
+    assert events[1].code == "openai_chat_completions_error"
+    assert provider_data["type"] == "RuntimeError"
+    assert provider_data["causes"][0]["type"] == "OSError"
+    assert provider_data["causes"][0]["message"] == "deepseek stream closed"
 
 
 def test_openai_chat_completions_payload_uses_internal_context() -> None:

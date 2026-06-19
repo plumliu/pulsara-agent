@@ -8,7 +8,9 @@ from pathlib import Path
 
 from pulsara_agent.runtime.terminal.backends.local import LocalTerminalBackend
 from pulsara_agent.runtime.terminal.models import TerminalBackendType, TerminalSessionState
+from pulsara_agent.runtime.terminal.process import ProcessRegistry
 from pulsara_agent.runtime.terminal.session import TerminalSession
+from pulsara_agent.runtime.terminal.shell import TerminalShellConfig, detect_terminal_shell
 
 
 DEFAULT_TERMINAL_SESSION_ID = "default"
@@ -19,10 +21,22 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 class TerminalSessionManager:
     workspace_root: Path
     max_sessions: int = 4
+    max_live_processes: int = 8
+    max_finished_processes: int = 32
+    finished_ttl_seconds: float = 3600.0
+    shell: TerminalShellConfig | None = None
     _sessions: dict[str, TerminalSession] = field(default_factory=dict, init=False, repr=False)
+    process_registry: ProcessRegistry = field(init=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
+        if self.shell is None:
+            self.shell = detect_terminal_shell()
+        self.process_registry = ProcessRegistry(
+            max_live_processes=self.max_live_processes,
+            max_finished_processes=self.max_finished_processes,
+            finished_ttl_seconds=self.finished_ttl_seconds,
+        )
 
     def get_or_create(self, session_id: str | None = None) -> TerminalSession:
         normalized = self._normalize_session_id(session_id)
@@ -36,14 +50,57 @@ class TerminalSessionManager:
                 workspace_root=self.workspace_root,
                 current_cwd=self.workspace_root,
                 backend_type=TerminalBackendType.LOCAL,
+                backend_metadata={"shell": self.shell.to_metadata()},
             ),
-            backend=LocalTerminalBackend(),
+            backend=LocalTerminalBackend(shell=self.shell),
+            process_registry=self.process_registry,
+            shell=self.shell,
         )
         self._sessions[normalized] = session
         return session
 
     def list_session_ids(self) -> list[str]:
         return sorted(self._sessions)
+
+    def poll_process(self, process_id: str, *, max_output_chars: int | None = None):
+        return self.process_registry.poll(process_id, max_output_chars=max_output_chars)
+
+    def wait_process(
+        self,
+        process_id: str,
+        *,
+        timeout_seconds: int | None = None,
+        max_output_chars: int | None = None,
+    ):
+        return self.process_registry.wait(
+            process_id,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        )
+
+    def kill_process(self, process_id: str, *, max_output_chars: int | None = None):
+        return self.process_registry.kill(process_id, max_output_chars=max_output_chars)
+
+    def write_process(
+        self,
+        process_id: str,
+        data: str,
+        *,
+        append_newline: bool = False,
+        max_output_chars: int | None = None,
+    ):
+        return self.process_registry.write(
+            process_id,
+            data,
+            append_newline=append_newline,
+            max_output_chars=max_output_chars,
+        )
+
+    def close_process_stdin(self, process_id: str, *, max_output_chars: int | None = None):
+        return self.process_registry.close_stdin(process_id, max_output_chars=max_output_chars)
+
+    def shutdown(self) -> None:
+        self.process_registry.shutdown()
 
     def _normalize_session_id(self, session_id: str | None) -> str:
         value = session_id or DEFAULT_TERMINAL_SESSION_ID
@@ -57,4 +114,3 @@ class TerminalSessionManager:
                 "terminal session_id must be 1-32 chars of letters, numbers, underscore, or hyphen"
             )
         return value
-

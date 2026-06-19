@@ -1,6 +1,8 @@
 import json
+import threading
+import time
 
-from pulsara_agent.event import EventContext
+from pulsara_agent.event import EventContext, ToolResultEndEvent, ToolResultTextDeltaEvent
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from pulsara_agent.runtime import RuntimeSession
@@ -33,6 +35,7 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
         "read_file",
         "search_files",
         "terminal",
+        "terminal_process",
         "todo",
         "write_file",
     ]
@@ -258,6 +261,270 @@ def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
     assert result.metadata["backend_type"] == "local"
 
 
+def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "sleep 5", "background": True},
+        ),
+        event_context=CTX,
+    )
+    start_payload = json.loads(start.output)
+    process_id = start_payload["process_id"]
+
+    poll = executor.execute(
+        ToolCall(
+            id="call:poll",
+            name="terminal_process",
+            arguments={"action": "poll", "process_id": process_id},
+        ),
+        event_context=CTX,
+    )
+    kill = executor.execute(
+        ToolCall(
+            id="call:kill",
+            name="terminal_process",
+            arguments={"action": "kill", "process_id": process_id},
+        ),
+        event_context=CTX,
+    )
+
+    assert start.status is ToolResultState.SUCCESS
+    assert start_payload["status"] == "running"
+    assert process_id
+    assert json.loads(poll.output)["status"] == "running"
+    assert json.loads(kill.output)["status"] == "killed"
+
+
+def test_terminal_process_wait_without_timeout_uses_finite_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "pulsara_agent.tools.builtins.terminal_process.DEFAULT_WAIT_TIMEOUT_SECONDS",
+        1,
+    )
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "sleep 5", "background": True},
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+    wait = executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": process_id},
+        ),
+        event_context=CTX,
+    )
+    kill = executor.execute(
+        ToolCall(
+            id="call:kill",
+            name="terminal_process",
+            arguments={"action": "kill", "process_id": process_id},
+        ),
+        event_context=CTX,
+    )
+
+    assert json.loads(wait.output)["status"] == "running"
+    assert json.loads(kill.output)["status"] == "killed"
+
+
+def test_terminal_background_timeout_argument_is_fail_closed(tmp_path) -> None:
+    _, result = execute_tool(
+        tmp_path,
+        "terminal",
+        {"command": "sleep 5", "background": True, "timeout_seconds": 1},
+    )
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert "does not support timeout_seconds" in payload["error"]
+
+
+def test_terminal_long_running_foreground_returns_background_suggestion(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "tail -f /dev/null"})
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert payload["policy_code"] == "use_managed_background"
+    assert payload["suggested_args"] == {"background": True}
+
+
+def test_terminal_shell_background_wrapper_returns_guidance(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "sleep 5 &"})
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert payload["policy_code"] == "use_managed_background"
+    assert "managed background=true" in payload["error"]
+
+
+def test_terminal_notify_on_complete_is_not_supported_yet(tmp_path) -> None:
+    _, result = execute_tool(
+        tmp_path,
+        "terminal",
+        {"command": "sleep 1", "background": True, "notify_on_complete": True},
+    )
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "not_supported_yet"
+    assert "notify_on_complete" in payload["error"]
+
+
+def test_terminal_dangerous_command_called_directly_fails_closed(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "rm -rf build"})
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert payload["policy_code"] == "requires_confirmation"
+    assert "requires user confirmation" in payload["error"]
+
+
+def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={
+                "command": "python -c 'import sys; data=sys.stdin.read(); print(\"GOT:\" + data)'",
+                "background": True,
+            },
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+
+    submit = executor.execute(
+        ToolCall(
+            id="call:submit",
+            name="terminal_process",
+            arguments={"action": "submit", "process_id": process_id, "data": "hello"},
+        ),
+        event_context=CTX,
+    )
+    close = executor.execute(
+        ToolCall(
+            id="call:close",
+            name="terminal_process",
+            arguments={"action": "close_stdin", "process_id": process_id},
+        ),
+        event_context=CTX,
+    )
+    wait = executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+        ),
+        event_context=CTX,
+    )
+
+    submit_payload = json.loads(submit.output)
+    close_payload = json.loads(close.output)
+    wait_payload = json.loads(wait.output)
+    assert submit.status is ToolResultState.SUCCESS
+    assert submit_payload["terminal_process_action"] == "submit"
+    assert close_payload["terminal_process_action"] == "close_stdin"
+    assert wait_payload["status"] == "success"
+    assert wait_payload["output"] == "GOT:hello"
+
+
+def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "printf done", "background": True},
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+    executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+        ),
+        event_context=CTX,
+    )
+    write = executor.execute(
+        ToolCall(
+            id="call:write",
+            name="terminal_process",
+            arguments={"action": "write", "process_id": process_id, "data": "late"},
+        ),
+        event_context=CTX,
+    )
+    payload = json.loads(write.output)
+
+    assert write.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert "finished" in payload["error"]
+
+
+def test_terminal_tool_rejects_foreground_tty(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "python", "tty": True})
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert "background=true" in payload["error"]
+
+
+def test_terminal_tool_background_tty_reports_io_mode(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={
+                "command": "python -c 'import sys; print(sys.stdin.isatty())'",
+                "background": True,
+                "tty": True,
+            },
+        ),
+        event_context=CTX,
+    )
+    start_payload = json.loads(start.output)
+    wait = executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": start_payload["process_id"], "timeout_seconds": 2},
+        ),
+        event_context=CTX,
+    )
+    wait_payload = json.loads(wait.output)
+
+    assert start.status is ToolResultState.SUCCESS
+    assert start_payload["io_mode"] == "pty"
+    assert wait_payload["status"] == "success"
+    assert wait_payload["io_mode"] == "pty"
+    assert "True" in wait_payload["output"]
+
+
 def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
@@ -315,8 +582,113 @@ def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) 
     msg = event_log.replay("reply:tools")
 
     assert result.status is ToolResultState.SUCCESS
-    assert [event.sequence for event in event_log.iter(reply_id="reply:tools")] == [1, 2, 3]
+    assert [event.sequence for event in event_log.iter(reply_id="reply:tools")] == [1, 2, 3, 4, 5]
     assert isinstance(msg.content[0], ToolResultBlock)
     assert msg.content[0].name == "terminal"
     assert msg.content[0].state is ToolResultState.SUCCESS
     assert json.loads(msg.content[0].output[0].text)["output"] == "ok"
+
+
+def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    event_log = InMemoryEventLog()
+    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+    result_holder = {}
+
+    thread = threading.Thread(
+        target=lambda: result_holder.setdefault(
+            "result",
+            executor.execute(
+                ToolCall(
+                    id="call:terminal",
+                    name="terminal",
+                    arguments={"command": "printf 'STREAM_FIRST\\n'; sleep 0.5; printf STREAM_SECOND"},
+                ),
+                event_context=CTX,
+            ),
+        )
+    )
+    thread.start()
+    deadline = time.monotonic() + 1.0
+    saw_first_delta_before_end = False
+    while time.monotonic() < deadline:
+        events = list(event_log.iter(reply_id="reply:tools"))
+        if any(
+            isinstance(event, ToolResultTextDeltaEvent) and "STREAM_FIRST" in event.delta
+            for event in events
+        ) and not any(isinstance(event, ToolResultEndEvent) for event in events):
+            saw_first_delta_before_end = True
+            break
+        time.sleep(0.02)
+    thread.join(timeout=2)
+    msg = event_log.replay("reply:tools")
+
+    assert saw_first_delta_before_end is True
+    assert thread.is_alive() is False
+    assert result_holder["result"].status is ToolResultState.SUCCESS
+    payload = json.loads(msg.content[0].output[0].text)
+    assert payload["output"] == "STREAM_FIRST\nSTREAM_SECOND"
+
+
+def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    event_log = InMemoryEventLog()
+    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+
+    result = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "printf 'JSON_A\\n'; printf JSON_B"},
+        ),
+        event_context=CTX,
+    )
+    deltas = [
+        event.delta
+        for event in event_log.iter(reply_id="reply:tools")
+        if isinstance(event, ToolResultTextDeltaEvent)
+    ]
+    streamed_json = "".join(deltas)
+
+    assert json.loads(streamed_json) == json.loads(result.output)
+    assert json.loads(streamed_json)["output"] == "JSON_A\nJSON_B"
+
+
+def test_terminal_large_output_returns_preview_and_readable_full_output_ref(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    event_log = InMemoryEventLog()
+    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+
+    result = executor.execute(
+        ToolCall(
+                id="call:terminal",
+                name="terminal",
+                arguments={
+                    "command": "python -c 'print(\"HEAD\"); print(\"z\" * 50000); print(\"TAIL\")'",
+                    "max_output_chars": 120,
+                },
+        ),
+        event_context=CTX,
+    )
+    payload = json.loads(result.output)
+    msg = event_log.replay("reply:tools")
+    replay_payload = json.loads(msg.content[0].output[0].text)
+
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["truncated"] is True
+    assert payload["full_output_ref"]
+    assert len(payload["output"]) < 500
+    assert len(replay_payload["output"]) < 500
+    assert replay_payload["full_output_ref"] == payload["full_output_ref"]
+
+    read_result = executor.execute(
+        ToolCall(
+            id="call:read",
+            name="read_file",
+            arguments={"path": payload["full_output_ref"]},
+        ),
+        event_context=CTX,
+    )
+    read_payload = json.loads(read_result.output)
+    assert "HEAD" in read_payload["content"]
+    assert "TAIL" in read_payload["content"]

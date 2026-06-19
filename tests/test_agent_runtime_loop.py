@@ -11,6 +11,7 @@ from pulsara_agent.event import (
     EventType,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
@@ -36,6 +37,7 @@ from pulsara_agent.message import (
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
+    ToolCallState,
     ToolResultBlock,
     ToolResultState,
     UserMsg,
@@ -51,6 +53,7 @@ from pulsara_agent.runtime import (
     msg_to_llm_messages,
 )
 from pulsara_agent.runtime.permission import PermissionDecision, PermissionDecisionKind
+from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
@@ -532,6 +535,72 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
     assert "FIRST_DENY" not in message_output
     assert "SECOND_DENY" in second_context_text
     assert "FIRST_DENY" not in second_context_text
+
+
+def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            }
+        ]
+    )
+    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+
+    result = asyncio.run(agent.run_task("attempt dangerous command"))
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    confirm = next(event for event in events if isinstance(event, RequireUserConfirmEvent))
+
+    assert result.status is LoopStatus.WAITING_USER
+    assert result.stop_reason == "waiting_user"
+    assert confirm.tool_calls[0].id == "call:danger"
+    assert confirm.tool_calls[0].name == "terminal"
+    assert confirm.tool_calls[0].state is ToolCallState.ASKING
+    assert confirm.tool_calls[0].suggested_rules[0]["reason"] == "dangerous_terminal_command"
+    assert not any(isinstance(event, ToolResultStartEvent) for event in events)
+
+
+def test_agent_runtime_finished_run_keeps_background_process_until_session_close(tmp_path) -> None:
+    runtime_session = RuntimeSession(tmp_path)
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "sleep 10", "background": True}),
+                    }
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    process_id: str | None = None
+
+    try:
+        result = asyncio.run(agent.run_task("start background then finish"))
+        tool_delta = next(
+            event
+            for event in runtime_session.event_log.iter(run_id=result.state.run_id)
+            if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bg"
+        )
+        process_id = json.loads(tool_delta.delta)["process_id"]
+
+        assert result.status is LoopStatus.FINISHED
+        assert runtime_session.terminal_sessions.poll_process(process_id).status is TerminalStatus.RUNNING
+    finally:
+        runtime_session.close()
+
+    if process_id is not None:
+        assert runtime_session.terminal_sessions.poll_process(process_id).status is TerminalStatus.KILLED
 
 
 def test_tool_result_from_event_slice_folds_text_and_data_blocks() -> None:

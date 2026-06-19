@@ -85,6 +85,9 @@ class RuntimeSession:
     def make_thread_recorder(self, *, state: LoopState | None = None) -> RuntimeThreadRecorder:
         return RuntimeThreadRecorder(runtime_session=self, state=state)
 
+    def close(self) -> None:
+        self.terminal_sessions.shutdown()
+
     def create_tool_executor(
         self,
         *,

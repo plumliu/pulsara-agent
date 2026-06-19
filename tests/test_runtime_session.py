@@ -7,6 +7,7 @@ from pulsara_agent.event import EventContext, TextBlockDeltaEvent
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime import RuntimePublishedEvent, RuntimeSession
 from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.tools import ToolCall, build_core_tool_registry
 
 
@@ -92,7 +93,22 @@ def test_runtime_session_create_tool_executor_can_explicitly_record_to_shared_ev
     )
 
     assert result.status is ToolResultState.SUCCESS
-    assert [event.sequence for event in runtime.event_log.iter(reply_id="reply:runtime")] == [1, 2, 3]
+    assert [event.sequence for event in runtime.event_log.iter(reply_id="reply:runtime")] == [1, 2, 3, 4, 5]
+
+
+def test_runtime_session_close_kills_background_terminal_process(tmp_path) -> None:
+    runtime = RuntimeSession(tmp_path)
+    executor = runtime.create_tool_executor()
+    start = executor.execute(
+        ToolCall(id="call:terminal", name="terminal", arguments={"command": "sleep 10", "background": True}),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+
+    runtime.close()
+    status = runtime.terminal_sessions.poll_process(process_id).status
+
+    assert status is TerminalStatus.KILLED
 
 
 def test_runtime_session_create_tool_executor_rejects_raw_append_recorders(tmp_path) -> None:

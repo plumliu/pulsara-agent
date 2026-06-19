@@ -43,6 +43,7 @@ from pulsara_agent.runtime.permission import (
     PermissionDecisionKind,
     PermissionGate,
 )
+from pulsara_agent.runtime.terminal.policy import TerminalPolicyPermissionGate
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
 from pulsara_agent.runtime.tool_loop import (
@@ -105,7 +106,7 @@ class AgentRuntime:
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
         self.tool_result_persistence_hook = tool_result_persistence_hook
-        self.permission_gate = permission_gate or AllowAllPermissionGate()
+        self.permission_gate = TerminalPolicyPermissionGate(permission_gate or AllowAllPermissionGate())
         self.model_role = model_role
         self.options = options
         self.budget = budget or LoopBudget()
@@ -127,6 +128,13 @@ class AgentRuntime:
 
     async def stream_task(self, user_input: str) -> AsyncIterator[AgentEvent]:
         state = LoopState(session_id=self.runtime_session.runtime_session_id, budget=self.budget)
+        async for event in self._stream_task(user_input, state):
+            yield event
+
+    def close(self) -> None:
+        self.runtime_session.close()
+
+    async def _stream_task(self, user_input: str, state: LoopState) -> AsyncIterator[AgentEvent]:
         state.messages.append(UserMsg(name="user", content=user_input))
         yield await self.runtime_session.emit(
             RunStartEvent(
