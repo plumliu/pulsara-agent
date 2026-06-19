@@ -161,13 +161,17 @@ def test_msg_to_llm_messages_compresses_context_blocks() -> None:
         if message.role is MessageRole.ASSISTANT
         for text in message.content
     )
-    tool_call = next(message for message in llm_messages if message.role is MessageRole.TOOL_CALL)
+    assistant_turn = next(
+        message for message in llm_messages if message.role is MessageRole.ASSISTANT and message.tool_calls
+    )
+    tool_call = assistant_turn.tool_calls[0]
     tool_result = next(message for message in llm_messages if message.role is MessageRole.TOOL_RESULT)
 
     assert "visible" in assistant_text
     assert "hidden" not in assistant_text
     assert "call:ignored" not in assistant_text
-    assert tool_call.tool_call_id == "call:ignored"
+    assert assistant_turn.thinking == ("hidden",)
+    assert tool_call.id == "call:ignored"
     assert tool_call.name == "lookup"
     assert "TOOL RESULT TRUNCATED" in "\n".join(tool_result.content)
     assert tool_result.tool_call_id == "call:1"

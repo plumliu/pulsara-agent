@@ -20,7 +20,7 @@ from pulsara_agent.llm.adapters.openai.events import (
     sdk_event_to_dict,
     usage_from_mapping,
 )
-from pulsara_agent.llm.input import LLMMessage, MessageRole, ToolSpec
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.models import ModelProfile
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.transport import LLMTransport
@@ -109,21 +109,35 @@ def build_responses_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model.id,
-        "input": [_message_to_responses_input(message) for message in context.messages],
+        "input": _messages_to_responses_inputs(context.messages),
     }
+    provider_profile = model.provider_profile
+    for key, value in provider_profile.request_defaults.items():
+        payload.setdefault(key, value)
     if context.system_prompt:
         payload["instructions"] = context.system_prompt
-    if context.tools:
+    if context.tools and provider_profile.supports_tools:
         payload["tools"] = [_tool_to_responses_tool(tool) for tool in context.tools]
     if options is not None:
-        if options.temperature is not None:
+        omitted = set(provider_profile.omit_params_when_thinking)
+        thinking_enabled = provider_profile.thinking.enabled
+        if options.temperature is not None and not (thinking_enabled and "temperature" in omitted):
             payload["temperature"] = options.temperature
-        if options.max_output_tokens is not None:
+        if options.max_output_tokens is not None and not (
+            thinking_enabled and "max_output_tokens" in omitted
+        ):
             payload["max_output_tokens"] = options.max_output_tokens
-        if options.reasoning_effort is not None:
+        if (
+            options.reasoning_effort is not None
+            and provider_profile.supports_reasoning
+            and not (thinking_enabled and "reasoning" in omitted)
+            and not (thinking_enabled and "reasoning_effort" in omitted)
+        ):
             payload["reasoning"] = {"effort": options.reasoning_effort}
         if options.reasoning_summary is not None:
             payload.setdefault("reasoning", {})["summary"] = options.reasoning_summary
+    if provider_profile.request_extra_body:
+        payload["extra_body"] = dict(provider_profile.request_extra_body)
     return payload
 
 
@@ -220,29 +234,60 @@ def translate_responses_event(
     return []
 
 
-def _message_to_responses_input(message: LLMMessage) -> dict[str, Any]:
+def _messages_to_responses_inputs(messages: tuple[LLMMessage, ...]) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
+    for message in messages:
+        inputs.extend(_message_to_responses_inputs(message))
+    return inputs
+
+
+def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
     if message.role is MessageRole.TOOL_CALL:
         if not message.tool_call_id:
             raise ValueError("Responses function_call input requires tool_call_id")
         if not message.name:
             raise ValueError("Responses function_call input requires name")
-        return {
-            "type": "function_call",
-            "call_id": message.tool_call_id,
-            "name": message.name,
-            "arguments": message.arguments or "{}",
-        }
+        return [
+            _tool_call_to_responses_input(
+                LLMToolCall(
+                    id=message.tool_call_id,
+                    name=message.name,
+                    arguments=message.arguments or "{}",
+                )
+            )
+        ]
     if message.role is MessageRole.TOOL_RESULT:
         if not message.tool_call_id:
             raise ValueError("Responses function_call_output input requires tool_call_id/call_id")
-        return {
-            "type": "function_call_output",
-            "call_id": message.tool_call_id,
-            "output": "\n".join(message.content),
-        }
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": message.tool_call_id,
+                "output": "\n".join(message.content),
+            }
+        ]
+    if message.role is MessageRole.ASSISTANT and message.tool_calls:
+        inputs: list[dict[str, Any]] = []
+        if message.content:
+            inputs.append(_textual_responses_input(message))
+        inputs.extend(_tool_call_to_responses_input(tool_call) for tool_call in message.tool_calls)
+        return inputs
+    return [_textual_responses_input(message)]
+
+
+def _textual_responses_input(message: LLMMessage) -> dict[str, Any]:
     return {
         "role": message.role.value,
         "content": [{"type": "input_text", "text": text} for text in message.content],
+    }
+
+
+def _tool_call_to_responses_input(tool_call: LLMToolCall) -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "call_id": tool_call.id,
+        "name": tool_call.name,
+        "arguments": tool_call.arguments or "{}",
     }
 
 

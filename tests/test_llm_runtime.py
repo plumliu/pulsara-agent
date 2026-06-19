@@ -33,8 +33,9 @@ from pulsara_agent.llm.adapters.openai.responses import (
 )
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.factory import build_llm_runtime
-from pulsara_agent.llm.input import LLMMessage, ToolSpec
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
 from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.llm.provider import ProviderProfile, ThinkingProfile, ThinkingReplayPolicy
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.runtime import LLMRuntime
@@ -173,6 +174,46 @@ def test_openai_responses_payload_uses_function_call_output_items() -> None:
         "output": "found",
     }
     assert all(item.get("role") != "tool" for item in payload["input"])
+
+
+def test_openai_responses_payload_expands_assistant_turn_tool_calls() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("Use lookup."),
+            LLMMessage.assistant_turn(
+                text="I will call lookup.",
+                thinking="private reasoning",
+                tool_calls=(
+                    LLMToolCall(id="call_responses_123", name="lookup", arguments='{"q":"pulsara"}'),
+                ),
+            ),
+            LLMMessage.tool_result("found", tool_call_id="call_responses_123"),
+        )
+    )
+
+    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+
+    assert payload["input"][1]["role"] == "assistant"
+    assert payload["input"][1]["content"] == [
+        {"type": "input_text", "text": "I will call lookup."}
+    ]
+    assert payload["input"][2] == {
+        "type": "function_call",
+        "call_id": "call_responses_123",
+        "name": "lookup",
+        "arguments": '{"q":"pulsara"}',
+    }
+    assert payload["input"][3] == {
+        "type": "function_call_output",
+        "call_id": "call_responses_123",
+        "output": "found",
+    }
 
 
 def test_openai_responses_events_translate_to_agent_events() -> None:
@@ -568,6 +609,74 @@ def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
     assert payload["messages"][3]["tool_call_id"] == "call_2"
 
 
+def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_calls() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+        provider_profile=ProviderProfile(
+            wire_api=OPENAI_CHAT_COMPLETIONS_API,
+            request_extra_body={"thinking": {"type": "enabled"}},
+            omit_params_when_thinking=("temperature",),
+            thinking=ThinkingProfile(
+                enabled=True,
+                replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
+            ),
+        ),
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("Use lookup."),
+            LLMMessage.assistant_turn(
+                text="I will look that up.",
+                thinking="Need a tool result before answering.",
+                tool_calls=(LLMToolCall(id="call_1", name="lookup", arguments='{"q":"pulsara"}'),),
+            ),
+            LLMMessage.tool_result("found", tool_call_id="call_1"),
+        )
+    )
+
+    payload = build_chat_completions_payload(
+        model=config.model_for(ModelRole.PRO),
+        context=context,
+        options=LLMOptions(temperature=0.2, reasoning_effort="medium"),
+    )
+
+    assistant = payload["messages"][1]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == "I will look that up."
+    assert assistant["reasoning_content"] == "Need a tool result before answering."
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    assert payload["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert "temperature" not in payload
+    assert payload["reasoning_effort"] == "medium"
+
+
+def test_openai_chat_completions_payload_does_not_replay_thinking_by_default() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.assistant_turn(
+                text="I will look that up.",
+                thinking="Provider-private reasoning.",
+                tool_calls=(LLMToolCall(id="call_1", name="lookup", arguments="{}"),),
+            ),
+        )
+    )
+
+    payload = build_chat_completions_payload(model=config.model_for(ModelRole.PRO), context=context)
+
+    assert "reasoning_content" not in payload["messages"][0]
+
+
 def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
     import asyncio
 
@@ -646,6 +755,24 @@ def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
     assert events[-1].input_tokens == 2
     assert events[-1].output_tokens == 4
     assert events[-1].total_tokens == 6
+
+
+def test_openai_chat_completions_translates_reasoning_content_delta() -> None:
+    builder = transport_builder_for_test()
+    accumulator = ChatToolCallAccumulator(builder=builder)
+
+    events = translate_chat_completion_chunk(
+        {"choices": [{"delta": {"reasoning_content": "think", "content": "answer"}}]},
+        builder=builder,
+        accumulator=accumulator,
+    )
+
+    assert isinstance(events[0], ThinkingBlockStartEvent)
+    assert isinstance(events[1], ThinkingBlockDeltaEvent)
+    assert events[1].delta == "think"
+    assert isinstance(events[2], TextBlockStartEvent)
+    assert isinstance(events[3], TextBlockDeltaEvent)
+    assert events[3].delta == "answer"
 
 
 def test_openai_chat_completions_transport_uses_sdk_stream() -> None:

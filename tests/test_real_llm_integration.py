@@ -111,6 +111,26 @@ def test_real_pro_model_emits_text_and_optional_thinking_events():
     assert result["replayed_thinking"]
 
 
+def test_real_chat_completions_thinking_delta_is_consumed():
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+    settings = _load_settings_for_real_llm()
+    if settings.llm.api != "openai_chat_completions":
+        pytest.skip("Set PULSARA_API=openai_chat_completions to test Chat thinking deltas.")
+    if not settings.llm.provider_profile or not settings.llm.provider_profile.thinking.enabled:
+        pytest.skip("Enable the provider thinking profile to test Chat thinking deltas.")
+
+    result = asyncio.run(_run_real_chat_thinking_delta_smoke())
+
+    assert result["errors"] == []
+    assert "ThinkingBlockDeltaEvent" in result["event_type_names"]
+    assert result["thinking"]
+    assert "TextBlockDeltaEvent" in result["event_type_names"]
+    assert "PULSARA_THINKING_DELTA_PROBE" in result["text"]
+    assert "PULSARA_THINKING_DELTA_PROBE" in result["replayed_text"]
+    assert result["replayed_thinking"]
+
+
 def test_real_agent_runtime_completes_tool_loop_with_responses_api(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
@@ -547,6 +567,34 @@ async def _run_real_thinking_text_smoke() -> dict:
             reasoning_summary="auto",
         ),
         label="real-thinking-text",
+    )
+    message = result["message"]
+    replayed_text = "".join(
+        block.text for block in message.content if isinstance(block, TextBlock)
+    )
+    replayed_thinking = "".join(
+        block.thinking for block in message.content if isinstance(block, ThinkingBlock)
+    )
+    return {
+        **_summarize_collected_result(result),
+        "replayed_text": replayed_text.strip(),
+        "replayed_thinking": replayed_thinking.strip(),
+    }
+
+
+async def _run_real_chat_thinking_delta_smoke() -> dict:
+    context = LLMContext(
+        messages=(
+            LLMMessage.user(
+                "Think briefly, then answer exactly: PULSARA_THINKING_DELTA_PROBE"
+            ),
+        )
+    )
+    result = await _collect_real_events(
+        role=ModelRole.PRO,
+        context=context,
+        options=LLMOptions(max_output_tokens=128, reasoning_effort="medium"),
+        label="real-chat-thinking-delta",
     )
     message = result["message"]
     replayed_text = "".join(

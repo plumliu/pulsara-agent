@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import (
     Base64Source,
     DataBlock,
     Msg,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultBlock,
     URLSource,
@@ -68,29 +69,43 @@ def msg_to_llm_messages(messages: list[Msg], budget: LoopBudget) -> tuple[LLMMes
 def _assistant_messages(message: Msg, budget: LoopBudget) -> list[LLMMessage]:
     messages: list[LLMMessage] = []
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    tool_calls: list[LLMToolCall] = []
+
+    def flush_assistant_turn() -> None:
+        nonlocal text_parts, thinking_parts, tool_calls
+        if not text_parts and not thinking_parts and not tool_calls:
+            return
+        messages.append(
+            LLMMessage.assistant_turn(
+                text="\n".join(text_parts),
+                thinking=tuple(thinking_parts),
+                tool_calls=tuple(tool_calls),
+            )
+        )
+        text_parts = []
+        thinking_parts = []
+        tool_calls = []
+
     for block in message.content:
         if isinstance(block, TextBlock):
             text_parts.append(block.text)
+        elif isinstance(block, ThinkingBlock):
+            thinking_parts.append(block.thinking)
         elif isinstance(block, DataBlock):
             text_parts.append(_data_placeholder(block))
         elif isinstance(block, ToolCallBlock):
-            if text_parts:
-                messages.append(LLMMessage.assistant("\n".join(text_parts)))
-                text_parts = []
-            messages.append(
-                LLMMessage.tool_call(
-                    tool_call_id=block.id,
+            tool_calls.append(
+                LLMToolCall(
+                    id=block.id,
                     name=block.name,
                     arguments=block.input or "{}",
                 )
             )
         elif isinstance(block, ToolResultBlock):
-            if text_parts:
-                messages.append(LLMMessage.assistant("\n".join(text_parts)))
-                text_parts = []
+            flush_assistant_turn()
             messages.extend(_tool_result_messages(Msg(role="tool_result", name=block.name, content=[block]), budget))
-    if text_parts:
-        messages.append(LLMMessage.assistant("\n".join(text_parts)))
+    flush_assistant_turn()
     return messages
 
 
@@ -124,7 +139,7 @@ def _textual_parts(message: Msg, budget: LoopBudget) -> list[str]:
         elif isinstance(block, DataBlock):
             parts.append(_data_placeholder(block))
         else:
-            # Thinking and tool_call blocks are intentionally not sent back as natural-language context.
+            # Thinking and tool_call blocks are provider metadata, not natural-language context.
             continue
     return [part for part in parts if part]
 

@@ -23,6 +23,13 @@ class ToolSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMToolCall:
+    id: str
+    name: str
+    arguments: str = "{}"
+
+
+@dataclass(frozen=True, slots=True)
 class LLMMessage:
     """Provider-neutral input item sent to a model provider.
 
@@ -34,6 +41,8 @@ class LLMMessage:
 
     role: MessageRole
     content: tuple[str, ...] = field(default_factory=tuple)
+    thinking: tuple[str, ...] = field(default_factory=tuple)
+    tool_calls: tuple[LLMToolCall, ...] = field(default_factory=tuple)
     tool_call_id: str | None = None
     name: str | None = None
     arguments: str | None = None
@@ -49,6 +58,23 @@ class LLMMessage:
     @classmethod
     def assistant(cls, text: str) -> "LLMMessage":
         return cls(role=MessageRole.ASSISTANT, content=(text,))
+
+    @classmethod
+    def assistant_turn(
+        cls,
+        *,
+        text: str | None = None,
+        thinking: str | tuple[str, ...] = (),
+        tool_calls: tuple[LLMToolCall, ...] = (),
+    ) -> "LLMMessage":
+        content = (text,) if text else ()
+        thinking_parts = (thinking,) if isinstance(thinking, str) and thinking else tuple(thinking)
+        return cls(
+            role=MessageRole.ASSISTANT,
+            content=content,
+            thinking=thinking_parts,
+            tool_calls=tool_calls,
+        )
 
     @classmethod
     def tool_call(cls, *, tool_call_id: str, name: str, arguments: str) -> "LLMMessage":

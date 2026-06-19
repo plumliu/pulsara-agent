@@ -16,8 +16,9 @@ from pulsara_agent.llm.adapters.openai.events import (
     sdk_event_to_dict,
     usage_from_mapping,
 )
-from pulsara_agent.llm.input import LLMMessage, MessageRole, ToolSpec
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.models import ModelProfile
+from pulsara_agent.llm.provider import ProviderProfile, ThinkingReplayPolicy
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.transport import LLMTransport
 from pulsara_agent.llm.usage import Usage
@@ -43,6 +44,7 @@ class OpenAIChatCompletionsTransport(LLMTransport):
     ) -> AsyncIterator[AgentEvent]:
         builder = AgentEventBuilder(model=model, event_context=event_context)
         accumulator = ChatToolCallAccumulator(builder=builder)
+        thinking_delta_fields = model.provider_profile.thinking.delta_fields
         yield builder.model_start()
 
         if self._mock_chunks:
@@ -51,6 +53,7 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                     raw_chunk,
                     builder=builder,
                     accumulator=accumulator,
+                    thinking_delta_fields=thinking_delta_fields,
                 ):
                     yield event
             for event in accumulator.close_active_tool_calls():
@@ -74,6 +77,7 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                     raw_chunk,
                     builder=builder,
                     accumulator=accumulator,
+                    thinking_delta_fields=thinking_delta_fields,
                 ):
                     yield event
         except Exception as exc:
@@ -104,34 +108,52 @@ def build_chat_completions_payload(
     context: LLMContext,
     options: LLMOptions | None = None,
 ) -> dict[str, Any]:
+    provider_profile = model.provider_profile
     messages: list[dict[str, Any]] = []
     if context.system_prompt:
         messages.append({"role": "system", "content": context.system_prompt})
-    messages.extend(_messages_to_chat_messages(context.messages))
+    messages.extend(_messages_to_chat_messages(context.messages, provider_profile=provider_profile))
 
     payload: dict[str, Any] = {
         "model": model.id,
         "messages": messages,
         "stream_options": {"include_usage": True},
     }
-    if context.tools:
+    for key, value in provider_profile.request_defaults.items():
+        payload.setdefault(key, value)
+    if context.tools and provider_profile.supports_tools:
         payload["tools"] = [_tool_to_chat_tool(tool) for tool in context.tools]
     if options is not None:
-        if options.temperature is not None:
+        omitted = set(provider_profile.omit_params_when_thinking)
+        thinking_enabled = provider_profile.thinking.enabled
+        if options.temperature is not None and not (thinking_enabled and "temperature" in omitted):
             payload["temperature"] = options.temperature
-        if options.max_output_tokens is not None:
+        if options.max_output_tokens is not None and not (
+            thinking_enabled and "max_completion_tokens" in omitted
+        ):
             payload["max_completion_tokens"] = options.max_output_tokens
-        if options.reasoning_effort is not None:
+        if (
+            options.reasoning_effort is not None
+            and provider_profile.supports_reasoning
+            and not (thinking_enabled and "reasoning_effort" in omitted)
+        ):
             payload["reasoning_effort"] = options.reasoning_effort
+    if provider_profile.request_extra_body:
+        payload["extra_body"] = dict(provider_profile.request_extra_body)
     return payload
 
 
-def _messages_to_chat_messages(messages: tuple[LLMMessage, ...]) -> list[dict[str, Any]]:
+def _messages_to_chat_messages(
+    messages: tuple[LLMMessage, ...],
+    *,
+    provider_profile: ProviderProfile | None = None,
+) -> list[dict[str, Any]]:
+    provider_profile = provider_profile or ProviderProfile(wire_api=OPENAI_CHAT_COMPLETIONS_API)
     chat_messages: list[dict[str, Any]] = []
     pending_tool_calls: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.TOOL_CALL:
-            pending_tool_calls.append(_message_to_chat_tool_call(message))
+            pending_tool_calls.append(_legacy_message_to_chat_tool_call(message))
             continue
         if pending_tool_calls:
             chat_messages.append(
@@ -142,7 +164,7 @@ def _messages_to_chat_messages(messages: tuple[LLMMessage, ...]) -> list[dict[st
                 }
             )
             pending_tool_calls = []
-        chat_messages.append(_message_to_chat_message(message))
+        chat_messages.append(_message_to_chat_message(message, provider_profile=provider_profile))
     if pending_tool_calls:
         chat_messages.append(
             {
@@ -159,6 +181,7 @@ def translate_chat_completion_chunk(
     *,
     builder: AgentEventBuilder,
     accumulator: "ChatToolCallAccumulator",
+    thinking_delta_fields: tuple[str, ...] = ("reasoning_content",),
 ) -> list[AgentEvent]:
     chunk = sdk_event_to_dict(raw_chunk)
     accumulator.update_usage(chunk.get("usage"))
@@ -172,6 +195,10 @@ def translate_chat_completion_chunk(
             continue
         delta = choice.get("delta")
         if isinstance(delta, dict):
+            for field_name in thinking_delta_fields:
+                thinking = delta.get(field_name)
+                if isinstance(thinking, str):
+                    events.extend(builder.thinking_delta(thinking))
             content = delta.get("content")
             if isinstance(content, str):
                 events.extend(builder.text_delta(content))
@@ -263,12 +290,16 @@ class ChatToolCallAccumulator:
         return events
 
 
-def _message_to_chat_message(message: LLMMessage) -> dict[str, Any]:
+def _message_to_chat_message(
+    message: LLMMessage,
+    *,
+    provider_profile: ProviderProfile,
+) -> dict[str, Any]:
     if message.role is MessageRole.TOOL_CALL:
         return {
             "role": "assistant",
             "content": "",
-            "tool_calls": [_message_to_chat_tool_call(message)],
+            "tool_calls": [_legacy_message_to_chat_tool_call(message)],
         }
     if message.role is MessageRole.TOOL_RESULT:
         if not message.tool_call_id:
@@ -278,6 +309,18 @@ def _message_to_chat_message(message: LLMMessage) -> dict[str, Any]:
             "tool_call_id": message.tool_call_id,
             "content": "\n".join(message.content),
         }
+    if message.role is MessageRole.ASSISTANT:
+        payload: dict[str, Any] = {
+            "role": "assistant",
+            "content": "\n".join(message.content),
+        }
+        if _should_replay_thinking(message, provider_profile=provider_profile):
+            message_field = provider_profile.thinking.message_field
+            if message_field:
+                payload[message_field] = "\n".join(message.thinking)
+        if message.tool_calls:
+            payload["tool_calls"] = [_tool_call_to_chat_tool_call(call) for call in message.tool_calls]
+        return payload
     return {
         "role": _chat_role(message.role),
         "content": "\n".join(message.content),
@@ -290,19 +333,42 @@ def _chat_role(role: MessageRole) -> str:
     raise ValueError(f"Unsupported chat message role: {role}")
 
 
-def _message_to_chat_tool_call(message: LLMMessage) -> dict[str, Any]:
+def _legacy_message_to_chat_tool_call(message: LLMMessage) -> dict[str, Any]:
     if not message.tool_call_id:
         raise ValueError("Chat assistant tool call message requires tool_call_id")
     if not message.name:
         raise ValueError("Chat assistant tool call message requires name")
+    return _tool_call_to_chat_tool_call(
+        LLMToolCall(
+            id=message.tool_call_id,
+            name=message.name,
+            arguments=message.arguments or "{}",
+        )
+    )
+
+
+def _tool_call_to_chat_tool_call(tool_call: LLMToolCall) -> dict[str, Any]:
     return {
-        "id": message.tool_call_id,
+        "id": tool_call.id,
         "type": "function",
         "function": {
-            "name": message.name,
-            "arguments": message.arguments or "{}",
+            "name": tool_call.name,
+            "arguments": tool_call.arguments or "{}",
         },
     }
+
+
+def _should_replay_thinking(message: LLMMessage, *, provider_profile: ProviderProfile) -> bool:
+    if not message.thinking:
+        return False
+    policy = provider_profile.thinking.replay_policy
+    if policy is ThinkingReplayPolicy.NEVER:
+        return False
+    if policy is ThinkingReplayPolicy.ALWAYS:
+        return True
+    if policy is ThinkingReplayPolicy.WHEN_TOOL_CALLS:
+        return bool(message.tool_calls)
+    return False
 
 
 def _tool_to_chat_tool(tool: ToolSpec) -> dict[str, Any]:
