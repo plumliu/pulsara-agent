@@ -7,6 +7,7 @@ from typing import Any
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
+MIN_TERMINAL_OUTPUT_CHARS = 512
 
 
 def object_schema(*, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -39,6 +40,20 @@ def int_arg(args: dict[str, Any], name: str, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an integer")
     return value
+
+
+def bounded_int_arg(
+    args: dict[str, Any],
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = int_arg(args, name, default)
+    if value <= 0:
+        return default
+    return max(minimum, min(value, maximum))
 
 
 def bool_arg(args: dict[str, Any], name: str, default: bool) -> bool:

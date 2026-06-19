@@ -41,7 +41,7 @@ def test_runtime_session_keeps_named_terminal_sessions_separate(tmp_path) -> Non
     executor = runtime.create_tool_executor()
 
     code_result = executor.execute(
-        ToolCall(id="call:code", name="terminal", arguments={"command": "cd src && pwd", "session_id": "code"}),
+        ToolCall(id="call:code", name="terminal", arguments={"command": "cd src && pwd", "terminal_session_id": "code"}),
         event_context=CTX,
     )
     default_result = executor.execute(
@@ -62,7 +62,7 @@ def test_runtime_session_terminal_session_limit_and_validation(tmp_path) -> None
     executor = runtime.create_tool_executor()
 
     invalid = executor.execute(
-        ToolCall(id="call:bad", name="terminal", arguments={"command": "pwd", "session_id": "../bad"}),
+        ToolCall(id="call:bad", name="terminal", arguments={"command": "pwd", "terminal_session_id": "../bad"}),
         event_context=CTX,
     )
     assert invalid.status is ToolResultState.ERROR
@@ -70,13 +70,13 @@ def test_runtime_session_terminal_session_limit_and_validation(tmp_path) -> None
 
     for name in ["a", "b", "c", "d"]:
         result = executor.execute(
-            ToolCall(id=f"call:{name}", name="terminal", arguments={"command": "pwd", "session_id": name}),
+            ToolCall(id=f"call:{name}", name="terminal", arguments={"command": "pwd", "terminal_session_id": name}),
             event_context=CTX,
         )
         assert result.status is ToolResultState.SUCCESS
 
     too_many = executor.execute(
-        ToolCall(id="call:e", name="terminal", arguments={"command": "pwd", "session_id": "e"}),
+        ToolCall(id="call:e", name="terminal", arguments={"command": "pwd", "terminal_session_id": "e"}),
         event_context=CTX,
     )
     assert too_many.status is ToolResultState.ERROR
@@ -100,7 +100,7 @@ def test_runtime_session_close_kills_background_terminal_process(tmp_path) -> No
     runtime = RuntimeSession(tmp_path)
     executor = runtime.create_tool_executor()
     start = executor.execute(
-        ToolCall(id="call:terminal", name="terminal", arguments={"command": "sleep 10", "background": True}),
+        ToolCall(id="call:terminal", name="terminal", arguments={"command": "sleep 10", "yield_time_ms": 0}),
         event_context=CTX,
     )
     process_id = json.loads(start.output)["process_id"]

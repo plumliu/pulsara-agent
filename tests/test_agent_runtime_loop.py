@@ -575,7 +575,7 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
                     {
                         "id": "call:bg",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "sleep 10", "background": True}),
+                        "arguments": json.dumps({"command": "sleep 10", "yield_time_ms": 0}),
                     }
                 ]
             },

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from pulsara_agent.runtime.terminal.backend import TerminalBackend
 from pulsara_agent.runtime.terminal.guard import CommandGuard
 from pulsara_agent.runtime.terminal.models import (
     TerminalRequest,
@@ -13,14 +12,18 @@ from pulsara_agent.runtime.terminal.models import (
     TerminalSessionState,
     TerminalStatus,
 )
-from pulsara_agent.runtime.terminal.process import ProcessLimitError, ProcessRegistry, snapshot_process
+from pulsara_agent.runtime.terminal.process import (
+    ProcessLimitError,
+    ProcessRegistry,
+    read_captured_cwd,
+    snapshot_process,
+)
 from pulsara_agent.runtime.terminal.shell import TerminalShellConfig
 
 
 @dataclass(slots=True)
 class TerminalSession:
     state: TerminalSessionState
-    backend: TerminalBackend
     process_registry: ProcessRegistry
     shell: TerminalShellConfig
 
@@ -33,15 +36,6 @@ class TerminalSession:
         return self.state.current_cwd
 
     def execute(self, request: TerminalRequest) -> TerminalResult:
-        if request.background:
-            return self._start_background(request)
-        result = self.backend.execute(request, self.state)
-        result_cwd = Path(result.cwd).expanduser().resolve()
-        if _is_within_workspace(result_cwd, self.state.workspace_root):
-            self.state.current_cwd = result_cwd
-        return result
-
-    def _start_background(self, request: TerminalRequest) -> TerminalResult:
         guard = CommandGuard(self.state.workspace_root)
         decision = guard.validate(request, current_cwd=self.state.current_cwd)
         if not decision.allowed:
@@ -58,15 +52,21 @@ class TerminalSession:
                 },
             )
         assert decision.effective_cwd is not None
+        output_callback = request.metadata.get("output_callback")
+        if not callable(output_callback):
+            output_callback = None
         try:
-            process = self.process_registry.start_background(
+            process, yielded = self.process_registry.exec_with_yield(
                 terminal_session_id=self.session_id,
                 command=request.command,
                 cwd=decision.effective_cwd,
                 artifact_root=self.state.workspace_root / ".pulsara" / "terminal-output",
                 max_output_chars=request.max_output_chars,
+                yield_time_ms=request.yield_time_ms,
                 backend_type=self.state.backend_type,
                 tty=request.tty,
+                max_lifetime_seconds=request.max_lifetime_seconds,
+                output_callback=output_callback,
                 shell=self.shell,
             )
         except ProcessLimitError as exc:
@@ -78,7 +78,40 @@ class TerminalSession:
                 error=str(exc),
                 metadata={"command": request.command},
             )
-        return snapshot_process(process)
+        final_cwd = self.state.current_cwd
+        result = snapshot_process(process, cwd=None if yielded else final_cwd)
+        if yielded:
+            return result
+
+        observed_cwd = read_captured_cwd(process)
+        if observed_cwd is not None:
+            if _is_within_workspace(observed_cwd, self.state.workspace_root):
+                final_cwd = observed_cwd
+                self.state.current_cwd = observed_cwd
+            else:
+                return TerminalResult(
+                    status=TerminalStatus.BLOCKED,
+                    output=result.output,
+                    exit_code=result.exit_code,
+                    cwd=str(final_cwd),
+                    timed_out=result.timed_out,
+                    truncated=result.truncated,
+                    error="command ended outside workspace_root; current_cwd was not updated",
+                    full_output_ref=result.full_output_ref,
+                    metadata=result.metadata,
+                )
+        return TerminalResult(
+            status=result.status,
+            output=result.output,
+            exit_code=result.exit_code,
+            cwd=str(final_cwd),
+            timed_out=result.timed_out,
+            truncated=result.truncated,
+            error=result.error,
+            process_id=result.process_id,
+            full_output_ref=result.full_output_ref,
+            metadata=result.metadata,
+        )
 
 
 def _is_within_workspace(path: Path, workspace_root: Path) -> bool:

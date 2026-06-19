@@ -30,10 +30,10 @@ class TerminalStatus(StrEnum):
 class TerminalRequest:
     command: str
     workdir: str | None = None
-    timeout_seconds: int = 30
+    yield_time_ms: int = 10_000
     max_output_chars: int = 20_000
-    background: bool = False
     tty: bool = False
+    max_lifetime_seconds: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

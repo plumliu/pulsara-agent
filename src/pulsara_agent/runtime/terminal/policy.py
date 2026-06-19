@@ -21,7 +21,7 @@ class ExecPolicyDecisionKind(StrEnum):
     ALLOW = "allow"
     BLOCK = "block"
     REQUIRE_CONFIRMATION = "require_confirmation"
-    SUGGEST_BACKGROUND = "suggest_background"
+    SUGGEST_MANAGED_TERMINAL = "suggest_managed_terminal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,17 +36,6 @@ class ExecPolicyDecision:
     def allow(cls, *, effective_cwd: Path) -> "ExecPolicyDecision":
         return cls(kind=ExecPolicyDecisionKind.ALLOW, effective_cwd=effective_cwd)
 
-
-_LONG_RUNNING_PATTERNS = [
-    re.compile(r"(^|\s)npm\s+run\s+dev(\s|$)"),
-    re.compile(r"(^|\s)pnpm\s+dev(\s|$)"),
-    re.compile(r"(^|\s)yarn\s+dev(\s|$)"),
-    re.compile(r"(^|\s)vite(\s|$)"),
-    re.compile(r"(^|\s)uvicorn(\s|$)"),
-    re.compile(r"(^|\s)python(\d+(\.\d+)?)?\s+-m\s+http\.server(\s|$)"),
-    re.compile(r"(^|\s)tail\s+-f(\s|$)"),
-    re.compile(r"(^|\s)watch(\s|$)"),
-]
 
 _PIPE_STDIN_REQUIRED_PATTERNS = [
     re.compile(r"(^|\s)gh\s+auth\s+login\s+--with-token(\s|$)"),
@@ -85,17 +74,23 @@ class TerminalExecPolicy:
                 reason="command must not be empty",
                 code="empty_command",
             )
-        if request.timeout_seconds <= 0:
+        if request.yield_time_ms < 0:
             return ExecPolicyDecision(
                 kind=ExecPolicyDecisionKind.BLOCK,
-                reason="timeout_seconds must be positive",
-                code="invalid_timeout",
+                reason="yield_time_ms must be non-negative",
+                code="invalid_yield_time",
             )
         if request.max_output_chars <= 0:
             return ExecPolicyDecision(
                 kind=ExecPolicyDecisionKind.BLOCK,
                 reason="max_output_chars must be positive",
                 code="invalid_output_limit",
+            )
+        if request.max_lifetime_seconds is not None and request.max_lifetime_seconds <= 0:
+            return ExecPolicyDecision(
+                kind=ExecPolicyDecisionKind.BLOCK,
+                reason="max_lifetime_seconds must be positive when provided",
+                code="invalid_lifetime",
             )
         if request.tty and _matches_any(_PIPE_STDIN_REQUIRED_PATTERNS, command):
             return ExecPolicyDecision(
@@ -111,21 +106,13 @@ class TerminalExecPolicy:
                 reason=str(exc),
                 code="workspace_escape",
             )
-        if not request.background and _matches_any(_SHELL_BACKGROUND_WRAPPER_PATTERNS, command):
+        if _matches_any(_SHELL_BACKGROUND_WRAPPER_PATTERNS, command):
             return ExecPolicyDecision(
-                kind=ExecPolicyDecisionKind.SUGGEST_BACKGROUND,
-                reason="shell-level background wrappers should use managed background=true",
+                kind=ExecPolicyDecisionKind.SUGGEST_MANAGED_TERMINAL,
+                reason="shell-level background wrappers should use terminal yield semantics instead",
                 effective_cwd=effective_cwd,
-                suggested_args={"background": True},
-                code="use_managed_background",
-            )
-        if not request.background and _matches_any(_LONG_RUNNING_PATTERNS, command):
-            return ExecPolicyDecision(
-                kind=ExecPolicyDecisionKind.SUGGEST_BACKGROUND,
-                reason="foreground long-running commands should use background=true",
-                effective_cwd=effective_cwd,
-                suggested_args={"background": True},
-                code="use_managed_background",
+                suggested_args={"yield_time_ms": 0},
+                code="use_terminal_yield",
             )
         if _matches_any(_DANGEROUS_COMMAND_PATTERNS, command):
             return ExecPolicyDecision(
@@ -137,9 +124,10 @@ class TerminalExecPolicy:
         return ExecPolicyDecision.allow(effective_cwd=effective_cwd)
 
     def resolve_workdir(self, workdir: str | None, *, current_cwd: Path) -> Path:
-        if workdir is None or not workdir.strip():
+        normalized_workdir = workdir.strip() if workdir is not None else ""
+        if not normalized_workdir or normalized_workdir in {".", "./"}:
             return self._recover_current_cwd(current_cwd)
-        raw = Path(workdir).expanduser()
+        raw = Path(normalized_workdir).expanduser()
         candidate = raw if raw.is_absolute() else self.workspace_root / raw
         resolved = candidate.resolve()
         if resolved != self.workspace_root and self.workspace_root not in resolved.parents:

@@ -12,7 +12,8 @@ from pulsara_agent.runtime.terminal.process import ProcessInputError
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
-    int_arg,
+    MIN_TERMINAL_OUTPUT_CHARS,
+    bounded_int_arg,
     object_schema,
     required_str_arg,
 )
@@ -29,7 +30,7 @@ class TerminalProcessTool(WorkspaceTool):
     terminal_sessions: TerminalSessionManager | None = None
     name: str = "terminal_process"
     description: str = (
-        "Poll, wait for, kill, or send stdin to a managed background terminal process returned by terminal(background=true). "
+        "Poll, wait for, kill, or send stdin to a managed terminal process returned when terminal yields a process_id. "
         "Use write or submit for both pipe and PTY processes; use close_stdin to send EOF."
     )
     parameters: dict[str, Any] = field(
@@ -38,7 +39,7 @@ class TerminalProcessTool(WorkspaceTool):
                 "action": {
                     "type": "string",
                     "enum": ["poll", "wait", "kill", "write", "submit", "close_stdin"],
-                    "description": "Process action for managed background pipe or PTY terminal processes.",
+                    "description": "Process action for managed pipe or PTY terminal processes returned by terminal.",
                 },
                 "process_id": {"type": "string"},
                 "data": {"type": "string"},
@@ -59,7 +60,13 @@ class TerminalProcessTool(WorkspaceTool):
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         action = required_str_arg(call.arguments, "action").strip()
         process_id = required_str_arg(call.arguments, "process_id").strip()
-        max_output = int_arg(call.arguments, "max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)
+        max_output = bounded_int_arg(
+            call.arguments,
+            "max_output_chars",
+            default=DEFAULT_MAX_OUTPUT_CHARS,
+            minimum=MIN_TERMINAL_OUTPUT_CHARS,
+            maximum=DEFAULT_MAX_OUTPUT_CHARS,
+        )
         if action not in _SUPPORTED_ACTIONS:
             return self._error_result(
                 call,
@@ -71,14 +78,13 @@ class TerminalProcessTool(WorkspaceTool):
             if action == "poll":
                 result = self.terminal_sessions.poll_process(process_id, max_output_chars=max_output)
             elif action == "wait":
-                timeout = int_arg(call.arguments, "timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS)
-                if timeout <= 0:
-                    return self._error_result(
-                        call,
-                        process_id=process_id,
-                        error="timeout_seconds must be positive",
-                        status="blocked",
-                    )
+                timeout = bounded_int_arg(
+                    call.arguments,
+                    "timeout_seconds",
+                    default=DEFAULT_WAIT_TIMEOUT_SECONDS,
+                    minimum=1,
+                    maximum=DEFAULT_WAIT_TIMEOUT_SECONDS,
+                )
                 result = self.terminal_sessions.wait_process(
                     process_id,
                     timeout_seconds=timeout,

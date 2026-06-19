@@ -51,6 +51,19 @@ def test_terminal_runtime_persists_current_cwd_after_cd(tmp_path) -> None:
     assert second.output == str(tmp_path / "src")
 
 
+def test_terminal_runtime_materialized_dot_workdir_honors_current_cwd(tmp_path) -> None:
+    (tmp_path / "src").mkdir()
+    session = make_session(tmp_path)
+
+    first = run(session, "cd src && pwd")
+    dot = run(session, "pwd", workdir=".")
+    dot_slash = run(session, "pwd", workdir="./")
+
+    assert first.status is TerminalStatus.SUCCESS
+    assert dot.output == str(tmp_path / "src")
+    assert dot_slash.output == str(tmp_path / "src")
+
+
 def test_terminal_runtime_resolves_relative_and_absolute_workdir(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     session = make_session(tmp_path)
@@ -131,19 +144,21 @@ def test_terminal_runtime_rejects_empty_command(tmp_path) -> None:
     assert result.error == "command must not be empty"
 
 
-def test_terminal_runtime_timeout_keeps_partial_output(tmp_path) -> None:
-    session = make_session(tmp_path)
+def test_terminal_runtime_yield_keeps_partial_output_and_does_not_kill(tmp_path) -> None:
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create()
 
     result = run(
         session,
         "python -c 'import time; print(\"before\", flush=True); time.sleep(5)'",
-        timeout_seconds=1,
+        yield_time_ms=200,
     )
 
-    assert result.status is TerminalStatus.TIMEOUT
-    assert result.exit_code == 124
-    assert result.timed_out is True
+    assert result.status is TerminalStatus.RUNNING
+    assert result.process_id is not None
+    assert result.timed_out is False
     assert "before" in result.output
+    assert manager.kill_process(result.process_id).status is TerminalStatus.KILLED
 
 
 def test_terminal_runtime_cleans_per_process_cwd_file_after_readback(tmp_path) -> None:
@@ -153,7 +168,7 @@ def test_terminal_runtime_cleans_per_process_cwd_file_after_readback(tmp_path) -
         command="cd src && pwd >/dev/null",
         cwd=tmp_path,
         max_output_chars=1000,
-        background=False,
+        stdin_pipe=True,
         capture_cwd=True,
     )
     assert process.capture_cwd_file is not None
@@ -189,7 +204,7 @@ def test_terminal_runtime_strips_ansi_and_redacts_secrets(tmp_path) -> None:
     assert result.output == "red API_KEY=[REDACTED]"
 
 
-def test_terminal_runtime_kills_process_group_on_timeout(tmp_path) -> None:
+def test_terminal_runtime_lifetime_watchdog_kills_process_group(tmp_path) -> None:
     marker = f"pulsara_terminal_test_{os.getpid()}_{int(time.time())}"
     session = make_session(tmp_path)
 
@@ -200,20 +215,32 @@ def test_terminal_runtime_kills_process_group_on_timeout(tmp_path) -> None:
             f"subprocess.Popen([\"sh\", \"-c\", \"sleep 2; touch /tmp/{marker}\"]); "
             "time.sleep(10)'"
         ),
-        timeout_seconds=1,
+        yield_time_ms=5000,
+        max_lifetime_seconds=1,
     )
     time.sleep(2.5)
 
-    assert result.status is TerminalStatus.TIMEOUT
+    assert result.status is TerminalStatus.KILLED
     assert not os.path.exists(f"/tmp/{marker}")
     subprocess.run(["rm", "-f", f"/tmp/{marker}"], check=False)
 
 
-def test_terminal_runtime_background_poll_wait_and_kill(tmp_path) -> None:
+def test_terminal_runtime_in_window_completion_is_not_registered(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "sleep 5", background=True)
+    result = run(session, "printf quick", yield_time_ms=10_000)
+
+    assert result.status is TerminalStatus.SUCCESS
+    assert result.process_id is None
+    assert manager.process_registry._processes == {}
+
+
+def test_terminal_runtime_yielded_process_poll_wait_and_kill(tmp_path) -> None:
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create()
+
+    result = run(session, "sleep 5", yield_time_ms=0)
 
     assert result.status is TerminalStatus.RUNNING
     assert result.process_id is not None
@@ -224,11 +251,27 @@ def test_terminal_runtime_background_poll_wait_and_kill(tmp_path) -> None:
     assert killed.status is TerminalStatus.KILLED
 
 
-def test_terminal_runtime_wait_timeout_does_not_kill_background_process(tmp_path) -> None:
+def test_terminal_runtime_yielded_process_without_lifetime_survives_past_default_window(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "sleep 0.4 && printf done", background=True)
+    result = run(session, "sleep 0.7 && printf survived", yield_time_ms=0)
+    assert result.status is TerminalStatus.RUNNING
+    assert result.process_id is not None
+
+    still_running = manager.wait_process(result.process_id, timeout_seconds=0.2)
+    final = manager.wait_process(result.process_id, timeout_seconds=2)
+
+    assert still_running.status is TerminalStatus.RUNNING
+    assert final.status is TerminalStatus.SUCCESS
+    assert final.output == "survived"
+
+
+def test_terminal_runtime_wait_timeout_does_not_kill_yielded_process(tmp_path) -> None:
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create()
+
+    result = run(session, "sleep 0.4 && printf done", yield_time_ms=0)
     assert result.process_id is not None
 
     first_wait = manager.wait_process(result.process_id, timeout_seconds=0.05)
@@ -239,14 +282,14 @@ def test_terminal_runtime_wait_timeout_does_not_kill_background_process(tmp_path
     assert final_wait.output == "done"
 
 
-def test_terminal_runtime_background_high_output_does_not_deadlock(tmp_path) -> None:
+def test_terminal_runtime_yielded_high_output_does_not_deadlock(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
     result = run(
         session,
         "python -c 'for i in range(30000): print(i)'",
-        background=True,
+        yield_time_ms=0,
         max_output_chars=200,
     )
     assert result.process_id is not None
@@ -258,12 +301,12 @@ def test_terminal_runtime_background_high_output_does_not_deadlock(tmp_path) -> 
     assert "OUTPUT TRUNCATED" in final.output
 
 
-def test_terminal_runtime_background_does_not_update_session_cwd(tmp_path) -> None:
+def test_terminal_runtime_yielded_process_does_not_update_session_cwd(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "cd src && pwd", background=True)
+    result = run(session, "cd src && sleep 0.2 && pwd", yield_time_ms=0)
     assert result.process_id is not None
     final = manager.wait_process(result.process_id, timeout_seconds=2)
     after = run(session, "pwd")
@@ -273,29 +316,26 @@ def test_terminal_runtime_background_does_not_update_session_cwd(tmp_path) -> No
     assert after.output == str(tmp_path)
 
 
-def test_terminal_runtime_long_running_guard_allows_managed_background(tmp_path) -> None:
+def test_terminal_runtime_long_running_command_yields_to_managed_process(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    blocked = run(session, "tail -f /dev/null")
-    background = run(session, "tail -f /dev/null", background=True)
+    yielded = run(session, "tail -f /dev/null", yield_time_ms=100)
 
-    assert blocked.status is TerminalStatus.BLOCKED
-    assert "background=true" in (blocked.error or "")
-    assert background.status is TerminalStatus.RUNNING
-    assert background.process_id is not None
-    assert manager.kill_process(background.process_id).status is TerminalStatus.KILLED
+    assert yielded.status is TerminalStatus.RUNNING
+    assert yielded.process_id is not None
+    assert manager.kill_process(yielded.process_id).status is TerminalStatus.KILLED
 
 
-def test_terminal_runtime_shell_background_wrapper_suggests_managed_background(tmp_path) -> None:
+def test_terminal_runtime_shell_background_wrapper_suggests_terminal_yield(tmp_path) -> None:
     session = make_session(tmp_path)
 
     result = run(session, "sleep 5 &")
 
     assert result.status is TerminalStatus.BLOCKED
-    assert result.error == "shell-level background wrappers should use managed background=true"
-    assert result.metadata["policy_code"] == "use_managed_background"
-    assert result.metadata["suggested_args"] == {"background": True}
+    assert result.error == "shell-level background wrappers should use terminal yield semantics instead"
+    assert result.metadata["policy_code"] == "use_terminal_yield"
+    assert result.metadata["suggested_args"] == {"yield_time_ms": 0}
 
 
 def test_terminal_runtime_dangerous_command_requires_confirmation_when_called_directly(tmp_path) -> None:
@@ -308,13 +348,13 @@ def test_terminal_runtime_dangerous_command_requires_confirmation_when_called_di
     assert result.metadata["policy_code"] == "requires_confirmation"
 
 
-def test_terminal_runtime_background_limit_does_not_count_foreground(tmp_path) -> None:
+def test_terminal_runtime_yield_limit_does_not_count_in_window_completion(tmp_path) -> None:
     manager = make_manager(tmp_path, max_live_processes=1)
     session = manager.get_or_create()
 
-    first = run(session, "sleep 5", background=True)
+    first = run(session, "sleep 5", yield_time_ms=0)
     foreground = run(session, "pwd")
-    second = run(session, "sleep 5", background=True)
+    second = run(session, "sleep 5", yield_time_ms=0)
 
     assert first.status is TerminalStatus.RUNNING
     assert foreground.status is TerminalStatus.SUCCESS
@@ -329,11 +369,11 @@ def test_terminal_runtime_finished_process_retention_is_lazy_and_bounded(tmp_pat
     manager = make_manager(tmp_path, max_finished_processes=1)
     session = manager.get_or_create()
 
-    first = run(session, "printf first", background=True)
+    first = run(session, "sleep 0.05 && printf first", yield_time_ms=0)
     assert first.process_id is not None
     assert manager.wait_process(first.process_id, timeout_seconds=2).status is TerminalStatus.SUCCESS
 
-    second = run(session, "printf second", background=True)
+    second = run(session, "sleep 0.05 && printf second", yield_time_ms=0)
     assert second.process_id is not None
     assert manager.wait_process(second.process_id, timeout_seconds=2).status is TerminalStatus.SUCCESS
     manager.poll_process(second.process_id)
@@ -346,11 +386,11 @@ def test_terminal_runtime_finished_process_retention_is_lazy_and_bounded(tmp_pat
         raise AssertionError("old finished process should be evicted")
 
 
-def test_terminal_runtime_shutdown_kills_tracked_background_process(tmp_path) -> None:
+def test_terminal_runtime_shutdown_kills_tracked_yielded_process(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "sleep 10", background=True)
+    result = run(session, "sleep 10", yield_time_ms=0)
     assert result.process_id is not None
 
     manager.shutdown()
@@ -379,7 +419,7 @@ def test_terminal_runtime_write_does_not_append_newline(tmp_path) -> None:
     result = run(
         session,
         "python -c 'import sys; data=sys.stdin.read(4); print(\"NL\" if data.endswith(\"\\n\") else \"NO_NL\")'",
-        background=True,
+        yield_time_ms=0,
     )
     assert result.process_id is not None
 
@@ -397,7 +437,7 @@ def test_terminal_runtime_submit_appends_newline(tmp_path) -> None:
     result = run(
         session,
         "python -c 'import sys; line=sys.stdin.readline(); print(\"NL\" if line.endswith(\"\\n\") else \"NO_NL\")'",
-        background=True,
+        yield_time_ms=0,
     )
     assert result.process_id is not None
 
@@ -415,7 +455,7 @@ def test_terminal_runtime_close_stdin_sends_eof(tmp_path) -> None:
     result = run(
         session,
         "python -c 'import sys; data=sys.stdin.read(); print(\"EOF:\" + data)'",
-        background=True,
+        yield_time_ms=0,
     )
     assert result.process_id is not None
 
@@ -431,7 +471,7 @@ def test_terminal_runtime_rejects_write_after_process_finished(tmp_path) -> None
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "printf done", background=True)
+    result = run(session, "sleep 0.05 && printf done", yield_time_ms=0)
     assert result.process_id is not None
     assert manager.wait_process(result.process_id, timeout_seconds=2).status is TerminalStatus.SUCCESS
 
@@ -462,14 +502,14 @@ def test_terminal_runtime_large_output_spills_redacted_full_output_ref(tmp_path)
     assert "secret-token" not in artifact_text
 
 
-def test_terminal_runtime_background_large_output_full_output_ref_is_readable(tmp_path) -> None:
+def test_terminal_runtime_yielded_large_output_full_output_ref_is_readable(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
     result = run(
         session,
         "python -c 'print(\"START\"); print(\"y\" * 100000); print(\"END\")'",
-        background=True,
+        yield_time_ms=0,
         max_output_chars=100,
     )
     assert result.process_id is not None
@@ -490,7 +530,7 @@ def test_terminal_runtime_pty_reports_tty(tmp_path) -> None:
     result = run(
         session,
         "python -c 'import sys; print(sys.stdin.isatty())'",
-        background=True,
+        yield_time_ms=0,
         tty=True,
     )
     assert result.process_id is not None
@@ -506,7 +546,7 @@ def test_terminal_runtime_pty_python_repl_submit_and_close(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "python", background=True, tty=True, max_output_chars=5000)
+    result = run(session, "python", yield_time_ms=0, tty=True, max_output_chars=5000)
     assert result.process_id is not None
 
     manager.write_process(result.process_id, 'print("PULSARA_PTY_OK")', append_newline=True)
@@ -526,7 +566,7 @@ def test_terminal_runtime_pty_kill_does_not_leave_process_running(tmp_path) -> N
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "python", background=True, tty=True)
+    result = run(session, "python", yield_time_ms=0, tty=True)
     assert result.process_id is not None
     killed = manager.kill_process(result.process_id)
 
@@ -538,7 +578,7 @@ def test_terminal_runtime_pty_blocks_known_pipe_stdin_command(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
-    result = run(session, "gh auth login --with-token", background=True, tty=True)
+    result = run(session, "gh auth login --with-token", yield_time_ms=0, tty=True)
 
     assert result.status is TerminalStatus.BLOCKED
     assert "pipe stdin" in (result.error or "")

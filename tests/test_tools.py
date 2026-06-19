@@ -61,6 +61,20 @@ def test_core_tool_registry_can_enable_memory_write_tools(tmp_path) -> None:
     }.issubset(registry.names())
 
 
+def test_terminal_tool_schema_uses_yield_model_hard_cut(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    terminal = next(spec for spec in registry.tool_specs() if spec.name == "terminal")
+    properties = terminal.parameters["properties"]
+
+    assert terminal.parameters["additionalProperties"] is False
+    assert "yield_time_ms" in properties
+    assert "tty" in properties
+    assert "background" not in properties
+    assert "timeout_seconds" not in properties
+    assert "session_id" not in properties
+    assert "max_lifetime_seconds" not in properties
+
+
 def test_read_file_reads_workspace_file_and_blocks_path_escape(tmp_path) -> None:
     target = tmp_path / "note.txt"
     target.write_text("hello Pulsara\nsecond line\n", encoding="utf-8")
@@ -251,7 +265,7 @@ def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
     payload = json.loads(result.output)
 
     assert "workdir" in terminal_spec.parameters["properties"]
-    assert "session_id" in terminal_spec.parameters["properties"]
+    assert "terminal_session_id" in terminal_spec.parameters["properties"]
     assert result.status is ToolResultState.SUCCESS
     assert payload["output"] == str(tmp_path / "src")
     assert payload["terminal_session_id"] == "default"
@@ -269,7 +283,7 @@ def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
         ToolCall(
             id="call:terminal",
             name="terminal",
-            arguments={"command": "sleep 5", "background": True},
+            arguments={"command": "sleep 5", "yield_time_ms": 0},
         ),
         event_context=CTX,
     )
@@ -312,7 +326,7 @@ def test_terminal_process_wait_without_timeout_uses_finite_default(monkeypatch, 
         ToolCall(
             id="call:terminal",
             name="terminal",
-            arguments={"command": "sleep 5", "background": True},
+            arguments={"command": "sleep 5", "yield_time_ms": 0},
         ),
         event_context=CTX,
     )
@@ -338,7 +352,39 @@ def test_terminal_process_wait_without_timeout_uses_finite_default(monkeypatch, 
     assert json.loads(kill.output)["status"] == "killed"
 
 
-def test_terminal_background_timeout_argument_is_fail_closed(tmp_path) -> None:
+def test_terminal_process_wait_zero_timeout_uses_finite_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "pulsara_agent.tools.builtins.terminal_process.DEFAULT_WAIT_TIMEOUT_SECONDS",
+        1,
+    )
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "sleep 0.05 && printf done", "yield_time_ms": 0},
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+    wait = executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 0},
+        ),
+        event_context=CTX,
+    )
+    payload = json.loads(wait.output)
+
+    assert wait.status is ToolResultState.SUCCESS
+    assert payload["status"] == "success"
+    assert payload["output"] == "done"
+
+
+def test_terminal_removed_background_arguments_are_hard_cut(tmp_path) -> None:
     _, result = execute_tool(
         tmp_path,
         "terminal",
@@ -348,17 +394,104 @@ def test_terminal_background_timeout_argument_is_fail_closed(tmp_path) -> None:
 
     assert result.status is ToolResultState.ERROR
     assert payload["status"] == "blocked"
-    assert "does not support timeout_seconds" in payload["error"]
+    assert "no longer supported" in payload["error"]
+    assert "background" in payload["error"]
+    assert "timeout_seconds" in payload["error"]
 
 
-def test_terminal_long_running_foreground_returns_background_suggestion(tmp_path) -> None:
-    _, result = execute_tool(tmp_path, "terminal", {"command": "tail -f /dev/null"})
+def test_terminal_long_running_command_yields_to_process_id(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "sleep 0.2 && printf done", "yield_time_ms": 10})
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["status"] == "running"
+    assert payload["process_id"]
+    assert payload["yielded_to_background"] is True
+
+
+def test_terminal_max_lifetime_argument_is_not_model_facing(tmp_path) -> None:
+    _, result = execute_tool(
+        tmp_path,
+        "terminal",
+        {"command": "sleep 1", "yield_time_ms": 0, "max_lifetime_seconds": 1},
+    )
     payload = json.loads(result.output)
 
     assert result.status is ToolResultState.ERROR
     assert payload["status"] == "blocked"
-    assert payload["policy_code"] == "use_managed_background"
-    assert payload["suggested_args"] == {"background": True}
+    assert "max_lifetime_seconds" in payload["error"]
+    assert "runtime-only" in payload["error"]
+    assert "no longer supported" not in payload["error"]
+
+
+def test_terminal_max_output_chars_zero_falls_back_to_default(tmp_path) -> None:
+    _, result = execute_tool(
+        tmp_path,
+        "terminal",
+        {
+            "command": "python -c 'print(\"x\" * 400)'",
+            "max_output_chars": 0,
+        },
+    )
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["status"] == "success"
+    assert len(payload["output"]) == 400
+    assert payload["truncated"] is False
+
+
+def test_terminal_max_output_chars_tiny_value_is_floored(tmp_path) -> None:
+    _, result = execute_tool(
+        tmp_path,
+        "terminal",
+        {
+            "command": "python -c 'print(\"y\" * 600)'",
+            "max_output_chars": 5,
+        },
+    )
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["status"] == "success"
+    assert payload["output"].startswith("y" * 100)
+    assert "OUTPUT TRUNCATED" in payload["output"]
+    assert payload["truncated"] is True
+
+
+def test_terminal_process_max_output_chars_tiny_value_is_floored(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "python -c 'print(\"p\" * 600)'", "yield_time_ms": 0},
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+    wait = executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={
+                "action": "wait",
+                "process_id": process_id,
+                "timeout_seconds": 2,
+                "max_output_chars": 5,
+            },
+        ),
+        event_context=CTX,
+    )
+    payload = json.loads(wait.output)
+
+    assert wait.status is ToolResultState.SUCCESS
+    assert payload["status"] == "success"
+    assert payload["output"].startswith("p" * 100)
+    assert "OUTPUT TRUNCATED" in payload["output"]
+    assert payload["truncated"] is True
 
 
 def test_terminal_shell_background_wrapper_returns_guidance(tmp_path) -> None:
@@ -367,20 +500,21 @@ def test_terminal_shell_background_wrapper_returns_guidance(tmp_path) -> None:
 
     assert result.status is ToolResultState.ERROR
     assert payload["status"] == "blocked"
-    assert payload["policy_code"] == "use_managed_background"
-    assert "managed background=true" in payload["error"]
+    assert payload["policy_code"] == "use_terminal_yield"
+    assert payload["suggested_args"] == {"yield_time_ms": 0}
+    assert "yield semantics" in payload["error"]
 
 
-def test_terminal_notify_on_complete_is_not_supported_yet(tmp_path) -> None:
+def test_terminal_notify_on_complete_is_hard_cut(tmp_path) -> None:
     _, result = execute_tool(
         tmp_path,
         "terminal",
-        {"command": "sleep 1", "background": True, "notify_on_complete": True},
+        {"command": "sleep 1", "notify_on_complete": True},
     )
     payload = json.loads(result.output)
 
     assert result.status is ToolResultState.ERROR
-    assert payload["status"] == "not_supported_yet"
+    assert payload["status"] == "blocked"
     assert "notify_on_complete" in payload["error"]
 
 
@@ -404,7 +538,7 @@ def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
             name="terminal",
             arguments={
                 "command": "python -c 'import sys; data=sys.stdin.read(); print(\"GOT:\" + data)'",
-                "background": True,
+                "yield_time_ms": 0,
             },
         ),
         event_context=CTX,
@@ -454,7 +588,7 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
         ToolCall(
             id="call:terminal",
             name="terminal",
-            arguments={"command": "printf done", "background": True},
+            arguments={"command": "sleep 0.05 && printf done", "yield_time_ms": 0},
         ),
         event_context=CTX,
     )
@@ -482,16 +616,21 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
     assert "finished" in payload["error"]
 
 
-def test_terminal_tool_rejects_foreground_tty(tmp_path) -> None:
-    _, result = execute_tool(tmp_path, "terminal", {"command": "python", "tty": True})
+def test_terminal_tool_tty_is_valid_without_background_mode(tmp_path) -> None:
+    _, result = execute_tool(
+        tmp_path,
+        "terminal",
+        {"command": "python -c 'import sys; print(sys.stdin.isatty())'", "tty": True},
+    )
     payload = json.loads(result.output)
 
-    assert result.status is ToolResultState.ERROR
-    assert payload["status"] == "blocked"
-    assert "background=true" in payload["error"]
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["status"] == "success"
+    assert payload["io_mode"] == "pty"
+    assert "True" in payload["output"]
 
 
-def test_terminal_tool_background_tty_reports_io_mode(tmp_path) -> None:
+def test_terminal_tool_yielded_tty_reports_io_mode(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)
 
@@ -500,8 +639,8 @@ def test_terminal_tool_background_tty_reports_io_mode(tmp_path) -> None:
             id="call:terminal",
             name="terminal",
             arguments={
-                "command": "python -c 'import sys; print(sys.stdin.isatty())'",
-                "background": True,
+                "command": "python -c 'import sys, time; print(sys.stdin.isatty(), flush=True); time.sleep(0.2)'",
+                "yield_time_ms": 0,
                 "tty": True,
             },
         ),
@@ -665,7 +804,7 @@ def test_terminal_large_output_returns_preview_and_readable_full_output_ref(tmp_
                 name="terminal",
                 arguments={
                     "command": "python -c 'print(\"HEAD\"); print(\"z\" * 50000); print(\"TAIL\")'",
-                    "max_output_chars": 120,
+                    "max_output_chars": 512,
                 },
         ),
         event_context=CTX,
@@ -677,8 +816,8 @@ def test_terminal_large_output_returns_preview_and_readable_full_output_ref(tmp_
     assert result.status is ToolResultState.SUCCESS
     assert payload["truncated"] is True
     assert payload["full_output_ref"]
-    assert len(payload["output"]) < 500
-    assert len(replay_payload["output"]) < 500
+    assert len(payload["output"]) < 700
+    assert len(replay_payload["output"]) < 700
     assert replay_payload["full_output_ref"] == payload["full_output_ref"]
 
     read_result = executor.execute(

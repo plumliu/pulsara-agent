@@ -15,7 +15,13 @@ from pulsara_agent.memory import CandidatePoolProposal, InMemoryCandidatePool, P
 from pulsara_agent.memory.candidates.pool import CandidateOrigin
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
-from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
+from pulsara_agent.memory.recall.service import (
+    LexicalMemoryRecallService,
+    RecallQuery,
+    RecallResult,
+    RecallStatus,
+    RecallTrigger,
+)
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.message import AssistantMsg, TextBlock, UserMsg
 from pulsara_agent.ontology import memory
@@ -319,6 +325,24 @@ def test_memory_search_and_get_tools_return_structured_canonical_results() -> No
         store.delete_graph(graph_id)
 
 
+def test_memory_search_materialized_zero_limit_uses_default() -> None:
+    recall = _RecordingRecallService()
+    search = MemorySearchTool(recall=recall)
+
+    result = search.execute(
+        ToolCall(
+            id="call:memory-search-zero-limit",
+            name="memory_search",
+            arguments={"query": "concise summaries", "limit": 0},
+        )
+    )
+    payload = json.loads(result.output)
+
+    assert payload["status"] == "empty"
+    assert recall.last_query is not None
+    assert recall.last_query.limit == 5
+
+
 def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
@@ -572,3 +596,12 @@ class _FailingMemoryQuery:
 
     def fetch_nodes(self, ids, *, graph_id=None):
         raise AssertionError("fetch should not be called")
+
+
+class _RecordingRecallService:
+    def __init__(self) -> None:
+        self.last_query: RecallQuery | None = None
+
+    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+        self.last_query = query
+        return RecallResult(status=RecallStatus.EMPTY)

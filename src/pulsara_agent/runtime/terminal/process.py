@@ -1,4 +1,4 @@
-"""Managed local terminal processes and background process registry."""
+"""Managed local terminal processes and yielded process registry."""
 
 from __future__ import annotations
 
@@ -26,11 +26,8 @@ from pulsara_agent.runtime.terminal.shell import TerminalShellConfig, detect_ter
 
 
 _TIMEOUT_EXIT_CODE = 124
-_INITIAL_OUTPUT_WAIT_SECONDS = 0.2
-
-
 class ProcessLimitError(RuntimeError):
-    """Raised when a new managed background process would exceed the live limit."""
+    """Raised when a newly yielded terminal process would exceed the live limit."""
 
 
 class ProcessInputError(RuntimeError):
@@ -46,11 +43,12 @@ class TerminalProcessState:
     backend_type: TerminalBackendType
     io_mode: TerminalIOMode
     process: subprocess.Popen[bytes]
-    background: bool
+    stdin_pipe: bool
     max_output_chars: int
     capture_cwd_file: Path | None = None
     pty_master_fd: int | None = None
     full_output_ref: str | None = None
+    yielded: bool = False
     status: TerminalStatus = TerminalStatus.RUNNING
     started_at: float = field(default_factory=time.monotonic)
     ended_at: float | None = None
@@ -61,6 +59,7 @@ class TerminalProcessState:
     output_callback: Callable[[str], None] | None = field(default=None, repr=False)
     shell: TerminalShellConfig = field(default_factory=detect_terminal_shell)
     reader_thread: Thread | None = None
+    lifetime_watchdog: Thread | None = None
     lock: RLock = field(default_factory=RLock, repr=False)
 
     @property
@@ -81,7 +80,7 @@ class ProcessRegistry:
     finished_ttl_seconds: float = 3600.0
     _processes: dict[str, TerminalProcessState] = field(default_factory=dict, init=False, repr=False)
 
-    def start_background(
+    def exec_with_yield(
         self,
         *,
         terminal_session_id: str,
@@ -89,13 +88,14 @@ class ProcessRegistry:
         cwd: Path,
         artifact_root: Path,
         max_output_chars: int,
+        yield_time_ms: int,
         backend_type: TerminalBackendType = TerminalBackendType.LOCAL,
         tty: bool = False,
+        max_lifetime_seconds: int | None = None,
+        output_callback: Callable[[str], None] | None = None,
         shell: TerminalShellConfig | None = None,
-    ) -> TerminalProcessState:
+    ) -> tuple[TerminalProcessState, bool]:
         self._cleanup_finished()
-        if self._live_count() >= self.max_live_processes:
-            raise ProcessLimitError(f"max live terminal processes reached: {self.max_live_processes}")
         state = spawn_local_process(
             terminal_session_id=terminal_session_id,
             command=command,
@@ -104,13 +104,29 @@ class ProcessRegistry:
             max_output_chars=max_output_chars,
             backend_type=backend_type,
             io_mode=TerminalIOMode.PTY if tty else TerminalIOMode.PIPE,
-            background=True,
-            capture_cwd=False,
+            stdin_pipe=True,
+            capture_cwd=True,
+            output_callback=output_callback,
             shell=shell,
         )
+        if max_lifetime_seconds is not None:
+            state.lifetime_watchdog = _arm_lifetime_watchdog(state, max_lifetime_seconds)
+        finished = wait_for_process(
+            state,
+            timeout_seconds=max(yield_time_ms, 0) / 1000,
+            kill_on_timeout=False,
+        )
+        if finished:
+            return state, False
+        if self._live_count() >= self.max_live_processes:
+            kill_process(state)
+            _cleanup_cwd_file(state)
+            raise ProcessLimitError(f"max live terminal processes reached: {self.max_live_processes}")
+        with state.lock:
+            state.yielded = True
+            state.output_callback = None
         self._processes[state.process_id] = state
-        self._wait_for_initial_output(state)
-        return state
+        return state, True
 
     def poll(self, process_id: str, *, max_output_chars: int | None = None) -> TerminalResult:
         state = self._get(process_id)
@@ -162,14 +178,14 @@ class ProcessRegistry:
             raise KeyError(f"terminal process not found or expired: {process_id}") from exc
 
     def _live_count(self) -> int:
-        return sum(1 for state in self._processes.values() if state.background and state.is_running)
+        return sum(1 for state in self._processes.values() if state.yielded and state.is_running)
 
     def _cleanup_finished(self) -> None:
         now = time.monotonic()
         expired = [
             process_id
             for process_id, state in self._processes.items()
-            if state.background
+            if state.yielded
             and state.is_finished
             and state.ended_at is not None
             and now - state.ended_at > self.finished_ttl_seconds
@@ -180,21 +196,12 @@ class ProcessRegistry:
         finished = [
             (process_id, state.ended_at or state.started_at)
             for process_id, state in self._processes.items()
-            if state.background and state.is_finished
+            if state.yielded and state.is_finished
         ]
         finished.sort(key=lambda item: item[1])
         while len(finished) > self.max_finished_processes:
             process_id, _ = finished.pop(0)
             self._processes.pop(process_id, None)
-
-    def _wait_for_initial_output(self, state: TerminalProcessState) -> None:
-        deadline = time.monotonic() + _INITIAL_OUTPUT_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            if state.is_finished:
-                return
-            if state.output.has_snapshot_text(max_chars=state.max_output_chars):
-                return
-            time.sleep(0.01)
 
 
 def spawn_local_process(
@@ -206,7 +213,7 @@ def spawn_local_process(
     artifact_root: Path | None = None,
     backend_type: TerminalBackendType = TerminalBackendType.LOCAL,
     io_mode: TerminalIOMode = TerminalIOMode.PIPE,
-    background: bool,
+    stdin_pipe: bool,
     capture_cwd: bool,
     output_callback: Callable[[str], None] | None = None,
     shell: TerminalShellConfig | None = None,
@@ -238,7 +245,7 @@ def spawn_local_process(
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE if background else subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
             preexec_fn=os.setsid,
         )
     state = TerminalProcessState(
@@ -249,7 +256,7 @@ def spawn_local_process(
         backend_type=backend_type,
         io_mode=io_mode,
         process=proc,
-        background=background,
+        stdin_pipe=stdin_pipe,
         max_output_chars=max_output_chars,
         capture_cwd_file=cwd_file,
         pty_master_fd=pty_master_fd,
@@ -370,7 +377,7 @@ def snapshot_process(
         status = state.status
         exit_code = state.exit_code
         timed_out = state.timed_out
-        process_id = state.process_id if state.background else None
+        process_id = state.process_id if state.yielded else None
         result_cwd = cwd or state.cwd
     processed = state.output.snapshot(max_chars=max_output_chars or state.max_output_chars)
     full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
@@ -460,6 +467,8 @@ def _reader_loop(state: TerminalProcessState) -> None:
             except OSError:
                 pass
             state.pty_master_fd = None
+        if state.yielded:
+            _cleanup_cwd_file(state)
 
 
 def _reader_fd(state: TerminalProcessState) -> int | None:
@@ -470,7 +479,8 @@ def _reader_fd(state: TerminalProcessState) -> int | None:
 
 
 def _emit_output_delta(state: TerminalProcessState, delta: str) -> None:
-    callback = state.output_callback
+    with state.lock:
+        callback = state.output_callback
     if callback is None:
         return
     try:
@@ -502,6 +512,35 @@ def _mark_status(
 def _join_reader(state: TerminalProcessState) -> None:
     if state.reader_thread is not None:
         state.reader_thread.join(timeout=2)
+
+
+def _arm_lifetime_watchdog(state: TerminalProcessState, seconds: int) -> Thread:
+    def _watch() -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if state.is_finished:
+                return
+            time.sleep(0.1)
+        if state.is_running:
+            kill_process(state)
+
+    watcher = Thread(
+        target=_watch,
+        daemon=True,
+        name=f"pulsara-terminal-lifetime-{state.process_id}",
+    )
+    watcher.start()
+    return watcher
+
+
+def _cleanup_cwd_file(state: TerminalProcessState) -> None:
+    cwd_file = state.capture_cwd_file
+    if cwd_file is None:
+        return
+    try:
+        cwd_file.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _terminate_process_group(proc: subprocess.Popen[bytes]) -> None:

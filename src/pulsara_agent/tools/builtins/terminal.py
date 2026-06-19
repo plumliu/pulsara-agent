@@ -11,10 +11,13 @@ from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManag
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
+    MIN_TERMINAL_OUTPUT_CHARS,
+    bounded_int_arg,
     bool_arg,
     int_arg,
     object_schema,
     required_str_arg,
+    str_arg,
 )
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
@@ -24,7 +27,8 @@ class TerminalTool(WorkspaceTool):
     terminal_sessions: TerminalSessionManager | None = None
     name: str = "terminal"
     description: str = (
-        "Run a foreground shell command inside workspace_root. "
+        "Run a shell command inside workspace_root. "
+        "If it is still running after yield_time_ms, return a process_id for terminal_process while the command keeps running. "
         "Use read_file/search_files/write_file/edit_file for file operations; "
         "reserve terminal for builds, tests, git, package managers, scripts, network commands, and external CLIs."
     )
@@ -35,28 +39,25 @@ class TerminalTool(WorkspaceTool):
                 "type": "string",
                 "description": "Optional working directory inside workspace_root. Relative paths resolve from workspace_root.",
             },
-            "session_id": {
-                "type": "string",
-                "default": "default",
-                "description": "Optional terminal session id. Use short names like default, frontend, or tests.",
-            },
             "terminal_session_id": {
                 "type": "string",
                 "default": "default",
-                "description": "Canonical terminal session id. session_id is retained as a compatibility alias.",
+                "description": "Terminal session id. Use short names like default, frontend, or tests.",
             },
-            "timeout_seconds": {"type": "integer", "default": 30},
-            "max_output_chars": {"type": "integer", "default": DEFAULT_MAX_OUTPUT_CHARS},
-            "background": {
-                "type": "boolean",
-                "default": False,
-                "description": "Start a managed background process and return process_id.",
+            "yield_time_ms": {
+                "type": "integer",
+                "default": 10_000,
+                "description": (
+                    "Wait up to this many milliseconds for the command to finish. "
+                    "If it is still running after this window, return process_id; the command is not killed."
+                ),
             },
             "tty": {
                 "type": "boolean",
                 "default": False,
-                "description": "Use a POSIX PTY for managed background interactive commands.",
+                "description": "Allocate a POSIX PTY for interactive commands.",
             },
+            "max_output_chars": {"type": "integer", "default": DEFAULT_MAX_OUTPUT_CHARS},
         },
         required=["command"],
     ))
@@ -72,7 +73,7 @@ class TerminalTool(WorkspaceTool):
         return self._execute(call)
 
     def execute_streaming(self, call: ToolCall, emit_delta: Callable[[str], None]) -> ToolExecutionResult:
-        max_output = int_arg(call.arguments, "max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)
+        max_output = _max_output_chars_arg(call.arguments)
         builder = _StreamingTerminalJsonBuilder(emit_delta, max_output_chars=max_output)
         result = self._execute(call, output_callback=builder.emit_output_delta)
         return builder.finish(result)
@@ -84,52 +85,45 @@ class TerminalTool(WorkspaceTool):
         output_callback: Callable[[str], None] | None = None,
     ) -> ToolExecutionResult:
         command = required_str_arg(call.arguments, "command")
-        workdir = call.arguments.get("workdir")
-        if workdir is not None and not isinstance(workdir, str):
-            raise TypeError("workdir must be a string")
-        session_id = _terminal_session_arg(call.arguments)
-        if session_id is not None and not isinstance(session_id, str):
-            raise TypeError("terminal_session_id must be a string")
-        if "notify_on_complete" in call.arguments:
+        workdir = str_arg(call.arguments, "workdir")
+        session_id = str_arg(call.arguments, "terminal_session_id") or "default"
+        if "max_lifetime_seconds" in call.arguments:
             return self._blocked_result(
                 call,
                 command=command,
-                session_id=session_id or "default",
-                error="notify_on_complete is not supported yet",
-                payload_status="not_supported_yet",
+                session_id=session_id,
+                error=(
+                    "max_lifetime_seconds is runtime-only and is not model-facing; "
+                    "use terminal_process.kill to stop a yielded process"
+                ),
             )
-        timeout = int_arg(call.arguments, "timeout_seconds", 30)
-        max_output = int_arg(call.arguments, "max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)
-        background = bool_arg(call.arguments, "background", False)
+        removed_args = sorted(
+            {"background", "timeout_seconds", "session_id", "notify_on_complete"} & call.arguments.keys()
+        )
+        if removed_args:
+            return self._blocked_result(
+                call,
+                command=command,
+                session_id=session_id,
+                error=(
+                    f"terminal arguments are no longer supported: {', '.join(removed_args)}; "
+                    "use yield_time_ms and terminal_process instead"
+                ),
+            )
+        yield_time_ms = int_arg(call.arguments, "yield_time_ms", 10_000)
+        max_output = _max_output_chars_arg(call.arguments)
         tty = bool_arg(call.arguments, "tty", False)
-        if background:
-            output_callback = None
-        if tty and not background:
-            return self._blocked_result(
-                call,
-                command=command,
-                session_id=session_id or "default",
-                error="tty mode requires background=true",
-            )
-        if background and "timeout_seconds" in call.arguments:
-            return self._blocked_result(
-                call,
-                command=command,
-                session_id=session_id or "default",
-                error="background=true does not support timeout_seconds yet; use terminal_process.wait timeout",
-            )
         try:
             terminal_session = self.terminal_sessions.get_or_create(session_id)
         except ValueError as exc:
-            return self._blocked_result(call, command=command, session_id=session_id or "default", error=str(exc))
+            return self._blocked_result(call, command=command, session_id=session_id, error=str(exc))
 
         result = terminal_session.execute(
             TerminalRequest(
                 command=command,
                 workdir=workdir,
-                timeout_seconds=timeout,
+                yield_time_ms=yield_time_ms,
                 max_output_chars=max_output,
-                background=background,
                 tty=tty,
                 metadata={"output_callback": output_callback} if output_callback is not None else {},
             )
@@ -183,6 +177,7 @@ class TerminalTool(WorkspaceTool):
                     "suggested_args": suggested_args or {},
                     "process_id": None,
                     "full_output_ref": None,
+                    "yielded_to_background": False,
                     "terminal_session_id": session_id,
                     "backend_type": "local",
                 },
@@ -216,6 +211,7 @@ def terminal_result_payload(
         "truncated": result.truncated,
         "error": result.error,
         "process_id": result.process_id,
+        "yielded_to_background": result.status is TerminalStatus.RUNNING and result.process_id is not None,
         "terminal_session_id": terminal_session_id,
         "backend_type": backend_type,
         "io_mode": result.metadata.get("io_mode"),
@@ -234,12 +230,14 @@ def _tool_result_state(status: TerminalStatus) -> ToolResultState:
     return ToolResultState.SUCCESS if status in {TerminalStatus.SUCCESS, TerminalStatus.RUNNING} else ToolResultState.ERROR
 
 
-def _terminal_session_arg(args: dict[str, Any]) -> str | None:
-    legacy = args.get("session_id")
-    canonical = args.get("terminal_session_id")
-    if legacy is not None and canonical is not None and legacy != canonical:
-        raise ValueError("session_id and terminal_session_id must match when both are provided")
-    return canonical if canonical is not None else legacy
+def _max_output_chars_arg(args: dict[str, Any]) -> int:
+    return bounded_int_arg(
+        args,
+        "max_output_chars",
+        default=DEFAULT_MAX_OUTPUT_CHARS,
+        minimum=MIN_TERMINAL_OUTPUT_CHARS,
+        maximum=DEFAULT_MAX_OUTPUT_CHARS,
+    )
 
 
 class _StreamingTerminalJsonBuilder:

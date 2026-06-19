@@ -12,7 +12,7 @@ from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery
 from pulsara_agent.memory.scope import CTX_USER, format_scope_list, is_valid_scope
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
-from pulsara_agent.tools.builtins.schemas import int_arg, json_text, object_schema, required_str_arg, str_arg
+from pulsara_agent.tools.builtins.schemas import bounded_int_arg, json_text, object_schema, required_str_arg, str_arg
 
 
 _MEMORY_SEARCH_PARAMETERS = object_schema(
@@ -31,6 +31,7 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         },
         "limit": {
             "type": "integer",
+            "default": 5,
             "description": "Maximum results to return.",
         },
     },
@@ -90,7 +91,7 @@ class MemorySearchTool:
         if scope == "":
             scope = None
         kind = str_arg(call.arguments, "kind")
-        limit = max(1, min(int_arg(call.arguments, "limit", 5), 20))
+        limit = bounded_int_arg(call.arguments, "limit", default=5, minimum=1, maximum=20)
         scope_error = _scope_error_payload(scope, self.read_scopes)
         if scope_error is not None:
             return _tool_success(call, scope_error)

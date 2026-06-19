@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pulsara_agent.runtime.terminal.backends.local import LocalTerminalBackend
 from pulsara_agent.runtime.terminal.models import TerminalBackendType, TerminalSessionState
 from pulsara_agent.runtime.terminal.process import ProcessRegistry
 from pulsara_agent.runtime.terminal.session import TerminalSession
@@ -52,7 +51,6 @@ class TerminalSessionManager:
                 backend_type=TerminalBackendType.LOCAL,
                 backend_metadata={"shell": self.shell.to_metadata()},
             ),
-            backend=LocalTerminalBackend(shell=self.shell),
             process_registry=self.process_registry,
             shell=self.shell,
         )
