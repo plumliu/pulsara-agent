@@ -43,21 +43,76 @@ _REMEMBER_TOOL_NAMES = {
     "remember_decision",
 }
 _EXPLICIT_MEMORY_SIGNALS = (
-    "记住",
-    "以后",
-    "总是",
-    "不要",
-    "偏好",
-    "决定",
-    "remember",
+    "从现在开始",
+    "我特别讨厌",
+    "我真的不喜欢",
+    "我真的讨厌",
+    "我极其讨厌",
+    "不要忘记",
+    "从今以后",
+    "我比较喜欢",
+    "我不是这个意思",
+    "make sure you",
+    "just so you know",
     "going forward",
     "from now on",
+    "from then on",
+    "in the future",
+    "make sure to",
+    "stop doing",
+    "stop saying",
+    "don't forget",
+    "keep in mind",
+    "for the record",
+    "like i said",
+    "what i meant was",
+    "i really dislike",
+    "i don't like",
+    "i never",
+    "我更喜欢",
+    "我不喜欢",
+    "我通常",
+    "我常常",
+    "我一般",
+    "我习惯",
+    "我总",
+    "我讨厌",
+    "以后都",
+    "不要再",
+    "不是这个意思",
+    "我的意思是",
+    "千万不要",
+    "千万别",
+    "别忘了",
+    "记下来",
+    "你要记住",
+    "你得记住",
+    "你应该",
+    "你需要",
+    "你必须",
+    "you always",
+    "i told you",
+    "i usually",
+    "i always",
+    "i prefer",
+    "i'd rather",
+    "i hate",
+    "i dislike",
+    "my favorite",
+    "next time",
+    "take note",
+    "that's not what i meant",
+    "please don't",
+    "别再",
+    "我更偏好",
+    "我更偏爱",
+    "我更爱",
+    "决定",
+    "remember",
     "prefer",
     "preference",
-    "always",
-    "never",
     "do not",
-    "don't",
+    "don't"
 )
 class MemoryToolAttempt(BaseModel):
     tool_call_id: str | None = None
@@ -282,20 +337,28 @@ def _parse_reflection_output(text: str) -> MemoryReflectionOutput:
 
 def cheap_memory_hints(text: str) -> list[MemoryReflectionHint]:
     lowered = text.lower()
-    hints: list[MemoryReflectionHint] = []
-    for signal in _EXPLICIT_MEMORY_SIGNALS:
+    matches: list[tuple[int, MemoryReflectionHint]] = []
+    matched_spans: list[tuple[int, int]] = []
+    for signal in sorted(_EXPLICIT_MEMORY_SIGNALS, key=len, reverse=True):
         index = lowered.find(signal)
         if index < 0:
             continue
-        hints.append(
-            MemoryReflectionHint(
-                source="cheap_string_match",
-                reason="User text matched a cheap memory-trigger string. This may be a false positive.",
-                signal=signal,
-                excerpt=_excerpt_around(text, index),
+        end = index + len(signal)
+        if any(index < matched_end and end > matched_start for matched_start, matched_end in matched_spans):
+            continue
+        matched_spans.append((index, end))
+        matches.append(
+            (
+                index,
+                MemoryReflectionHint(
+                    source="cheap_string_match",
+                    reason="User text matched a cheap memory-trigger string. This may be a false positive.",
+                    signal=signal,
+                    excerpt=_excerpt_around(text, index),
+                ),
             )
         )
-    return hints
+    return [hint for _, hint in sorted(matches, key=lambda match: match[0])]
 
 
 def _candidate_with_id(candidate: dict[str, Any]) -> MemoryCandidate:

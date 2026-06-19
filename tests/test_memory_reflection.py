@@ -30,7 +30,7 @@ from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.candidates.pool import InMemoryCandidatePool
 from pulsara_agent.memory.hooks.durable import ReflectiveMemoryHooks
 import pulsara_agent.memory.reflection.engine as reflection_module
-from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint
+from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint, cheap_memory_hints
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState, UserMsg
 from pulsara_agent.ontology import memory
 from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession
@@ -183,6 +183,34 @@ def test_memory_reflection_false_positive_records_decision_without_candidate() -
     assert completed.proposed_count == 0
     assert completed.written_count == 0
     assert pool.list_pending() == []
+
+
+def test_cheap_memory_hints_cover_preference_and_instruction_phrases() -> None:
+    hints = cheap_memory_hints(
+        "从现在开始请直接给结论；I usually prefer concise summaries, and for the record my favorite format is bullets."
+    )
+
+    assert [hint.signal for hint in hints] == ["从现在开始", "i usually", "prefer", "for the record", "my favorite"]
+
+
+def test_cheap_memory_hints_cover_negative_preferences_and_corrections() -> None:
+    hints = cheap_memory_hints("我真的不喜欢花哨的比喻。我的意思是：请直接说工程事实。")
+
+    assert [hint.signal for hint in hints] == ["我真的不喜欢", "我的意思是"]
+
+
+def test_cheap_memory_hints_cover_colloquial_english_corrections() -> None:
+    hints = cheap_memory_hints("Please don't call it magic. What I meant was: use precise implementation terms.")
+
+    assert [hint.signal for hint in hints] == ["please don't", "what i meant was"]
+
+
+def test_cheap_memory_hints_prefer_specific_overlapping_signal() -> None:
+    hints = cheap_memory_hints("不要忘记以后都用 uv run pytest。")
+
+    assert [hint.signal for hint in hints] == ["不要忘记", "以后都"]
+    assert "不要" not in [hint.signal for hint in hints]
+    assert "以后" not in [hint.signal for hint in hints]
 
 
 def test_agent_runtime_flash_reflection_queues_candidate_at_session_end(tmp_path: Path) -> None:
