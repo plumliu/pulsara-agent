@@ -814,7 +814,7 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
 
 
 async def _run_real_agent_active_skill_smoke(tmp_path: Path) -> dict:
-    skill_dir = tmp_path / ".pulsara" / "skills" / "say-sentinel"
+    skill_dir = tmp_path / ".agents" / "skills" / "say-sentinel"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         """---

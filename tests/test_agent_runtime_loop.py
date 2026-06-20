@@ -27,6 +27,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.capability import (
     CapabilityResolveContext,
+    LocalSkillProvider,
     LocalSkillResolver,
     ResolvedCapabilitySet,
 )
@@ -771,7 +772,7 @@ Use the review checklist.
         workspace_kind="project",
         stable_project_key=str(tmp_path),
     )
-    resolver = CountingCapabilityResolver(LocalSkillResolver())
+    resolver = CountingCapabilityResolver(_workspace_only_resolver())
     agent = AgentRuntime(
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
@@ -814,7 +815,7 @@ description: Review pull requests.
     agent = AgentRuntime(
         runtime_session=RuntimeSession(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        capability_resolver=LocalSkillResolver(),
+        capability_resolver=_workspace_only_resolver(),
     )
 
     result = asyncio.run(agent.run_task("inspect this", active_skill_names=frozenset({"review-pr"})))
@@ -826,9 +827,13 @@ description: Review pull requests.
 
 
 def _write_workspace_skill(root, name: str, content: str) -> None:
-    skill_dir = root / ".pulsara" / "skills" / name
+    skill_dir = root / ".agents" / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+
+def _workspace_only_resolver() -> LocalSkillResolver:
+    return LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False))
 
 
 def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -> None:

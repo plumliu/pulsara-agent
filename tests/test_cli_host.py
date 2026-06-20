@@ -1,6 +1,7 @@
 import asyncio
 
 from pulsara_agent import cli
+from pulsara_agent.capability import LocalSkillProvider, LocalSkillResolver
 from pulsara_agent.host import HostWorkspaceInput
 from pulsara_agent.runtime.state import LoopStatus
 
@@ -89,7 +90,12 @@ def test_cli_host_run_uses_host_core_and_normalizes_ephemeral(monkeypatch, tmp_p
 def test_cli_host_inspect_prints_host_process_recovery_scope_and_skills(monkeypatch, tmp_path) -> None:
     FakeCore.instances.clear()
     monkeypatch.setattr(cli, "HostCore", FakeCore)
-    skill_dir = tmp_path / ".pulsara" / "skills" / "review-pr"
+    monkeypatch.setattr(
+        cli,
+        "LocalSkillResolver",
+        lambda: LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False)),
+    )
+    skill_dir = tmp_path / ".agents" / "skills" / "review-pr"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         """---
@@ -123,7 +129,7 @@ provides_tools:
             "name": "review-pr",
             "description": "Review pull requests.",
             "when_to_use": None,
-            "location": ".pulsara/skills/review-pr/SKILL.md",
+            "location": ".agents/skills/review-pr/SKILL.md",
             "provides_tools": ["read_file"],
         }
     ]

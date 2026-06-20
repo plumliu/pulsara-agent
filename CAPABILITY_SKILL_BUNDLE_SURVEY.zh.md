@@ -195,7 +195,7 @@ Anthropic 官方文档将 Skill 定义为 filesystem-based resources，包含 wo
 - best-practices 强调 `SKILL.md` 作为 overview / table of contents，长内容拆到单层 reference 文件；脚本应执行而不是全文塞上下文。
 - security considerations 明确把 skill 当作安装软件级风险：恶意 skill 可引导工具误用、数据外泄、执行危险代码。
 
-这说明 capability bundle 的本体不是 prompt text，而是“可由 agent 在文件系统中导航的一组材料”。Pulsara V1 如果只支持 local `.pulsara/skills`，也应保留目录、supporting files、relative path 的语义，而不是只读取一个 markdown 字符串。
+这说明 capability bundle 的本体不是 prompt text，而是“可由 agent 在文件系统中导航的一组材料”。Pulsara V1 即使只支持 local filesystem skill provider，也应保留目录、supporting files、relative path 的语义，而不是只读取一个 markdown 字符串。
 
 ## 对比矩阵
 
@@ -234,9 +234,10 @@ Anthropic 官方文档将 Skill 定义为 filesystem-based resources，包含 wo
 
 第一轮只做 input capability，且只接 local skill provider：
 
-- 发现 `.pulsara/skills/<skill-name>/SKILL.md`。
+- 发现 `<workspace>/.pulsara/skills/<skill-name>/SKILL.md`、`<workspace>/.agents/skills/<skill-name>/SKILL.md`、`${PULSARA_HOME}/skills/<skill-name>/SKILL.md`、`~/.agents/skills/<skill-name>/SKILL.md`。
+- 不发现 `~/.codex/skills`、`~/.claude/skills`、`~/.hermes/skills`、`~/.openclaw/skills` 或其他 agent 的 product home skills。
 - 解析 `name`、`description`、可选 `when_to_use`、`provides_tools`、`disable_model_invocation`、`user_invocable`；V1 不暴露作者可写 `allowed_scopes/blocked_scopes`。
-- 生成低成本 available skill catalog prompt fragment，location 使用 workspace-relative path，并对 XML-ish wrapper 中的字段做 escaping。
+- 生成低成本 available skill catalog prompt fragment，location 使用非绝对 display path，并对 XML-ish wrapper 中的字段做 escaping。
 - 支持显式 `$skill` / `skill:<name>` / slash-like host command 激活完整 skill。
 - full body 保持 raw Markdown，用 collision-checked sentinel fence 作为 prompt fragment 注入当前用户消息对应的 agent run，而不是永久改 system prompt。
 - supporting files 第一轮只在 prompt 中告诉模型如何通过现有 file tools 读取；不新增专用 `skill_view`，除非后续发现 file path 暴露体验差。

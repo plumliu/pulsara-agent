@@ -1,7 +1,8 @@
-"""Workspace-local SKILL.md discovery and V1 frontmatter parsing."""
+"""Local SKILL.md discovery and V1 frontmatter parsing."""
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,10 +10,14 @@ from typing import Any
 
 import yaml
 
-from pulsara_agent.capability.types import CapabilityDiagnostic, LocalSkillManifest
+from pulsara_agent.capability.types import CapabilityDiagnostic, LocalSkillManifest, SkillSource
 
 
-SKILL_ROOT_PARTS = (".pulsara", "skills")
+WORKSPACE_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
+WORKSPACE_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
+USER_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
+USER_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
+PULSARA_HOME_ENV = "PULSARA_HOME"
 SKILL_FILE_NAME = "SKILL.md"
 MAX_SKILL_FILE_BYTES = 64 * 1024
 MAX_SKILL_NAME_CHARS = 64
@@ -36,9 +41,27 @@ class LocalSkillDiscovery:
     diagnostics: tuple[CapabilityDiagnostic, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _SkillRoot:
+    path: Path
+    source: SkillSource
+    location_prefix: str
+    containment_root: Path
+
+
 class LocalSkillProvider:
-    def __init__(self, *, max_skill_file_bytes: int = MAX_SKILL_FILE_BYTES) -> None:
+    def __init__(
+        self,
+        *,
+        max_skill_file_bytes: int = MAX_SKILL_FILE_BYTES,
+        user_product_skills_root: Path | None = None,
+        user_agents_skills_root: Path | None = None,
+        include_user_skills: bool = True,
+    ) -> None:
         self.max_skill_file_bytes = max_skill_file_bytes
+        self.user_product_skills_root = user_product_skills_root
+        self.user_agents_skills_root = user_agents_skills_root
+        self.include_user_skills = include_user_skills
 
     def discover(
         self,
@@ -47,86 +70,138 @@ class LocalSkillProvider:
         available_tool_names: frozenset[str],
     ) -> LocalSkillDiscovery:
         workspace_root = workspace_root.expanduser().resolve()
-        skills_root = workspace_root.joinpath(*SKILL_ROOT_PARTS)
+        skill_roots = self._skill_roots(workspace_root)
         diagnostics: list[CapabilityDiagnostic] = []
-        if not skills_root.exists():
-            return LocalSkillDiscovery(skills=(), diagnostics=())
-        if not skills_root.is_dir():
-            return LocalSkillDiscovery(
-                skills=(),
-                diagnostics=(
+        skills: list[LocalSkillManifest] = []
+        seen_names: set[str] = set()
+
+        for root in skill_roots:
+            if not root.path.exists():
+                continue
+            if not _is_within(root.path, root.containment_root):
+                diagnostics.append(
+                    CapabilityDiagnostic(
+                        severity="warning",
+                        code="skill_symlink_escape",
+                        message=f"Skill root resolves outside allowed root: {root.path}",
+                        path=root.path,
+                    )
+                )
+                continue
+            if not root.path.is_dir():
+                diagnostics.append(
                     CapabilityDiagnostic(
                         severity="warning",
                         code="skill_root_not_directory",
-                        message=f"Skill root is not a directory: {skills_root}",
-                        path=skills_root,
-                    ),
-                ),
-            )
+                        message=f"Skill root is not a directory: {root.path}",
+                        path=root.path,
+                    )
+                )
+                continue
 
-        skills: list[LocalSkillManifest] = []
-        seen_names: set[str] = set()
-        for child in sorted(skills_root.iterdir(), key=lambda path: path.name):
-            if not child.is_dir():
-                continue
-            if not _is_within(child, workspace_root):
-                diagnostics.append(
-                    CapabilityDiagnostic(
-                        severity="warning",
-                        code="skill_symlink_escape",
-                        message=f"Skill directory resolves outside workspace: {child}",
-                        path=child,
+            for child in sorted(root.path.iterdir(), key=lambda path: path.name):
+                if child.name.startswith("."):
+                    continue
+                if not child.is_dir():
+                    continue
+                if not _is_within(child, root.containment_root):
+                    diagnostics.append(
+                        CapabilityDiagnostic(
+                            severity="warning",
+                            code="skill_symlink_escape",
+                            message=f"Skill directory resolves outside skill root: {child}",
+                            path=child,
+                        )
                     )
-                )
-                continue
-            skill_file = child / SKILL_FILE_NAME
-            if not skill_file.exists():
-                diagnostics.append(
-                    CapabilityDiagnostic(
-                        severity="warning",
-                        code="skill_missing_file",
-                        message=f"Skill directory has no {SKILL_FILE_NAME}: {child}",
-                        path=child,
+                    continue
+                skill_file = child / SKILL_FILE_NAME
+                if not skill_file.exists():
+                    diagnostics.append(
+                        CapabilityDiagnostic(
+                            severity="warning",
+                            code="skill_missing_file",
+                            message=f"Skill directory has no {SKILL_FILE_NAME}: {child}",
+                            path=child,
+                        )
                     )
-                )
-                continue
-            if not _is_within(skill_file, workspace_root):
-                diagnostics.append(
-                    CapabilityDiagnostic(
-                        severity="warning",
-                        code="skill_symlink_escape",
-                        message=f"Skill file resolves outside workspace: {skill_file}",
-                        path=skill_file,
+                    continue
+                if not _is_within(skill_file, root.containment_root):
+                    diagnostics.append(
+                        CapabilityDiagnostic(
+                            severity="warning",
+                            code="skill_symlink_escape",
+                            message=f"Skill file resolves outside skill root: {skill_file}",
+                            path=skill_file,
+                        )
                     )
+                    continue
+                skill, parse_diagnostics = self._parse_skill_file(
+                    skill_file,
+                    root=root,
+                    available_tool_names=available_tool_names,
                 )
-                continue
-            skill, parse_diagnostics = self._parse_skill_file(
-                skill_file,
-                workspace_root=workspace_root,
-                available_tool_names=available_tool_names,
-            )
-            diagnostics.extend(parse_diagnostics)
-            if skill is None:
-                continue
-            if skill.name in seen_names:
-                diagnostics.append(
-                    CapabilityDiagnostic(
-                        severity="warning",
-                        code="skill_duplicate_name",
-                        message=f"Duplicate skill name ignored: {skill.name}",
-                        path=skill.path,
+                diagnostics.extend(parse_diagnostics)
+                if skill is None:
+                    continue
+                if skill.name in seen_names:
+                    diagnostics.append(
+                        CapabilityDiagnostic(
+                            severity="warning",
+                            code="skill_duplicate_name",
+                            message=f"Duplicate skill name ignored: {skill.name}",
+                            path=skill.path,
+                        )
                     )
-                )
-                continue
-            seen_names.add(skill.name)
-            skills.append(skill)
+                    continue
+                seen_names.add(skill.name)
+                skills.append(skill)
         return LocalSkillDiscovery(skills=tuple(skills), diagnostics=tuple(diagnostics))
+
+    def _skill_roots(self, workspace_root: Path) -> tuple[_SkillRoot, ...]:
+        roots = [
+            _SkillRoot(
+                path=workspace_root.joinpath(*WORKSPACE_PRODUCT_SKILL_ROOT_PARTS),
+                source="workspace",
+                location_prefix=".pulsara/skills",
+                containment_root=workspace_root,
+            ),
+            _SkillRoot(
+                path=workspace_root.joinpath(*WORKSPACE_AGENTS_SKILL_ROOT_PARTS),
+                source="workspace",
+                location_prefix=".agents/skills",
+                containment_root=workspace_root,
+            ),
+        ]
+        if self.include_user_skills:
+            user_product_root = self.user_product_skills_root
+            if user_product_root is None:
+                user_product_root = _default_user_product_skills_root()
+            user_agents_root = self.user_agents_skills_root
+            if user_agents_root is None:
+                user_agents_root = Path.home().joinpath(*USER_AGENTS_SKILL_ROOT_PARTS)
+            roots.append(
+                _SkillRoot(
+                    path=user_product_root.expanduser().resolve(),
+                    source="user",
+                    location_prefix="~/.pulsara/skills",
+                    containment_root=user_product_root.expanduser().resolve(),
+                )
+            )
+            roots.append(
+                _SkillRoot(
+                    path=user_agents_root.expanduser().resolve(),
+                    source="user",
+                    location_prefix="~/.agents/skills",
+                    containment_root=user_agents_root.expanduser().resolve(),
+                )
+            )
+        return tuple(roots)
 
     def _parse_skill_file(
         self,
         path: Path,
         *,
-        workspace_root: Path,
+        root: _SkillRoot,
         available_tool_names: frozenset[str],
     ) -> tuple[LocalSkillManifest | None, tuple[CapabilityDiagnostic, ...]]:
         diagnostics: list[CapabilityDiagnostic] = []
@@ -216,8 +291,9 @@ class LocalSkillProvider:
                 description=description,
                 path=path,
                 base_dir=path.parent,
-                location=path.resolve().relative_to(workspace_root).as_posix(),
+                location=_skill_location(path, root=root),
                 content=content,
+                source=root.source,
                 when_to_use=when_to_use,
                 provides_tools=provides_tools,
                 disable_model_invocation=_bool_field(raw_fields, "disable_model_invocation", default=False),
@@ -230,10 +306,22 @@ class LocalSkillProvider:
 
 def _is_within(path: Path, root: Path) -> bool:
     try:
-        path.resolve(strict=True).relative_to(root)
+        path.resolve(strict=True).relative_to(root.resolve(strict=True))
     except (FileNotFoundError, ValueError):
         return False
     return True
+
+
+def _skill_location(path: Path, *, root: _SkillRoot) -> str:
+    relative = path.resolve().relative_to(root.path.resolve()).as_posix()
+    return f"{root.location_prefix}/{relative}"
+
+
+def _default_user_product_skills_root() -> Path:
+    pulsara_home = os.getenv(PULSARA_HOME_ENV)
+    if pulsara_home:
+        return Path(pulsara_home).expanduser() / "skills"
+    return Path.home().joinpath(*USER_PRODUCT_SKILL_ROOT_PARTS)
 
 
 def _read_bounded_utf8(path: Path, *, max_bytes: int) -> tuple[str, bool]:
