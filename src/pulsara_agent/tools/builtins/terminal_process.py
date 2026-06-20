@@ -28,6 +28,7 @@ DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 @dataclass(slots=True)
 class TerminalProcessTool(WorkspaceTool):
     terminal_sessions: TerminalSessionManager | None = None
+    owner_host_session_id: str | None = None
     name: str = "terminal_process"
     description: str = (
         "Poll, wait for, kill, or send stdin to a managed terminal process returned when terminal yields a process_id. "
@@ -76,7 +77,11 @@ class TerminalProcessTool(WorkspaceTool):
             )
         try:
             if action == "poll":
-                result = self.terminal_sessions.poll_process(process_id, max_output_chars=max_output)
+                result = self.terminal_sessions.poll_process(
+                    process_id,
+                    max_output_chars=max_output,
+                    owner_host_session_id=self.owner_host_session_id,
+                )
             elif action == "wait":
                 timeout = bounded_int_arg(
                     call.arguments,
@@ -89,9 +94,14 @@ class TerminalProcessTool(WorkspaceTool):
                     process_id,
                     timeout_seconds=timeout,
                     max_output_chars=max_output,
+                    owner_host_session_id=self.owner_host_session_id,
                 )
             elif action == "kill":
-                result = self.terminal_sessions.kill_process(process_id, max_output_chars=max_output)
+                result = self.terminal_sessions.kill_process(
+                    process_id,
+                    max_output_chars=max_output,
+                    owner_host_session_id=self.owner_host_session_id,
+                )
             elif action in {"write", "submit"}:
                 data = call.arguments.get("data")
                 if not isinstance(data, str):
@@ -106,9 +116,14 @@ class TerminalProcessTool(WorkspaceTool):
                     data,
                     append_newline=action == "submit",
                     max_output_chars=max_output,
+                    owner_host_session_id=self.owner_host_session_id,
                 )
             elif action == "close_stdin":
-                result = self.terminal_sessions.close_process_stdin(process_id, max_output_chars=max_output)
+                result = self.terminal_sessions.close_process_stdin(
+                    process_id,
+                    max_output_chars=max_output,
+                    owner_host_session_id=self.owner_host_session_id,
+                )
             else:
                 raise AssertionError(action)
         except KeyError as exc:

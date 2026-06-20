@@ -21,6 +21,7 @@ class EventLog(Protocol):
         run_id: str | None = None,
         turn_id: str | None = None,
         reply_id: str | None = None,
+        after_sequence: int | None = None,
     ) -> list[AgentEvent]: ...
 
     def replay(self, reply_id: str) -> Msg: ...

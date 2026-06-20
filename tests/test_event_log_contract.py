@@ -84,6 +84,7 @@ def test_event_log_assigns_sequences_and_filters_events(event_log: EventLog) -> 
     assert [event.sequence for event in event_log.iter()] == list(range(1, 8))
     assert [event.reply_id for event in event_log.iter(run_id=first.run_id)] == [first.reply_id] * 6
     assert [event.run_id for event in event_log.iter(reply_id=second.reply_id)] == [second.run_id]
+    assert [event.sequence for event in event_log.iter(after_sequence=5)] == [6, 7]
 
 
 def test_event_log_replay_rebuilds_assistant_message(event_log: EventLog) -> None:

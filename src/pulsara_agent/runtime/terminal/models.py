@@ -58,3 +58,5 @@ class TerminalSessionState:
     current_cwd: Path
     backend_type: TerminalBackendType
     backend_metadata: dict[str, Any] = field(default_factory=dict)
+    owner_host_session_id: str | None = None
+    owner_conversation_id: str | None = None

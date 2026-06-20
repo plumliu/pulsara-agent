@@ -195,6 +195,19 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     assert agent.runtime_session.event_log.replay(result.state.reply_id).content[0].text == "done"
 
 
+def test_agent_runtime_accepts_prior_messages(tmp_path) -> None:
+    prior = [UserMsg(name="user", content="previous sentinel")]
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+
+    result = asyncio.run(agent.run_task("current", prior_messages=prior))
+
+    assert result.status is LoopStatus.FINISHED
+    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    assert "previous sentinel" in context_text
+    assert "current" in context_text
+
+
 def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(tmp_path) -> None:
     runtime_session = RuntimeSession(tmp_path)
     seen_events: list[EventType] = []
@@ -671,6 +684,9 @@ class RecordingHooks(NoopMemoryHooks):
     async def on_session_start(self, state: LoopState, user_input: str) -> None:
         self.calls.append("start")
 
+    async def on_turn_start(self, state: LoopState, user_input: str) -> None:
+        self.calls.append("turn_start")
+
     async def project(self, state: LoopState, *, token_budget: int):
         self.calls.append("project")
         return {"summary": "Remember source=fenced.", "included_memory_ids": ["mem:1"]}
@@ -683,6 +699,9 @@ class RecordingHooks(NoopMemoryHooks):
 
     async def on_session_end(self, state: LoopState) -> None:
         self.calls.append("end")
+
+    async def on_turn_end(self, state: LoopState) -> None:
+        self.calls.append("turn_end")
 
 
 class SlowProjectionHooks(NoopMemoryHooks):
@@ -702,7 +721,7 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
 
     asyncio.run(agent.run_task("hi"))
 
-    assert hooks.calls == ["start", "project", "after_model", "end"]
+    assert hooks.calls == ["turn_start", "project", "after_model", "turn_end"]
     events = agent.runtime_session.event_log.iter()
     assert any(event.type is EventType.PROJECTION_REQUESTED for event in events)
     assert any(event.type is EventType.PROJECTION_READY for event in events)
@@ -818,7 +837,8 @@ def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) ->
 
     result = asyncio.run(agent.run_task("hi"))
 
-    _assert_memory_hook_failed(agent, result, "on_session_start")
+    _assert_memory_hook_failed(agent, result, "on_turn_start")
+    assert "on_session_start boom" in (result.error_message or "")
     assert transport.contexts == []
 
 
@@ -986,7 +1006,8 @@ def test_memory_hook_failure_on_session_end_returns_failed_result(tmp_path) -> N
 
     result = asyncio.run(agent.run_task("hi"))
 
-    _assert_memory_hook_failed(agent, result, "on_session_end")
+    _assert_memory_hook_failed(agent, result, "on_turn_end")
+    assert "on_session_end boom" in (result.error_message or "")
     assert result.final_text == "done"
 
 

@@ -35,9 +35,12 @@ class InMemoryEventLog:
         run_id: str | None = None,
         turn_id: str | None = None,
         reply_id: str | None = None,
+        after_sequence: int | None = None,
     ) -> list[AgentEvent]:
         with self._lock:
             events = list(self._events)
+        if after_sequence is not None:
+            events = [event for event in events if (event.sequence or 0) > after_sequence]
         if run_id is not None:
             events = [event for event in events if event.run_id == run_id]
         if turn_id is not None:

@@ -27,7 +27,7 @@ class TerminalSessionManager:
     shell: TerminalShellConfig | None = None
     env_builder: TerminalEnvBuilder | None = None
     env_config: TerminalEnvConfig | None = None
-    _sessions: dict[str, TerminalSession] = field(default_factory=dict, init=False, repr=False)
+    _sessions: dict[tuple[str | None, str], TerminalSession] = field(default_factory=dict, init=False, repr=False)
     process_registry: ProcessRegistry = field(init=False)
 
     def __post_init__(self) -> None:
@@ -42,10 +42,17 @@ class TerminalSessionManager:
             finished_ttl_seconds=self.finished_ttl_seconds,
         )
 
-    def get_or_create(self, session_id: str | None = None) -> TerminalSession:
+    def get_or_create(
+        self,
+        session_id: str | None = None,
+        *,
+        owner_host_session_id: str | None = None,
+        owner_conversation_id: str | None = None,
+    ) -> TerminalSession:
         normalized = self._normalize_session_id(session_id)
-        if normalized in self._sessions:
-            return self._sessions[normalized]
+        key = (owner_host_session_id, normalized)
+        if key in self._sessions:
+            return self._sessions[key]
         if len(self._sessions) >= self.max_sessions:
             raise ValueError(f"terminal session limit reached: max {self.max_sessions}")
         session = TerminalSession(
@@ -55,19 +62,31 @@ class TerminalSessionManager:
                 current_cwd=self.workspace_root,
                 backend_type=TerminalBackendType.LOCAL,
                 backend_metadata={"shell": self.shell.to_metadata()},
+                owner_host_session_id=owner_host_session_id,
+                owner_conversation_id=owner_conversation_id,
             ),
             process_registry=self.process_registry,
             shell=self.shell,
             env_builder=self.env_builder,
         )
-        self._sessions[normalized] = session
+        self._sessions[key] = session
         return session
 
     def list_session_ids(self) -> list[str]:
-        return sorted(self._sessions)
+        return sorted(session_id for _owner, session_id in self._sessions)
 
-    def poll_process(self, process_id: str, *, max_output_chars: int | None = None):
-        return self.process_registry.poll(process_id, max_output_chars=max_output_chars)
+    def poll_process(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ):
+        return self.process_registry.poll(
+            process_id,
+            max_output_chars=max_output_chars,
+            owner_host_session_id=owner_host_session_id,
+        )
 
     def wait_process(
         self,
@@ -75,15 +94,27 @@ class TerminalSessionManager:
         *,
         timeout_seconds: int | None = None,
         max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
     ):
         return self.process_registry.wait(
             process_id,
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
+            owner_host_session_id=owner_host_session_id,
         )
 
-    def kill_process(self, process_id: str, *, max_output_chars: int | None = None):
-        return self.process_registry.kill(process_id, max_output_chars=max_output_chars)
+    def kill_process(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ):
+        return self.process_registry.kill(
+            process_id,
+            max_output_chars=max_output_chars,
+            owner_host_session_id=owner_host_session_id,
+        )
 
     def write_process(
         self,
@@ -92,16 +123,43 @@ class TerminalSessionManager:
         *,
         append_newline: bool = False,
         max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
     ):
         return self.process_registry.write(
             process_id,
             data,
             append_newline=append_newline,
             max_output_chars=max_output_chars,
+            owner_host_session_id=owner_host_session_id,
         )
 
-    def close_process_stdin(self, process_id: str, *, max_output_chars: int | None = None):
-        return self.process_registry.close_stdin(process_id, max_output_chars=max_output_chars)
+    def close_process_stdin(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ):
+        return self.process_registry.close_stdin(
+            process_id,
+            max_output_chars=max_output_chars,
+            owner_host_session_id=owner_host_session_id,
+        )
+
+    def kill_owned(self, owner_host_session_id: str):
+        return self.process_registry.kill_owned(owner_host_session_id)
+
+    def list_owned(self, owner_host_session_id: str):
+        return self.process_registry.list_owned(owner_host_session_id)
+
+    def has_live_processes(self, *, owner_host_session_id: str | None = None) -> bool:
+        return self.process_registry.live_count(owner_host_session_id=owner_host_session_id) > 0
+
+    def live_process_count(self, *, owner_host_session_id: str | None = None) -> int:
+        return self.process_registry.live_count(owner_host_session_id=owner_host_session_id)
+
+    def finished_process_count(self, *, owner_host_session_id: str | None = None) -> int:
+        return self.process_registry.finished_count(owner_host_session_id=owner_host_session_id)
 
     def shutdown(self) -> None:
         self.process_registry.shutdown()

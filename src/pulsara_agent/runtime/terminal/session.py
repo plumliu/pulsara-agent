@@ -77,6 +77,8 @@ class TerminalSession:
                 shell=self.shell,
                 env=env_result.env,
                 env_diagnostics=env_result.diagnostics,
+                owner_host_session_id=self.state.owner_host_session_id,
+                owner_conversation_id=self.state.owner_conversation_id,
             )
         except ProcessLimitError as exc:
             return TerminalResult(

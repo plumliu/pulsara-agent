@@ -37,6 +37,7 @@ from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
 from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.terminal import TerminalSessionManager
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -69,6 +70,9 @@ def build_in_memory_runtime_wiring(
     runtime_session_id: str | None = None,
     graph_id: str | None = None,
     memory_domain: MemoryDomainContext | None = None,
+    terminal_session_manager: TerminalSessionManager | None = None,
+    terminal_owner_host_session_id: str | None = None,
+    owns_terminal_session_manager: bool = True,
 ) -> RuntimeWiring:
     resolved_graph_id = graph_id or (memory_domain.graph_id if memory_domain is not None else None)
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
@@ -80,6 +84,9 @@ def build_in_memory_runtime_wiring(
         workspace_root,
         **_runtime_session_id_kwargs(runtime_session_id),
         event_log=event_log,
+        terminal_session_manager=terminal_session_manager,
+        terminal_owner_host_session_id=terminal_owner_host_session_id,
+        owns_terminal_session_manager=owns_terminal_session_manager,
     )
     _register_timeline_hook(
         runtime_session=runtime_session,
@@ -120,6 +127,9 @@ def build_durable_runtime_wiring(
     runtime_session_id: str | None = None,
     graph_id: str | None = None,
     memory_domain: MemoryDomainContext | None = None,
+    terminal_session_manager: TerminalSessionManager | None = None,
+    terminal_owner_host_session_id: str | None = None,
+    owns_terminal_session_manager: bool = True,
 ) -> RuntimeWiring:
     runtime_session_id = runtime_session_id or _new_runtime_session_id()
     event_log = PostgresEventLog(
@@ -131,6 +141,9 @@ def build_durable_runtime_wiring(
         workspace_root,
         runtime_session_id=event_log.runtime_session_id,
         event_log=event_log,
+        terminal_session_manager=terminal_session_manager,
+        terminal_owner_host_session_id=terminal_owner_host_session_id,
+        owns_terminal_session_manager=owns_terminal_session_manager,
     )
     resolved_graph_id = graph_id or (
         memory_domain.graph_id
@@ -203,6 +216,9 @@ def build_agent_runtime_wiring(
     memory_domain: MemoryDomainContext | None = None,
     memory_reflection: bool = True,
     memory_reflection_options: MemoryReflectionOptions | None = None,
+    terminal_session_manager: TerminalSessionManager | None = None,
+    terminal_owner_host_session_id: str | None = None,
+    owns_terminal_session_manager: bool = True,
 ) -> AgentRuntimeWiring:
     runtime_wiring = (
         build_durable_runtime_wiring(
@@ -211,6 +227,9 @@ def build_agent_runtime_wiring(
             runtime_session_id=runtime_session_id,
             graph_id=graph_id,
             memory_domain=memory_domain,
+            terminal_session_manager=terminal_session_manager,
+            terminal_owner_host_session_id=terminal_owner_host_session_id,
+            owns_terminal_session_manager=owns_terminal_session_manager,
         )
         if durable
         else build_in_memory_runtime_wiring(
@@ -218,6 +237,9 @@ def build_agent_runtime_wiring(
             runtime_session_id=runtime_session_id,
             graph_id=graph_id,
             memory_domain=memory_domain,
+            terminal_session_manager=terminal_session_manager,
+            terminal_owner_host_session_id=terminal_owner_host_session_id,
+            owns_terminal_session_manager=owns_terminal_session_manager,
         )
     )
     llm_runtime = build_llm_runtime(settings.llm)

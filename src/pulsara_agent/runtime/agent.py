@@ -118,35 +118,57 @@ class AgentRuntime:
             graph_id=getattr(self.memory_hooks, "graph_id", None),
             memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
         )
-        self._last_result: AgentRunResult | None = None
 
-    async def run_task(self, user_input: str) -> AgentRunResult:
-        async for _event in self.stream_task(user_input):
+    async def run_task(
+        self,
+        user_input: str,
+        *,
+        prior_messages: list[Msg] | None = None,
+        state: LoopState | None = None,
+    ) -> AgentRunResult:
+        state = state or self.new_state()
+        async for _event in self._stream_task(user_input, state, prior_messages=prior_messages):
             pass
-        assert self._last_result is not None
-        return self._last_result
+        return self._run_result(state)
 
-    async def stream_task(self, user_input: str) -> AsyncIterator[AgentEvent]:
-        state = LoopState(session_id=self.runtime_session.runtime_session_id, budget=self.budget)
-        async for event in self._stream_task(user_input, state):
+    async def stream_task(
+        self,
+        user_input: str,
+        *,
+        prior_messages: list[Msg] | None = None,
+        state: LoopState | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        state = state or self.new_state()
+        async for event in self._stream_task(user_input, state, prior_messages=prior_messages):
             yield event
 
     def close(self) -> None:
         self.runtime_session.close()
 
-    async def _stream_task(self, user_input: str, state: LoopState) -> AsyncIterator[AgentEvent]:
+    def new_state(self) -> LoopState:
+        return LoopState(session_id=self.runtime_session.runtime_session_id, budget=self.budget)
+
+    async def _stream_task(
+        self,
+        user_input: str,
+        state: LoopState,
+        *,
+        prior_messages: list[Msg] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        state.messages.extend(message.model_copy(deep=True) for message in (prior_messages or []))
         state.messages.append(UserMsg(name="user", content=user_input))
         yield await self.runtime_session.emit(
             RunStartEvent(
                 **self._event_context(state).event_fields(),
                 user_input_chars=len(user_input),
+                metadata={"user_input": user_input},
             ),
             state=state,
         )
         ok, _result, error_event = await self._run_memory_hook(
             state,
-            "on_session_start",
-            lambda: self.memory_hooks.on_session_start(state, user_input),
+            "on_turn_start",
+            lambda: self._call_turn_start_hook(state, user_input),
         )
         if not ok:
             assert error_event is not None
@@ -302,8 +324,8 @@ class AgentRuntime:
         if run_session_end_hook:
             _ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,
-                "on_session_end",
-                lambda: self.memory_hooks.on_session_end(state),
+                "on_turn_end",
+                lambda: self._call_turn_end_hook(state),
             )
             for event in hook_events:
                 yield event
@@ -316,7 +338,9 @@ class AgentRuntime:
             ),
             state=state,
         )
-        self._last_result = AgentRunResult(
+
+    def _run_result(self, state: LoopState) -> AgentRunResult:
+        return AgentRunResult(
             status=state.status,
             stop_reason=state.stop_reason,
             state=state,
@@ -331,6 +355,18 @@ class AgentRuntime:
         except Exception as exc:
             event = await self._mark_memory_hook_failed(state, hook_name, exc)
             return False, None, event
+
+    async def _call_turn_start_hook(self, state: LoopState, user_input: str):
+        hook = getattr(self.memory_hooks, "on_turn_start", None)
+        if hook is not None and _is_overridden_hook(self.memory_hooks, "on_turn_start", NoopMemoryHooks):
+            return await hook(state, user_input)
+        return await self.memory_hooks.on_session_start(state, user_input)
+
+    async def _call_turn_end_hook(self, state: LoopState):
+        hook = getattr(self.memory_hooks, "on_turn_end", None)
+        if hook is not None and _is_overridden_hook(self.memory_hooks, "on_turn_end", NoopMemoryHooks):
+            return await hook(state)
+        return await self.memory_hooks.on_session_end(state)
 
     async def _run_memory_hook_and_emit_events(
         self,
@@ -668,3 +704,8 @@ class AgentRuntime:
 
     def _event_context(self, state: LoopState) -> EventContext:
         return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+
+
+def _is_overridden_hook(instance: object, name: str, base: type) -> bool:
+    method = getattr(type(instance), name, None)
+    return method is not None and method is not getattr(base, name, None)

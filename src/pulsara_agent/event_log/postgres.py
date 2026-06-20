@@ -49,10 +49,14 @@ class PostgresEventLog:
         run_id: str | None = None,
         turn_id: str | None = None,
         reply_id: str | None = None,
+        after_sequence: int | None = None,
     ) -> list[AgentEvent]:
         predicates = [sql.SQL("session_id = %s")]
         params: list[str] = [self.runtime_session_id]
 
+        if after_sequence is not None:
+            predicates.append(sql.SQL("sequence > %s"))
+            params.append(after_sequence)
         if run_id is not None:
             predicates.append(sql.SQL("run_id = %s"))
             params.append(run_id)

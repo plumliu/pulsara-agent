@@ -29,6 +29,7 @@ from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePa
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
+from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
@@ -176,6 +177,19 @@ def test_real_agent_runtime_uses_terminal_process_tool(tmp_path):
     assert result["terminal_status"] == "running"
     assert result["terminal_process_status"] == "killed"
     assert "PULSARA_TERMINAL_PROCESS_OK" in result["final_text"]
+
+
+def test_real_host_core_terminal_process_survives_after_real_turn(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_terminal_continuity_smoke(tmp_path), timeout=120))
+
+    assert result["status"] == "finished"
+    assert result["terminal_status_after_run"] == "running"
+    assert result["terminal_status_after_kill"] == "killed"
+    assert result["replay_count"] > 0
+    assert "PULSARA_HOST_TERMINAL_TURN_OK" in result["final_text"]
 
 
 def test_real_agent_runtime_terminal_yield_survives_wait_timeout(tmp_path):
@@ -832,6 +846,56 @@ async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
         }
     finally:
         runtime_session.close()
+
+
+async def _run_real_host_core_terminal_continuity_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    core = HostCore(settings=settings, durable=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_host_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=384),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara HostCore multi-turn terminal continuity. "
+            "Obey the user's exact step instructions. Do not pass background, timeout_seconds, session_id, "
+            "notify_on_complete, or max_lifetime_seconds to terminal."
+        ),
+    )
+    try:
+        result = await session.run_turn(
+            "Call terminal exactly once with command exactly 'sleep 60' and yield_time_ms exactly 0. "
+            "After the terminal tool returns a running process_id, answer exactly PULSARA_HOST_TERMINAL_TURN_OK."
+        )
+        events = session.replay_events()
+        payloads = _json_tool_result_payloads(events)
+        terminal_payload = next(
+            payload for payload in payloads if payload.get("process_id") and payload.get("status") == "running"
+        )
+        process_id = terminal_payload["process_id"]
+        terminal_status_after_run = session.wiring.runtime_wiring.runtime_session.terminal_sessions.poll_process(
+            process_id,
+            owner_host_session_id=session.host_session_id,
+        ).status.value
+        killed = session.wiring.runtime_wiring.runtime_session.terminal_sessions.kill_process(
+            process_id,
+            owner_host_session_id=session.host_session_id,
+        )
+        return {
+            "status": result.status.value,
+            "final_text": result.final_text.strip(),
+            "terminal_status_after_run": terminal_status_after_run,
+            "terminal_status_after_kill": killed.status.value,
+            "replay_count": len(events),
+        }
+    finally:
+        await core.close_session(session.host_session_id)
 
 
 async def _run_real_agent_terminal_yield_survival_smoke(tmp_path: Path) -> dict:
@@ -2692,6 +2756,20 @@ def _tool_arguments_by_call_id(events) -> dict[str, dict]:
         else:
             parsed[tool_call_id] = payload if isinstance(payload, dict) else {"_raw": raw}
     return parsed
+
+
+def _json_tool_result_payloads(events) -> list[dict]:
+    payloads: list[dict] = []
+    for event in events:
+        if not isinstance(event, ToolResultTextDeltaEvent):
+            continue
+        try:
+            payload = json.loads(event.delta)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
 
 
 def _load_settings_for_real_llm() -> PulsaraSettings:

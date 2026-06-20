@@ -25,6 +25,8 @@ from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 @dataclass(slots=True)
 class TerminalTool(WorkspaceTool):
     terminal_sessions: TerminalSessionManager | None = None
+    owner_host_session_id: str | None = None
+    owner_conversation_id: str | None = None
     name: str = "terminal"
     description: str = (
         "Run a shell command inside workspace_root. "
@@ -114,7 +116,11 @@ class TerminalTool(WorkspaceTool):
         max_output = _max_output_chars_arg(call.arguments)
         tty = bool_arg(call.arguments, "tty", False)
         try:
-            terminal_session = self.terminal_sessions.get_or_create(session_id)
+            terminal_session = self.terminal_sessions.get_or_create(
+                session_id,
+                owner_host_session_id=self.owner_host_session_id,
+                owner_conversation_id=self.owner_conversation_id,
+            )
         except ValueError as exc:
             return self._blocked_result(call, command=command, session_id=session_id, error=str(exc))
 

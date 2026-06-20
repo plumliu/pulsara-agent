@@ -188,6 +188,8 @@ class MemoryHooks(Protocol):
     @property
     def memory_proposal_sink(self) -> MemoryProposalSink | None: ...
 
+    async def on_turn_start(self, state: LoopState, user_input: str) -> None: ...
+
     async def on_session_start(self, state: LoopState, user_input: str) -> None: ...
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None: ...
@@ -199,6 +201,8 @@ class MemoryHooks(Protocol):
     ) -> list[AgentEvent]: ...
 
     async def should_compact(self, state: LoopState) -> bool: ...
+
+    async def on_turn_end(self, state: LoopState) -> list[AgentEvent]: ...
 
     async def on_session_end(self, state: LoopState) -> list[AgentEvent]: ...
 
@@ -214,6 +218,9 @@ class NoopMemoryHooks:
 
     async def on_session_start(self, state: LoopState, user_input: str) -> None:
         return None
+
+    async def on_turn_start(self, state: LoopState, user_input: str) -> None:
+        return await self.on_session_start(state, user_input)
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None:
         return None
@@ -231,3 +238,6 @@ class NoopMemoryHooks:
 
     async def on_session_end(self, state: LoopState) -> list[AgentEvent]:
         return []
+
+    async def on_turn_end(self, state: LoopState) -> list[AgentEvent]:
+        return await self.on_session_end(state)

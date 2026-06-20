@@ -47,8 +47,20 @@ def build_core_tool_registry(
     registry = ToolRegistry()
     registry.register(ReadFileTool(root))
     registry.register(SearchFilesTool(root))
-    registry.register(TerminalTool(root, runtime_session.terminal_sessions))
-    registry.register(TerminalProcessTool(root, runtime_session.terminal_sessions))
+    registry.register(
+        TerminalTool(
+            root,
+            runtime_session.terminal_sessions,
+            owner_host_session_id=runtime_session.terminal_owner_host_session_id,
+        )
+    )
+    registry.register(
+        TerminalProcessTool(
+            root,
+            runtime_session.terminal_sessions,
+            owner_host_session_id=runtime_session.terminal_owner_host_session_id,
+        )
+    )
     registry.register(EditFileTool(root))
     registry.register(WriteFileTool(root))
     registry.register(TodoTool())

@@ -754,14 +754,21 @@ def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) ->
                 ToolCall(
                     id="call:terminal",
                     name="terminal",
-                    arguments={"command": "printf 'STREAM_FIRST\\n'; sleep 0.5; printf STREAM_SECOND"},
+                    arguments={
+                        "command": (
+                            "python -c 'import time; "
+                            'print("STREAM_FIRST", flush=True); '
+                            "time.sleep(1.0); "
+                            'print("STREAM_SECOND", end="", flush=True)\''
+                        )
+                    },
                 ),
                 event_context=CTX,
             ),
         )
     )
     thread.start()
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + 3.0
     saw_first_delta_before_end = False
     while time.monotonic() < deadline:
         events = list(event_log.iter(reply_id="reply:tools"))

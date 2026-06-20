@@ -32,6 +32,9 @@ class RuntimeSession:
     event_log: EventLog = field(default_factory=InMemoryEventLog)
     hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
+    terminal_session_manager: TerminalSessionManager | None = None
+    owns_terminal_session_manager: bool = True
+    terminal_owner_host_session_id: str | None = None
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)
 
@@ -39,7 +42,11 @@ class RuntimeSession:
         self.workspace_root = self.workspace_root.expanduser().resolve()
         self.publisher = RuntimeEventPublisher(runtime_session_id=self.runtime_session_id)
         self.publisher.subscribe(self.hook_manager)
-        self.terminal_sessions = TerminalSessionManager(self.workspace_root)
+        if self.terminal_session_manager is None:
+            self.terminal_sessions = TerminalSessionManager(self.workspace_root)
+            self.owns_terminal_session_manager = True
+        else:
+            self.terminal_sessions = self.terminal_session_manager
 
     def _require_runtime_managed_sequence(self, event: AgentEvent) -> None:
         if event.sequence is not None:
@@ -86,7 +93,10 @@ class RuntimeSession:
         return RuntimeThreadRecorder(runtime_session=self, state=state)
 
     def close(self) -> None:
-        self.terminal_sessions.shutdown()
+        if self.owns_terminal_session_manager:
+            self.terminal_sessions.shutdown()
+        elif self.terminal_owner_host_session_id is not None:
+            self.terminal_sessions.kill_owned(self.terminal_owner_host_session_id)
 
     def create_tool_executor(
         self,

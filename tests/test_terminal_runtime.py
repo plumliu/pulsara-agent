@@ -594,6 +594,21 @@ def test_terminal_runtime_shutdown_kills_tracked_yielded_process(tmp_path) -> No
     assert killed.status is TerminalStatus.KILLED
 
 
+def test_terminal_runtime_owner_scoped_process_access(tmp_path) -> None:
+    manager = make_manager(tmp_path)
+    first = manager.get_or_create(owner_host_session_id="host:a")
+    second = manager.get_or_create(owner_host_session_id="host:b")
+
+    result = first.execute(TerminalRequest(command="sleep 10", yield_time_ms=0))
+    assert result.process_id is not None
+
+    with pytest.raises(KeyError):
+        manager.poll_process(result.process_id, owner_host_session_id="host:b")
+    assert manager.poll_process(result.process_id, owner_host_session_id="host:a").status is TerminalStatus.RUNNING
+    assert second.current_cwd == tmp_path
+    assert manager.kill_owned("host:a")[0].status is TerminalStatus.KILLED
+
+
 def test_output_accumulator_redacts_secret_split_across_chunks() -> None:
     accumulator = OutputAccumulator()
 

@@ -60,6 +60,8 @@ class TerminalProcessState:
     output: OutputAccumulator = field(default_factory=OutputAccumulator)
     output_callback: Callable[[str], None] | None = field(default=None, repr=False)
     shell: TerminalShellConfig = field(default_factory=detect_terminal_shell)
+    owner_host_session_id: str | None = None
+    owner_conversation_id: str | None = None
     reader_thread: Thread | None = None
     lifetime_watchdog: Thread | None = None
     lock: RLock = field(default_factory=RLock, repr=False)
@@ -98,6 +100,8 @@ class ProcessRegistry:
         shell: TerminalShellConfig | None = None,
         env: Mapping[str, str] | None = None,
         env_diagnostics: Mapping[str, object] | None = None,
+        owner_host_session_id: str | None = None,
+        owner_conversation_id: str | None = None,
     ) -> tuple[TerminalProcessState, bool]:
         self._cleanup_finished()
         state = spawn_local_process(
@@ -114,6 +118,8 @@ class ProcessRegistry:
             shell=shell,
             env=env,
             env_diagnostics=env_diagnostics,
+            owner_host_session_id=owner_host_session_id,
+            owner_conversation_id=owner_conversation_id,
         )
         if max_lifetime_seconds is not None:
             state.lifetime_watchdog = _arm_lifetime_watchdog(state, max_lifetime_seconds)
@@ -134,8 +140,14 @@ class ProcessRegistry:
         self._processes[state.process_id] = state
         return state, True
 
-    def poll(self, process_id: str, *, max_output_chars: int | None = None) -> TerminalResult:
-        state = self._get(process_id)
+    def poll(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ) -> TerminalResult:
+        state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
     def wait(
@@ -144,13 +156,20 @@ class ProcessRegistry:
         *,
         timeout_seconds: int | None = None,
         max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
     ) -> TerminalResult:
-        state = self._get(process_id)
+        state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         wait_for_process(state, timeout_seconds=timeout_seconds, kill_on_timeout=False)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
-    def kill(self, process_id: str, *, max_output_chars: int | None = None) -> TerminalResult:
-        state = self._get(process_id)
+    def kill(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ) -> TerminalResult:
+        state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         kill_process(state)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
@@ -161,13 +180,20 @@ class ProcessRegistry:
         *,
         append_newline: bool = False,
         max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
     ) -> TerminalResult:
-        state = self._get(process_id)
+        state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         write_process_input(state, data, append_newline=append_newline)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
-    def close_stdin(self, process_id: str, *, max_output_chars: int | None = None) -> TerminalResult:
-        state = self._get(process_id)
+    def close_stdin(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ) -> TerminalResult:
+        state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         close_process_stdin(state)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
@@ -176,12 +202,56 @@ class ProcessRegistry:
             if state.is_running:
                 kill_process(state)
 
-    def _get(self, process_id: str) -> TerminalProcessState:
+    def kill_owned(self, owner_host_session_id: str) -> list[TerminalResult]:
+        results: list[TerminalResult] = []
+        for state in list(self._processes.values()):
+            if state.owner_host_session_id != owner_host_session_id:
+                continue
+            if state.is_running:
+                kill_process(state)
+            results.append(snapshot_process(state))
+        return results
+
+    def list_owned(self, owner_host_session_id: str) -> list[TerminalResult]:
+        self._cleanup_finished()
+        return [
+            snapshot_process(state)
+            for state in self._processes.values()
+            if state.owner_host_session_id == owner_host_session_id
+        ]
+
+    def live_count(self, *, owner_host_session_id: str | None = None) -> int:
+        return sum(
+            1
+            for state in self._processes.values()
+            if state.yielded
+            and state.is_running
+            and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
+        )
+
+    def finished_count(self, *, owner_host_session_id: str | None = None) -> int:
+        return sum(
+            1
+            for state in self._processes.values()
+            if state.yielded
+            and state.is_finished
+            and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
+        )
+
+    def _get(
+        self,
+        process_id: str,
+        *,
+        owner_host_session_id: str | None = None,
+    ) -> TerminalProcessState:
         self._cleanup_finished()
         try:
-            return self._processes[process_id]
+            state = self._processes[process_id]
         except KeyError as exc:
             raise KeyError(f"terminal process not found or expired: {process_id}") from exc
+        if owner_host_session_id is not None and state.owner_host_session_id != owner_host_session_id:
+            raise KeyError(f"terminal process not found or not owned by this session: {process_id}")
+        return state
 
     def _live_count(self) -> int:
         return sum(1 for state in self._processes.values() if state.yielded and state.is_running)
@@ -225,6 +295,8 @@ def spawn_local_process(
     shell: TerminalShellConfig | None = None,
     env: Mapping[str, str] | None = None,
     env_diagnostics: Mapping[str, object] | None = None,
+    owner_host_session_id: str | None = None,
+    owner_conversation_id: str | None = None,
 ) -> TerminalProcessState:
     process_id = f"proc_{uuid4().hex}"
     shell = shell or detect_terminal_shell()
@@ -275,6 +347,8 @@ def spawn_local_process(
         full_output_ref=full_output_ref,
         output_callback=output_callback,
         shell=shell,
+        owner_host_session_id=owner_host_session_id,
+        owner_conversation_id=owner_conversation_id,
         output=OutputAccumulator(
             artifact_path=artifact_path,
             artifact_threshold_chars=max_output_chars,
@@ -411,6 +485,8 @@ def snapshot_process(
             "full_output_ref": full_output_ref,
             "shell": state.shell.to_metadata(),
             "env": dict(state.env_diagnostics),
+            "owner_host_session_id": state.owner_host_session_id,
+            "owner_conversation_id": state.owner_conversation_id,
         },
     )
 
