@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
+from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder, TerminalEnvConfig
 from pulsara_agent.runtime.terminal.output import OutputAccumulator
 from pulsara_agent.runtime.terminal.process import (
     ProcessInputError,
     read_captured_cwd,
     spawn_local_process,
+    snapshot_process,
     wait_for_process,
 )
 from pulsara_agent.runtime.terminal.shell import TerminalShellConfig
@@ -27,6 +29,11 @@ def make_manager(tmp_path, **kwargs):
 
 def run(session, command: str, **kwargs):
     return session.execute(TerminalRequest(command=command, **kwargs))
+
+
+def write_executable(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
 
 
 def test_terminal_runtime_runs_in_workspace_root_by_default(tmp_path) -> None:
@@ -181,6 +188,33 @@ def test_terminal_runtime_cleans_per_process_cwd_file_after_readback(tmp_path) -
     assert not cwd_file.exists()
 
 
+def test_spawn_local_process_default_env_does_not_inherit_provider_secret(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PULSARA_API_KEY", "pulsara-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    process = spawn_local_process(
+        terminal_session_id="default",
+        command=(
+            "python - <<'PY'\n"
+            "import os\n"
+            "print('missing_0=' + str('PULSARA_API_KEY' not in os.environ))\n"
+            "print('missing_1=' + str('OPENAI_API_KEY' not in os.environ))\n"
+            "PY"
+        ),
+        cwd=tmp_path,
+        max_output_chars=1000,
+        stdin_pipe=True,
+        capture_cwd=True,
+    )
+
+    wait_for_process(process, timeout_seconds=2, kill_on_timeout=True)
+    result = snapshot_process(process)
+
+    assert result.status is TerminalStatus.SUCCESS
+    assert "missing_0=True" in result.output
+    assert "missing_1=True" in result.output
+    assert "pulsara-secret" not in result.output
+
+
 def test_terminal_runtime_truncates_with_head_and_tail(tmp_path) -> None:
     session = make_session(tmp_path)
 
@@ -202,6 +236,167 @@ def test_terminal_runtime_strips_ansi_and_redacts_secrets(tmp_path) -> None:
     result = run(session, "printf '\\033[31mred\\033[0m API_KEY=secret-token'")
 
     assert result.output == "red API_KEY=[REDACTED]"
+
+
+def test_terminal_runtime_sanitizes_pipe_child_environment(tmp_path) -> None:
+    env_builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(enable_shell_snapshot=False),
+        parent_env={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(tmp_path),
+            "LANG": "en_US.UTF-8",
+            "PULSARA_API_KEY": "pulsara-secret",
+            "OPENAI_API_KEY": "openai-secret",
+            "FOO_TOKEN": "token-secret",
+            "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+            "NVM_DIR": "/tmp/nvm",
+            "PYTHONPATH": "/tmp/evil",
+            "NODE_OPTIONS": "--require /tmp/hook.js",
+        },
+    )
+    manager = make_manager(tmp_path, env_builder=env_builder)
+    session = manager.get_or_create()
+
+    result = run(
+        session,
+        (
+            "python - <<'PY'\n"
+            "import os\n"
+            "names = ['PULSARA_API_KEY','OPENAI_API_KEY','FOO_TOKEN','PYTHONPATH','NODE_OPTIONS']\n"
+            "for index, name in enumerate(names):\n"
+            "    print(f'missing_{index}={name not in os.environ}')\n"
+            "print('SSH_AUTH_SOCK=' + os.environ.get('SSH_AUTH_SOCK', '<missing>'))\n"
+            "print('NVM_DIR=' + os.environ.get('NVM_DIR', '<missing>'))\n"
+            "PY"
+        ),
+    )
+
+    assert result.status is TerminalStatus.SUCCESS
+    assert "missing_0=True" in result.output
+    assert "missing_1=True" in result.output
+    assert "missing_2=True" in result.output
+    assert "missing_3=True" in result.output
+    assert "missing_4=True" in result.output
+    assert "SSH_AUTH_SOCK=/tmp/ssh-agent.sock" in result.output
+    assert "NVM_DIR=/tmp/nvm" in result.output
+    assert "pulsara-secret" not in result.output
+    assert "openai-secret" not in result.output
+    assert "env" in result.metadata
+    assert "PATH" not in result.metadata["env"]
+
+
+def test_terminal_runtime_sanitizes_pty_child_environment(tmp_path) -> None:
+    env_builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(enable_shell_snapshot=False),
+        parent_env={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(tmp_path),
+            "PULSARA_API_KEY": "pulsara-secret",
+        },
+    )
+    manager = make_manager(tmp_path, env_builder=env_builder)
+    session = manager.get_or_create()
+
+    result = run(session, "python -c 'import os; print(\"present\", \"PULSARA_API_KEY\" in os.environ)'", tty=True)
+
+    assert result.status is TerminalStatus.SUCCESS
+    assert "present False" in result.output
+    assert "pulsara-secret" not in result.output
+
+
+def test_terminal_runtime_shell_snapshot_path_is_used_without_login_shell_default(tmp_path) -> None:
+    bin_dir = tmp_path / "custom-bin"
+    bin_dir.mkdir()
+    tool = bin_dir / "snapshot-tool"
+    write_executable(tool, "#!/bin/sh\nprintf snapshot-ok\n")
+    fake_shell = tmp_path / "zsh"
+    write_executable(
+        fake_shell,
+        "#!/bin/sh\n"
+        "command=''\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -c) shift; command=\"${1:-}\"; break ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "if printf '%s' \"$command\" | grep -q 'env -0'; then\n"
+        "  printf '__PULSARA_ENV_START__\\0'\n"
+        f"  printf 'PATH={bin_dir}:/usr/bin:/bin\\0'\n"
+        "  printf 'OPENAI_API_KEY=secret\\0'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exec /bin/sh -c \"$command\"\n",
+    )
+    env_builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(enable_shell_snapshot=True),
+        parent_env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+    manager = TerminalSessionManager(
+        tmp_path,
+        shell=TerminalShellConfig(path=fake_shell, login=False),
+        env_builder=env_builder,
+    )
+    session = manager.get_or_create()
+
+    result = run(session, "snapshot-tool")
+
+    assert result.status is TerminalStatus.SUCCESS
+    assert result.output == "snapshot-ok"
+    assert result.metadata["shell"]["login"] is False
+    assert result.metadata["env"]["shell_snapshot_used"] is True
+
+
+def test_terminal_runtime_nearest_venv_overlay_uses_session_cwd(tmp_path) -> None:
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / "packages" / "foo" / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / "packages" / "foo" / "src").mkdir(parents=True)
+    root_marker = tmp_path / ".venv" / "bin" / "which-venv"
+    package_marker = tmp_path / "packages" / "foo" / ".venv" / "bin" / "which-venv"
+    write_executable(root_marker, "#!/bin/sh\nprintf root-venv\n")
+    write_executable(package_marker, "#!/bin/sh\nprintf package-venv\n")
+    env_builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(enable_shell_snapshot=False),
+        parent_env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+    manager = make_manager(tmp_path, env_builder=env_builder)
+    session = manager.get_or_create()
+
+    root = run(session, "which-venv")
+    cd = run(session, "cd packages/foo/src && pwd")
+    package = run(session, "which-venv", workdir=".")
+
+    assert root.output == "root-venv"
+    assert cd.status is TerminalStatus.SUCCESS
+    assert package.output == "package-venv"
+    assert package.metadata["env"]["venv_overlay"] == str(tmp_path / "packages" / "foo" / ".venv" / "bin")
+
+
+def test_terminal_runtime_venv_overlay_falls_back_to_root_and_ignores_outside(tmp_path) -> None:
+    outside = tmp_path.parent / f"outside-venv-{os.getpid()}"
+    try:
+        (tmp_path / ".venv" / "bin").mkdir(parents=True)
+        (tmp_path / "packages" / "bar").mkdir(parents=True)
+        (outside / ".venv" / "bin").mkdir(parents=True)
+        root_marker = tmp_path / ".venv" / "bin" / "which-venv"
+        outside_marker = outside / ".venv" / "bin" / "which-venv"
+        write_executable(root_marker, "#!/bin/sh\nprintf root-venv\n")
+        write_executable(outside_marker, "#!/bin/sh\nprintf outside-venv\n")
+        env_builder = TerminalEnvBuilder(
+            config=TerminalEnvConfig(enable_shell_snapshot=False),
+            parent_env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        )
+        manager = make_manager(tmp_path, env_builder=env_builder)
+        session = manager.get_or_create()
+
+        package = run(session, "which-venv", workdir="packages/bar")
+        root = run(session, "which-venv", workdir=".")
+
+        assert package.output == "root-venv"
+        assert root.output == "root-venv"
+        assert "outside-venv" not in package.output
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_terminal_runtime_lifetime_watchdog_kills_process_group(tmp_path) -> None:

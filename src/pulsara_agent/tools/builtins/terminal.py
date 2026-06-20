@@ -147,6 +147,7 @@ class TerminalTool(WorkspaceTool):
                 "terminal_session_id": terminal_session.session_id,
                 "backend_type": terminal_session.state.backend_type.value,
                 "shell": result.metadata.get("shell"),
+                "env": result.metadata.get("env"),
             },
         )
 
@@ -223,6 +224,8 @@ def terminal_result_payload(
         payload["suggested_args"] = result.metadata.get("suggested_args") or {}
     if "shell" in result.metadata:
         payload["shell"] = result.metadata.get("shell")
+    if "env" in result.metadata:
+        payload["env"] = result.metadata.get("env") or {}
     return payload
 
 

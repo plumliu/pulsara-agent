@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder
 from pulsara_agent.runtime.terminal.guard import CommandGuard
 from pulsara_agent.runtime.terminal.models import (
     TerminalRequest,
@@ -26,6 +27,7 @@ class TerminalSession:
     state: TerminalSessionState
     process_registry: ProcessRegistry
     shell: TerminalShellConfig
+    env_builder: TerminalEnvBuilder
 
     @property
     def session_id(self) -> str:
@@ -55,6 +57,11 @@ class TerminalSession:
         output_callback = request.metadata.get("output_callback")
         if not callable(output_callback):
             output_callback = None
+        env_result = self.env_builder.build(
+            cwd=decision.effective_cwd,
+            workspace_root=self.state.workspace_root,
+            shell=self.shell,
+        )
         try:
             process, yielded = self.process_registry.exec_with_yield(
                 terminal_session_id=self.session_id,
@@ -68,6 +75,8 @@ class TerminalSession:
                 max_lifetime_seconds=request.max_lifetime_seconds,
                 output_callback=output_callback,
                 shell=self.shell,
+                env=env_result.env,
+                env_diagnostics=env_result.diagnostics,
             )
         except ProcessLimitError as exc:
             return TerminalResult(

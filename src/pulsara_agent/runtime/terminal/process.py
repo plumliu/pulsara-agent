@@ -12,9 +12,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock, Thread
-from typing import Callable
+from typing import Callable, Mapping
 from uuid import uuid4
 
+from pulsara_agent.runtime.terminal.env import build_default_subprocess_env
 from pulsara_agent.runtime.terminal.models import (
     TerminalBackendType,
     TerminalIOMode,
@@ -45,6 +46,7 @@ class TerminalProcessState:
     process: subprocess.Popen[bytes]
     stdin_pipe: bool
     max_output_chars: int
+    env_diagnostics: dict[str, object] = field(default_factory=dict)
     capture_cwd_file: Path | None = None
     pty_master_fd: int | None = None
     full_output_ref: str | None = None
@@ -94,6 +96,8 @@ class ProcessRegistry:
         max_lifetime_seconds: int | None = None,
         output_callback: Callable[[str], None] | None = None,
         shell: TerminalShellConfig | None = None,
+        env: Mapping[str, str] | None = None,
+        env_diagnostics: Mapping[str, object] | None = None,
     ) -> tuple[TerminalProcessState, bool]:
         self._cleanup_finished()
         state = spawn_local_process(
@@ -108,6 +112,8 @@ class ProcessRegistry:
             capture_cwd=True,
             output_callback=output_callback,
             shell=shell,
+            env=env,
+            env_diagnostics=env_diagnostics,
         )
         if max_lifetime_seconds is not None:
             state.lifetime_watchdog = _arm_lifetime_watchdog(state, max_lifetime_seconds)
@@ -217,9 +223,12 @@ def spawn_local_process(
     capture_cwd: bool,
     output_callback: Callable[[str], None] | None = None,
     shell: TerminalShellConfig | None = None,
+    env: Mapping[str, str] | None = None,
+    env_diagnostics: Mapping[str, object] | None = None,
 ) -> TerminalProcessState:
     process_id = f"proc_{uuid4().hex}"
     shell = shell or detect_terminal_shell()
+    subprocess_env = dict(env) if env is not None else build_default_subprocess_env()
     cwd_file = _new_cwd_file() if capture_cwd else None
     artifact_path = artifact_root / f"{process_id}.txt" if artifact_root is not None else None
     full_output_ref = f".pulsara/terminal-output/{process_id}.txt" if artifact_path is not None else None
@@ -236,6 +245,7 @@ def spawn_local_process(
                 stderr=pty_slave_fd,
                 preexec_fn=os.setsid,
                 close_fds=True,
+                env=subprocess_env,
             )
         finally:
             os.close(pty_slave_fd)
@@ -247,6 +257,7 @@ def spawn_local_process(
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
             preexec_fn=os.setsid,
+            env=subprocess_env,
         )
     state = TerminalProcessState(
         process_id=process_id,
@@ -258,6 +269,7 @@ def spawn_local_process(
         process=proc,
         stdin_pipe=stdin_pipe,
         max_output_chars=max_output_chars,
+        env_diagnostics=dict(env_diagnostics or {}),
         capture_cwd_file=cwd_file,
         pty_master_fd=pty_master_fd,
         full_output_ref=full_output_ref,
@@ -398,6 +410,7 @@ def snapshot_process(
             "terminal_session_id": state.terminal_session_id,
             "full_output_ref": full_output_ref,
             "shell": state.shell.to_metadata(),
+            "env": dict(state.env_diagnostics),
         },
     )
 

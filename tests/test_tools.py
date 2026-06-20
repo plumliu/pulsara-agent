@@ -275,6 +275,19 @@ def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
     assert result.metadata["backend_type"] == "local"
 
 
+def test_terminal_tool_payload_exposes_safe_env_diagnostics_only(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "printf hi"})
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["env"]["shell_snapshot_used"] in {True, False}
+    assert "sanitized_env_removed_count" in payload["env"]
+    assert "path_entries_count" in payload["env"]
+    assert "PATH" not in payload["env"]
+    assert "HOME" not in payload["env"]
+    assert result.metadata["env"] == payload["env"]
+
+
 def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
     registry = make_registry(tmp_path)
     executor = ToolExecutor(registry=registry)

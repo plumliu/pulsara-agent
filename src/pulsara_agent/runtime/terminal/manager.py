@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder, TerminalEnvConfig
 from pulsara_agent.runtime.terminal.models import TerminalBackendType, TerminalSessionState
 from pulsara_agent.runtime.terminal.process import ProcessRegistry
 from pulsara_agent.runtime.terminal.session import TerminalSession
@@ -24,6 +25,8 @@ class TerminalSessionManager:
     max_finished_processes: int = 32
     finished_ttl_seconds: float = 3600.0
     shell: TerminalShellConfig | None = None
+    env_builder: TerminalEnvBuilder | None = None
+    env_config: TerminalEnvConfig | None = None
     _sessions: dict[str, TerminalSession] = field(default_factory=dict, init=False, repr=False)
     process_registry: ProcessRegistry = field(init=False)
 
@@ -31,6 +34,8 @@ class TerminalSessionManager:
         self.workspace_root = self.workspace_root.expanduser().resolve()
         if self.shell is None:
             self.shell = detect_terminal_shell()
+        if self.env_builder is None:
+            self.env_builder = TerminalEnvBuilder(config=self.env_config or TerminalEnvConfig.from_env())
         self.process_registry = ProcessRegistry(
             max_live_processes=self.max_live_processes,
             max_finished_processes=self.max_finished_processes,
@@ -53,6 +58,7 @@ class TerminalSessionManager:
             ),
             process_registry=self.process_registry,
             shell=self.shell,
+            env_builder=self.env_builder,
         )
         self._sessions[normalized] = session
         return session
