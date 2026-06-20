@@ -185,16 +185,11 @@ async def _host_repl(args) -> None:
 
 
 async def _host_inspect(args) -> dict[str, object]:
-    settings = _settings_from_host_args(args)
-    core = HostCore(settings=settings, durable=False)
-    try:
-        return {
-            "sessions": [summary.__dict__ for summary in await core.list_sessions()],
-            "workspace_supervisors": await core.list_workspace_supervisors(),
-            "recovery_scope": "host_process",
-        }
-    finally:
-        await core.shutdown()
+    return {
+        "sessions": [],
+        "workspace_supervisors": [],
+        "recovery_scope": "host_process",
+    }
 
 
 def _settings_from_host_args(args) -> PulsaraSettings:

@@ -84,7 +84,11 @@ def test_cli_host_run_uses_host_core_and_normalizes_ephemeral(monkeypatch, tmp_p
 def test_cli_host_inspect_prints_host_process_recovery_scope(monkeypatch) -> None:
     FakeCore.instances.clear()
     monkeypatch.setattr(cli, "HostCore", FakeCore)
-    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+
+    def _fail_from_env(cls, prefix="PULSARA"):
+        raise AssertionError("inspect should not load settings")
+
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(_fail_from_env))
     parser = cli.build_parser()
     args = parser.parse_args(["host", "inspect"])
 
@@ -93,3 +97,4 @@ def test_cli_host_inspect_prints_host_process_recovery_scope(monkeypatch) -> Non
     assert snapshot["sessions"] == []
     assert snapshot["workspace_supervisors"] == []
     assert snapshot["recovery_scope"] == "host_process"
+    assert FakeCore.instances == []
