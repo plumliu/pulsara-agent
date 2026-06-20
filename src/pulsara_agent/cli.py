@@ -8,14 +8,17 @@ import json
 from pathlib import Path
 
 from pulsara_agent import __version__
+from pulsara_agent.capability import CapabilityResolveContext, LocalSkillResolver
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.host import HostCore, HostWorkspaceInput, normalize_workspace_kind
+from pulsara_agent.host import HostCore, HostWorkspaceInput, normalize_workspace_kind, resolve_workspace
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
+from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.tools import build_core_tool_registry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,7 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_host_common_args(
         host_subcommands.add_parser("repl", help="Start a minimal HostCore REPL.")
     )
-    inspect_cmd = host_subcommands.add_parser("inspect", help="Print an empty HostCore diagnostics snapshot.")
+    inspect_cmd = _add_host_workspace_args(
+        host_subcommands.add_parser("inspect", help="Print a HostCore diagnostics snapshot.")
+    )
     inspect_cmd.add_argument("--env-file", default=None, help="Load settings from a .env file before inspecting.")
     inspect_cmd.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
     inspect_cmd.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
@@ -59,15 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--workspace", default=".", help="Workspace path. Defaults to current directory.")
+    _add_host_workspace_args(parser)
     parser.add_argument(
-        "--workspace-kind",
-        default="project",
-        choices=("project", "transient", "ephemeral"),
-        help="Workspace kind. 'ephemeral' is accepted as an adapter alias for 'transient'.",
+        "--skill",
+        action="append",
+        default=[],
+        help="Activate a workspace skill by name for this turn. May be repeated.",
     )
-    parser.add_argument("--display-label", default=None, help="Optional workspace display label.")
-    parser.add_argument("--memory-domain-id", default="u_local", help="Memory domain id. Defaults to u_local.")
     parser.add_argument("--durable", action="store_true", help="Use durable runtime wiring.")
     parser.add_argument("--env-file", default=None, help="Load settings from a .env file before running.")
     parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
@@ -78,6 +81,19 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         choices=(ModelRole.PRO.value, ModelRole.FLASH.value),
         help="Model role to use.",
     )
+    return parser
+
+
+def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--workspace", default=".", help="Workspace path. Defaults to current directory.")
+    parser.add_argument(
+        "--workspace-kind",
+        default="project",
+        choices=("project", "transient", "ephemeral"),
+        help="Workspace kind. 'ephemeral' is accepted as an adapter alias for 'transient'.",
+    )
+    parser.add_argument("--display-label", default=None, help="Optional workspace display label.")
+    parser.add_argument("--memory-domain-id", default="u_local", help="Memory domain id. Defaults to u_local.")
     return parser
 
 
@@ -157,7 +173,7 @@ async def _host_run(args) -> object:
         model_role=ModelRole(args.model_role),
     )
     try:
-        return await session.run_turn(args.prompt)
+        return await session.run_turn(args.prompt, active_skill_names=_active_skill_names_from_args(args))
     finally:
         await core.close_session(session.host_session_id)
 
@@ -177,7 +193,7 @@ async def _host_repl(args) -> None:
                 break
             if prompt.strip() in {"exit", "quit", ":q"}:
                 break
-            result = await session.run_turn(prompt)
+            result = await session.run_turn(prompt, active_skill_names=_active_skill_names_from_args(args))
             if result.final_text:
                 print(result.final_text)
     finally:
@@ -185,10 +201,55 @@ async def _host_repl(args) -> None:
 
 
 async def _host_inspect(args) -> dict[str, object]:
+    workspace = resolve_workspace(_workspace_input_from_args(args))
+    runtime_session = RuntimeSession(workspace.workspace_root)
+    try:
+        registry = build_core_tool_registry(runtime_session)
+        resolver = LocalSkillResolver()
+        capabilities = resolver.resolve(
+            CapabilityResolveContext(
+                workspace_root=workspace.workspace_root,
+                workspace_kind=workspace.workspace_kind,
+                memory_domain=workspace.memory_domain,
+                available_tool_names=frozenset(registry.names()),
+                user_input="",
+            )
+        )
+    finally:
+        runtime_session.close()
     return {
         "sessions": [],
         "workspace_supervisors": [],
         "recovery_scope": "host_process",
+        "workspace": {
+            "workspace_kind": workspace.workspace_kind,
+            "workspace_root": str(workspace.workspace_root),
+            "display_label": workspace.display_label,
+            "workspace_scope": workspace.workspace_scope,
+            "workspace_key": workspace.workspace_key,
+            "read_scopes": sorted(workspace.memory_domain.read_scopes),
+            "allowed_write_scopes": sorted(workspace.memory_domain.allowed_write_scopes),
+        },
+        "tools": registry.names(),
+        "skills": [
+            {
+                "name": entry.name,
+                "description": entry.description,
+                "when_to_use": entry.when_to_use,
+                "location": entry.location,
+                "provides_tools": list(entry.provides_tools),
+            }
+            for entry in capabilities.catalog_entries
+        ],
+        "active_skills": [
+            {
+                "name": injection.name,
+                "location": injection.location,
+                "reason": injection.reason,
+            }
+            for injection in capabilities.active_injections
+        ],
+        "capability_diagnostics": [diagnostic.to_dict() for diagnostic in capabilities.diagnostics],
     }
 
 
@@ -209,3 +270,7 @@ def _workspace_input_from_args(args) -> HostWorkspaceInput:
         display_label=args.display_label,
         memory_domain_id=args.memory_domain_id,
     )
+
+
+def _active_skill_names_from_args(args) -> frozenset[str]:
+    return frozenset(name.strip() for name in getattr(args, "skill", ()) if name.strip())

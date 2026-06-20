@@ -41,7 +41,12 @@ class HostSession:
             owner_host_session_id=self.host_session_id
         )
 
-    async def run_turn(self, user_input: str) -> AgentRunResult:
+    async def run_turn(
+        self,
+        user_input: str,
+        *,
+        active_skill_names: frozenset[str] | None = None,
+    ) -> AgentRunResult:
         if self.closed:
             raise RuntimeError("host session is closed")
         if self._run_lock.locked():
@@ -56,13 +61,19 @@ class HostSession:
                     user_input,
                     prior_messages=prior_messages,
                     state=state,
+                    active_skill_names=active_skill_names,
                 )
                 return result
             finally:
                 self.active_run_id = None
                 self.last_active_at = time.monotonic()
 
-    async def stream_turn(self, user_input: str) -> AsyncIterator[AgentEvent]:
+    async def stream_turn(
+        self,
+        user_input: str,
+        *,
+        active_skill_names: frozenset[str] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         if self.closed:
             raise RuntimeError("host session is closed")
         if self._run_lock.locked():
@@ -77,6 +88,7 @@ class HostSession:
                     user_input,
                     prior_messages=prior_messages,
                     state=state,
+                    active_skill_names=active_skill_names,
                 ):
                     yield event
             finally:

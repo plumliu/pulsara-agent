@@ -18,6 +18,7 @@ from pulsara_agent.runtime import (
     build_durable_runtime_wiring,
     build_in_memory_runtime_wiring,
 )
+from pulsara_agent.capability import LocalSkillResolver
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
 
@@ -64,6 +65,7 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     assert wiring.agent_runtime.model_role.name == "FLASH"
     assert wiring.agent_runtime.options == LLMOptions(temperature=0, max_output_tokens=32)
     assert wiring.agent_runtime.system_prompt == "test prompt"
+    assert isinstance(wiring.agent_runtime.capability_resolver, LocalSkillResolver)
 
 
 def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -> None:
@@ -84,6 +86,28 @@ def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -
     assert wiring.memory_governance_executor.allowed_write_scopes == frozenset(
         {"ctx:user", workspace_scope(str(project_root))}
     )
+
+
+def test_agent_runtime_wiring_threads_memory_domain_to_capability_context(tmp_path) -> None:
+    project_root = tmp_path / "repo_test"
+    domain = MemoryDomainContext(
+        memory_domain_id="u_test",
+        workspace_kind="project",
+        stable_project_key=str(project_root),
+    )
+    settings = _settings_for_storage(StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"))
+
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=False,
+        model_role=ModelRole.FLASH,
+        memory_domain=domain,
+        enable_workspace_skills=False,
+    )
+
+    assert wiring.agent_runtime.memory_domain == domain
+    assert wiring.agent_runtime.workspace_kind == "project"
 
 
 def test_in_memory_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> None:

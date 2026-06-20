@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from pulsara_agent.capability import CapabilityResolver, LocalSkillResolver
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore, InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.llm import ModelRole, build_llm_runtime
@@ -219,6 +220,8 @@ def build_agent_runtime_wiring(
     terminal_session_manager: TerminalSessionManager | None = None,
     terminal_owner_host_session_id: str | None = None,
     owns_terminal_session_manager: bool = True,
+    capability_resolver: CapabilityResolver | None = None,
+    enable_workspace_skills: bool = True,
 ) -> AgentRuntimeWiring:
     runtime_wiring = (
         build_durable_runtime_wiring(
@@ -257,6 +260,11 @@ def build_agent_runtime_wiring(
         model_role=model_role,
         options=options,
         system_prompt=system_prompt,
+        capability_resolver=capability_resolver
+        if capability_resolver is not None
+        else (LocalSkillResolver() if enable_workspace_skills else None),
+        memory_domain=runtime_wiring.memory_domain,
+        workspace_kind=runtime_wiring.memory_domain.workspace_kind if runtime_wiring.memory_domain is not None else "transient",
     )
     return AgentRuntimeWiring(
         agent_runtime=agent_runtime,

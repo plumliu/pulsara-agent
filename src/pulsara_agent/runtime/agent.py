@@ -7,6 +7,11 @@ import json
 from dataclasses import dataclass
 from typing import AsyncIterator, Literal
 
+from pulsara_agent.capability.types import (
+    CapabilityResolveContext,
+    CapabilityResolver,
+    NoopCapabilityResolver,
+)
 from pulsara_agent.event import (
     AgentEvent,
     CustomEvent,
@@ -23,6 +28,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.message import (
     Msg,
     ToolCallBlock,
@@ -58,6 +64,7 @@ from pulsara_agent.runtime.tool_loop import (
 )
 from pulsara_agent.tools import ToolCall, ToolExecutor
 
+WorkspaceKind = Literal["project", "transient"]
 
 StopReason = Literal[
     "final",
@@ -70,12 +77,21 @@ StopReason = Literal[
 ]
 
 
+def compose_system_prompt(
+    base: str | None,
+    *,
+    memory_prompt: str | None = None,
+    capability_prompt: str | None = None,
+    active_skill_prompt: str | None = None,
+) -> str | None:
+    parts = [part for part in (base, memory_prompt, capability_prompt, active_skill_prompt) if part]
+    if not parts:
+        return None
+    return "\n\n".join(parts)
+
+
 def _with_memory_context_prompt(system_prompt: str | None, memory_prompt: str | None) -> str | None:
-    if not memory_prompt:
-        return system_prompt
-    if not system_prompt:
-        return memory_prompt
-    return "\n\n".join([system_prompt, memory_prompt])
+    return compose_system_prompt(system_prompt, memory_prompt=memory_prompt)
 
 
 @dataclass(slots=True)
@@ -101,6 +117,9 @@ class AgentRuntime:
         options: LLMOptions | None = None,
         budget: LoopBudget | None = None,
         system_prompt: str | None = None,
+        capability_resolver: CapabilityResolver | None = None,
+        memory_domain: MemoryDomainContext | None = None,
+        workspace_kind: WorkspaceKind = "transient",
     ) -> None:
         self.runtime_session = runtime_session
         self.llm_runtime = llm_runtime
@@ -111,6 +130,9 @@ class AgentRuntime:
         self.options = options
         self.budget = budget or LoopBudget()
         self.system_prompt = system_prompt
+        self.capability_resolver = capability_resolver or NoopCapabilityResolver()
+        self.memory_domain = memory_domain
+        self.workspace_kind = workspace_kind
         self.tool_executor = runtime_session.create_tool_executor(
             memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
             memory_recall_service=getattr(self.memory_hooks, "recall", None),
@@ -125,9 +147,15 @@ class AgentRuntime:
         *,
         prior_messages: list[Msg] | None = None,
         state: LoopState | None = None,
+        active_skill_names: frozenset[str] | None = None,
     ) -> AgentRunResult:
         state = state or self.new_state()
-        async for _event in self._stream_task(user_input, state, prior_messages=prior_messages):
+        async for _event in self._stream_task(
+            user_input,
+            state,
+            prior_messages=prior_messages,
+            active_skill_names=active_skill_names,
+        ):
             pass
         return self._run_result(state)
 
@@ -137,9 +165,15 @@ class AgentRuntime:
         *,
         prior_messages: list[Msg] | None = None,
         state: LoopState | None = None,
+        active_skill_names: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         state = state or self.new_state()
-        async for event in self._stream_task(user_input, state, prior_messages=prior_messages):
+        async for event in self._stream_task(
+            user_input,
+            state,
+            prior_messages=prior_messages,
+            active_skill_names=active_skill_names,
+        ):
             yield event
 
     def close(self) -> None:
@@ -154,6 +188,7 @@ class AgentRuntime:
         state: LoopState,
         *,
         prior_messages: list[Msg] | None = None,
+        active_skill_names: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         state.messages.extend(message.model_copy(deep=True) for message in (prior_messages or []))
         state.messages.append(UserMsg(name="user", content=user_input))
@@ -176,6 +211,17 @@ class AgentRuntime:
             async for event in self._finalize_run(state, run_session_end_hook=False):
                 yield event
             return
+        capabilities = self.capability_resolver.resolve(
+            CapabilityResolveContext(
+                workspace_root=self.runtime_session.workspace_root,
+                workspace_kind=self.workspace_kind,
+                memory_domain=self.memory_domain,
+                available_tool_names=frozenset(self.tool_executor.registry.names()),
+                user_input=user_input,
+                prior_messages=tuple(prior_messages or ()),
+                active_skill_names=active_skill_names or frozenset(),
+            )
+        )
 
         while state.status is LoopStatus.RUNNING:
             if state.turn_index >= self.budget.max_turns:
@@ -199,9 +245,11 @@ class AgentRuntime:
             context = build_llm_context(
                 state=state,
                 registry=self.tool_executor.registry,
-                system_prompt=_with_memory_context_prompt(
+                system_prompt=compose_system_prompt(
                     self.system_prompt,
-                    getattr(self.memory_hooks, "memory_context_prompt", lambda: None)(),
+                    memory_prompt=getattr(self.memory_hooks, "memory_context_prompt", lambda: None)(),
+                    capability_prompt=capabilities.catalog_prompt,
+                    active_skill_prompt=capabilities.active_skill_prompt,
                 ),
                 budget=self.budget,
             )

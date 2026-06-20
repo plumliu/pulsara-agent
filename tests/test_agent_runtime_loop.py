@@ -25,7 +25,13 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
+from pulsara_agent.capability import (
+    CapabilityResolveContext,
+    LocalSkillResolver,
+    ResolvedCapabilitySet,
+)
 from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile
+from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.graph import InMemoryGraphStore
@@ -704,6 +710,16 @@ class RecordingHooks(NoopMemoryHooks):
         self.calls.append("turn_end")
 
 
+class CountingCapabilityResolver:
+    def __init__(self, delegate: LocalSkillResolver) -> None:
+        self.delegate = delegate
+        self.calls: list[CapabilityResolveContext] = []
+
+    def resolve(self, context: CapabilityResolveContext) -> ResolvedCapabilitySet:
+        self.calls.append(context)
+        return self.delegate.resolve(context)
+
+
 class SlowProjectionHooks(NoopMemoryHooks):
     async def project(self, state: LoopState, *, token_budget: int):
         await asyncio.sleep(0.05)
@@ -726,6 +742,93 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     assert any(event.type is EventType.PROJECTION_REQUESTED for event in events)
     assert any(event.type is EventType.PROJECTION_READY for event in events)
     assert "Recalled Memory" in (transport.contexts[0].system_prompt or "")
+
+
+def test_capability_resolver_runs_once_per_user_message_and_prompt_is_stable(tmp_path) -> None:
+    _write_workspace_skill(
+        tmp_path,
+        "review-pr",
+        """---
+name: review-pr
+description: Review pull requests.
+provides_tools:
+  - noop
+---
+# Review PR
+
+Use the review checklist.
+""",
+    )
+    transport = ScriptedTransport(
+        [
+            {"tool_calls": [{"id": "call:noop", "name": "noop", "arguments": "{}"}]},
+            {"text": "done"},
+        ]
+    )
+    runtime_session = RuntimeSession(tmp_path)
+    domain = MemoryDomainContext(
+        memory_domain_id="u_test",
+        workspace_kind="project",
+        stable_project_key=str(tmp_path),
+    )
+    resolver = CountingCapabilityResolver(LocalSkillResolver())
+    agent = AgentRuntime(
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        capability_resolver=resolver,
+        memory_domain=domain,
+        workspace_kind="project",
+    )
+    registry = ToolRegistry()
+    registry.register(RecordingTool("noop", calls=[]))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("$review-pr inspect this"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert len(resolver.calls) == 1
+    assert resolver.calls[0].workspace_root == tmp_path
+    assert resolver.calls[0].workspace_kind == "project"
+    assert resolver.calls[0].memory_domain == domain
+    assert resolver.calls[0].available_tool_names == frozenset({"noop"})
+    assert len(transport.contexts) == 2
+    assert transport.contexts[0].system_prompt == transport.contexts[1].system_prompt
+    assert "Available Skills:" in (transport.contexts[0].system_prompt or "")
+    assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")
+    assert "# Review PR" in (transport.contexts[0].system_prompt or "")
+    assert [[tool.name for tool in context.tools] for context in transport.contexts] == [["noop"], ["noop"]]
+
+
+def test_agent_runtime_accepts_host_selected_active_skill(tmp_path) -> None:
+    _write_workspace_skill(
+        tmp_path,
+        "review-pr",
+        """---
+name: review-pr
+description: Review pull requests.
+---
+# Review PR
+""",
+    )
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        capability_resolver=LocalSkillResolver(),
+    )
+
+    result = asyncio.run(agent.run_task("inspect this", active_skill_names=frozenset({"review-pr"})))
+
+    assert result.status is LoopStatus.FINISHED
+    assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")
+    assert "Reason: host_command" in (transport.contexts[0].system_prompt or "")
+    assert "# Review PR" in (transport.contexts[0].system_prompt or "")
+
+
+def _write_workspace_skill(root, name: str, content: str) -> None:
+    skill_dir = root / ".pulsara" / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
 
 def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -> None:
