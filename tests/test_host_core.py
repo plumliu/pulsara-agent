@@ -9,6 +9,10 @@ from pulsara_agent.event import (
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ReplyEndEvent,
+    RunEndEvent,
+    RunErrorEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -17,6 +21,7 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
 )
 from pulsara_agent.host import HostCore, HostSessionBusyError, HostWorkspaceInput
+from pulsara_agent.host.transcript import FAILURE_NOTE_TEXT, rebuild_prior_messages
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
@@ -70,6 +75,52 @@ class ScriptedTransport:
                 delta=call["arguments"],
             )
             yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
+        yield ModelCallEndEvent(**event_context.event_fields())
+
+
+class FailingScriptedTransport:
+    api = "scripted"
+
+    def __init__(self, replies: list[dict]) -> None:
+        self.replies = replies
+        self.contexts: list[LLMContext] = []
+
+    async def stream(
+        self,
+        *,
+        model: ModelProfile,
+        context: LLMContext,
+        event_context: EventContext,
+        options: LLMOptions | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        self.contexts.append(context)
+        reply = self.replies.pop(0)
+        yield ModelCallStartEvent(
+            **event_context.event_fields(),
+            model_name=model.id,
+            model_role=model.role.value,
+            provider=model.provider,
+        )
+        if "text" in reply:
+            yield TextBlockStartEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+            yield TextBlockDeltaEvent(
+                **event_context.event_fields(),
+                block_id=f"text:{len(self.contexts)}",
+                delta=reply["text"],
+            )
+            if reply.get("close_text_block", True):
+                yield TextBlockEndEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+        if "run_error" in reply:
+            error = reply["run_error"]
+            yield RunErrorEvent(
+                **event_context.event_fields(),
+                message=error["message"],
+                code=error["code"],
+                metadata=error.get("metadata", {}),
+            )
+            return
+        if "raise" in reply:
+            raise reply["raise"]
         yield ModelCallEndEvent(**event_context.event_fields())
 
 
@@ -130,6 +181,149 @@ def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> N
     assert session.runtime_session_id == session.wiring.agent_runtime.runtime_session.runtime_session_id
     assert "first user" in _context_text(transport.contexts[1])
     assert "sentinel-one" in _context_text(transport.contexts[1])
+    assert FAILURE_NOTE_TEXT not in _context_text(transport.contexts[1])
+
+
+def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_reply_end() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "first user"}),
+            ModelCallStartEvent(**ctx.event_fields(), model_name="flash", model_role="flash", provider="scripted"),
+            RunErrorEvent(
+                **ctx.event_fields(),
+                message="APIConnectionError: sk-secret https://api.deepseek.com retry trace",
+                code="openai_responses_error",
+                metadata={"provider_data": {"base_url": "https://api.deepseek.com", "api_key": "sk-secret"}},
+            ),
+            ReplyEndEvent(**ctx.event_fields()),
+            RunEndEvent(
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
+                error_message="model error budget exceeded with sk-secret",
+            ),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert messages[0].role == "user"
+    assert messages[0].content[0].text == "first user"
+    assert messages[1].role == "assistant"
+    assert messages[1].content == []
+    assert messages[2].role == "system"
+    assert messages[2].content[0].text == FAILURE_NOTE_TEXT
+    rendered = "\n".join(
+        getattr(block, "text", "") for message in messages for block in getattr(message, "content", [])
+    )
+    assert "sk-secret" not in rendered
+    assert "api.deepseek.com" not in rendered
+    assert "retry trace" not in rendered
+
+
+def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:partial", turn_id="turn:partial", reply_id="reply:partial")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "first user"}),
+            TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="partial answer"),
+            RunErrorEvent(**ctx.event_fields(), message="provider failed", code="openai_responses_error"),
+            ReplyEndEvent(**ctx.event_fields()),
+            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="model_error"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert messages[1].role == "assistant"
+    assert messages[1].content[0].text == "partial answer"
+    assert messages[2].role == "system"
+    assert messages[2].content[0].text == FAILURE_NOTE_TEXT
+
+
+def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    failed_ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    done_ctx = EventContext(run_id="run:done", turn_id="turn:done", reply_id="reply:done")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**failed_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "failed user"}),
+            RunErrorEvent(**failed_ctx.event_fields(), message="provider failed", code="openai_responses_error"),
+            ReplyEndEvent(**failed_ctx.event_fields()),
+            RunEndEvent(**failed_ctx.event_fields(), status="failed", stop_reason="model_error"),
+            RunStartEvent(**done_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "done user"}),
+            TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
+            TextBlockDeltaEvent(**done_ctx.event_fields(), block_id="text:done", delta="done"),
+            TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
+            ReplyEndEvent(**done_ctx.event_fields()),
+            RunEndEvent(**done_ctx.event_fields(), status="finished", stop_reason="final"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "assistant", "user", "assistant"]
+    assert all(
+        not (message.role == "system" and message.content and message.content[0].text == FAILURE_NOTE_TEXT)
+        for message in messages
+    )
+
+
+def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_end() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:raised", turn_id="turn:raised", reply_id="reply:raised")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "first user"}),
+            RunErrorEvent(**ctx.event_fields(), message="APIConnectionError: boom", code="model_stream_error"),
+            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="model_error"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "system"]
+    assert messages[1].content[0].text == FAILURE_NOTE_TEXT
+
+
+def test_host_session_injects_failed_turn_note_into_next_context(tmp_path, monkeypatch) -> None:
+    transport = FailingScriptedTransport(
+        [
+            {"run_error": {"message": "APIConnectionError: sk-secret", "code": "openai_responses_error"}},
+            {"run_error": {"message": "APIConnectionError: sk-secret", "code": "openai_responses_error"}},
+            {"run_error": {"message": "APIConnectionError: sk-secret", "code": "openai_responses_error"}},
+            {"text": "recovered"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        await session.run_turn("first user")
+        await session.run_turn("please continue")
+        return session
+
+    session = asyncio.run(run())
+
+    assert session.runtime_session_id == session.wiring.agent_runtime.runtime_session.runtime_session_id
+    assert len(transport.contexts) == 4
+    second_context = transport.contexts[-1]
+    assert any(message.role.value == "system" and FAILURE_NOTE_TEXT in "\n".join(message.content) for message in second_context.messages)
+    assert "first user" in _context_text(second_context)
+    assert "please continue" in _context_text(second_context)
+    assert "sk-secret" not in _context_text(second_context)
 
 
 def test_host_session_replay_events_after_sequence(tmp_path, monkeypatch) -> None:

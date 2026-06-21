@@ -186,6 +186,37 @@ def test_openai_responses_payload_uses_function_call_output_items() -> None:
     assert all(item.get("role") != "tool" for item in payload["input"])
 
 
+def test_openai_responses_payload_preserves_message_level_system_items() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("original user input"),
+            LLMMessage.system("Pulsara note: previous turn failed."),
+            LLMMessage.user("please continue"),
+        )
+    )
+
+    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+
+    assert payload["input"][0] == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "original user input"}],
+    }
+    assert payload["input"][1] == {
+        "role": "system",
+        "content": [{"type": "input_text", "text": "Pulsara note: previous turn failed."}],
+    }
+    assert payload["input"][2] == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "please continue"}],
+    }
+
+
 def test_openai_responses_payload_expands_assistant_turn_tool_calls() -> None:
     config = LLMConfig(
         api_key="sk-test",
@@ -919,6 +950,29 @@ def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
     assert payload["messages"][2]["tool_call_id"] == "call_1"
     assert payload["messages"][3]["role"] == "tool"
     assert payload["messages"][3]["tool_call_id"] == "call_2"
+
+
+def test_openai_chat_completions_payload_preserves_message_level_system_items() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("original user input"),
+            LLMMessage.system("Pulsara note: previous turn failed."),
+            LLMMessage.user("please continue"),
+        )
+    )
+
+    payload = build_chat_completions_payload(model=config.model_for(ModelRole.PRO), context=context)
+
+    assert payload["messages"][0] == {"role": "user", "content": "original user input"}
+    assert payload["messages"][1] == {"role": "system", "content": "Pulsara note: previous turn failed."}
+    assert payload["messages"][2] == {"role": "user", "content": "please continue"}
 
 
 def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_calls() -> None:

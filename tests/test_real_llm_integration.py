@@ -114,6 +114,21 @@ def test_real_flash_model_can_emit_tool_call_events():
     assert "Pulsara" in result["replayed_tool_call_input"]
 
 
+def test_real_flash_model_accepts_message_level_system_item():
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_message_level_system_smoke())
+
+    assert result["errors"] == []
+    assert result["event_type_names"][0] == "ReplyStartEvent"
+    assert "ModelCallStartEvent" in result["event_type_names"]
+    assert "ModelCallEndEvent" in result["event_type_names"]
+    assert result["event_type_names"][-1] == "ReplyEndEvent"
+    assert "PULSARA_SYSTEM_MSG_OK" in result["text"]
+    assert "PULSARA_SYSTEM_MSG_OK" in result["replayed_text"]
+
+
 def test_real_pro_model_emits_text_and_optional_thinking_events():
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
@@ -733,6 +748,25 @@ async def _run_real_tool_call_smoke() -> dict:
         "replayed_tool_call_name": replayed_tool_call.name if replayed_tool_call else "",
         "replayed_tool_call_input": replayed_tool_call.input if replayed_tool_call else "",
     }
+
+
+async def _run_real_message_level_system_smoke() -> dict:
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("This is the original preserved user input."),
+            LLMMessage.system(
+                "Pulsara note: the previous turn did not complete. "
+                "Acknowledge this by replying with exactly: PULSARA_SYSTEM_MSG_OK"
+            ),
+        )
+    )
+    result = await _collect_real_events(
+        role=ModelRole.FLASH,
+        context=context,
+        options=LLMOptions(temperature=0, max_output_tokens=512),
+        label="real-message-level-system",
+    )
+    return _summarize_collected_result(result)
 
 
 async def _run_real_thinking_text_smoke() -> dict:
@@ -2835,9 +2869,14 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
 
 
 def _summarize_collected_result(result: dict) -> dict:
+    message = result["message"]
+    replayed_text = "".join(
+        block.text for block in message.content if isinstance(block, TextBlock)
+    ).strip()
     return {
         "event_type_names": [type(event).__name__ for event in result["events"]],
         "text": result["text"],
+        "replayed_text": replayed_text,
         "thinking": result["thinking"],
         "errors": result["errors"],
     }
