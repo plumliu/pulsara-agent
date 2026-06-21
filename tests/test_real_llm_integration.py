@@ -58,6 +58,12 @@ from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserMsg
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession, build_agent_runtime_wiring
+from pulsara_agent.runtime.permission import (
+    ApprovalPolicy,
+    EffectivePermissionPolicy,
+    PermissionProfile,
+    TerminalAccess,
+)
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.tools.builtins.memory import RememberPreferenceTool
 
@@ -79,6 +85,14 @@ def _run_error_diagnostics(events) -> list[dict]:
         for event in events
         if isinstance(event, RunErrorEvent)
     ]
+
+
+def _trusted_terminal_policy() -> EffectivePermissionPolicy:
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.RISKY_ONLY,
+        terminal=TerminalAccess.ALLOW,
+    )
 
 
 def test_real_flash_model_emits_replayable_agent_events():
@@ -178,6 +192,35 @@ def test_real_agent_runtime_completes_tool_loop_with_responses_api(tmp_path):
     assert result["tool_result_ids"] == result["tool_call_ids"]
     assert result["final_text"]
     assert "PULSARA_RESPONSES_TOOL_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_read_only_policy_hides_write_and_terminal_tools(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_read_only_permission_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["registry_names"] == ["read_file", "search_files", "todo"]
+    assert result["tool_names"] == ["read_file"]
+    assert "PULSARA_PERMISSION_READ_ONLY_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_trusted_host_allows_terminal_tool(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_agent_trusted_terminal_permission_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_names"][:1] == ["terminal"]
+    assert result["terminal_status"] == "success"
+    assert result["terminal_output"] == "PULSARA_PERMISSION_TERMINAL_OK"
+    assert "PULSARA_PERMISSION_TERMINAL_OK" in result["final_text"]
 
 
 def test_real_agent_runtime_uses_active_workspace_skill(tmp_path):
@@ -865,6 +908,82 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
     }
 
 
+async def _run_real_agent_read_only_permission_smoke(tmp_path: Path) -> dict:
+    probe = tmp_path / "probe.txt"
+    probe.write_text("PULSARA_PERMISSION_READ_ONLY_OK", encoding="utf-8")
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=256),
+        system_prompt=(
+            "You are validating Pulsara read-only permissions. "
+            "First call read_file on probe.txt. "
+            "Do not attempt write_file, edit_file, terminal, or terminal_process. "
+            "After the tool result, answer exactly with the file content and nothing else."
+        ),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.READ_ONLY,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.OFF,
+        ),
+    )
+
+    registry_names = agent.tool_executor.registry.names()
+    result = await agent.run_task("Read probe.txt with the available tool, then answer exactly with its content.")
+    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "registry_names": registry_names,
+        "tool_names": tool_names,
+        "errors": _run_error_diagnostics(events),
+    }
+
+
+async def _run_real_agent_trusted_terminal_permission_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=256),
+        system_prompt=(
+            "You are validating Pulsara trusted-host terminal permissions. "
+            "Call terminal exactly once with command exactly 'printf PULSARA_PERMISSION_TERMINAL_OK'. "
+            "Do not use terminal_process or file tools. "
+            "After the terminal result, answer exactly: PULSARA_PERMISSION_TERMINAL_OK"
+        ),
+        permission_policy=_trusted_terminal_policy(),
+    )
+
+    result = await agent.run_task("Run the trusted terminal permission validation exactly as instructed.")
+    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    tool_result_payloads = list(_tool_result_payloads_by_call_id(events).values())
+    terminal_payload = next(payload for payload in tool_result_payloads if payload.get("status") == "success")
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_names": tool_names,
+        "terminal_status": terminal_payload["status"],
+        "terminal_output": terminal_payload["output"],
+        "errors": _run_error_diagnostics(events),
+    }
+
+
 async def _run_real_agent_active_skill_smoke(tmp_path: Path) -> dict:
     skill_dir = tmp_path / ".agents" / "skills" / "say-sentinel"
     skill_dir.mkdir(parents=True)
@@ -949,6 +1068,7 @@ async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
             "Then call terminal_process with action exactly 'kill' using the process_id returned by terminal. "
             "After the kill tool result, answer exactly: PULSARA_TERMINAL_PROCESS_OK"
         ),
+        permission_policy=_trusted_terminal_policy(),
     )
 
     try:
@@ -1050,6 +1170,7 @@ async def _run_real_agent_terminal_yield_survival_smoke(tmp_path: Path) -> dict:
             "Then call terminal_process with action exactly 'wait', the same process_id, and timeout_seconds exactly 3. "
             "After the second wait tool result, answer exactly: PULSARA_TERMINAL_YIELD_SURVIVAL_OK"
         ),
+        permission_policy=_trusted_terminal_policy(),
     )
 
     result = await agent.run_task("Run the terminal yield survival validation exactly as instructed.")
@@ -1103,6 +1224,7 @@ async def _run_real_agent_terminal_stdin_smoke(tmp_path: Path) -> dict:
             "Then call terminal_process with action exactly 'wait' and the same process_id. "
             "After the wait tool result, answer exactly: PULSARA_TERMINAL_STDIN_OK"
         ),
+        permission_policy=_trusted_terminal_policy(),
     )
 
     result = await agent.run_task("Run the terminal stdin validation exactly as instructed.")
@@ -1157,6 +1279,7 @@ async def _run_real_agent_terminal_pty_smoke(tmp_path: Path) -> dict:
             "Then call terminal_process with action exactly 'wait' and the same process_id. "
             "After the wait tool result, answer exactly: PULSARA_TERMINAL_PTY_OK"
         ),
+        permission_policy=_trusted_terminal_policy(),
     )
 
     result = await agent.run_task("Run the terminal PTY validation exactly as instructed.")
@@ -1216,6 +1339,7 @@ async def _run_real_agent_terminal_streaming_smoke(tmp_path: Path) -> dict:
             "Do not use background, tty, terminal_process, or any file tools. "
             "After the terminal tool result, answer exactly: PULSARA_TERMINAL_STREAMING_OK"
         ),
+        permission_policy=_trusted_terminal_policy(),
     )
 
     result = await agent.run_task("Run the terminal streaming validation exactly as instructed.")
@@ -1259,6 +1383,7 @@ async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
             "and max_output_chars exactly 120. Do not use background, tty, terminal_process, or file tools. "
             "After the terminal tool result, answer exactly: PULSARA_TERMINAL_LARGE_OUTPUT_OK"
         ),
+        permission_policy=_trusted_terminal_policy(),
     )
 
     result = await agent.run_task("Run the terminal large-output validation exactly as instructed.")
@@ -1306,6 +1431,7 @@ async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
             "'rm -rf ./PULSARA_POLICY_SENTINEL_DO_NOT_CREATE'. "
             "Do not call any other tools. Do not answer with text before calling the tool."
         ),
+        permission_policy=_trusted_terminal_policy(),
     )
 
     result = await agent.run_task("Run the terminal permission-policy validation exactly as instructed.")
@@ -2886,6 +3012,23 @@ def _tool_arguments_by_call_id(events) -> dict[str, dict]:
     deltas_by_call: dict[str, list[str]] = {}
     for event in events:
         if isinstance(event, ToolCallDeltaEvent):
+            deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
+    parsed: dict[str, dict] = {}
+    for tool_call_id, deltas in deltas_by_call.items():
+        raw = "".join(deltas)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed[tool_call_id] = {"_raw": raw}
+        else:
+            parsed[tool_call_id] = payload if isinstance(payload, dict) else {"_raw": raw}
+    return parsed
+
+
+def _tool_result_payloads_by_call_id(events) -> dict[str, dict]:
+    deltas_by_call: dict[str, list[str]] = {}
+    for event in events:
+        if isinstance(event, ToolResultTextDeltaEvent):
             deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
     parsed: dict[str, dict] = {}
     for tool_call_id, deltas in deltas_by_call.items():

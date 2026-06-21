@@ -6,8 +6,16 @@ from pulsara_agent.event import EventContext, ToolResultEndEvent, ToolResultText
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.runtime.permission import (
+    ApprovalPolicy,
+    EffectivePermissionPolicy,
+    PermissionProfile,
+    TerminalAccess,
+)
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import ToolCall, ToolExecutor, build_core_tool_registry
+from pulsara_agent.tools.builtins.terminal import TerminalTool
+from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 
 
 CTX = EventContext(run_id="run:tools", turn_id="turn:tools", reply_id="reply:tools")
@@ -59,6 +67,35 @@ def test_core_tool_registry_can_enable_memory_write_tools(tmp_path) -> None:
         "remember_observation",
         "remember_preference",
     }.issubset(registry.names())
+
+
+def test_core_tool_registry_filters_read_only_builtin_write_and_terminal_tools(tmp_path) -> None:
+    registry = build_core_tool_registry(
+        RuntimeSession(tmp_path),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.READ_ONLY,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.OFF,
+        ),
+    )
+
+    assert registry.names() == ["read_file", "search_files", "todo"]
+
+
+def test_core_tool_registry_filters_terminal_and_terminal_process_together(tmp_path) -> None:
+    registry = build_core_tool_registry(
+        RuntimeSession(tmp_path),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.WORKSPACE_GUARDED,
+            approval=ApprovalPolicy.RISKY_ONLY,
+            terminal=TerminalAccess.OFF,
+        ),
+    )
+
+    assert "edit_file" in registry.names()
+    assert "write_file" in registry.names()
+    assert "terminal" not in registry.names()
+    assert "terminal_process" not in registry.names()
 
 
 def test_terminal_tool_schema_uses_yield_model_hard_cut(tmp_path) -> None:
@@ -531,14 +568,14 @@ def test_terminal_notify_on_complete_is_hard_cut(tmp_path) -> None:
     assert "notify_on_complete" in payload["error"]
 
 
-def test_terminal_dangerous_command_called_directly_fails_closed(tmp_path) -> None:
-    _, result = execute_tool(tmp_path, "terminal", {"command": "rm -rf build"})
+def test_terminal_hardline_command_called_directly_fails_closed(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "rm -rf /"})
     payload = json.loads(result.output)
 
     assert result.status is ToolResultState.ERROR
     assert payload["status"] == "blocked"
-    assert payload["policy_code"] == "requires_confirmation"
-    assert "requires user confirmation" in payload["error"]
+    assert payload["policy_code"] == "hardline_terminal_command"
+    assert "hardline permission policy" in payload["error"]
 
 
 def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
@@ -627,6 +664,48 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
     assert write.status is ToolResultState.ERROR
     assert payload["status"] == "blocked"
     assert "finished" in payload["error"]
+
+
+def test_terminal_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> None:
+    tool = TerminalTool(
+        tmp_path,
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.WORKSPACE_GUARDED,
+            approval=ApprovalPolicy.RISKY_ONLY,
+            terminal=TerminalAccess.OFF,
+        ),
+    )
+
+    result = tool.execute(ToolCall(id="call:terminal", name="terminal", arguments={"command": "pwd"}))
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert payload["policy_code"] == "terminal_access_off"
+
+
+def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> None:
+    tool = TerminalProcessTool(
+        tmp_path,
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.WORKSPACE_GUARDED,
+            approval=ApprovalPolicy.RISKY_ONLY,
+            terminal=TerminalAccess.OFF,
+        ),
+    )
+
+    result = tool.execute(
+        ToolCall(
+            id="call:process",
+            name="terminal_process",
+            arguments={"action": "poll", "process_id": "terminal-process:fake"},
+        )
+    )
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.ERROR
+    assert payload["status"] == "blocked"
+    assert payload["policy_code"] == "terminal_access_off"
 
 
 def test_terminal_tool_tty_is_valid_without_background_mode(tmp_path) -> None:

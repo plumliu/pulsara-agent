@@ -46,10 +46,12 @@ from pulsara_agent.runtime.loop_helpers import (
 )
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
+    EffectivePermissionPolicy,
+    PolicyPermissionGate,
     PermissionDecisionKind,
     PermissionGate,
+    default_permission_policy,
 )
-from pulsara_agent.runtime.terminal.policy import TerminalPolicyPermissionGate
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
 from pulsara_agent.runtime.tool_loop import (
@@ -120,12 +122,17 @@ class AgentRuntime:
         capability_resolver: CapabilityResolver | None = None,
         memory_domain: MemoryDomainContext | None = None,
         workspace_kind: WorkspaceKind = "transient",
+        permission_policy: EffectivePermissionPolicy | None = None,
     ) -> None:
         self.runtime_session = runtime_session
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
         self.tool_result_persistence_hook = tool_result_persistence_hook
-        self.permission_gate = TerminalPolicyPermissionGate(permission_gate or AllowAllPermissionGate())
+        self.permission_policy = permission_policy or default_permission_policy(workspace_kind=workspace_kind)
+        self.permission_gate = PolicyPermissionGate(
+            self.permission_policy,
+            inner=permission_gate or AllowAllPermissionGate(),
+        )
         self.model_role = model_role
         self.options = options
         self.budget = budget or LoopBudget()
@@ -139,6 +146,7 @@ class AgentRuntime:
             memory_query=getattr(self.memory_hooks, "memory_query", None),
             graph_id=getattr(self.memory_hooks, "graph_id", None),
             memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
+            permission_policy=self.permission_policy,
         )
 
     async def run_task(

@@ -59,7 +59,14 @@ from pulsara_agent.runtime import (
     build_tool_result_error_events,
     msg_to_llm_messages,
 )
-from pulsara_agent.runtime.permission import PermissionDecision, PermissionDecisionKind
+from pulsara_agent.runtime.permission import (
+    ApprovalPolicy,
+    EffectivePermissionPolicy,
+    PermissionDecision,
+    PermissionDecisionKind,
+    PermissionProfile,
+    TerminalAccess,
+)
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
@@ -126,6 +133,14 @@ def make_llm_runtime(transport: ScriptedTransport) -> LLMRuntime:
     registry = LLMTransportRegistry()
     registry.register(transport)
     return LLMRuntime(config=config, registry=registry)
+
+
+def _trusted_terminal_policy() -> EffectivePermissionPolicy:
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.RISKY_ONLY,
+        terminal=TerminalAccess.ALLOW,
+    )
 
 
 def test_loop_state_initializes_from_runtime_session(tmp_path) -> None:
@@ -571,7 +586,11 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
             }
         ]
     )
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
 
     result = asyncio.run(agent.run_task("attempt dangerous command"))
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
@@ -602,7 +621,11 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
     process_id: str | None = None
 
     try:

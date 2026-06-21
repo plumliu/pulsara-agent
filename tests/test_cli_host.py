@@ -41,9 +41,10 @@ class FakeCore:
         self.closed: list[str] = []
         self.__class__.instances.append(self)
 
-    async def open_session(self, workspace_input, *, model_role):
+    async def open_session(self, workspace_input, *, model_role, permission_policy=None):
         self.workspace_input = workspace_input
         self.model_role = model_role
+        self.permission_policy = permission_policy
         return self.session
 
     async def close_session(self, host_session_id: str):
@@ -93,6 +94,44 @@ def test_cli_host_run_uses_host_core_and_normalizes_ephemeral(monkeypatch, tmp_p
     assert core.session.active_skill_names == [frozenset({"review-pr"})]
     assert core.closed == ["host:fake"]
     assert sync_calls == ["sync"]
+
+
+def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) -> None:
+    class PolicyCapturingCore(FakeCore):
+        async def open_session(self, workspace_input, *, model_role, permission_policy=None):
+            self.workspace_input = workspace_input
+            self.model_role = model_role
+            self.permission_policy = permission_policy
+            return self.session
+
+    PolicyCapturingCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", PolicyCapturingCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--permission-profile",
+            "workspace_guarded",
+            "--approval-policy",
+            "risky_only",
+            "--terminal-access",
+            "off",
+            "say hi",
+        ]
+    )
+
+    result = asyncio.run(cli._host_run(args))
+
+    assert result.final_text == "fake final"
+    core = PolicyCapturingCore.instances[0]
+    assert core.permission_policy.profile.value == "workspace_guarded"
+    assert core.permission_policy.approval.value == "risky_only"
+    assert core.permission_policy.terminal.value == "off"
 
 
 def test_cli_host_repl_runs_bundled_sync_before_opening_session(monkeypatch, tmp_path) -> None:
@@ -186,12 +225,85 @@ provides_tools:
         }
     ]
     assert "read_file" in snapshot["tools"]
+    assert "write_file" not in snapshot["tools"]
+    assert "terminal" not in snapshot["tools"]
+    assert snapshot["memory"] == {
+        "graph_id": "graph:user/u_local",
+        "tools_enabled": [],
+        "read_scopes": snapshot["workspace"]["read_scopes"],
+        "allowed_write_scopes": snapshot["workspace"]["allowed_write_scopes"],
+    }
+    assert snapshot["permissions"] == {
+        "profile": "read_only",
+        "approval_policy": "on_request",
+        "terminal_access": "off",
+        "execution_boundary": "host",
+        "network_isolated": False,
+        "filesystem": {
+            "file_tools": "workspace_only",
+            "terminal": "off",
+        },
+    }
     assert [diagnostic["code"] for diagnostic in snapshot["capability_diagnostics"]] == [
         "skill_unknown_tool_reference"
     ]
     assert "bundled_skills" in snapshot
     assert not (tmp_path / "pulsara-home" / "skills").exists()
     assert FakeCore.instances == []
+
+
+def test_cli_host_inspect_can_report_explicit_trusted_host_policy(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
+    monkeypatch.setattr(
+        cli,
+        "LocalSkillResolver",
+        lambda: LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False)),
+    )
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "inspect",
+            "--workspace",
+            str(tmp_path),
+            "--permission-profile",
+            "trusted_host",
+            "--approval-policy",
+            "never",
+            "--terminal-access",
+            "allow",
+        ]
+    )
+
+    snapshot = asyncio.run(cli._host_inspect(args))
+
+    assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(snapshot["tools"])
+    assert snapshot["permissions"]["profile"] == "trusted_host"
+    assert snapshot["permissions"]["approval_policy"] == "never"
+    assert snapshot["permissions"]["terminal_access"] == "allow"
+    assert snapshot["permissions"]["filesystem"]["terminal"] == "host_shell"
+
+
+def test_cli_host_run_rejects_unresumable_approval_policy(monkeypatch, tmp_path) -> None:
+    sync_calls = []
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: sync_calls.append("sync"))
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--approval-policy",
+            "on_request",
+            "say hi",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="approval resume"):
+        asyncio.run(cli._host_run(args))
+    assert sync_calls == []
 
 
 def test_cli_skills_sync_bundled_uses_pulsara_home(monkeypatch, tmp_path) -> None:

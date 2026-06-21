@@ -399,6 +399,47 @@ def test_terminal_runtime_venv_overlay_falls_back_to_root_and_ignores_outside(tm
         shutil.rmtree(outside, ignore_errors=True)
 
 
+def test_terminal_runtime_venv_overlay_switches_python_resolution(tmp_path) -> None:
+    parent_bin = tmp_path / "parent-bin"
+    workspace_venv_bin = tmp_path / ".venv" / "bin"
+    parent_python = parent_bin / "python"
+    workspace_python = workspace_venv_bin / "python"
+    parent_bin.mkdir(parents=True)
+    workspace_venv_bin.mkdir(parents=True)
+    write_executable(parent_python, "#!/bin/sh\nprintf 'parent-path-python\n'")
+    write_executable(workspace_python, "#!/bin/sh\nprintf 'workspace-venv-python\n'")
+    command = "command -v python && python -c 'print(\"ignored\")'"
+
+    disabled = run(
+        make_manager(
+            tmp_path,
+            env_builder=TerminalEnvBuilder(
+                config=TerminalEnvConfig(enable_shell_snapshot=False, enable_venv_overlay=False),
+                parent_env={"PATH": f"{parent_bin}:/usr/bin:/bin", "HOME": str(tmp_path)},
+            ),
+        ).get_or_create(),
+        command,
+    )
+    enabled = run(
+        make_manager(
+            tmp_path,
+            env_builder=TerminalEnvBuilder(
+                config=TerminalEnvConfig(enable_shell_snapshot=False, enable_venv_overlay=True),
+                parent_env={"PATH": f"{parent_bin}:/usr/bin:/bin", "HOME": str(tmp_path)},
+            ),
+        ).get_or_create(),
+        command,
+    )
+
+    assert disabled.status is TerminalStatus.SUCCESS
+    assert disabled.output.splitlines() == [str(parent_python), "parent-path-python"]
+    assert disabled.metadata["env"]["venv_overlay"] is None
+
+    assert enabled.status is TerminalStatus.SUCCESS
+    assert enabled.output.splitlines() == [str(workspace_python), "workspace-venv-python"]
+    assert enabled.metadata["env"]["venv_overlay"] == str(workspace_venv_bin)
+
+
 def test_terminal_runtime_lifetime_watchdog_kills_process_group(tmp_path) -> None:
     marker = f"pulsara_terminal_test_{os.getpid()}_{int(time.time())}"
     session = make_session(tmp_path)
@@ -533,14 +574,24 @@ def test_terminal_runtime_shell_background_wrapper_suggests_terminal_yield(tmp_p
     assert result.metadata["suggested_args"] == {"yield_time_ms": 0}
 
 
-def test_terminal_runtime_dangerous_command_requires_confirmation_when_called_directly(tmp_path) -> None:
+def test_terminal_runtime_non_hardline_risky_command_is_not_blocked_by_runtime_floor(tmp_path) -> None:
     session = make_session(tmp_path)
+    (tmp_path / "build").mkdir()
 
     result = run(session, "rm -rf build")
 
+    assert result.status is TerminalStatus.SUCCESS
+    assert not (tmp_path / "build").exists()
+
+
+def test_terminal_runtime_hardline_command_is_blocked_when_called_directly(tmp_path) -> None:
+    session = make_session(tmp_path)
+
+    result = run(session, "rm -rf /")
+
     assert result.status is TerminalStatus.BLOCKED
-    assert result.error == "terminal command requires user confirmation before execution"
-    assert result.metadata["policy_code"] == "requires_confirmation"
+    assert result.error == "terminal command blocked by hardline permission policy"
+    assert result.metadata["policy_code"] == "hardline_terminal_command"
 
 
 def test_terminal_runtime_yield_limit_does_not_count_in_window_completion(tmp_path) -> None:

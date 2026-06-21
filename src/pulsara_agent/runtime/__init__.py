@@ -19,9 +19,16 @@ from pulsara_agent.runtime.hooks import (
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimeEventSubscriber, RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
+    ApprovalPolicy,
+    EffectivePermissionPolicy,
     PermissionDecision,
     PermissionDecisionKind,
     PermissionGate,
+    PermissionProfile,
+    PolicyPermissionGate,
+    TerminalAccess,
+    default_permission_policy,
+    resolve_permission_policy,
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
@@ -40,7 +47,6 @@ from pulsara_agent.runtime.terminal import (
     ProcessRegistry,
     TerminalExecPolicy,
     TerminalProcessState,
-    TerminalPolicyPermissionGate,
     TerminalStatus,
 )
 from pulsara_agent.runtime.wiring import (
@@ -56,6 +62,8 @@ __all__ = [
     "AgentRuntime",
     "AgentRuntimeWiring",
     "AllowAllPermissionGate",
+    "ApprovalPolicy",
+    "EffectivePermissionPolicy",
     "ExecPolicyDecision",
     "ExecPolicyDecisionKind",
     "LoopBudget",
@@ -74,6 +82,8 @@ __all__ = [
     "PermissionDecision",
     "PermissionDecisionKind",
     "PermissionGate",
+    "PermissionProfile",
+    "PolicyPermissionGate",
     "RuntimeEventPublisher",
     "RuntimeEventSubscriber",
     "RuntimePublishedEvent",
@@ -82,6 +92,7 @@ __all__ = [
     "RunTimeline",
     "RunTimelineItem",
     "TerminalBackendType",
+    "TerminalAccess",
     "TerminalIOMode",
     "TerminalRequest",
     "TerminalResult",
@@ -91,7 +102,6 @@ __all__ = [
     "ProcessRegistry",
     "TerminalExecPolicy",
     "TerminalProcessState",
-    "TerminalPolicyPermissionGate",
     "TerminalStatus",
     "build_llm_context",
     "build_agent_runtime_wiring",
@@ -99,5 +109,7 @@ __all__ = [
     "build_in_memory_runtime_wiring",
     "build_run_timeline",
     "build_tool_result_error_events",
+    "default_permission_policy",
     "msg_to_llm_messages",
+    "resolve_permission_policy",
 ]

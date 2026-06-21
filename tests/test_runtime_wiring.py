@@ -18,6 +18,12 @@ from pulsara_agent.runtime import (
     build_durable_runtime_wiring,
     build_in_memory_runtime_wiring,
 )
+from pulsara_agent.runtime.permission import (
+    ApprovalPolicy,
+    EffectivePermissionPolicy,
+    PermissionProfile,
+    TerminalAccess,
+)
 from pulsara_agent.capability import LocalSkillResolver
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
@@ -66,6 +72,9 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     assert wiring.agent_runtime.options == LLMOptions(temperature=0, max_output_tokens=32)
     assert wiring.agent_runtime.system_prompt == "test prompt"
     assert isinstance(wiring.agent_runtime.capability_resolver, LocalSkillResolver)
+    assert wiring.agent_runtime.workspace_kind == "transient"
+    assert wiring.agent_runtime.permission_policy.profile is PermissionProfile.READ_ONLY
+    assert "terminal" not in wiring.agent_runtime.tool_executor.registry.names()
 
 
 def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -> None:
@@ -108,6 +117,29 @@ def test_agent_runtime_wiring_threads_memory_domain_to_capability_context(tmp_pa
 
     assert wiring.agent_runtime.memory_domain == domain
     assert wiring.agent_runtime.workspace_kind == "project"
+    assert wiring.agent_runtime.permission_policy.profile is PermissionProfile.TRUSTED_HOST
+
+
+def test_agent_runtime_wiring_threads_permission_policy_to_session_registry(tmp_path) -> None:
+    settings = _settings_for_storage(StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"))
+    policy = EffectivePermissionPolicy(
+        profile=PermissionProfile.READ_ONLY,
+        approval=ApprovalPolicy.ON_REQUEST,
+        terminal=TerminalAccess.OFF,
+    )
+
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=False,
+        model_role=ModelRole.FLASH,
+        permission_policy=policy,
+    )
+
+    assert wiring.agent_runtime.permission_policy is policy
+    assert "read_file" in wiring.agent_runtime.tool_executor.registry.names()
+    assert "write_file" not in wiring.agent_runtime.tool_executor.registry.names()
+    assert "terminal" not in wiring.agent_runtime.tool_executor.registry.names()
 
 
 def test_in_memory_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> None:

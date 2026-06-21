@@ -8,13 +8,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pulsara_agent.runtime.permission import (
-    PermissionDecision,
-    PermissionDecisionKind,
-    PermissionGate,
-)
 from pulsara_agent.runtime.terminal.models import TerminalRequest
-from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.runtime.terminal_risk import is_hardline_terminal_command
 
 
 class ExecPolicyDecisionKind(StrEnum):
@@ -46,17 +41,6 @@ _SHELL_BACKGROUND_WRAPPER_PATTERNS = [
     re.compile(r"(^|\s)nohup\s+"),
     re.compile(r"(^|\s)setsid\s+"),
     re.compile(r"(^|\s)disown(\s|$)"),
-]
-
-_DANGEROUS_COMMAND_PATTERNS = [
-    re.compile(r"(^|[;&|]\s*)rm\s+-[^\s]*[rR][^\s]*[fF][^\s]*(\s|$)"),
-    re.compile(r"(^|[;&|]\s*)rm\s+-[^\s]*[fF][^\s]*[rR][^\s]*(\s|$)"),
-    re.compile(r"(^|[;&|]\s*)sudo(\s|$)"),
-    re.compile(r"(^|[;&|]\s*)chmod\s+-R(\s|$)"),
-    re.compile(r"(^|[;&|]\s*)chown\s+-R(\s|$)"),
-    re.compile(r"(^|[;&|]\s*)dd\s+.*\bof="),
-    re.compile(r"(^|[;&|]\s*)mkfs(\.|\s|$)"),
-    re.compile(r"(^|[;&|]\s*)ssh-keygen(\s|$)"),
 ]
 
 
@@ -114,12 +98,12 @@ class TerminalExecPolicy:
                 suggested_args={"yield_time_ms": 0},
                 code="use_terminal_yield",
             )
-        if _matches_any(_DANGEROUS_COMMAND_PATTERNS, command):
+        if is_hardline_terminal_command(command):
             return ExecPolicyDecision(
-                kind=ExecPolicyDecisionKind.REQUIRE_CONFIRMATION,
-                reason="terminal command requires user confirmation before execution",
+                kind=ExecPolicyDecisionKind.BLOCK,
+                reason="terminal command blocked by hardline permission policy",
                 effective_cwd=effective_cwd,
-                code="requires_confirmation",
+                code="hardline_terminal_command",
             )
         return ExecPolicyDecision.allow(effective_cwd=effective_cwd)
 
@@ -152,37 +136,6 @@ class TerminalExecPolicy:
             if resolved == self.workspace_root:
                 break
         return self.workspace_root
-
-
-class TerminalPolicyPermissionGate:
-    """Permission gate wrapper that escalates risky terminal commands."""
-
-    def __init__(self, inner: PermissionGate) -> None:
-        self.inner = inner
-
-    async def evaluate(self, calls: list[ToolCall]) -> PermissionDecision:
-        base = await self.inner.evaluate(calls)
-        if base.kind is not PermissionDecisionKind.ALLOW:
-            return base
-        for call in calls:
-            if call.name != "terminal":
-                continue
-            command = call.arguments.get("command")
-            if not isinstance(command, str):
-                continue
-            if _matches_any(_DANGEROUS_COMMAND_PATTERNS, command.strip()):
-                return PermissionDecision(
-                    kind=PermissionDecisionKind.WAIT_FOR_USER,
-                    reason="terminal command requires user confirmation before execution",
-                    suggested_rules=[
-                        {
-                            "tool": "terminal",
-                            "reason": "dangerous_terminal_command",
-                            "command": command,
-                        }
-                    ],
-                )
-        return base
 
 
 def _matches_any(patterns: list[re.Pattern[str]], command: str) -> bool:

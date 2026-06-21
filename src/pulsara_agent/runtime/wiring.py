@@ -37,6 +37,7 @@ from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
 from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal import TerminalSessionManager
 from pulsara_agent.settings import PulsaraSettings
@@ -222,6 +223,7 @@ def build_agent_runtime_wiring(
     owns_terminal_session_manager: bool = True,
     capability_resolver: CapabilityResolver | None = None,
     enable_workspace_skills: bool = True,
+    permission_policy: EffectivePermissionPolicy | None = None,
 ) -> AgentRuntimeWiring:
     runtime_wiring = (
         build_durable_runtime_wiring(
@@ -247,6 +249,11 @@ def build_agent_runtime_wiring(
     )
     llm_runtime = build_llm_runtime(settings.llm)
     runtime_wiring = _with_memory_governance_engine(runtime_wiring, llm_runtime=llm_runtime)
+    effective_permission_policy = permission_policy or default_permission_policy(
+        workspace_kind=runtime_wiring.memory_domain.workspace_kind
+        if runtime_wiring.memory_domain is not None
+        else "transient"
+    )
     agent_runtime = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=llm_runtime,
@@ -265,6 +272,7 @@ def build_agent_runtime_wiring(
         else (LocalSkillResolver() if enable_workspace_skills else None),
         memory_domain=runtime_wiring.memory_domain,
         workspace_kind=runtime_wiring.memory_domain.workspace_kind if runtime_wiring.memory_domain is not None else "transient",
+        permission_policy=effective_permission_policy,
     )
     return AgentRuntimeWiring(
         agent_runtime=agent_runtime,

@@ -7,8 +7,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalSessionManager, TerminalStatus
 from pulsara_agent.runtime.terminal.process import ProcessInputError
+from pulsara_agent.runtime.terminal_risk import is_hardline_terminal_command
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
@@ -29,6 +31,7 @@ DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 class TerminalProcessTool(WorkspaceTool):
     terminal_sessions: TerminalSessionManager | None = None
     owner_host_session_id: str | None = None
+    permission_policy: EffectivePermissionPolicy | None = None
     name: str = "terminal_process"
     description: str = (
         "Poll, wait for, kill, or send stdin to a managed terminal process returned when terminal yields a process_id. "
@@ -61,6 +64,14 @@ class TerminalProcessTool(WorkspaceTool):
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         action = required_str_arg(call.arguments, "action").strip()
         process_id = required_str_arg(call.arguments, "process_id").strip()
+        if self.permission_policy is not None and self.permission_policy.terminal is TerminalAccess.OFF:
+            return self._error_result(
+                call,
+                process_id=process_id,
+                error="terminal_process is disabled by permission policy",
+                status="blocked",
+                policy_code="terminal_access_off",
+            )
         max_output = bounded_int_arg(
             call.arguments,
             "max_output_chars",
@@ -110,6 +121,14 @@ class TerminalProcessTool(WorkspaceTool):
                         process_id=process_id,
                         error="data must be a string",
                         status="blocked",
+                    )
+                if is_hardline_terminal_command(data):
+                    return self._error_result(
+                        call,
+                        process_id=process_id,
+                        error="terminal process input blocked by hardline permission policy",
+                        status="blocked",
+                        policy_code="hardline_terminal_process_input",
                     )
                 result = self.terminal_sessions.write_process(
                     process_id,
@@ -162,6 +181,7 @@ class TerminalProcessTool(WorkspaceTool):
         process_id: str,
         error: str,
         status: str = "error",
+        policy_code: str | None = None,
     ) -> ToolExecutionResult:
         return self._result(
             call,
@@ -179,6 +199,7 @@ class TerminalProcessTool(WorkspaceTool):
                     "terminal_session_id": "default",
                     "backend_type": "local",
                     "full_output_ref": None,
+                    "policy_code": policy_code,
                 },
                 ensure_ascii=False,
             ),
@@ -190,5 +211,6 @@ class TerminalProcessTool(WorkspaceTool):
                 "truncated": False,
                 "terminal_session_id": "default",
                 "backend_type": "local",
+                "policy_code": policy_code,
             },
         )

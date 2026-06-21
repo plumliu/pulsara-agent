@@ -13,7 +13,6 @@ from pulsara_agent.runtime.terminal.policy import (
     ExecPolicyDecision,
     ExecPolicyDecisionKind,
     TerminalExecPolicy,
-    TerminalPolicyPermissionGate,
 )
 from pulsara_agent.runtime.terminal.process import ProcessRegistry, TerminalProcessState
 from pulsara_agent.runtime.terminal.session import TerminalSession
@@ -32,5 +31,4 @@ __all__ = [
     "ProcessRegistry",
     "TerminalProcessState",
     "TerminalExecPolicy",
-    "TerminalPolicyPermissionGate",
 ]

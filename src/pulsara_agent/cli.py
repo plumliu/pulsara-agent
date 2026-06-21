@@ -25,6 +25,7 @@ from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.runtime.permission import resolve_permission_policy
 from pulsara_agent.settings import PulsaraSettings, load_env_file
 from pulsara_agent.tools import build_core_tool_registry
 
@@ -43,8 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_host_common_args(
         host_subcommands.add_parser("repl", help="Start a minimal HostCore REPL.")
     )
-    inspect_cmd = _add_host_workspace_args(
-        host_subcommands.add_parser("inspect", help="Print a HostCore diagnostics snapshot.")
+    inspect_cmd = _add_host_permission_args(
+        _add_host_workspace_args(
+            host_subcommands.add_parser("inspect", help="Print a HostCore diagnostics snapshot.")
+        )
     )
     inspect_cmd.add_argument("--env-file", default=None, help="Load settings from a .env file before inspecting.")
     inspect_cmd.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
@@ -86,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     _add_host_workspace_args(parser)
+    _add_host_permission_args(parser)
     parser.add_argument(
         "--skill",
         action="append",
@@ -115,6 +119,28 @@ def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.Argume
     )
     parser.add_argument("--display-label", default=None, help="Optional workspace display label.")
     parser.add_argument("--memory-domain-id", default="u_local", help="Memory domain id. Defaults to u_local.")
+    return parser
+
+
+def _add_host_permission_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--permission-profile",
+        default=None,
+        choices=("trusted_host", "workspace_guarded", "read_only"),
+        help="Permission profile. Defaults depend on the host command and workspace kind.",
+    )
+    parser.add_argument(
+        "--approval-policy",
+        default=None,
+        choices=("never", "risky_only", "on_request"),
+        help="Approval policy. Defaults depend on the effective permission profile.",
+    )
+    parser.add_argument(
+        "--terminal-access",
+        default=None,
+        choices=("off", "ask", "allow"),
+        help="Terminal access policy. ASK is defined but requires approval resume before practical use.",
+    )
     return parser
 
 
@@ -177,14 +203,23 @@ def main() -> None:
 
     if args.command == "host":
         if args.host_command == "run":
-            result = asyncio.run(_host_run(args))
+            try:
+                result = asyncio.run(_host_run(args))
+            except ValueError as exc:
+                parser.error(str(exc))
             print(result.final_text)
             return
         if args.host_command == "repl":
-            asyncio.run(_host_repl(args))
+            try:
+                asyncio.run(_host_repl(args))
+            except ValueError as exc:
+                parser.error(str(exc))
             return
         if args.host_command == "inspect":
-            snapshot = asyncio.run(_host_inspect(args))
+            try:
+                snapshot = asyncio.run(_host_inspect(args))
+            except ValueError as exc:
+                parser.error(str(exc))
             print(json.dumps(snapshot, indent=2))
             return
         parser.error("host requires a subcommand")
@@ -209,11 +244,13 @@ def main() -> None:
 
 async def _host_run(args) -> object:
     settings = _settings_from_host_args(args)
+    permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
     core = HostCore(settings=settings, durable=bool(args.durable))
     session = await core.open_session(
         _workspace_input_from_args(args),
         model_role=ModelRole(args.model_role),
+        permission_policy=permission_policy,
     )
     try:
         return await session.run_turn(args.prompt, active_skill_names=_active_skill_names_from_args(args))
@@ -223,11 +260,13 @@ async def _host_run(args) -> object:
 
 async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
+    permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
     core = HostCore(settings=settings, durable=bool(args.durable))
     session = await core.open_session(
         _workspace_input_from_args(args),
         model_role=ModelRole(args.model_role),
+        permission_policy=permission_policy,
     )
     try:
         while True:
@@ -247,9 +286,10 @@ async def _host_repl(args) -> None:
 async def _host_inspect(args) -> dict[str, object]:
     _load_env_file_from_args(args)
     workspace = resolve_workspace(_workspace_input_from_args(args))
+    permission_policy = _permission_policy_from_host_args(args, intent="inspect")
     runtime_session = RuntimeSession(workspace.workspace_root)
     try:
-        registry = build_core_tool_registry(runtime_session)
+        registry = build_core_tool_registry(runtime_session, permission_policy=permission_policy)
         resolver = LocalSkillResolver()
         capabilities = resolver.resolve(
             CapabilityResolveContext(
@@ -276,6 +316,15 @@ async def _host_inspect(args) -> dict[str, object]:
             "allowed_write_scopes": sorted(workspace.memory_domain.allowed_write_scopes),
         },
         "tools": registry.names(),
+        "permissions": permission_policy.to_dict(),
+        "memory": {
+            "graph_id": workspace.memory_domain.graph_id,
+            "tools_enabled": sorted(
+                name for name in registry.names() if name.startswith(("memory_", "remember_"))
+            ),
+            "read_scopes": sorted(workspace.memory_domain.read_scopes),
+            "allowed_write_scopes": sorted(workspace.memory_domain.allowed_write_scopes),
+        },
         "skills": [
             {
                 "name": entry.name,
@@ -357,3 +406,16 @@ def _workspace_input_from_args(args) -> HostWorkspaceInput:
 
 def _active_skill_names_from_args(args) -> frozenset[str]:
     return frozenset(name.strip() for name in getattr(args, "skill", ()) if name.strip())
+
+
+def _permission_policy_from_host_args(args, *, intent: str):
+    workspace_kind = normalize_workspace_kind(args.workspace_kind)
+    prefix = getattr(args, "prefix", "PULSARA")
+    return resolve_permission_policy(
+        workspace_kind=workspace_kind,
+        intent=intent,
+        profile=getattr(args, "permission_profile", None),
+        approval=getattr(args, "approval_policy", None),
+        terminal=getattr(args, "terminal_access", None),
+        prefix=prefix,
+    )

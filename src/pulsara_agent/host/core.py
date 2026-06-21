@@ -13,6 +13,7 @@ from pulsara_agent.host.session import HostSession
 from pulsara_agent.host.supervisor import WorkspaceTerminalSupervisor
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
@@ -37,6 +38,7 @@ class HostCore:
         options: LLMOptions | None = None,
         system_prompt: str | None = None,
         memory_reflection: bool = True,
+        permission_policy: EffectivePermissionPolicy | None = None,
     ) -> HostSession:
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root)
         host_session_id = host_session_id or f"host:{uuid4().hex}"
@@ -54,6 +56,7 @@ class HostCore:
             terminal_session_manager=supervisor.terminal_sessions if supervisor is not None else None,
             terminal_owner_host_session_id=host_session_id,
             owns_terminal_session_manager=supervisor is None,
+            permission_policy=permission_policy,
         )
         session = HostSession(
             host_session_id=host_session_id,
