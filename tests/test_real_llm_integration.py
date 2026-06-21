@@ -25,7 +25,7 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
-from pulsara_agent.capability import LocalSkillResolver
+from pulsara_agent.capability import LocalSkillResolver, sync_bundled_skills
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.entities.memory import Preference
@@ -176,6 +176,24 @@ def test_real_agent_runtime_uses_active_workspace_skill(tmp_path):
     assert result["errors"] == []
     assert result["tool_names"] == []
     assert "PULSARA_SKILL_ACTIVE_OK" in result["final_text"]
+
+
+def test_real_agent_runtime_uses_synced_bundled_skill(tmp_path, monkeypatch):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    pulsara_home = tmp_path / "pulsara-home"
+    monkeypatch.setenv("PULSARA_HOME", str(pulsara_home))
+    sync_result = sync_bundled_skills()
+
+    assert any(item.name == "pulsara-skill-creator" and item.action == "installed" for item in sync_result.items)
+    result = asyncio.run(_run_real_agent_synced_bundled_skill_smoke(tmp_path))
+
+    assert result["status"] == "finished"
+    assert result["stop_reason"] == "final"
+    assert result["errors"] == []
+    assert result["tool_names"] == []
+    assert "PULSARA_BUNDLED_SKILL_ACTIVE_OK" in result["final_text"]
 
 
 def test_real_agent_runtime_uses_terminal_process_tool(tmp_path):
@@ -830,12 +848,44 @@ When this skill is active, answer exactly: PULSARA_SKILL_ACTIVE_OK
         runtime_session=RuntimeSession(tmp_path),
         llm_runtime=build_llm_runtime(settings.llm),
         model_role=ModelRole.FLASH,
-        options=LLMOptions(temperature=0, max_output_tokens=64),
+        options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt="Do not call tools. Follow active skill instructions if present.",
         capability_resolver=LocalSkillResolver(),
     )
 
     result = await agent.run_task("$say-sentinel")
+    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
+    tool_names = [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
+    return {
+        "status": result.status.value,
+        "stop_reason": result.stop_reason,
+        "final_text": result.final_text.strip(),
+        "tool_names": tool_names,
+        "errors": _run_error_diagnostics(events),
+    }
+
+
+async def _run_real_agent_synced_bundled_skill_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=build_llm_runtime(settings.llm),
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=64),
+        system_prompt=(
+            "Do not call tools. If the active skill content is visible for pulsara-skill-creator, "
+            "answer exactly: PULSARA_BUNDLED_SKILL_ACTIVE_OK"
+        ),
+        capability_resolver=LocalSkillResolver(),
+    )
+
+    result = await agent.run_task(
+        "$pulsara-skill-creator Validation only: answer exactly PULSARA_BUNDLED_SKILL_ACTIVE_OK and nothing else."
+    )
     events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
     tool_names = [
         event.tool_call_name

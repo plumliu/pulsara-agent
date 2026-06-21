@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -18,7 +19,9 @@ WORKSPACE_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 USER_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
 USER_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 PULSARA_HOME_ENV = "PULSARA_HOME"
+USER_PRODUCT_LOCATION_PREFIX = "~/.pulsara/skills"
 SKILL_FILE_NAME = "SKILL.md"
+BUNDLED_SKILL_PROVENANCE_FILE_NAME = ".pulsara-skill-source.json"
 MAX_SKILL_FILE_BYTES = 64 * 1024
 MAX_SKILL_NAME_CHARS = 64
 MAX_FRONTMATTER_TEXT_CHARS = 1024
@@ -183,7 +186,7 @@ class LocalSkillProvider:
                 _SkillRoot(
                     path=user_product_root.expanduser().resolve(),
                     source="user",
-                    location_prefix="~/.pulsara/skills",
+                    location_prefix=USER_PRODUCT_LOCATION_PREFIX,
                     containment_root=user_product_root.expanduser().resolve(),
                 )
             )
@@ -293,7 +296,7 @@ class LocalSkillProvider:
                 base_dir=path.parent,
                 location=_skill_location(path, root=root),
                 content=content,
-                source=root.source,
+                source=_skill_source(path.parent, root=root),
                 when_to_use=when_to_use,
                 provides_tools=provides_tools,
                 disable_model_invocation=_bool_field(raw_fields, "disable_model_invocation", default=False),
@@ -315,6 +318,19 @@ def _is_within(path: Path, root: Path) -> bool:
 def _skill_location(path: Path, *, root: _SkillRoot) -> str:
     relative = path.resolve().relative_to(root.path.resolve()).as_posix()
     return f"{root.location_prefix}/{relative}"
+
+
+def _skill_source(skill_dir: Path, *, root: _SkillRoot) -> SkillSource:
+    if root.source != "user" or root.location_prefix != USER_PRODUCT_LOCATION_PREFIX:
+        return root.source
+    provenance_path = skill_dir / BUNDLED_SKILL_PROVENANCE_FILE_NAME
+    try:
+        data = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return root.source
+    if isinstance(data, dict) and data.get("source") == "bundled":
+        return "bundled"
+    return root.source
 
 
 def _default_user_product_skills_root() -> Path:

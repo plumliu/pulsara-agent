@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 WorkspaceKind = Literal["project", "transient"]
 CapabilityDiagnosticSeverity = Literal["info", "warning", "error"]
-SkillSource = Literal["workspace", "user"]
+SkillSource = Literal["workspace", "user", "bundled"]
 ActiveSkillReason = Literal["explicit_user_mention", "host_command"]
 
 

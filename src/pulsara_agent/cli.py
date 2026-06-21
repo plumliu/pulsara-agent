@@ -5,10 +5,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 from pulsara_agent import __version__
-from pulsara_agent.capability import CapabilityResolveContext, LocalSkillResolver
+from pulsara_agent.capability import (
+    BUNDLED_OPT_OUT_MARKER_NAME,
+    CapabilityResolveContext,
+    LocalSkillResolver,
+    bundled_skills_status,
+    reset_bundled_skill,
+    sync_bundled_skills,
+)
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.host import HostCore, HostWorkspaceInput, normalize_workspace_kind, resolve_workspace
 from pulsara_agent.llm import ModelRole
@@ -17,7 +25,7 @@ from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import RuntimeSession
-from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.settings import PulsaraSettings, load_env_file
 from pulsara_agent.tools import build_core_tool_registry
 
 
@@ -41,6 +49,19 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_cmd.add_argument("--env-file", default=None, help="Load settings from a .env file before inspecting.")
     inspect_cmd.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
     inspect_cmd.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
+    skills = subcommands.add_parser("skills", help="Manage Pulsara local skills.")
+    skills_subcommands = skills.add_subparsers(dest="skills_command")
+    sync_bundled = _add_skills_common_args(
+        skills_subcommands.add_parser("sync-bundled", help="Sync bundled Pulsara skills into PULSARA_HOME.")
+    )
+    sync_bundled.add_argument(
+        "--override-opt-out",
+        action="store_true",
+        help=f"Run even when {BUNDLED_OPT_OUT_MARKER_NAME} exists.",
+    )
+    _add_skills_common_args(skills_subcommands.add_parser("status", help="Print bundled skill status."))
+    reset = _add_skills_common_args(skills_subcommands.add_parser("reset", help="Reset a bundled skill from package source."))
+    reset.add_argument("name", help="Bundled skill name to reset.")
     config_check = subcommands.add_parser(
         "config-check",
         help="Load Pulsara configuration from environment variables.",
@@ -94,6 +115,12 @@ def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.Argume
     )
     parser.add_argument("--display-label", default=None, help="Optional workspace display label.")
     parser.add_argument("--memory-domain-id", default="u_local", help="Memory domain id. Defaults to u_local.")
+    return parser
+
+
+def _add_skills_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--env-file", default=None, help="Load a .env file before resolving PULSARA_HOME.")
+    parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
     return parser
 
 
@@ -162,11 +189,27 @@ def main() -> None:
             return
         parser.error("host requires a subcommand")
 
+    if args.command == "skills":
+        if args.skills_command == "sync-bundled":
+            result = _skills_sync_bundled(args)
+            print(json.dumps(result.to_dict(), indent=2))
+            return
+        if args.skills_command == "status":
+            result = _skills_status(args)
+            print(json.dumps(result.to_dict(), indent=2))
+            return
+        if args.skills_command == "reset":
+            result = _skills_reset(args)
+            print(json.dumps(result.to_dict(), indent=2))
+            return
+        parser.error("skills requires a subcommand")
+
     parser.print_help()
 
 
 async def _host_run(args) -> object:
     settings = _settings_from_host_args(args)
+    _best_effort_sync_bundled_skills()
     core = HostCore(settings=settings, durable=bool(args.durable))
     session = await core.open_session(
         _workspace_input_from_args(args),
@@ -180,6 +223,7 @@ async def _host_run(args) -> object:
 
 async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
+    _best_effort_sync_bundled_skills()
     core = HostCore(settings=settings, durable=bool(args.durable))
     session = await core.open_session(
         _workspace_input_from_args(args),
@@ -201,6 +245,7 @@ async def _host_repl(args) -> None:
 
 
 async def _host_inspect(args) -> dict[str, object]:
+    _load_env_file_from_args(args)
     workspace = resolve_workspace(_workspace_input_from_args(args))
     runtime_session = RuntimeSession(workspace.workspace_root)
     try:
@@ -250,6 +295,7 @@ async def _host_inspect(args) -> dict[str, object]:
             for injection in capabilities.active_injections
         ],
         "capability_diagnostics": [diagnostic.to_dict() for diagnostic in capabilities.diagnostics],
+        "bundled_skills": bundled_skills_status().to_dict(),
     }
 
 
@@ -261,6 +307,43 @@ def _settings_from_host_args(args) -> PulsaraSettings:
             override=args.override_env,
         )
     return PulsaraSettings.from_env(prefix=args.prefix)
+
+
+def _load_env_file_from_args(args) -> None:
+    env_file = getattr(args, "env_file", None)
+    if env_file:
+        load_env_file(env_file, override=bool(getattr(args, "override_env", False)))
+
+
+def _best_effort_sync_bundled_skills() -> None:
+    try:
+        result = sync_bundled_skills()
+    except Exception as exc:  # pragma: no cover - defensive best-effort boundary
+        print(f"pulsara: bundled skill sync failed: {exc}", file=sys.stderr)
+        return
+    changed = [item for item in result.items if item.action in {"installed", "updated"}]
+    if changed:
+        names = ", ".join(item.name for item in changed)
+        print(f"pulsara: bundled skills synced: {names}", file=sys.stderr)
+
+
+def _skills_sync_bundled(args):
+    _load_env_file_from_args(args)
+    return sync_bundled_skills(override_opt_out=bool(args.override_opt_out))
+
+
+def _skills_status(args):
+    _load_env_file_from_args(args)
+    return bundled_skills_status()
+
+
+def _skills_reset(args):
+    _load_env_file_from_args(args)
+    try:
+        return reset_bundled_skill(args.name)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 def _workspace_input_from_args(args) -> HostWorkspaceInput:
