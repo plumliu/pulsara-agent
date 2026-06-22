@@ -98,6 +98,37 @@ def test_core_tool_registry_filters_terminal_and_terminal_process_together(tmp_p
     assert "terminal_process" not in registry.names()
 
 
+def test_core_tool_registry_keeps_terminal_tools_when_terminal_access_is_ask(tmp_path) -> None:
+    registry = build_core_tool_registry(
+        RuntimeSession(tmp_path),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.RISKY_ONLY,
+            terminal=TerminalAccess.ASK,
+        ),
+    )
+
+    assert "terminal" in registry.names()
+    assert "terminal_process" in registry.names()
+    assert "write_file" in registry.names()
+
+
+def test_core_tool_registry_keeps_write_tools_for_on_request_with_terminal_off(tmp_path) -> None:
+    registry = build_core_tool_registry(
+        RuntimeSession(tmp_path),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.WORKSPACE_GUARDED,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.OFF,
+        ),
+    )
+
+    assert "edit_file" in registry.names()
+    assert "write_file" in registry.names()
+    assert "terminal" not in registry.names()
+    assert "terminal_process" not in registry.names()
+
+
 def test_terminal_tool_schema_uses_yield_model_hard_cut(tmp_path) -> None:
     registry = make_registry(tmp_path)
     terminal = next(spec for spec in registry.tool_specs() if spec.name == "terminal")

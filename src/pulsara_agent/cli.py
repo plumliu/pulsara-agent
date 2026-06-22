@@ -133,13 +133,13 @@ def _add_host_permission_args(parser: argparse.ArgumentParser) -> argparse.Argum
         "--approval-policy",
         default=None,
         choices=("never", "risky_only", "on_request"),
-        help="Approval policy. Defaults depend on the effective permission profile.",
+        help="Approval policy. on_request asks before write and terminal side-effect tools when available.",
     )
     parser.add_argument(
         "--terminal-access",
         default=None,
         choices=("off", "ask", "allow"),
-        help="Terminal access policy. ASK is defined but requires approval resume before practical use.",
+        help="Terminal access policy. ask requires approval before each terminal action.",
     )
     return parser
 

@@ -58,7 +58,14 @@ from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserMsg
 from pulsara_agent.ontology import memory, runtime as rt
-from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession, build_agent_runtime_wiring
+from pulsara_agent.runtime import (
+    AgentRuntime,
+    ApprovalResolution,
+    LoopState,
+    RuntimeSession,
+    ToolApprovalDecision,
+    build_agent_runtime_wiring,
+)
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
@@ -93,6 +100,22 @@ def _trusted_terminal_policy() -> EffectivePermissionPolicy:
         profile=PermissionProfile.TRUSTED_HOST,
         approval=ApprovalPolicy.RISKY_ONLY,
         terminal=TerminalAccess.ALLOW,
+    )
+
+
+def _trusted_terminal_ask_policy() -> EffectivePermissionPolicy:
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.RISKY_ONLY,
+        terminal=TerminalAccess.ASK,
+    )
+
+
+def _workspace_on_request_policy() -> EffectivePermissionPolicy:
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile.WORKSPACE_GUARDED,
+        approval=ApprovalPolicy.ON_REQUEST,
+        terminal=TerminalAccess.OFF,
     )
 
 
@@ -222,6 +245,40 @@ def test_real_agent_runtime_trusted_host_allows_terminal_tool(tmp_path):
     assert result["terminal_status"] == "success"
     assert result["terminal_output"] == "PULSARA_PERMISSION_TERMINAL_OK"
     assert "PULSARA_PERMISSION_TERMINAL_OK" in result["final_text"]
+
+
+def test_real_host_core_terminal_access_ask_approval_completes(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_terminal_ask_approval_smoke(tmp_path), timeout=180))
+
+    assert result["first_status"] == "waiting_user"
+    assert result["resolved_status"] == "finished"
+    assert result["errors"] == []
+    assert result["pending_tool_names"] == ["terminal"]
+    assert result["tool_names"][:1] == ["terminal"]
+    assert result["terminal_status"] == "success"
+    assert "PULSARA_TERMINAL_ASK_OK" in result["terminal_output"]
+    assert "PULSARA_TERMINAL_ASK_OK" in result["final_text"]
+    assert result["model_end_count"] >= 2
+
+
+def test_real_host_core_on_request_write_approval_completes(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_on_request_write_approval_smoke(tmp_path), timeout=180))
+
+    assert result["first_status"] == "waiting_user"
+    assert result["resolved_status"] == "finished"
+    assert result["errors"] == []
+    assert result["pending_tool_names"] in (["write_file"], ["edit_file"])
+    assert result["file_text"] == "PULSARA_ON_REQUEST_WRITE_OK\n"
+    assert "PULSARA_ON_REQUEST_WRITE_OK" in result["final_text"]
+    assert "terminal" not in result["registry_names"]
+    assert "terminal_process" not in result["registry_names"]
+    assert result["model_end_count"] >= 2
 
 
 def test_real_agent_runtime_uses_active_workspace_skill(tmp_path):
@@ -1013,6 +1070,142 @@ async def _run_real_agent_trusted_terminal_permission_smoke(tmp_path: Path) -> d
         "terminal_output": terminal_payload["output"],
         "errors": _run_error_diagnostics(events),
     }
+
+
+async def _run_real_host_core_terminal_ask_approval_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_terminal_ask_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real-terminal-ask:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real-terminal-ask:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=512),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara terminal_access=ask approval. "
+            "For the first validation request, call terminal exactly once with command exactly "
+            "'printf PULSARA_TERMINAL_ASK_OK'. Do not use terminal_process or file tools. "
+            "After the approved terminal tool result, answer exactly: PULSARA_TERMINAL_ASK_OK"
+        ),
+        permission_policy=_trusted_terminal_ask_policy(),
+    )
+    try:
+        first = await session.run_turn("Run the terminal_access=ask validation exactly as instructed.")
+        pending = session.get_pending_approval()
+        pending_tool_names = [call.name for call in pending.tool_calls] if pending is not None else []
+        if pending is None:
+            events = session.replay_events()
+            return {
+                "first_status": first.status.value,
+                "resolved_status": None,
+                "final_text": first.final_text.strip(),
+                "pending_tool_names": pending_tool_names,
+                "tool_names": [
+                    event.tool_call_name for event in events if isinstance(event, ToolCallStartEvent)
+                ],
+                "terminal_status": None,
+                "terminal_output": "",
+                "model_end_count": sum(isinstance(event, ModelCallEndEvent) for event in events),
+                "model_end_metadata": [event.metadata for event in events if isinstance(event, ModelCallEndEvent)],
+                "errors": _run_error_diagnostics(events),
+            }
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        events = session.replay_events()
+        first_run_events = [event for event in events if event.run_id == first.state.run_id]
+        tool_names = [
+            event.tool_call_name for event in first_run_events if isinstance(event, ToolCallStartEvent)
+        ]
+        payloads = _tool_result_payloads_by_call_id(first_run_events)
+        terminal_payload = next((payload for payload in payloads.values() if payload.get("status") == "success"), {})
+        return {
+            "first_status": first.status.value,
+            "resolved_status": resolved.status.value,
+            "final_text": resolved.final_text.strip(),
+            "pending_tool_names": pending_tool_names,
+            "tool_names": tool_names,
+            "terminal_status": terminal_payload.get("status"),
+            "terminal_output": terminal_payload.get("output", ""),
+            "model_end_count": sum(isinstance(event, ModelCallEndEvent) for event in first_run_events),
+            "model_end_metadata": [event.metadata for event in first_run_events if isinstance(event, ModelCallEndEvent)],
+            "errors": _run_error_diagnostics(first_run_events),
+        }
+    finally:
+        await core.close_session(session.host_session_id)
+
+
+async def _run_real_host_core_on_request_write_approval_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    target = tmp_path / "on_request.txt"
+    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_on_request_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real-on-request:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real-on-request:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=512),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara approval_policy=on_request for write tools. "
+            "For the first validation request, call write_file exactly once with path exactly "
+            "'on_request.txt' and content exactly 'PULSARA_ON_REQUEST_WRITE_OK\\n'. "
+            "Do not use edit_file, terminal, terminal_process, or read_file. "
+            "After the approved write_file tool result, answer exactly: PULSARA_ON_REQUEST_WRITE_OK"
+        ),
+        permission_policy=_workspace_on_request_policy(),
+    )
+    try:
+        registry_names = session.wiring.agent_runtime.tool_executor.registry.names()
+        first = await session.run_turn("Run the approval_policy=on_request write validation exactly as instructed.")
+        pending = session.get_pending_approval()
+        pending_tool_names = [call.name for call in pending.tool_calls] if pending is not None else []
+        if pending is None:
+            events = session.replay_events()
+            return {
+                "first_status": first.status.value,
+                "resolved_status": None,
+                "final_text": first.final_text.strip(),
+                "pending_tool_names": pending_tool_names,
+                "registry_names": registry_names,
+                "file_text": target.read_text(encoding="utf-8") if target.exists() else None,
+                "model_end_count": sum(isinstance(event, ModelCallEndEvent) for event in events),
+                "model_end_metadata": [event.metadata for event in events if isinstance(event, ModelCallEndEvent)],
+                "errors": _run_error_diagnostics(events),
+            }
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        events = session.replay_events()
+        first_run_events = [event for event in events if event.run_id == first.state.run_id]
+        return {
+            "first_status": first.status.value,
+            "resolved_status": resolved.status.value,
+            "final_text": resolved.final_text.strip(),
+            "pending_tool_names": pending_tool_names,
+            "registry_names": registry_names,
+            "file_text": target.read_text(encoding="utf-8") if target.exists() else None,
+            "model_end_count": sum(isinstance(event, ModelCallEndEvent) for event in first_run_events),
+            "model_end_metadata": [event.metadata for event in first_run_events if isinstance(event, ModelCallEndEvent)],
+            "errors": _run_error_diagnostics(first_run_events),
+        }
+    finally:
+        await core.close_session(session.host_session_id)
 
 
 async def _run_real_agent_active_skill_smoke(tmp_path: Path) -> dict:

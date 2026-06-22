@@ -59,19 +59,59 @@ def test_resolve_permission_policy_uses_cli_over_env() -> None:
     assert policy.terminal is TerminalAccess.ALLOW
 
 
-def test_resolve_permission_policy_rejects_read_only_with_terminal() -> None:
+@pytest.mark.parametrize("terminal", ["ask", "allow"])
+def test_resolve_permission_policy_rejects_read_only_with_terminal(terminal: str) -> None:
     with pytest.raises(ValueError, match="read_only"):
-        resolve_permission_policy(profile="read_only", terminal="allow", env={})
+        resolve_permission_policy(profile="read_only", terminal=terminal, env={})
 
 
-def test_resolve_permission_policy_rejects_ask_until_approval_resume_exists() -> None:
-    with pytest.raises(ValueError, match="approval resume"):
-        resolve_permission_policy(profile="trusted_host", terminal="ask", env={})
+@pytest.mark.parametrize("profile", ["trusted_host", "workspace_guarded"])
+@pytest.mark.parametrize("approval", ["never", "risky_only", "on_request"])
+@pytest.mark.parametrize("terminal", ["off", "allow", "ask"])
+def test_resolve_permission_policy_accepts_non_read_only_cross_product(
+    profile: str,
+    approval: str,
+    terminal: str,
+) -> None:
+    policy = resolve_permission_policy(profile=profile, approval=approval, terminal=terminal, env={})
+
+    assert policy.profile.value == profile
+    assert policy.approval.value == approval
+    assert policy.terminal.value == terminal
 
 
-def test_resolve_permission_policy_rejects_on_request_for_write_capable_profiles() -> None:
-    with pytest.raises(ValueError, match="approval_policy=on_request"):
-        resolve_permission_policy(profile="workspace_guarded", approval="on_request", terminal="off", env={})
+@pytest.mark.parametrize("approval", ["never", "risky_only", "on_request"])
+def test_resolve_permission_policy_accepts_read_only_with_terminal_off(approval: str) -> None:
+    policy = resolve_permission_policy(profile="read_only", approval=approval, terminal="off", env={})
+
+    assert policy.profile is PermissionProfile.READ_ONLY
+    assert policy.approval.value == approval
+    assert policy.terminal is TerminalAccess.OFF
+
+
+def test_resolve_permission_policy_env_can_select_ask() -> None:
+    policy = resolve_permission_policy(
+        profile="trusted_host",
+        env={"PULSARA_TERMINAL_ACCESS": "ask"},
+    )
+
+    assert policy.profile is PermissionProfile.TRUSTED_HOST
+    assert policy.terminal is TerminalAccess.ASK
+
+
+def test_resolve_permission_policy_cli_overrides_env_for_ask_and_on_request() -> None:
+    policy = resolve_permission_policy(
+        env={
+            "PULSARA_APPROVAL_POLICY": "never",
+            "PULSARA_TERMINAL_ACCESS": "off",
+        },
+        profile="trusted_host",
+        approval="on_request",
+        terminal="ask",
+    )
+
+    assert policy.approval is ApprovalPolicy.ON_REQUEST
+    assert policy.terminal is TerminalAccess.ASK
 
 
 def test_policy_gate_denies_tools_hidden_by_terminal_off() -> None:
@@ -123,6 +163,24 @@ def test_policy_gate_never_allows_non_hardline_risky_terminal_command() -> None:
     )
 
     assert decision.kind is PermissionDecisionKind.ALLOW
+
+
+def test_policy_gate_ask_overrides_never_for_terminal() -> None:
+    gate = PolicyPermissionGate(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.NEVER,
+            terminal=TerminalAccess.ASK,
+        ),
+        inner=AllowAllPermissionGate(),
+    )
+
+    decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "printf ok"})])
+    )
+
+    assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
+    assert decision.suggested_rules[0]["reason"] == "terminal_access_ask"
 
 
 def test_policy_gate_hardline_terminal_command_denies_even_when_never() -> None:
@@ -237,7 +295,14 @@ def test_policy_gate_hardline_terminal_process_input_denies_even_when_never(acti
     assert decision.suggested_rules[0]["reason"] == "hardline_terminal_process_input"
 
 
-def test_policy_gate_on_request_write_tool_waits_for_user() -> None:
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("write_file", {"path": "x", "content": "y"}),
+        ("edit_file", {"path": "x", "old": "a", "new": "b"}),
+    ],
+)
+def test_policy_gate_on_request_file_write_tools_wait_for_user(tool_name: str, arguments: dict) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.WORKSPACE_GUARDED,
@@ -247,9 +312,118 @@ def test_policy_gate_on_request_write_tool_waits_for_user() -> None:
         inner=AllowAllPermissionGate(),
     )
 
+    decision = asyncio.run(gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name, arguments=arguments)]))
+
+    assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
+    assert decision.suggested_rules[0] == {"tool": tool_name, "reason": "write_tool_on_request"}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("terminal", {"command": "printf ok"}),
+        ("terminal_process", {"action": "poll", "process_id": "terminal-process:fake"}),
+    ],
+)
+def test_policy_gate_on_request_terminal_tools_wait_for_user(tool_name: str, arguments: dict) -> None:
+    gate = PolicyPermissionGate(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.ALLOW,
+        ),
+        inner=AllowAllPermissionGate(),
+    )
+
+    decision = asyncio.run(gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name, arguments=arguments)]))
+
+    assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
+    assert decision.suggested_rules[0] == {"tool": tool_name, "reason": "terminal_on_request"}
+
+
+@pytest.mark.parametrize("action", ["poll", "wait", "kill", "write", "submit"])
+def test_policy_gate_terminal_access_ask_waits_for_all_terminal_process_actions(action: str) -> None:
+    gate = PolicyPermissionGate(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.NEVER,
+            terminal=TerminalAccess.ASK,
+        ),
+        inner=AllowAllPermissionGate(),
+    )
+    arguments = {"action": action, "process_id": "terminal-process:fake"}
+    if action in {"write", "submit"}:
+        arguments["data"] = "printf ok"
+
     decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:write", name="write_file", arguments={"path": "x", "content": "y"})])
+        gate.evaluate([ToolCall(id="call:process", name="terminal_process", arguments=arguments)])
     )
 
     assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
-    assert decision.suggested_rules[0]["reason"] == "write_tool_on_request"
+    assert decision.suggested_rules[0] == {"tool": "terminal_process", "reason": "terminal_access_ask"}
+
+
+def test_policy_gate_terminal_access_ask_takes_precedence_over_on_request() -> None:
+    gate = PolicyPermissionGate(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.ASK,
+        ),
+        inner=AllowAllPermissionGate(),
+    )
+
+    decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "printf ok"})])
+    )
+
+    assert decision.kind is PermissionDecisionKind.WAIT_FOR_USER
+    assert decision.suggested_rules[0] == {"tool": "terminal", "reason": "terminal_access_ask"}
+
+
+def test_policy_gate_hardline_terminal_command_denies_under_ask() -> None:
+    gate = PolicyPermissionGate(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.ASK,
+        ),
+        inner=AllowAllPermissionGate(),
+    )
+
+    decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "rm -rf /"})])
+    )
+
+    assert decision.kind is PermissionDecisionKind.DENY
+    assert decision.suggested_rules[0]["reason"] == "hardline_terminal_command"
+
+
+def test_policy_gate_hardline_terminal_process_input_denies_under_on_request() -> None:
+    gate = PolicyPermissionGate(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.ALLOW,
+        ),
+        inner=AllowAllPermissionGate(),
+    )
+
+    decision = asyncio.run(
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:process",
+                    name="terminal_process",
+                    arguments={
+                        "action": "submit",
+                        "process_id": "terminal-process:fake",
+                        "data": "rm -rf /",
+                    },
+                )
+            ]
+        )
+    )
+
+    assert decision.kind is PermissionDecisionKind.DENY
+    assert decision.suggested_rules[0]["reason"] == "hardline_terminal_process_input"

@@ -205,8 +205,6 @@ class PolicyPermissionGate:
         if call.name in TERMINAL_TOOL_NAMES:
             return self._evaluate_terminal_call(call)
         if self.policy.approval is ApprovalPolicy.ON_REQUEST and call.name in FILE_WRITE_TOOL_NAMES:
-            # V1 policy validation prevents executable ON_REQUEST write profiles until
-            # approval resume exists; direct gate tests still exercise the future branch.
             return PermissionDecision(
                 kind=PermissionDecisionKind.WAIT_FOR_USER,
                 reason="file write tool requires user confirmation by approval policy",
@@ -216,16 +214,12 @@ class PolicyPermissionGate:
 
     def _evaluate_terminal_call(self, call: ToolCall) -> PermissionDecision:
         if self.policy.terminal is TerminalAccess.ASK:
-            # terminal_access=ask is rejected by V1 policy validation until approval
-            # resume exists; this branch documents the intended decision shape.
             return PermissionDecision(
                 kind=PermissionDecisionKind.WAIT_FOR_USER,
                 reason="terminal access requires user confirmation by permission policy",
                 suggested_rules=[{"tool": call.name, "reason": "terminal_access_ask"}],
             )
         if self.policy.approval is ApprovalPolicy.ON_REQUEST:
-            # Executable terminal ON_REQUEST policies are rejected in V1 for the
-            # same reason; keep the gate behavior explicit for future resume work.
             return PermissionDecision(
                 kind=PermissionDecisionKind.WAIT_FOR_USER,
                 reason="terminal tool requires user confirmation by approval policy",
@@ -304,15 +298,6 @@ def _parse_enum(enum_type, value, *, option_name: str, default=None):
 def _validate_policy(policy: EffectivePermissionPolicy) -> None:
     if policy.profile is PermissionProfile.READ_ONLY and policy.terminal is not TerminalAccess.OFF:
         raise ValueError("read_only permission profile requires terminal_access=off")
-    if policy.terminal is TerminalAccess.ASK:
-        raise ValueError("terminal_access=ask requires approval resume support and is not enabled in V1")
-    if policy.approval is ApprovalPolicy.ON_REQUEST and not (
-        policy.profile is PermissionProfile.READ_ONLY and policy.terminal is TerminalAccess.OFF
-    ):
-        raise ValueError(
-            "approval_policy=on_request requires approval resume support unless paired with "
-            "read_only + terminal_access=off"
-        )
 
 
 def _terminal_process_input(call: ToolCall) -> str | None:

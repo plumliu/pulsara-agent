@@ -21,6 +21,7 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
 from pulsara_agent.host import HostCore, HostSessionBusyError, HostSessionPendingApprovalError, HostWorkspaceInput
@@ -166,6 +167,22 @@ def _trusted_terminal_policy() -> EffectivePermissionPolicy:
         profile=PermissionProfile.TRUSTED_HOST,
         approval=ApprovalPolicy.RISKY_ONLY,
         terminal=TerminalAccess.ALLOW,
+    )
+
+
+def _trusted_terminal_ask_policy() -> EffectivePermissionPolicy:
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.RISKY_ONLY,
+        terminal=TerminalAccess.ASK,
+    )
+
+
+def _workspace_on_request_policy() -> EffectivePermissionPolicy:
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile.WORKSPACE_GUARDED,
+        approval=ApprovalPolicy.ON_REQUEST,
+        terminal=TerminalAccess.OFF,
     )
 
 
@@ -479,6 +496,251 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
     assert session.suspended_run_id is None
     assert session.active_run_id is None
     assert any(event.run_id == first.state.run_id for event in session.replay_events())
+
+
+def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ask-terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf PULSARA_ASK_OK"}),
+                    }
+                ]
+            },
+            {"text": "approved ask continuation"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        first = await session.run_turn("run harmless terminal under ask")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert pending.tool_calls[0].name == "terminal"
+        assert pending.tool_calls[0].id == "call:ask-terminal"
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    tool_output = "".join(
+        event.delta
+        for event in run_events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:ask-terminal"
+    )
+
+    assert first.status.value == "waiting_user"
+    assert resolved.status.value == "finished"
+    assert resolved.final_text == "approved ask continuation"
+    assert session.get_pending_approval() is None
+    assert "PULSARA_ASK_OK" in tool_output
+
+
+def test_host_session_on_request_write_approval_executes_file_snapshot(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "approved.txt", "content": "PULSARA_ON_REQUEST_OK\n"}),
+                    }
+                ]
+            },
+            {"text": "write approved"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
+        first = await session.run_turn("write a file under on_request")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert pending.tool_calls[0].name == "write_file"
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+
+    assert first.status.value == "waiting_user"
+    assert resolved.status.value == "finished"
+    assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "PULSARA_ON_REQUEST_OK\n"
+    assert session.get_pending_approval() is None
+
+
+def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "denied.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    }
+                ]
+            },
+            {"text": "write denied"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
+        first = await session.run_turn("write a file under on_request")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                ),
+            )
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    denied_output = "".join(
+        event.delta
+        for event in run_events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:write"
+    )
+
+    assert resolved.status.value == "finished"
+    assert resolved.final_text == "write denied"
+    assert not (tmp_path / "denied.txt").exists()
+    assert "tool call denied by user approval" in denied_output
+    assert session.get_pending_approval() is None
+
+
+def test_host_session_stop_terminal_access_ask_pending_approval_aborts(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ask-terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf SHOULD_NOT_RUN"}),
+                    }
+                ]
+            },
+            {"text": "continued after ask stop"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        first = await session.run_turn("run harmless terminal under ask")
+        assert session.get_pending_approval() is not None
+        stopped = await session.stop_current_turn()
+        assert stopped is not None
+        second = await session.run_turn("please continue")
+        return session, first, stopped, second
+
+    session, first, stopped, second = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+
+    assert stopped.status.value == "aborted"
+    assert stopped.stop_reason == "aborted"
+    assert second.final_text == "continued after ask stop"
+    assert session.get_pending_approval() is None
+    assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
+    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == ["aborted"]
+
+
+def test_host_session_stop_on_request_write_pending_approval_aborts_without_file(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "stopped.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    }
+                ]
+            },
+            {"text": "continued after write stop"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
+        first = await session.run_turn("write a file under on_request")
+        assert session.get_pending_approval() is not None
+        stopped = await session.stop_current_turn()
+        assert stopped is not None
+        second = await session.run_turn("please continue")
+        return session, first, stopped, second
+
+    session, first, stopped, second = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+
+    assert stopped.status.value == "aborted"
+    assert stopped.stop_reason == "aborted"
+    assert second.final_text == "continued after write stop"
+    assert session.get_pending_approval() is None
+    assert not (tmp_path / "stopped.txt").exists()
+    assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
+    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == ["aborted"]
+
+
+def test_host_session_hardline_under_terminal_ask_denies_without_approval(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:hardline",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf /"}),
+                    }
+                ]
+            },
+            {"text": "hardline denied"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        result = await session.run_turn("attempt hardline command")
+        return session, result
+
+    session, result = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    denied_output = "".join(
+        event.delta
+        for event in run_events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:hardline"
+    )
+
+    assert result.status.value == "finished"
+    assert result.final_text == "hardline denied"
+    assert session.get_pending_approval() is None
+    assert not any(isinstance(event, RequireUserConfirmEvent) for event in run_events)
+    assert "terminal command blocked by hardline permission policy" in denied_output
 
 
 def test_host_session_suspension_releases_run_lock_before_approval_resolution(tmp_path, monkeypatch) -> None:
