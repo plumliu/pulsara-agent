@@ -6,10 +6,12 @@ import pytest
 
 from pulsara_agent.event import (
     AgentEvent,
+    ConfirmResult,
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ReplyEndEvent,
+    RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
@@ -19,12 +21,18 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    UserConfirmResultEvent,
 )
-from pulsara_agent.host import HostCore, HostSessionBusyError, HostWorkspaceInput
+from pulsara_agent.host import HostCore, HostSessionBusyError, HostSessionPendingApprovalError, HostWorkspaceInput
 from pulsara_agent.host.transcript import FAILURE_NOTE_TEXT, rebuild_prior_messages
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.message import ToolCallBlock, ToolCallState
+from pulsara_agent.message.message import AssistantMsg
+from pulsara_agent.message.reducer import MessageReducer
+from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.permission import ApprovalPolicy, EffectivePermissionPolicy, PermissionProfile, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
@@ -152,13 +160,28 @@ def _core(monkeypatch, transport: ScriptedTransport, *, use_workspace_supervisor
     return core
 
 
-async def _open_project_session(core: HostCore, tmp_path, *, host_session_id: str = "host:test"):
+def _trusted_terminal_policy() -> EffectivePermissionPolicy:
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.RISKY_ONLY,
+        terminal=TerminalAccess.ALLOW,
+    )
+
+
+async def _open_project_session(
+    core: HostCore,
+    tmp_path,
+    *,
+    host_session_id: str = "host:test",
+    permission_policy: EffectivePermissionPolicy | None = None,
+):
     return await core.open_session(
         HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path, memory_domain_id="u_test"),
         host_session_id=host_session_id,
         conversation_id=f"conversation:{host_session_id}",
         model_role=ModelRole.FLASH,
         memory_reflection=False,
+        permission_policy=permission_policy,
     )
 
 
@@ -357,6 +380,350 @@ def test_host_session_rejects_concurrent_runs(tmp_path, monkeypatch) -> None:
     result = asyncio.run(run())
 
     assert result.final_text == "slow"
+
+
+def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "approved continuation"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        first = await session.run_turn("attempt dangerous command")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert pending.tool_calls[0].id == "call:danger"
+        assert session.active_run_id is None
+        assert session.suspended_run_id == first.state.run_id
+        assert not session._run_lock.locked()
+        with pytest.raises(HostSessionPendingApprovalError):
+            await session.run_turn("new prompt should not start")
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+
+    assert resolved.status.value == "finished"
+    assert resolved.final_text == "approved continuation"
+    assert session.get_pending_approval() is None
+    assert session.suspended_run_id is None
+    assert session.active_run_id is None
+    assert any(event.run_id == first.state.run_id for event in session.replay_events())
+
+
+def test_host_session_suspension_releases_run_lock_before_approval_resolution(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "resolved without deadlock"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        await session.run_turn("attempt dangerous command")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert not session._run_lock.locked()
+        result = await asyncio.wait_for(
+            session.resolve_approval(
+                ApprovalResolution(
+                    approval_id=pending.approval_id,
+                    decisions=tuple(
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                    ),
+                )
+            ),
+            timeout=1,
+        )
+        return session, result
+
+    session, result = asyncio.run(run())
+
+    assert result.final_text == "resolved without deadlock"
+    assert session.get_pending_approval() is None
+    assert not session._run_lock.locked()
+
+
+def test_host_session_resume_can_suspend_again_with_new_pending_approval(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:first",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build-a"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:second",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build-b"}),
+                    }
+                ]
+            },
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        first = await session.run_turn("attempt dangerous command")
+        first_pending = session.get_pending_approval()
+        assert first_pending is not None
+        resumed = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=first_pending.approval_id,
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in first_pending.tool_calls
+                ),
+            )
+        )
+        second_pending = session.get_pending_approval()
+        return first, resumed, first_pending, second_pending, session
+
+    first, resumed, first_pending, second_pending, session = asyncio.run(run())
+
+    assert resumed.status.value == "waiting_user"
+    assert second_pending is not None
+    assert second_pending.approval_id != first_pending.approval_id
+    assert second_pending.run_id == first_pending.run_id == first.state.run_id
+    assert second_pending.tool_calls[0].id == "call:second"
+    assert session.suspended_run_id == first.state.run_id
+    assert session.active_run_id is None
+
+
+def test_host_session_close_invalidates_pending_approval(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            }
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        await session.run_turn("attempt dangerous command")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        session.close()
+        assert session.get_pending_approval() is None
+        assert session.suspended_run_id is None
+        with pytest.raises(RuntimeError, match="closed"):
+            await session.resolve_approval(
+                ApprovalResolution(
+                    approval_id=pending.approval_id,
+                    decisions=tuple(
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                    ),
+                )
+            )
+        return session
+
+    session = asyncio.run(run())
+
+    assert session.closed
+
+
+def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "denied continuation"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        streamed = [event async for event in session.stream_turn("attempt dangerous command")]
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert session.suspended_run_id is not None
+        assert session.active_run_id is None
+        events = [
+            event
+            async for event in session.stream_approval_resolution(
+                ApprovalResolution(
+                    approval_id=pending.approval_id,
+                    decisions=tuple(
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                    ),
+                )
+            )
+        ]
+        return session, streamed, events
+
+    session, streamed, events = asyncio.run(run())
+
+    assert any(event.type.name == "REQUIRE_USER_CONFIRM" for event in streamed)
+    assert any(event.type.name == "USER_CONFIRM_RESULT" for event in events)
+    assert any(event.type.name == "TOOL_RESULT_END" for event in events)
+    assert session.get_pending_approval() is None
+
+
+def test_host_session_stream_turn_captures_suspended_run_id_before_clearing_active_run(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            }
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        streamed = [event async for event in session.stream_turn("attempt dangerous command")]
+        pending = session.get_pending_approval()
+        confirm = next(event for event in streamed if isinstance(event, RequireUserConfirmEvent))
+        return session, pending, confirm
+
+    session, pending, confirm = asyncio.run(run())
+
+    assert pending is not None
+    assert session.active_run_id is None
+    assert session.suspended_run_id == pending.run_id == confirm.run_id
+    assert pending.reply_id == confirm.reply_id
+
+
+def test_host_core_approval_facade_resolves_pending_request(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "core approved"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            host_session_id="host:approval-facade",
+            permission_policy=_trusted_terminal_policy(),
+        )
+        await session.run_turn("attempt dangerous command")
+        pending = await core.get_pending_approval(session.host_session_id)
+        assert pending is not None
+        result = await core.resolve_approval(
+            session.host_session_id,
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            ),
+        )
+        return result, await core.get_pending_approval(session.host_session_id)
+
+    result, pending_after = asyncio.run(run())
+
+    assert result.final_text == "core approved"
+    assert pending_after is None
+
+
+def test_confirm_result_rules_are_inert_in_message_replay() -> None:
+    ctx = EventContext(run_id="run:confirm", turn_id="turn:confirm", reply_id="reply:confirm")
+    tool_call = ToolCallBlock(
+        id="call:danger",
+        name="terminal",
+        input='{"command":"rm -rf build"}',
+        state=ToolCallState.PENDING,
+    )
+    message = AssistantMsg(id=ctx.reply_id, name="assistant", content=[tool_call])
+    reducer = MessageReducer(message)
+
+    reducer.append(
+        RequireUserConfirmEvent(
+            **ctx.event_fields(),
+            tool_calls=[
+                ToolCallBlock(
+                    id="call:danger",
+                    name="terminal",
+                    input='{"command":"rm -rf build"}',
+                    state=ToolCallState.ASKING,
+                    suggested_rules=[{"reason": "dangerous_terminal_command"}],
+                )
+            ],
+        )
+    )
+    reducer.append(
+        UserConfirmResultEvent(
+            **ctx.event_fields(),
+            confirm_results=[
+                ConfirmResult(
+                    confirmed=True,
+                    tool_call=tool_call,
+                    rules=[{"reason": "user_approved_once"}],
+                )
+            ],
+        )
+    )
+
+    replayed_call = message.content[0]
+    assert isinstance(replayed_call, ToolCallBlock)
+    assert replayed_call.state is ToolCallState.ALLOWED
+    assert replayed_call.suggested_rules == [{"reason": "dangerous_terminal_command"}]
+    assert "rules" not in replayed_call.model_dump(mode="json")
 
 
 def test_host_core_reconnect_by_session_id_returns_same_session(tmp_path, monkeypatch) -> None:

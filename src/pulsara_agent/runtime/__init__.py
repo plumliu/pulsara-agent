@@ -4,6 +4,7 @@ from pulsara_agent.runtime.agent import (
     AgentRunResult,
     AgentRuntime,
 )
+from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval, ToolApprovalDecision
 from pulsara_agent.runtime.context import build_llm_context, msg_to_llm_messages
 from pulsara_agent.runtime.hooks import (
     ControlHookResult,
@@ -62,6 +63,7 @@ __all__ = [
     "AgentRuntime",
     "AgentRuntimeWiring",
     "AllowAllPermissionGate",
+    "ApprovalResolution",
     "ApprovalPolicy",
     "EffectivePermissionPolicy",
     "ExecPolicyDecision",
@@ -83,6 +85,7 @@ __all__ = [
     "PermissionDecisionKind",
     "PermissionGate",
     "PermissionProfile",
+    "PendingApproval",
     "PolicyPermissionGate",
     "RuntimeEventPublisher",
     "RuntimeEventSubscriber",
@@ -103,6 +106,7 @@ __all__ = [
     "TerminalExecPolicy",
     "TerminalProcessState",
     "TerminalStatus",
+    "ToolApprovalDecision",
     "build_llm_context",
     "build_agent_runtime_wiring",
     "build_durable_runtime_wiring",

@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
+import pytest
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
@@ -24,6 +26,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    UserConfirmResultEvent,
 )
 from pulsara_agent.capability import (
     CapabilityResolveContext,
@@ -50,12 +53,14 @@ from pulsara_agent.message import (
     UserMsg,
 )
 from pulsara_agent.runtime import (
+    ApprovalResolution,
     AgentRuntime,
     LoopBudget,
     LoopState,
     LoopStatus,
     LoopTransition,
     RuntimeSession,
+    ToolApprovalDecision,
     build_tool_result_error_events,
     msg_to_llm_messages,
 )
@@ -598,11 +603,292 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
 
     assert result.status is LoopStatus.WAITING_USER
     assert result.stop_reason == "waiting_user"
+    assert result.state.pending_tool_calls[0].id == "call:danger"
+    assert result.state.pending_tool_calls[0].state is ToolCallState.ASKING
     assert confirm.tool_calls[0].id == "call:danger"
     assert confirm.tool_calls[0].name == "terminal"
     assert confirm.tool_calls[0].state is ToolCallState.ASKING
     assert confirm.tool_calls[0].suggested_rules[0]["reason"] == "dangerous_terminal_command"
     assert not any(isinstance(event, ToolResultStartEvent) for event in events)
+    assert not any(isinstance(event, RunEndEvent) for event in events)
+
+
+def test_approval_resume_approve_executes_original_tool_snapshot_and_continues(tmp_path) -> None:
+    calls: list[str] = []
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "continued"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
+    registry = ToolRegistry()
+    registry.register(RecordingTool("terminal", calls=calls))
+    agent.tool_executor.registry = registry
+
+    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    resolution = ApprovalResolution(
+        approval_id="host-minted",
+        decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),),
+    )
+    result = asyncio.run(agent.resume_after_approval(first.state, resolution))
+    events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    confirm_index = next(i for i, event in enumerate(events) if isinstance(event, UserConfirmResultEvent))
+    tool_start_index = next(i for i, event in enumerate(events) if isinstance(event, ToolResultStartEvent))
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.final_text == "continued"
+    assert calls == ["call:danger"]
+    assert confirm_index < tool_start_index
+    assert [event.status for event in events if isinstance(event, RunEndEvent)] == ["finished"]
+    assert all(
+        event.reply_id == first.state.messages[1].id
+        for event in events
+        if isinstance(event, (UserConfirmResultEvent, ToolResultStartEvent, ToolResultTextDeltaEvent, ToolResultEndEvent))
+    )
+    assert len(transport.contexts) == 2
+    assert "call:danger" in "\n".join(text for message in transport.contexts[1].messages for text in message.content)
+
+
+def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path) -> None:
+    calls: list[str] = []
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "continued"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
+    registry = ToolRegistry()
+    registry.register(RecordingTool("terminal", calls=calls))
+    agent.tool_executor.registry = registry
+
+    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    before_resume_confirm_count = sum(
+        isinstance(event, RequireUserConfirmEvent)
+        for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    )
+    result = asyncio.run(
+        agent.resume_after_approval(
+            first.state,
+            ApprovalResolution(
+                approval_id="host-minted",
+                decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),),
+            ),
+        )
+    )
+    after_resume_confirm_count = sum(
+        isinstance(event, RequireUserConfirmEvent)
+        for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    )
+
+    assert result.status is LoopStatus.FINISHED
+    assert calls == ["call:danger"]
+    assert before_resume_confirm_count == 1
+    assert after_resume_confirm_count == 1
+
+
+def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_path) -> None:
+    calls: list[str] = []
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "denial acknowledged"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
+    registry = ToolRegistry()
+    registry.register(RecordingTool("terminal", calls=calls))
+    agent.tool_executor.registry = registry
+
+    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    result = asyncio.run(
+        agent.resume_after_approval(
+            first.state,
+            ApprovalResolution(
+                approval_id="host-minted",
+                decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=False),),
+            ),
+        )
+    )
+    events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    denied = next(event for event in events if isinstance(event, ToolResultEndEvent))
+    second_context_text = "\n".join(text for message in transport.contexts[1].messages for text in message.content)
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.final_text == "denial acknowledged"
+    assert calls == []
+    assert denied.state is ToolResultState.DENIED
+    assert "tool call denied by user approval" in second_context_text
+
+
+def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_path) -> None:
+    hooks = RecordingHooks()
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+        memory_hooks=hooks,
+    )
+    registry = ToolRegistry()
+    registry.register(RecordingTool("terminal", calls=[]))
+    agent.tool_executor.registry = registry
+
+    first = asyncio.run(agent.run_task("attempt dangerous command"))
+
+    assert first.status is LoopStatus.WAITING_USER
+    assert "turn_end" not in hooks.calls
+    assert "end" not in hooks.calls
+
+    result = asyncio.run(
+        agent.resume_after_approval(
+            first.state,
+            ApprovalResolution(
+                approval_id="host-minted",
+                decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),),
+            ),
+        )
+    )
+
+    assert result.status is LoopStatus.FINISHED
+    assert hooks.calls.count("turn_end") == 1
+    assert hooks.calls.count("end") == 0
+
+
+def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> None:
+    calls: list[str] = []
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:a", "name": "terminal", "arguments": json.dumps({"command": "rm -rf build-a"})},
+                    {"id": "call:b", "name": "terminal", "arguments": json.dumps({"command": "rm -rf build-b"})},
+                    {"id": "call:c", "name": "terminal", "arguments": json.dumps({"command": "rm -rf build-c"})},
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
+    registry = ToolRegistry()
+    registry.register(RecordingTool("terminal", calls=calls))
+    agent.tool_executor.registry = registry
+
+    first = asyncio.run(agent.run_task("attempt dangerous commands"))
+    result = asyncio.run(
+        agent.resume_after_approval(
+            first.state,
+            ApprovalResolution(
+                approval_id="host-minted",
+                decisions=(
+                    ToolApprovalDecision(tool_call_id="call:a", confirmed=True),
+                    ToolApprovalDecision(tool_call_id="call:b", confirmed=False),
+                    ToolApprovalDecision(tool_call_id="call:c", confirmed=True),
+                ),
+            ),
+        )
+    )
+    result_ends = [
+        event for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id) if isinstance(event, ToolResultEndEvent)
+    ]
+
+    assert result.status is LoopStatus.FINISHED
+    assert [(event.tool_call_id, event.state) for event in result_ends] == [
+        ("call:a", ToolResultState.SUCCESS),
+        ("call:b", ToolResultState.DENIED),
+        ("call:c", ToolResultState.SUCCESS),
+    ]
+    assert calls == ["call:a", "call:c"]
+
+
+def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            }
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
+
+    first = asyncio.run(agent.run_task("attempt dangerous command"))
+
+    with pytest.raises(ValueError, match="unknown tool calls"):
+        asyncio.run(
+            agent.resume_after_approval(
+                first.state,
+                ApprovalResolution(
+                    approval_id="host-minted",
+                    decisions=(ToolApprovalDecision(tool_call_id="call:other", confirmed=True),),
+                ),
+            )
+        )
+    with pytest.raises(ValueError, match="missing decisions"):
+        asyncio.run(agent.resume_after_approval(first.state, ApprovalResolution(approval_id="host-minted", decisions=())))
 
 
 def test_agent_runtime_finished_run_keeps_background_process_until_session_close(tmp_path) -> None:

@@ -24,6 +24,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    UserConfirmResultEvent,
 )
 
 TimelineItemKind = Literal[
@@ -136,6 +137,7 @@ def build_run_timeline(
     tool_calls: dict[str, RunTimelineItem] = {}
     tool_results: dict[str, RunTimelineItem] = {}
     failed = False
+    waiting_user = False
     terminal_status: str | None = None
 
     for event in ordered:
@@ -259,10 +261,12 @@ def build_run_timeline(
             continue
         if isinstance(event, RunEndEvent):
             terminal_status = _timeline_status_from_run_status(event.status)
+            waiting_user = False
             if terminal_status == "failed":
                 failed = True
             continue
         if isinstance(event, RequireUserConfirmEvent):
+            waiting_user = True
             items.append(
                 _item(
                     "permission_request",
@@ -272,6 +276,9 @@ def build_run_timeline(
                     metadata={"tool_call_ids": [call.id for call in event.tool_calls]},
                 )
             )
+            continue
+        if isinstance(event, UserConfirmResultEvent):
+            waiting_user = False
             continue
         if isinstance(event, RunErrorEvent):
             failed = True
@@ -284,7 +291,7 @@ def build_run_timeline(
 
     start_sequence = min((event.sequence for event in ordered if event.sequence is not None), default=None)
     end_sequence = max((event.sequence for event in ordered if event.sequence is not None), default=None)
-    status = terminal_status or ("failed" if failed else "completed")
+    status = terminal_status or ("failed" if failed else "waiting_user" if waiting_user else "completed")
     return RunTimeline(
         runtime_session_id=runtime_session_id,
         run_id=run_id,

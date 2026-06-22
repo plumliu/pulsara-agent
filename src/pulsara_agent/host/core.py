@@ -13,6 +13,8 @@ from pulsara_agent.host.session import HostSession
 from pulsara_agent.host.supervisor import WorkspaceTerminalSupervisor
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval
+from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
@@ -80,6 +82,23 @@ class HostCore:
     async def replay_events(self, host_session_id: str, *, after_sequence: int | None = None):
         session = await self.get_session(host_session_id)
         return session.replay_events(after_sequence=after_sequence)
+
+    async def get_pending_approval(self, host_session_id: str) -> PendingApproval | None:
+        session = await self.get_session(host_session_id)
+        return session.get_pending_approval()
+
+    async def resolve_approval(
+        self,
+        host_session_id: str,
+        resolution: ApprovalResolution,
+    ) -> AgentRunResult:
+        session = await self.get_session(host_session_id)
+        return await session.resolve_approval(resolution)
+
+    async def stream_approval_resolution(self, host_session_id: str, resolution: ApprovalResolution):
+        session = await self.get_session(host_session_id)
+        async for event in session.stream_approval_resolution(resolution):
+            yield event
 
     async def list_sessions(self) -> list[HostSessionSummary]:
         return await self.registry.list_sessions()

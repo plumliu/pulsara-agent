@@ -11,9 +11,11 @@ from pulsara_agent.capability.types import (
     CapabilityResolveContext,
     CapabilityResolver,
     NoopCapabilityResolver,
+    ResolvedCapabilitySet,
 )
 from pulsara_agent.event import (
     AgentEvent,
+    ConfirmResult,
     CustomEvent,
     EventContext,
     ExceedMaxItersEvent,
@@ -25,6 +27,7 @@ from pulsara_agent.event import (
     RunErrorEvent,
     RunStartEvent,
     ToolResultEndEvent,
+    UserConfirmResultEvent,
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
@@ -37,6 +40,7 @@ from pulsara_agent.message import (
     UserMsg,
 )
 from pulsara_agent.runtime.context import build_llm_context
+from pulsara_agent.runtime.approval import ApprovalResolution
 from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
 from pulsara_agent.runtime.loop_helpers import (
     _accumulate_usage,
@@ -184,6 +188,23 @@ class AgentRuntime:
         ):
             yield event
 
+    async def resume_after_approval(
+        self,
+        state: LoopState,
+        resolution: ApprovalResolution,
+    ) -> AgentRunResult:
+        async for _event in self.stream_after_approval(state, resolution):
+            pass
+        return self._run_result(state)
+
+    async def stream_after_approval(
+        self,
+        state: LoopState,
+        resolution: ApprovalResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        async for event in self._stream_approval_resolution(state, resolution):
+            yield event
+
     def close(self) -> None:
         self.runtime_session.close()
 
@@ -219,7 +240,26 @@ class AgentRuntime:
             async for event in self._finalize_run(state, run_session_end_hook=False):
                 yield event
             return
-        capabilities = self.capability_resolver.resolve(
+        capabilities = self._resolve_capabilities(
+            state,
+            user_input=user_input,
+            prior_messages=prior_messages,
+            active_skill_names=active_skill_names,
+        )
+        state.scratchpad["capabilities"] = capabilities
+
+        async for event in self._stream_model_loop(state, capabilities):
+            yield event
+
+    def _resolve_capabilities(
+        self,
+        state: LoopState,
+        *,
+        user_input: str,
+        prior_messages: list[Msg] | None = None,
+        active_skill_names: frozenset[str] | None = None,
+    ) -> ResolvedCapabilitySet:
+        return self.capability_resolver.resolve(
             CapabilityResolveContext(
                 workspace_root=self.runtime_session.workspace_root,
                 workspace_kind=self.workspace_kind,
@@ -231,6 +271,11 @@ class AgentRuntime:
             )
         )
 
+    async def _stream_model_loop(
+        self,
+        state: LoopState,
+        capabilities: ResolvedCapabilitySet,
+    ) -> AsyncIterator[AgentEvent]:
         while state.status is LoopStatus.RUNNING:
             if state.turn_index >= self.budget.max_turns:
                 state.status = LoopStatus.FAILED
@@ -319,57 +364,126 @@ class AgentRuntime:
             if state.status is not LoopStatus.RUNNING:
                 break
 
-            tool_error_count = sum(1 for result in state.tool_results if result.state is not ToolResultState.SUCCESS)
-            if tool_error_count:
-                state.consecutive_tool_failures += tool_error_count
-                state.recovery_mode = True
-                if state.consecutive_tool_failures > self.budget.max_consecutive_tool_failures:
-                    state.status = LoopStatus.FAILED
-                    state.stop_reason = "tool_error_budget"
-                    state.error_message = "tool error budget exceeded"
-                    state.transition(LoopTransition.FAIL)
-                    break
-            else:
-                state.consecutive_tool_failures = 0
-                state.recovery_mode = False
-
-            if self.tool_result_persistence_hook is not None:
-                event = await self._run_tool_result_persistence_hook(state)
-                if event is not None:
-                    yield event
-            ok, hook_events = await self._run_memory_hook_and_emit_events(
-                state,
-                "after_tool_results",
-                lambda: self.memory_hooks.after_tool_results(state, state.tool_results),
-            )
-            for event in hook_events:
+            async for event in self._after_tool_results(state):
                 yield event
-            if not ok:
+            if state.status is not LoopStatus.RUNNING:
                 break
-            ok, should_compact, error_event = await self._run_memory_hook(
-                state,
-                "should_compact",
-                lambda: self.memory_hooks.should_compact(state),
-            )
-            if not ok:
-                assert error_event is not None
-                yield error_event
-                break
-            if should_compact:
-                state.compacted = True
-                yield await self.runtime_session.emit(
-                    CustomEvent(
-                        **self._event_context(state).event_fields(),
-                        name="compaction_requested",
-                        value={},
-                    ),
-                    state=state,
-                )
             state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
             state.begin_next_turn()
 
+        if state.status is LoopStatus.WAITING_USER:
+            return
         async for event in self._finalize_run(state):
             yield event
+
+    async def _stream_approval_resolution(
+        self,
+        state: LoopState,
+        resolution: ApprovalResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        if state.status is not LoopStatus.WAITING_USER:
+            raise ValueError("approval resolution requires a waiting state")
+        pending_by_id = {call.id: call for call in state.pending_tool_calls}
+        if not pending_by_id:
+            raise ValueError("approval resolution requires pending tool calls")
+        decisions_by_id = {decision.tool_call_id: decision for decision in resolution.decisions}
+        unknown_ids = set(decisions_by_id).difference(pending_by_id)
+        if unknown_ids:
+            raise ValueError(f"approval resolution referenced unknown tool calls: {sorted(unknown_ids)}")
+        missing_ids = set(pending_by_id).difference(decisions_by_id)
+        if missing_ids:
+            raise ValueError(f"approval resolution missing decisions for tool calls: {sorted(missing_ids)}")
+
+        confirm_results = [
+            ConfirmResult(
+                confirmed=decisions_by_id[call.id].confirmed,
+                tool_call=call.model_copy(deep=True),
+                rules=list(decisions_by_id[call.id].rules) or None,
+            )
+            for call in state.pending_tool_calls
+        ]
+        event = await self.runtime_session.emit(
+            UserConfirmResultEvent(**self._event_context(state).event_fields(), confirm_results=confirm_results),
+            state=state,
+        )
+        yield event
+
+        state.status = LoopStatus.RUNNING
+        state.stop_reason = None
+        async for event in self._stream_confirmed_tool_blocks(state, decisions_by_id):
+            yield event
+        if state.status is not LoopStatus.RUNNING:
+            async for event in self._finalize_run(state):
+                yield event
+            return
+
+        async for event in self._after_tool_results(state):
+            yield event
+        if state.status is not LoopStatus.RUNNING:
+            async for event in self._finalize_run(state):
+                yield event
+            return
+        state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
+        state.begin_next_turn()
+        capabilities = state.scratchpad.get("capabilities")
+        if not isinstance(capabilities, ResolvedCapabilitySet):
+            capabilities = self._resolve_capabilities(
+                state,
+                user_input="",
+                prior_messages=[],
+                active_skill_names=frozenset(),
+            )
+            state.scratchpad["capabilities"] = capabilities
+        async for event in self._stream_model_loop(state, capabilities):
+            yield event
+
+    async def _after_tool_results(self, state: LoopState) -> AsyncIterator[AgentEvent]:
+        tool_error_count = sum(1 for result in state.tool_results if result.state is not ToolResultState.SUCCESS)
+        if tool_error_count:
+            state.consecutive_tool_failures += tool_error_count
+            state.recovery_mode = True
+            if state.consecutive_tool_failures > self.budget.max_consecutive_tool_failures:
+                state.status = LoopStatus.FAILED
+                state.stop_reason = "tool_error_budget"
+                state.error_message = "tool error budget exceeded"
+                state.transition(LoopTransition.FAIL)
+                return
+        else:
+            state.consecutive_tool_failures = 0
+            state.recovery_mode = False
+
+        if self.tool_result_persistence_hook is not None:
+            event = await self._run_tool_result_persistence_hook(state)
+            if event is not None:
+                yield event
+        ok, hook_events = await self._run_memory_hook_and_emit_events(
+            state,
+            "after_tool_results",
+            lambda: self.memory_hooks.after_tool_results(state, state.tool_results),
+        )
+        for event in hook_events:
+            yield event
+        if not ok:
+            return
+        ok, should_compact, error_event = await self._run_memory_hook(
+            state,
+            "should_compact",
+            lambda: self.memory_hooks.should_compact(state),
+        )
+        if not ok:
+            assert error_event is not None
+            yield error_event
+            return
+        if should_compact:
+            state.compacted = True
+            yield await self.runtime_session.emit(
+                CustomEvent(
+                    **self._event_context(state).event_fields(),
+                    name="compaction_requested",
+                    value={},
+                ),
+                state=state,
+            )
 
     async def _finalize_run(
         self,
@@ -644,6 +758,7 @@ class AgentRuntime:
                 )
                 for call in parsed_calls
             ]
+            state.pending_tool_calls = blocks
             state.status = LoopStatus.WAITING_USER
             state.stop_reason = "waiting_user"
             state.transition(LoopTransition.WAIT_FOR_USER)
@@ -680,6 +795,88 @@ class AgentRuntime:
                 )
             return
 
+        async for event in self._stream_parsed_tool_calls(state, parsed_calls):
+            yield event
+
+    async def _stream_confirmed_tool_blocks(
+        self,
+        state: LoopState,
+        decisions_by_id,
+    ) -> AsyncIterator[AgentEvent]:
+        parsed_calls: list[ToolCall] = []
+        async def flush_parsed_calls() -> AsyncIterator[AgentEvent]:
+            nonlocal parsed_calls
+            if not parsed_calls:
+                return
+            calls = parsed_calls
+            parsed_calls = []
+            async for event in self._stream_parsed_tool_calls(state, calls):
+                yield event
+
+        for block in state.pending_tool_calls:
+            decision = decisions_by_id[block.id]
+            if not decision.confirmed:
+                async for event in flush_parsed_calls():
+                    yield event
+                stored_events = await self.runtime_session.emit_many(
+                    build_tool_result_error_events(
+                        self._event_context(state),
+                        tool_call_id=block.id,
+                        tool_call_name=block.name,
+                        message="tool call denied by user approval",
+                        state=ToolResultState.DENIED,
+                    ),
+                    state=state,
+                )
+                for event in stored_events:
+                    yield event
+                result_block = _tool_result_from_event_slice(stored_events, block.id)
+                _remember_tool_result_event_span(state, stored_events, block.id)
+                state.tool_results.append(result_block)
+                state.messages.append(
+                    Msg(
+                        role="tool_result",
+                        name=block.name,
+                        id=f"tool-result-message:{block.id}",
+                        content=[result_block],
+                    )
+                )
+                continue
+            try:
+                parsed_calls.append(_parse_tool_call(block))
+            except ValueError as exc:
+                async for event in flush_parsed_calls():
+                    yield event
+                stored_events = await self.runtime_session.emit_many(
+                    build_tool_result_error_events(
+                        self._event_context(state),
+                        tool_call_id=block.id,
+                        tool_call_name=block.name,
+                        message=str(exc),
+                    ),
+                    state=state,
+                )
+                for event in stored_events:
+                    yield event
+                result_block = _tool_result_from_event_slice(stored_events, block.id)
+                _remember_tool_result_event_span(state, stored_events, block.id)
+                state.tool_results.append(result_block)
+                state.messages.append(
+                    Msg(
+                        role="tool_result",
+                        name=block.name,
+                        id=f"tool-result-message:{block.id}",
+                        content=[result_block],
+                    )
+                )
+        async for event in flush_parsed_calls():
+            yield event
+
+    async def _stream_parsed_tool_calls(
+        self,
+        state: LoopState,
+        parsed_calls: list[ToolCall],
+    ) -> AsyncIterator[AgentEvent]:
         for batch in _tool_batches(parsed_calls, self.tool_executor):
             if state.tool_call_count + len(batch) > self.budget.max_tool_calls:
                 yield await self._mark_tool_budget_exceeded(state, attempted_count=len(batch))

@@ -8,6 +8,8 @@ from pulsara_agent.capability.bundled_skills import (
     sync_bundled_skills as real_sync_bundled_skills,
 )
 from pulsara_agent.host import HostWorkspaceInput
+from pulsara_agent.message import ToolCallBlock, ToolCallState
+from pulsara_agent.runtime import PendingApproval
 from pulsara_agent.runtime.state import LoopStatus
 
 
@@ -27,6 +29,34 @@ class FakeSession:
     async def run_turn(self, prompt: str, *, active_skill_names=None):
         self.prompts.append(prompt)
         self.active_skill_names.append(active_skill_names)
+        return FakeResult()
+
+    def get_pending_approval(self):
+        return None
+
+
+class PendingFakeSession(FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resolutions = []
+        self._pending = PendingApproval(
+            approval_id="approval:test",
+            host_session_id=self.host_session_id,
+            runtime_session_id="runtime:test",
+            run_id="run:test",
+            turn_id="turn:test",
+            reply_id="reply:test",
+            tool_calls=(
+                ToolCallBlock(id="call:danger", name="terminal", input="{}", state=ToolCallState.ASKING),
+            ),
+        )
+
+    def get_pending_approval(self):
+        return self._pending
+
+    async def resolve_approval(self, resolution):
+        self.resolutions.append(resolution)
+        self._pending = None
         return FakeResult()
 
 
@@ -132,6 +162,55 @@ def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) 
     assert core.permission_policy.profile.value == "workspace_guarded"
     assert core.permission_policy.approval.value == "risky_only"
     assert core.permission_policy.terminal.value == "off"
+
+
+def test_cli_host_run_returns_pending_approval_summary_for_one_shot(monkeypatch, tmp_path) -> None:
+    class PendingCore(FakeCore):
+        def __init__(self, *, settings, durable: bool = False):
+            super().__init__(settings=settings, durable=durable)
+            self.session = PendingFakeSession()
+
+    PendingCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", PendingCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "run", "--workspace", str(tmp_path), "danger"])
+
+    result = asyncio.run(cli._host_run(args))
+
+    assert result["status"] == "waiting_user"
+    assert result["pending_approval"]["approval_id"] == "approval:test"
+    assert result["pending_approval"]["tool_calls"][0]["id"] == "call:danger"
+    assert PendingCore.instances[0].closed == ["host:fake"]
+
+
+def test_cli_host_repl_approval_commands_show_and_resolve_pending(monkeypatch, tmp_path, capsys) -> None:
+    class PendingCore(FakeCore):
+        def __init__(self, *, settings, durable: bool = False):
+            super().__init__(settings=settings, durable=durable)
+            self.session = PendingFakeSession()
+
+    PendingCore.instances.clear()
+    inputs = iter([":approval", ":approve", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    core = PendingCore.instances[0]
+    session = core.session
+    assert session.resolutions[0].approval_id == "approval:test"
+    assert session.resolutions[0].decisions[0].tool_call_id == "call:danger"
+    assert session.resolutions[0].decisions[0].confirmed is True
+    assert core.closed == ["host:fake"]
+    out = capsys.readouterr().out
+    assert '"approval_id": "approval:test"' in out
+    assert "fake final" in out
 
 
 def test_cli_host_repl_runs_bundled_sync_before_opening_session(monkeypatch, tmp_path) -> None:

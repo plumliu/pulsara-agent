@@ -24,7 +24,7 @@ from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
-from pulsara_agent.runtime import RuntimeSession
+from pulsara_agent.runtime import ApprovalResolution, RuntimeSession, ToolApprovalDecision
 from pulsara_agent.runtime.permission import resolve_permission_policy
 from pulsara_agent.settings import PulsaraSettings, load_env_file
 from pulsara_agent.tools import build_core_tool_registry
@@ -207,7 +207,10 @@ def main() -> None:
                 result = asyncio.run(_host_run(args))
             except ValueError as exc:
                 parser.error(str(exc))
-            print(result.final_text)
+            if isinstance(result, dict) and result.get("pending_approval") is not None:
+                print(json.dumps(result, indent=2))
+            else:
+                print(result.final_text)
             return
         if args.host_command == "repl":
             try:
@@ -253,7 +256,15 @@ async def _host_run(args) -> object:
         permission_policy=permission_policy,
     )
     try:
-        return await session.run_turn(args.prompt, active_skill_names=_active_skill_names_from_args(args))
+        result = await session.run_turn(args.prompt, active_skill_names=_active_skill_names_from_args(args))
+        pending = session.get_pending_approval()
+        if pending is not None:
+            return {
+                "status": "waiting_user",
+                "message": "This one-shot host run is waiting for approval. Use host repl or HostCore APIs to resolve it.",
+                "pending_approval": pending.to_dict(),
+            }
+        return result
     finally:
         await core.close_session(session.host_session_id)
 
@@ -276,9 +287,36 @@ async def _host_repl(args) -> None:
                 break
             if prompt.strip() in {"exit", "quit", ":q"}:
                 break
+            if prompt.strip() == ":approval":
+                pending = session.get_pending_approval()
+                print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
+                continue
+            if prompt.strip() in {":approve", ":deny"}:
+                pending = session.get_pending_approval()
+                if pending is None:
+                    print("No pending approval.")
+                    continue
+                confirmed = prompt.strip() == ":approve"
+                resolution = ApprovalResolution(
+                    approval_id=pending.approval_id,
+                    decisions=tuple(
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=confirmed)
+                        for call in pending.tool_calls
+                    ),
+                )
+                result = await session.resolve_approval(resolution)
+                if result.final_text:
+                    print(result.final_text)
+                pending = session.get_pending_approval()
+                if pending is not None:
+                    print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
+                continue
             result = await session.run_turn(prompt, active_skill_names=_active_skill_names_from_args(args))
             if result.final_text:
                 print(result.final_text)
+            pending = session.get_pending_approval()
+            if pending is not None:
+                print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
     finally:
         await core.close_session(session.host_session_id)
 

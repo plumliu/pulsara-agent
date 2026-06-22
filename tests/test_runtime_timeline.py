@@ -11,6 +11,7 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     ReplyEndEvent,
     ReplyStartEvent,
+    RequireUserConfirmEvent,
     RunEndEvent,
     TextBlockDeltaEvent,
     ToolCallDeltaEvent,
@@ -19,6 +20,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    UserConfirmResultEvent,
 )
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.memory import (
@@ -28,7 +30,9 @@ from pulsara_agent.memory import (
     summarize_run_timeline,
 )
 from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.event import ConfirmResult
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.message import ToolCallBlock, ToolCallState
 from pulsara_agent.runtime import RuntimeSession, build_run_timeline
 
 
@@ -74,6 +78,81 @@ def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
     assert timeline.items[3].metadata["arguments"] == '{"path":"note.txt"}'
     assert timeline.items[4].summary == "hello"
     assert timeline.items[4].status == "success"
+
+
+def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -> None:
+    runtime = RuntimeSession(Path("."))
+
+    async def run() -> None:
+        for event in [
+            ReplyStartEvent(**CTX.event_fields(), name="assistant"),
+            ModelCallStartEvent(**CTX.event_fields(), model_name="flash", model_role="flash", provider="scripted"),
+            ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
+            ToolCallDeltaEvent(**CTX.event_fields(), tool_call_id="call:danger", delta='{"command":"rm -rf build"}'),
+            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:danger"),
+            ReplyEndEvent(**CTX.event_fields()),
+            RequireUserConfirmEvent(
+                **CTX.event_fields(),
+                tool_calls=[
+                    ToolCallBlock(
+                        id="call:danger",
+                        name="terminal",
+                        input='{"command":"rm -rf build"}',
+                        state=ToolCallState.ASKING,
+                    )
+                ],
+            ),
+        ]:
+            await runtime.emit(event)
+
+    asyncio.run(run())
+
+    timeline = build_run_timeline(
+        runtime.event_log.iter(run_id=CTX.run_id),
+        runtime_session_id=runtime.runtime_session_id,
+    )
+
+    assert timeline.status == "waiting_user"
+    permission_item = next(item for item in timeline.items if item.kind == "permission_request")
+    assert permission_item.status == "waiting"
+    assert permission_item.metadata["tool_call_ids"] == ["call:danger"]
+
+
+def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None:
+    runtime = RuntimeSession(Path("."))
+    tool_call = ToolCallBlock(
+        id="call:danger",
+        name="terminal",
+        input='{"command":"rm -rf build"}',
+        state=ToolCallState.ASKING,
+    )
+
+    async def run() -> None:
+        for event in [
+            ReplyStartEvent(**CTX.event_fields(), name="assistant"),
+            ToolCallStartEvent(**CTX.event_fields(), tool_call_id=tool_call.id, tool_call_name=tool_call.name),
+            ToolCallDeltaEvent(**CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input),
+            ToolCallEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id),
+            ReplyEndEvent(**CTX.event_fields()),
+            RequireUserConfirmEvent(**CTX.event_fields(), tool_calls=[tool_call]),
+            UserConfirmResultEvent(
+                **CTX.event_fields(),
+                confirm_results=[ConfirmResult(confirmed=True, tool_call=tool_call)],
+            ),
+            ToolResultStartEvent(**CTX.event_fields(), tool_call_id=tool_call.id, tool_call_name=tool_call.name),
+            ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id=tool_call.id, delta="ok"),
+            ToolResultEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id, state=ToolResultState.SUCCESS),
+        ]:
+            await runtime.emit(event)
+
+    asyncio.run(run())
+
+    timeline = build_run_timeline(
+        runtime.event_log.iter(run_id=CTX.run_id),
+        runtime_session_id=runtime.runtime_session_id,
+    )
+
+    assert timeline.status == "completed"
 
 
 def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(tmp_path) -> None:
