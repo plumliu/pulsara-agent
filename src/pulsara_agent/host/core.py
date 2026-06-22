@@ -95,6 +95,15 @@ class HostCore:
         session = await self.get_session(host_session_id)
         return await session.resolve_approval(resolution)
 
+    async def stop_current_turn(
+        self,
+        host_session_id: str,
+        *,
+        reason: str = "user_stop",
+    ) -> AgentRunResult | None:
+        session = await self.get_session(host_session_id)
+        return await session.stop_current_turn(reason=reason)
+
     async def stream_approval_resolution(self, host_session_id: str, resolution: ApprovalResolution):
         session = await self.get_session(host_session_id)
         async for event in session.stream_approval_resolution(resolution):

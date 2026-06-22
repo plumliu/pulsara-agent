@@ -34,6 +34,9 @@ class FakeSession:
     def get_pending_approval(self):
         return None
 
+    async def stop_current_turn(self):
+        return None
+
 
 class PendingFakeSession(FakeSession):
     def __init__(self) -> None:
@@ -58,6 +61,13 @@ class PendingFakeSession(FakeSession):
         self.resolutions.append(resolution)
         self._pending = None
         return FakeResult()
+
+    async def stop_current_turn(self):
+        self._pending = None
+        result = FakeResult()
+        result.status = LoopStatus.ABORTED
+        result.stop_reason = "aborted"
+        return result
 
 
 class FakeCore:
@@ -211,6 +221,30 @@ def test_cli_host_repl_approval_commands_show_and_resolve_pending(monkeypatch, t
     out = capsys.readouterr().out
     assert '"approval_id": "approval:test"' in out
     assert "fake final" in out
+
+
+def test_cli_host_repl_stop_aborts_pending_approval(monkeypatch, tmp_path, capsys) -> None:
+    class PendingCore(FakeCore):
+        def __init__(self, *, settings, durable: bool = False):
+            super().__init__(settings=settings, durable=durable)
+            self.session = PendingFakeSession()
+
+    PendingCore.instances.clear()
+    inputs = iter([":stop", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    core = PendingCore.instances[0]
+    assert core.session.get_pending_approval() is None
+    assert core.closed == ["host:fake"]
+    out = capsys.readouterr().out
+    assert '"status": "aborted"' in out
 
 
 def test_cli_host_repl_runs_bundled_sync_before_opening_session(monkeypatch, tmp_path) -> None:

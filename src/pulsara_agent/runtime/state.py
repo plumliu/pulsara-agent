@@ -77,6 +77,7 @@ class LoopState:
     compacted: bool = False
     stop_reason: StopReason | None = None
     error_message: str | None = None
+    finalized: bool = False
     scratchpad: dict[str, Any] = field(default_factory=dict)
     budget: LoopBudget = field(default_factory=LoopBudget)
 

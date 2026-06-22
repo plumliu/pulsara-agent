@@ -64,6 +64,7 @@ from pulsara_agent.runtime import (
     build_tool_result_error_events,
     msg_to_llm_messages,
 )
+from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
@@ -220,6 +221,45 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     assert result.final_text == "done"
     assert any(event.type is EventType.TEXT_BLOCK_DELTA for event in agent.runtime_session.event_log.iter())
     assert agent.runtime_session.event_log.replay(result.state.reply_id).content[0].text == "done"
+
+
+def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) -> None:
+    runtime_session = RuntimeSession(tmp_path)
+    state = LoopState(session_id=runtime_session.runtime_session_id)
+    delivered: list[AgentEvent] = []
+
+    class Subscriber:
+        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            delivered.append(published.event)
+
+    runtime_session.publisher.subscribe(Subscriber())
+
+    async def run_and_emit_after_cancel() -> None:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await runtime_session.emit(
+                RunEndEvent(
+                    **EventContext(
+                        run_id=state.run_id,
+                        turn_id=state.turn_id,
+                        reply_id=state.reply_id,
+                    ).event_fields(),
+                    status="aborted",
+                    stop_reason="aborted",
+                ),
+                state=state,
+            )
+
+    async def run() -> None:
+        task = asyncio.create_task(run_and_emit_after_cancel())
+        await asyncio.sleep(0)
+        task.cancel()
+        await task
+
+    asyncio.run(run())
+
+    assert any(isinstance(event, RunEndEvent) and event.status == "aborted" for event in delivered)
 
 
 def test_agent_runtime_accepts_prior_messages(tmp_path) -> None:
@@ -611,6 +651,57 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
     assert confirm.tool_calls[0].suggested_rules[0]["reason"] == "dangerous_terminal_command"
     assert not any(isinstance(event, ToolResultStartEvent) for event in events)
     assert not any(isinstance(event, RunEndEvent) for event in events)
+
+
+def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            }
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        permission_policy=_trusted_terminal_policy(),
+    )
+
+    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    result = asyncio.run(agent.abort_run(first.state))
+    events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+    run_ends = [event for event in events if isinstance(event, RunEndEvent)]
+
+    assert first.status is LoopStatus.WAITING_USER
+    assert result.status is LoopStatus.ABORTED
+    assert result.stop_reason == "aborted"
+    assert result.state.pending_tool_calls == []
+    assert [(event.status, event.stop_reason) for event in run_ends] == [("aborted", "aborted")]
+    assert not any(isinstance(event, RunErrorEvent) for event in events)
+
+
+def test_agent_runtime_finalize_run_is_idempotent(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+
+    result = asyncio.run(agent.run_task("Say done"))
+    second = asyncio.run(agent.abort_run(result.state))
+    run_ends = [
+        event
+        for event in agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+        if isinstance(event, RunEndEvent)
+    ]
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.state.finalized is True
+    assert second.status is LoopStatus.FINISHED
+    assert [event.status for event in run_ends] == ["finished"]
 
 
 def test_approval_resume_approve_executes_original_tool_snapshot_and_continues(tmp_path) -> None:

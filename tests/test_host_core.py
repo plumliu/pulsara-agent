@@ -24,7 +24,7 @@ from pulsara_agent.event import (
     UserConfirmResultEvent,
 )
 from pulsara_agent.host import HostCore, HostSessionBusyError, HostSessionPendingApprovalError, HostWorkspaceInput
-from pulsara_agent.host.transcript import FAILURE_NOTE_TEXT, rebuild_prior_messages
+from pulsara_agent.host.transcript import FAILURE_NOTE_TEXT, INTERRUPTED_NOTE_TEXT, rebuild_prior_messages
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
@@ -33,6 +33,7 @@ from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
 from pulsara_agent.runtime.permission import ApprovalPolicy, EffectivePermissionPolicy, PermissionProfile, TerminalAccess
+from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
@@ -302,6 +303,58 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
     )
 
 
+def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "long user task"}),
+            TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="partial answer"),
+            ReplyEndEvent(**ctx.event_fields()),
+            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "assistant", "system"]
+    assert messages[1].content[0].text == "partial answer"
+    assert messages[2].content[0].text == INTERRUPTED_NOTE_TEXT
+    assert messages[2].metadata == {"run_id": "run:aborted", "kind": "previous_turn_aborted"}
+
+
+def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succeeds() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    aborted_ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    done_ctx = EventContext(run_id="run:done", turn_id="turn:done", reply_id="reply:done")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**aborted_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "aborted user"}),
+            ReplyEndEvent(**aborted_ctx.event_fields()),
+            RunEndEvent(**aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            RunStartEvent(**done_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "done user"}),
+            TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
+            TextBlockDeltaEvent(**done_ctx.event_fields(), block_id="text:done", delta="done"),
+            TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
+            ReplyEndEvent(**done_ctx.event_fields()),
+            RunEndEvent(**done_ctx.event_fields(), status="finished", stop_reason="final"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "assistant", "user", "assistant"]
+    assert all(
+        not (message.role == "system" and message.content and message.content[0].text == INTERRUPTED_NOTE_TEXT)
+        for message in messages
+    )
+
+
 def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_end() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
@@ -469,6 +522,201 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(tm
     assert result.final_text == "resolved without deadlock"
     assert session.get_pending_approval() is None
     assert not session._run_lock.locked()
+
+
+def test_host_session_stop_pending_approval_aborts_without_tool_execution(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            },
+            {"text": "continued after stop"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        first = await session.run_turn("attempt dangerous command")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        stopped = await session.stop_current_turn()
+        assert stopped is not None
+        second = await session.run_turn("please continue")
+        return session, first, stopped, second
+
+    session, first, stopped, second = asyncio.run(run())
+    events = session.replay_events()
+    run_events = [event for event in events if event.run_id == first.state.run_id]
+
+    assert stopped.status.value == "aborted"
+    assert stopped.stop_reason == "aborted"
+    assert second.final_text == "continued after stop"
+    assert session.get_pending_approval() is None
+    assert session.suspended_run_id is None
+    assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
+    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == ["aborted"]
+    assert any(
+        message.role.value == "system" and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
+        for message in transport.contexts[-1].messages
+    )
+
+
+def test_host_core_stop_current_turn_delegates_to_session(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            }
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        await session.run_turn("attempt dangerous command")
+        return await core.stop_current_turn(session.host_session_id)
+
+    stopped = asyncio.run(run())
+
+    assert stopped is not None
+    assert stopped.status.value == "aborted"
+
+
+def test_host_session_stop_active_run_turn_aborts_and_releases_lock(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport([{"text": "continued"}], delay=0.2)
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        run_task = asyncio.create_task(session.run_turn("slow user request"))
+        await asyncio.sleep(0.05)
+        stopped = await session.stop_current_turn()
+        result = await run_task
+        assert not session._run_lock.locked()
+        second = await session.run_turn("continue after stop")
+        return session, stopped, result, second
+
+    session, stopped, result, second = asyncio.run(run())
+    first_run_id = result.state.run_id
+    first_events = [event for event in session.replay_events() if event.run_id == first_run_id]
+
+    assert stopped is not None
+    assert stopped.status.value == "aborted"
+    assert result.status.value == "aborted"
+    assert second.final_text == "continued"
+    assert session.active_run_id is None
+    assert session.stopping_run_id is None
+    assert [event.status for event in first_events if isinstance(event, RunEndEvent)] == ["aborted"]
+    assert any(
+        message.role.value == "system" and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
+        for message in transport.contexts[-1].messages
+    )
+
+
+def test_host_session_stop_active_run_publishes_aborted_event_to_live_subscriber(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport([], delay=0.2)
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    delivered: list[AgentEvent] = []
+
+    class Subscriber:
+        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            delivered.append(published.event)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.wiring.runtime_wiring.runtime_session.publisher.subscribe(Subscriber())
+        run_task = asyncio.create_task(session.run_turn("slow user request"))
+        await asyncio.sleep(0.05)
+        stopped = await session.stop_current_turn()
+        result = await run_task
+        return result, stopped
+
+    result, stopped = asyncio.run(run())
+
+    assert stopped is not None
+    assert stopped.status.value == "aborted"
+    assert result.status.value == "aborted"
+    assert any(
+        isinstance(event, RunEndEvent)
+        and event.run_id == result.state.run_id
+        and event.status == "aborted"
+        and event.stop_reason == "aborted"
+        for event in delivered
+    )
+
+
+def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(tmp_path, monkeypatch) -> None:
+    class CancellationSwallowingTransport:
+        api = "scripted"
+
+        def __init__(self) -> None:
+            self.contexts: list[LLMContext] = []
+            self.started: asyncio.Event | None = None
+            self.release: asyncio.Event | None = None
+
+        async def stream(
+            self,
+            *,
+            model: ModelProfile,
+            context: LLMContext,
+            event_context: EventContext,
+            options: LLMOptions | None = None,
+        ) -> AsyncIterator[AgentEvent]:
+            self.contexts.append(context)
+            assert self.started is not None
+            assert self.release is not None
+            self.started.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await self.release.wait()
+            yield ModelCallStartEvent(
+                **event_context.event_fields(),
+                model_name=model.id,
+                model_role=model.role.value,
+                provider=model.provider,
+            )
+            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:late")
+            yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:late", delta="late text")
+            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:late")
+            yield ModelCallEndEvent(**event_context.event_fields())
+
+    transport = CancellationSwallowingTransport()
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        transport.started = asyncio.Event()
+        transport.release = asyncio.Event()
+        session = await _open_project_session(core, tmp_path)
+        run_task = asyncio.create_task(session.run_turn("slow user request"))
+        await transport.started.wait()
+        stopped = await session.stop_current_turn(timeout=0.01)
+        assert stopped is None
+        with pytest.raises(HostSessionBusyError):
+            await session.run_turn("must not start while stopping")
+        transport.release.set()
+        result = await run_task
+        return session, result
+
+    session, result = asyncio.run(run())
+    first_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+
+    assert result.status.value == "aborted"
+    assert session.stopping_run_id is None
+    assert [event.status for event in first_events if isinstance(event, RunEndEvent)] == ["aborted"]
 
 
 def test_host_session_resume_can_suspend_again_with_new_pending_approval(tmp_path, monkeypatch) -> None:

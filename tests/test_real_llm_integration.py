@@ -17,6 +17,7 @@ from pulsara_agent.event import (
     RequireUserConfirmEvent,
     ReplyEndEvent,
     ReplyStartEvent,
+    RunEndEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
@@ -384,6 +385,36 @@ def test_real_agent_runtime_terminal_policy_requires_confirmation(tmp_path):
     assert result["confirm_count"] == 1
     assert result["tool_result_count"] == 0
     assert result["suggested_rule_reason"] == "dangerous_terminal_command"
+
+
+def test_real_host_core_active_stop_injects_interrupted_note(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_active_stop_smoke(tmp_path), timeout=180))
+
+    assert result["stop_result_status"] == "aborted"
+    assert result["first_result_status"] == "aborted"
+    assert result["second_status"] == "finished"
+    assert "PULSARA_ACTIVE_STOP_NOTE_OK" in result["second_final_text"]
+    assert result["aborted_run_end_count"] == 1
+    assert result["run_errors"] == []
+
+
+def test_real_host_core_pending_approval_stop_injects_interrupted_note(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_pending_stop_smoke(tmp_path), timeout=180))
+
+    assert result["first_status"] == "waiting_user"
+    assert result["stop_result_status"] == "aborted"
+    assert result["second_status"] == "finished"
+    assert result["tool_names"] == ["terminal"]
+    assert result["pending_after_stop"] is None
+    assert "PULSARA_PENDING_STOP_NOTE_OK" in result["second_final_text"]
+    assert result["aborted_run_end_count"] == 1
+    assert result["run_errors"] == []
 
 
 def test_real_agent_runtime_persists_run_timeline_with_responses_api(tmp_path):
@@ -1454,6 +1485,117 @@ async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
         "tool_result_count": tool_result_count,
         "suggested_rule_reason": suggested_rule_reason,
     }
+
+
+async def _run_real_host_core_active_stop_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_stop_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real-stop:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real-stop:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=2048),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara user stop recovery. "
+            "If the conversation context contains a Pulsara note saying the previous turn was stopped by the user "
+            "and the user asks to continue, answer exactly PULSARA_ACTIVE_STOP_NOTE_OK. "
+            "Otherwise, follow the user's current instruction."
+        ),
+    )
+    try:
+        first_task = asyncio.create_task(
+            session.run_turn(
+                "Begin a long validation response. Produce many numbered lines and do not finish quickly."
+            )
+        )
+        for _ in range(50):
+            if session.active_run_id is not None:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        stop_result = await session.stop_current_turn(timeout=10)
+        first_result = await first_task
+        second = await session.run_turn("Please continue from the stopped turn.")
+        first_events = session.replay_events()
+        first_run_id = first_result.state.run_id
+        run_errors = _run_error_diagnostics(event for event in first_events if event.run_id == first_run_id)
+        aborted_run_end_count = sum(
+            1
+            for event in first_events
+            if event.run_id == first_run_id and isinstance(event, RunEndEvent) and event.status == "aborted"
+        )
+        return {
+            "stop_result_status": stop_result.status.value if stop_result is not None else None,
+            "first_result_status": first_result.status.value,
+            "second_status": second.status.value,
+            "second_final_text": second.final_text.strip(),
+            "aborted_run_end_count": aborted_run_end_count,
+            "run_errors": run_errors,
+        }
+    finally:
+        await core.close_session(session.host_session_id)
+
+
+async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_pending_stop_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real-pending-stop:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real-pending-stop:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=384),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara pending-approval stop recovery. "
+            "For the first validation request, call terminal exactly once with command exactly "
+            "'rm -rf ./PULSARA_PENDING_STOP_SENTINEL_DO_NOT_CREATE' and do not call any other tools. "
+            "If the conversation context contains a Pulsara note saying the previous turn was stopped by the user "
+            "and the user asks to continue, answer exactly PULSARA_PENDING_STOP_NOTE_OK."
+        ),
+        permission_policy=_trusted_terminal_policy(),
+    )
+    try:
+        first = await session.run_turn("Run the first validation request exactly as instructed.")
+        first_events = session.replay_events()
+        first_run_id = first.state.run_id
+        tool_names = [
+            event.tool_call_name
+            for event in first_events
+            if event.run_id == first_run_id and isinstance(event, ToolCallStartEvent)
+        ]
+        stop_result = await session.stop_current_turn()
+        pending_after_stop = session.get_pending_approval()
+        second = await session.run_turn("Please continue from the stopped pending-approval turn.")
+        events = session.replay_events()
+        run_errors = _run_error_diagnostics(event for event in events if event.run_id == first_run_id)
+        aborted_run_end_count = sum(
+            1
+            for event in events
+            if event.run_id == first_run_id and isinstance(event, RunEndEvent) and event.status == "aborted"
+        )
+        return {
+            "first_status": first.status.value,
+            "stop_result_status": stop_result.status.value if stop_result is not None else None,
+            "second_status": second.status.value,
+            "second_final_text": second.final_text.strip(),
+            "tool_names": tool_names,
+            "pending_after_stop": pending_after_stop,
+            "aborted_run_end_count": aborted_run_end_count,
+            "run_errors": run_errors,
+        }
+    finally:
+        await core.close_session(session.host_session_id)
 
 
 async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:

@@ -205,6 +205,34 @@ class AgentRuntime:
         async for event in self._stream_approval_resolution(state, resolution):
             yield event
 
+    async def abort_run(
+        self,
+        state: LoopState,
+        *,
+        reason: str = "user_stop",
+    ) -> AgentRunResult:
+        async for _event in self.stream_abort_run(state, reason=reason):
+            pass
+        return self._run_result(state)
+
+    async def stream_abort_run(
+        self,
+        state: LoopState,
+        *,
+        reason: str = "user_stop",
+    ) -> AsyncIterator[AgentEvent]:
+        if state.finalized:
+            return
+        if state.status in {LoopStatus.FINISHED, LoopStatus.FAILED, LoopStatus.ABORTED}:
+            return
+        state.status = LoopStatus.ABORTED
+        state.stop_reason = "aborted"
+        state.error_message = None
+        state.pending_tool_calls = []
+        state.scratchpad["abort_reason"] = reason
+        async for event in self._finalize_run(state):
+            yield event
+
     def close(self) -> None:
         self.runtime_session.close()
 
@@ -277,6 +305,8 @@ class AgentRuntime:
         capabilities: ResolvedCapabilitySet,
     ) -> AsyncIterator[AgentEvent]:
         while state.status is LoopStatus.RUNNING:
+            if self._apply_stop_request(state):
+                break
             if state.turn_index >= self.budget.max_turns:
                 state.status = LoopStatus.FAILED
                 state.stop_reason = "max_turns"
@@ -331,6 +361,8 @@ class AgentRuntime:
                 reply_had_run_error = True
                 yield event
 
+            if self._apply_stop_request(state):
+                break
             if reply_had_run_error:
                 if not self._recover_or_fail_model(state):
                     break
@@ -361,11 +393,15 @@ class AgentRuntime:
             state.transition(LoopTransition.CONTINUE_AFTER_MODEL)
             async for event in self._execute_tool_blocks(state, tool_blocks):
                 yield event
+            if self._apply_stop_request(state):
+                break
             if state.status is not LoopStatus.RUNNING:
                 break
 
             async for event in self._after_tool_results(state):
                 yield event
+            if self._apply_stop_request(state):
+                break
             if state.status is not LoopStatus.RUNNING:
                 break
             state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
@@ -375,6 +411,17 @@ class AgentRuntime:
             return
         async for event in self._finalize_run(state):
             yield event
+
+    def _apply_stop_request(self, state: LoopState) -> bool:
+        if not state.scratchpad.get("stop_requested"):
+            return False
+        if state.status is not LoopStatus.RUNNING:
+            return state.status is LoopStatus.ABORTED
+        state.status = LoopStatus.ABORTED
+        state.stop_reason = "aborted"
+        state.error_message = None
+        state.pending_tool_calls = []
+        return True
 
     async def _stream_approval_resolution(
         self,
@@ -491,6 +538,9 @@ class AgentRuntime:
         *,
         run_session_end_hook: bool = True,
     ) -> AsyncIterator[AgentEvent]:
+        if state.finalized:
+            return
+        state.finalized = True
         if run_session_end_hook:
             _ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,

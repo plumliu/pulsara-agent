@@ -291,6 +291,13 @@ async def _host_repl(args) -> None:
                 pending = session.get_pending_approval()
                 print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
                 continue
+            if prompt.strip() == ":stop":
+                result = await session.stop_current_turn()
+                if result is None:
+                    print("No active turn to stop.")
+                else:
+                    print(json.dumps({"status": result.status.value, "stop_reason": result.stop_reason}, indent=2))
+                continue
             if prompt.strip() in {":approve", ":deny"}:
                 pending = session.get_pending_approval()
                 if pending is None:

@@ -39,10 +39,14 @@ class HostSession:
     last_active_at: float = field(default_factory=time.monotonic)
     closed: bool = False
     active_run_id: str | None = None
+    stopping_run_id: str | None = None
     suspended_run_id: str | None = None
     pending_approval: PendingApproval | None = None
     _suspended_state: LoopState | None = None
+    _active_state: LoopState | None = None
+    _active_task: asyncio.Task[AgentRunResult] | None = None
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     @property
     def runtime_session_id(self) -> str:
@@ -62,6 +66,8 @@ class HostSession:
     ) -> AgentRunResult:
         if self.closed:
             raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
         if self.pending_approval is not None:
             raise HostSessionPendingApprovalError(
                 "host session has a pending approval; resolve or deny it before starting a new turn"
@@ -72,18 +78,31 @@ class HostSession:
             prior_messages = self._prior_messages()
             state = self.wiring.agent_runtime.new_state()
             self.active_run_id = state.run_id
+            self._active_state = state
             self.last_active_at = time.monotonic()
-            try:
-                result = await self.wiring.agent_runtime.run_task(
+            task = asyncio.create_task(
+                self.wiring.agent_runtime.run_task(
                     user_input,
                     prior_messages=prior_messages,
                     state=state,
                     active_skill_names=active_skill_names,
                 )
+            )
+            self._active_task = task
+            try:
+                try:
+                    result = await task
+                except asyncio.CancelledError:
+                    if not state.scratchpad.get("stop_requested"):
+                        raise
+                    result = await self.wiring.agent_runtime.abort_run(state)
                 self._capture_pending_approval(result.state)
                 return result
             finally:
+                self._active_task = None
+                self._active_state = None
                 self.active_run_id = None
+                self.stopping_run_id = None
                 self.last_active_at = time.monotonic()
 
     async def stream_turn(
@@ -94,6 +113,8 @@ class HostSession:
     ) -> AsyncIterator[AgentEvent]:
         if self.closed:
             raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
         if self.pending_approval is not None:
             raise HostSessionPendingApprovalError(
                 "host session has a pending approval; resolve or deny it before starting a new turn"
@@ -124,6 +145,8 @@ class HostSession:
     async def resolve_approval(self, resolution: ApprovalResolution) -> AgentRunResult:
         if self.closed:
             raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_approval(resolution.approval_id)
         if self._run_lock.locked():
             raise HostSessionBusyError("host session already has an active run")
@@ -145,6 +168,8 @@ class HostSession:
     ) -> AsyncIterator[AgentEvent]:
         if self.closed:
             raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_approval(resolution.approval_id)
         if self._run_lock.locked():
             raise HostSessionBusyError("host session already has an active run")
@@ -160,6 +185,51 @@ class HostSession:
                 self.active_run_id = None
                 self.last_active_at = time.monotonic()
 
+    async def stop_current_turn(
+        self,
+        *,
+        reason: str = "user_stop",
+        timeout: float = 2.0,
+    ) -> AgentRunResult | None:
+        if self.closed:
+            raise RuntimeError("host session is closed")
+        async with self._stop_lock:
+            if self.pending_approval is not None:
+                if self._run_lock.locked():
+                    raise HostSessionBusyError("host session already has an active run")
+                async with self._run_lock:
+                    pending = self.pending_approval
+                    if pending is None:
+                        return None
+                    state = self._require_suspended_state(pending)
+                    self.active_run_id = state.run_id
+                    self.stopping_run_id = state.run_id
+                    self.last_active_at = time.monotonic()
+                    try:
+                        result = await self.wiring.agent_runtime.abort_run(state, reason=reason)
+                        self._capture_pending_approval(result.state)
+                        return result
+                    finally:
+                        self.active_run_id = None
+                        self.stopping_run_id = None
+                        self.last_active_at = time.monotonic()
+
+            task = self._active_task
+            state = self._active_state
+            if task is None or state is None:
+                return None
+            if task.done():
+                return None
+            self.stopping_run_id = state.run_id
+            state.scratchpad["stop_requested"] = True
+            task.cancel()
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            except asyncio.CancelledError:
+                return await self.wiring.agent_runtime.abort_run(state, reason=reason)
+            except TimeoutError:
+                return None
+
     def replay_events(self, *, after_sequence: int | None = None) -> list[AgentEvent]:
         return self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
 
@@ -169,6 +239,9 @@ class HostSession:
         self.closed = True
         self.pending_approval = None
         self._suspended_state = None
+        self._active_state = None
+        self._active_task = None
+        self.stopping_run_id = None
         self.suspended_run_id = None
         self.wiring.agent_runtime.close()
         self._cleanup_workspace_root()
@@ -185,6 +258,8 @@ class HostSession:
             "last_active_at": self.last_active_at,
             "closed": self.closed,
             "active_run_id": self.active_run_id,
+            "stopping_run_id": self.stopping_run_id,
+            "is_stopping": self.stopping_run_id is not None,
             "suspended_run_id": self.suspended_run_id,
             "pending_approval": self.pending_approval.to_dict() if self.pending_approval is not None else None,
             "has_live_processes": self.has_live_processes,

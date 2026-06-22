@@ -33,7 +33,7 @@ import pulsara_agent.memory.reflection.engine as reflection_module
 from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint, cheap_memory_hints
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState, UserMsg
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession
+from pulsara_agent.runtime import AgentRuntime, LoopState, LoopStatus, RuntimeSession
 
 
 class _ScriptedTransport:
@@ -323,6 +323,27 @@ def test_agent_runtime_reflection_failure_does_not_fail_run(tmp_path: Path) -> N
     assert not any(isinstance(event, RunErrorEvent) and event.code == "memory_hook_error" for event in events)
     assert events[-1].type is EventType.RUN_END
     assert events[-1].status == "finished"
+    assert pool.list_pending() == []
+
+
+def test_aborted_run_skips_memory_reflection(tmp_path: Path) -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    transport = _ScriptedTransport([{"text": _reflection_json()}])
+    agent = _agent_with_reflection(tmp_path, graph=graph, pool=pool, transport=transport)
+    state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state.status = LoopStatus.ABORTED
+    state.stop_reason = "aborted"
+    state.messages.append(UserMsg(name="user", content="Please remember that I prefer concise summaries."))
+
+    async def run():
+        await agent.memory_hooks.on_session_start(state, "Please remember that I prefer concise summaries.")
+        return await agent.memory_hooks.on_session_end(state)
+
+    events = asyncio.run(run())
+
+    assert events == []
+    assert transport.contexts == []
     assert pool.list_pending() == []
 
 

@@ -40,7 +40,7 @@ from pulsara_agent.memory.working_context import (
 from pulsara_agent.message import Msg, TextBlock, ToolResultBlock
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.timeline import build_run_timeline
 
 
@@ -254,6 +254,8 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
         *,
         safe_point: str,
     ) -> list[AgentEvent]:
+        if state.status is LoopStatus.ABORTED:
+            return []
         trigger_reasons = self._trigger_reasons(state, safe_point=safe_point)
         if not trigger_reasons:
             return []
