@@ -4,6 +4,8 @@ from pulsara_agent.runtime.terminal.manager import TerminalSessionManager
 from pulsara_agent.runtime.terminal.models import (
     TerminalBackendType,
     TerminalIOMode,
+    TerminalProcessInfo,
+    TerminalProcessLog,
     TerminalRequest,
     TerminalResult,
     TerminalSessionState,
@@ -22,6 +24,8 @@ __all__ = [
     "ExecPolicyDecisionKind",
     "TerminalBackendType",
     "TerminalIOMode",
+    "TerminalProcessInfo",
+    "TerminalProcessLog",
     "TerminalRequest",
     "TerminalResult",
     "TerminalSession",

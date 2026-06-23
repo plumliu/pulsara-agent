@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
@@ -77,9 +78,48 @@ class TerminalTool(WorkspaceTool):
         return self._execute(call)
 
     def execute_streaming(self, call: ToolCall, emit_delta: Callable[[str], None]) -> ToolExecutionResult:
+        return self._execute_streaming(call, emit_delta)
+
+    def execute_with_context(
+        self,
+        call: ToolCall,
+        *,
+        event_context: EventContext,
+        record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+    ) -> ToolExecutionResult:
+        return self._execute(call, event_context=event_context, record_event=record_event)
+
+    def execute_streaming_with_context(
+        self,
+        call: ToolCall,
+        emit_delta: Callable[[str], None],
+        *,
+        event_context: EventContext,
+        record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+    ) -> ToolExecutionResult:
+        return self._execute_streaming(
+            call,
+            emit_delta,
+            event_context=event_context,
+            record_event=record_event,
+        )
+
+    def _execute_streaming(
+        self,
+        call: ToolCall,
+        emit_delta: Callable[[str], None],
+        *,
+        event_context: EventContext | None = None,
+        record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+    ) -> ToolExecutionResult:
         max_output = _max_output_chars_arg(call.arguments)
         builder = _StreamingTerminalJsonBuilder(emit_delta, max_output_chars=max_output)
-        result = self._execute(call, output_callback=builder.emit_output_delta)
+        result = self._execute(
+            call,
+            output_callback=builder.emit_output_delta,
+            event_context=event_context,
+            record_event=record_event,
+        )
         return builder.finish(result)
 
     def _execute(
@@ -87,6 +127,8 @@ class TerminalTool(WorkspaceTool):
         call: ToolCall,
         *,
         output_callback: Callable[[str], None] | None = None,
+        event_context: EventContext | None = None,
+        record_event: Callable[[AgentEvent], AgentEvent] | None = None,
     ) -> ToolExecutionResult:
         command = required_str_arg(call.arguments, "command")
         workdir = str_arg(call.arguments, "workdir")
@@ -134,6 +176,14 @@ class TerminalTool(WorkspaceTool):
         except ValueError as exc:
             return self._blocked_result(call, command=command, session_id=session_id, error=str(exc))
 
+        metadata: dict[str, Any] = {}
+        if output_callback is not None:
+            metadata["output_callback"] = output_callback
+        if event_context is not None and record_event is not None:
+            metadata["origin_event_context"] = event_context
+            metadata["tool_call_id"] = call.id
+            metadata["record_event"] = record_event
+
         result = terminal_session.execute(
             TerminalRequest(
                 command=command,
@@ -141,7 +191,7 @@ class TerminalTool(WorkspaceTool):
                 yield_time_ms=yield_time_ms,
                 max_output_chars=max_output,
                 tty=tty,
-                metadata={"output_callback": output_callback} if output_callback is not None else {},
+                metadata=metadata,
             )
         )
         payload = terminal_result_payload(
@@ -234,6 +284,12 @@ def terminal_result_payload(
         "io_mode": result.metadata.get("io_mode"),
         "full_output_ref": result.full_output_ref,
     }
+    if "command" in result.metadata:
+        payload["command"] = result.metadata.get("command")
+    if "duration_seconds" in result.metadata:
+        payload["duration_seconds"] = result.metadata.get("duration_seconds")
+    if "stdin_closed" in result.metadata:
+        payload["stdin_closed"] = result.metadata.get("stdin_closed")
     if "policy_code" in result.metadata:
         payload["policy_code"] = result.metadata.get("policy_code")
     if "suggested_args" in result.metadata:

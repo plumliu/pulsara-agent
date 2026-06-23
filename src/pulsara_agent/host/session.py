@@ -58,6 +58,17 @@ class HostSession:
             owner_host_session_id=self.host_session_id
         )
 
+    @property
+    def terminal_summary(self) -> dict[str, object]:
+        terminal_sessions = self.wiring.runtime_wiring.runtime_session.terminal_sessions
+        processes = terminal_sessions.list_processes(owner_host_session_id=self.host_session_id)
+        return {
+            "has_live_processes": terminal_sessions.has_live_processes(owner_host_session_id=self.host_session_id),
+            "live_process_count": terminal_sessions.live_process_count(owner_host_session_id=self.host_session_id),
+            "finished_process_count": terminal_sessions.finished_process_count(owner_host_session_id=self.host_session_id),
+            "processes": [process.to_payload() for process in processes],
+        }
+
     async def run_turn(
         self,
         user_input: str,
@@ -263,6 +274,7 @@ class HostSession:
             "suspended_run_id": self.suspended_run_id,
             "pending_approval": self.pending_approval.to_dict() if self.pending_approval is not None else None,
             "has_live_processes": self.has_live_processes,
+            "terminal": self.terminal_summary,
         }
 
     def _prior_messages(self):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from pulsara_agent.event import ReplyEndEvent, RunEndEvent, RunStartEvent
+from pulsara_agent.event import ReplyEndEvent, RunEndEvent, RunStartEvent, TerminalProcessCompletedEvent
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.message import Msg, SystemMsg, UserMsg
 
@@ -21,6 +21,8 @@ INTERRUPTED_NOTE_TEXT = (
     "was preserved. Any assistant text or tool work from that turn may be partial; if the user "
     "asks to continue, continue from the preserved input."
 )
+
+_MAX_COMPLETION_NOTES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,7 @@ def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
 
     events = event_log.iter()
     note_target = _last_terminal_run_note_target(events)
+    completion_note = _completion_note_after_last_run_start(events)
     messages: list[Msg] = []
     seen_replies: set[str] = set()
     noted_runs: set[str] = set()
@@ -73,6 +76,8 @@ def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
             continue
     if note_target is not None and note_target.run_id not in noted_runs:
         messages.append(_note_message(note_target, created_at=note_target.created_at))
+    if completion_note is not None:
+        messages.append(completion_note)
     return messages
 
 
@@ -118,4 +123,46 @@ def _note_message(note_target: _TerminalRunNoteTarget, *, created_at: str | None
         id=f"{note_target.id_prefix}:{note_target.run_id}",
         created_at=created_at,
         metadata={"run_id": note_target.run_id, "kind": note_target.kind},
+    )
+
+
+def _completion_note_after_last_run_start(events: list) -> SystemMsg | None:
+    last_run_start_sequence = max(
+        ((event.sequence or 0) for event in events if isinstance(event, RunStartEvent)),
+        default=0,
+    )
+    if last_run_start_sequence <= 0:
+        return None
+    completions = [
+        event
+        for event in events
+        if isinstance(event, TerminalProcessCompletedEvent)
+        and (event.sequence or 0) > last_run_start_sequence
+    ]
+    if not completions:
+        return None
+    selected = completions[:_MAX_COMPLETION_NOTES]
+    lines = [_completion_note_line(event) for event in selected]
+    remaining = len(completions) - len(selected)
+    if remaining > 0:
+        lines.append(f"{remaining} more terminal task(s) completed; use terminal_process list if still retained.")
+    latest = completions[-1]
+    process_ids = ",".join(event.process_id for event in selected)
+    return SystemMsg(
+        name="pulsara",
+        content="Pulsara note: terminal background task update. " + " ".join(lines),
+        id=f"terminal-completion-note:{latest.sequence or latest.id}",
+        created_at=latest.created_at,
+        metadata={
+            "kind": "terminal_process_completed",
+            "process_ids": process_ids,
+        },
+    )
+
+
+def _completion_note_line(event: TerminalProcessCompletedEvent) -> str:
+    exit_code = event.exit_code
+    return (
+        f"Process {event.process_id} completed with status {event.status} "
+        f"and exit code {exit_code}. If still retained, inspect it with terminal_process log."
     )

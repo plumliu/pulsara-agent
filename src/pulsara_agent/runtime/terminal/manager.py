@@ -146,6 +146,32 @@ class TerminalSessionManager:
             owner_host_session_id=owner_host_session_id,
         )
 
+    def list_processes(
+        self,
+        *,
+        owner_host_session_id: str | None = None,
+        include_finished: bool = True,
+        include_running: bool = True,
+    ):
+        return self.process_registry.list_processes(
+            owner_host_session_id=owner_host_session_id,
+            include_finished=include_finished,
+            include_running=include_running,
+        )
+
+    def log_process(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ):
+        return self.process_registry.log(
+            process_id,
+            max_output_chars=max_output_chars,
+            owner_host_session_id=owner_host_session_id,
+        )
+
     def kill_owned(self, owner_host_session_id: str):
         return self.process_registry.kill_owned(owner_host_session_id)
 

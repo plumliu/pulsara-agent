@@ -17,6 +17,7 @@ from pulsara_agent.event import (
     TextBlockEndEvent,
     TextBlockStartEvent,
 )
+from pulsara_agent.event import TerminalProcessCompletedEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.settings import StorageConfig
 
@@ -106,6 +107,25 @@ def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> 
 
     assert load_agent_event(dump_agent_event(started)) == started
     assert load_agent_event(dump_agent_event(ended)) == ended
+
+
+def test_terminal_process_completed_event_round_trips_through_agent_event_serialization() -> None:
+    event = TerminalProcessCompletedEvent(
+        run_id="run:terminal",
+        turn_id="turn:terminal",
+        reply_id="reply:terminal",
+        process_id="proc_123",
+        terminal_session_id="default",
+        command="pytest -q",
+        status="success",
+        exit_code=0,
+        cwd="/workspace",
+        duration_seconds=1.25,
+        output_preview="ok",
+        tool_call_id="call:terminal",
+    )
+
+    assert load_agent_event(dump_agent_event(event)) == event
 
 
 def test_event_log_preassigned_sequence_advances_next_sequence(event_log: EventLog) -> None:

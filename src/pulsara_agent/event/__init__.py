@@ -61,6 +61,7 @@ from pulsara_agent.event.events import (
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    TerminalProcessCompletedEvent,
     UserConfirmResultEvent,
 )
 
@@ -123,5 +124,6 @@ __all__ = [
     "ToolResultEndEvent",
     "ToolResultStartEvent",
     "ToolResultTextDeltaEvent",
+    "TerminalProcessCompletedEvent",
     "UserConfirmResultEvent",
 ]

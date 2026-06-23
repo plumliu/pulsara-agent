@@ -83,6 +83,7 @@ class EffectivePermissionPolicy:
 
 FILE_WRITE_TOOL_NAMES = frozenset({"edit_file", "write_file"})
 TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
+TERMINAL_PROCESS_READ_ONLY_ACTIONS = frozenset({"list", "log", "poll", "wait"})
 
 
 def default_permission_policy(
@@ -213,6 +214,8 @@ class PolicyPermissionGate:
         return PermissionDecision.allow()
 
     def _evaluate_terminal_call(self, call: ToolCall) -> PermissionDecision:
+        if call.name == "terminal_process" and _terminal_process_action(call) in TERMINAL_PROCESS_READ_ONLY_ACTIONS:
+            return PermissionDecision.allow()
         if self.policy.terminal is TerminalAccess.ASK:
             return PermissionDecision(
                 kind=PermissionDecisionKind.WAIT_FOR_USER,
@@ -301,8 +304,13 @@ def _validate_policy(policy: EffectivePermissionPolicy) -> None:
 
 
 def _terminal_process_input(call: ToolCall) -> str | None:
-    action = call.arguments.get("action")
+    action = _terminal_process_action(call)
     if action not in {"write", "submit"}:
         return None
     data = call.arguments.get("data")
     return data if isinstance(data, str) else None
+
+
+def _terminal_process_action(call: ToolCall) -> str | None:
+    action = call.arguments.get("action")
+    return action if isinstance(action, str) else None

@@ -322,7 +322,7 @@ def test_policy_gate_on_request_file_write_tools_wait_for_user(tool_name: str, a
     ("tool_name", "arguments"),
     [
         ("terminal", {"command": "printf ok"}),
-        ("terminal_process", {"action": "poll", "process_id": "terminal-process:fake"}),
+        ("terminal_process", {"action": "kill", "process_id": "terminal-process:fake"}),
     ],
 )
 def test_policy_gate_on_request_terminal_tools_wait_for_user(tool_name: str, arguments: dict) -> None:
@@ -341,8 +341,29 @@ def test_policy_gate_on_request_terminal_tools_wait_for_user(tool_name: str, arg
     assert decision.suggested_rules[0] == {"tool": tool_name, "reason": "terminal_on_request"}
 
 
-@pytest.mark.parametrize("action", ["poll", "wait", "kill", "write", "submit"])
-def test_policy_gate_terminal_access_ask_waits_for_all_terminal_process_actions(action: str) -> None:
+@pytest.mark.parametrize("action", ["list", "log", "poll", "wait"])
+def test_policy_gate_terminal_process_read_only_actions_do_not_wait_under_ask_or_on_request(action: str) -> None:
+    gate = PolicyPermissionGate(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.ASK,
+        ),
+        inner=AllowAllPermissionGate(),
+    )
+    arguments = {"action": action, "process_id": "terminal-process:fake"}
+    if action == "list":
+        arguments.pop("process_id")
+
+    decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:process", name="terminal_process", arguments=arguments)])
+    )
+
+    assert decision.kind is PermissionDecisionKind.ALLOW
+
+
+@pytest.mark.parametrize("action", ["kill", "write", "submit", "close_stdin"])
+def test_policy_gate_terminal_access_ask_waits_for_side_effect_terminal_process_actions(action: str) -> None:
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
             profile=PermissionProfile.TRUSTED_HOST,

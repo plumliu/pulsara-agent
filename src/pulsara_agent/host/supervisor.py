@@ -38,10 +38,12 @@ class WorkspaceTerminalSupervisor:
         self.owner_sessions.clear()
 
     def summary(self) -> dict[str, object]:
+        processes = self.terminal_sessions.list_processes()
         return {
             "workspace_key": self.workspace_key,
             "workspace_root": str(self.workspace_root),
             "owner_session_count": len(self.owner_sessions),
             "live_process_count": self.terminal_sessions.live_process_count(),
             "finished_process_count": self.terminal_sessions.finished_process_count(),
+            "processes": [process.to_payload(include_owner=True) for process in processes],
         }

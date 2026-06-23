@@ -32,7 +32,20 @@ class ToolExecutor:
         )
         try:
             tool = self.registry.get(call.name)
-            if hasattr(tool, "execute_streaming"):
+            if hasattr(tool, "execute_streaming_with_context"):
+                result = tool.execute_streaming_with_context(
+                    call,
+                    self._tool_delta_emitter(event_context, call.id),
+                    event_context=event_context,
+                    record_event=self.record_event,
+                )
+            elif hasattr(tool, "execute_with_context"):
+                result = tool.execute_with_context(
+                    call,
+                    event_context=event_context,
+                    record_event=self.record_event,
+                )
+            elif hasattr(tool, "execute_streaming"):
                 result = tool.execute_streaming(call, self._tool_delta_emitter(event_context, call.id))
             else:
                 result = tool.execute(call)

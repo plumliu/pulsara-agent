@@ -57,6 +57,9 @@ class TerminalSession:
         output_callback = request.metadata.get("output_callback")
         if not callable(output_callback):
             output_callback = None
+        record_event = request.metadata.get("record_event")
+        if not callable(record_event):
+            record_event = None
         env_result = self.env_builder.build(
             cwd=decision.effective_cwd,
             workspace_root=self.state.workspace_root,
@@ -79,6 +82,9 @@ class TerminalSession:
                 env_diagnostics=env_result.diagnostics,
                 owner_host_session_id=self.state.owner_host_session_id,
                 owner_conversation_id=self.state.owner_conversation_id,
+                origin_event_context=request.metadata.get("origin_event_context"),
+                origin_tool_call_id=request.metadata.get("tool_call_id"),
+                record_event=record_event,
             )
         except ProcessLimitError as exc:
             return TerminalResult(

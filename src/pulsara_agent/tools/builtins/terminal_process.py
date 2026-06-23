@@ -16,6 +16,7 @@ from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
     MIN_TERMINAL_OUTPUT_CHARS,
     bounded_int_arg,
+    bool_arg,
     object_schema,
     required_str_arg,
 )
@@ -23,7 +24,8 @@ from pulsara_agent.tools.builtins.terminal import terminal_result_payload
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
 
-_SUPPORTED_ACTIONS = {"poll", "wait", "kill", "write", "submit", "close_stdin"}
+_SUPPORTED_ACTIONS = {"list", "log", "poll", "wait", "kill", "write", "submit", "close_stdin"}
+_PROCESS_ID_ACTIONS = {"log", "poll", "wait", "kill", "write", "submit", "close_stdin"}
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 
 
@@ -34,23 +36,25 @@ class TerminalProcessTool(WorkspaceTool):
     permission_policy: EffectivePermissionPolicy | None = None
     name: str = "terminal_process"
     description: str = (
-        "Poll, wait for, kill, or send stdin to a managed terminal process returned when terminal yields a process_id. "
-        "Use write or submit for both pipe and PTY processes; use close_stdin to send EOF."
+        "List, inspect, poll, wait for, kill, or send stdin to managed terminal processes returned when terminal yields a process_id. "
+        "Use list to see retained tasks, log to inspect output, write or submit for pipe/PTY input, and close_stdin to send EOF."
     )
     parameters: dict[str, Any] = field(
         default_factory=lambda: object_schema(
             properties={
                 "action": {
                     "type": "string",
-                    "enum": ["poll", "wait", "kill", "write", "submit", "close_stdin"],
+                    "enum": ["list", "log", "poll", "wait", "kill", "write", "submit", "close_stdin"],
                     "description": "Process action for managed pipe or PTY terminal processes returned by terminal.",
                 },
                 "process_id": {"type": "string"},
                 "data": {"type": "string"},
                 "timeout_seconds": {"type": "integer", "default": DEFAULT_WAIT_TIMEOUT_SECONDS},
                 "max_output_chars": {"type": "integer", "default": DEFAULT_MAX_OUTPUT_CHARS},
+                "include_finished": {"type": "boolean", "default": True},
+                "include_running": {"type": "boolean", "default": True},
             },
-            required=["action", "process_id"],
+            required=["action"],
         )
     )
     is_read_only: bool = False
@@ -63,7 +67,7 @@ class TerminalProcessTool(WorkspaceTool):
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         action = required_str_arg(call.arguments, "action").strip()
-        process_id = required_str_arg(call.arguments, "process_id").strip()
+        process_id = _optional_process_id(call.arguments)
         if self.permission_policy is not None and self.permission_policy.terminal is TerminalAccess.OFF:
             return self._error_result(
                 call,
@@ -86,14 +90,40 @@ class TerminalProcessTool(WorkspaceTool):
                 error=f"terminal_process action is not supported yet: {action}",
                 status="not_supported_yet",
             )
+        if action in _PROCESS_ID_ACTIONS and not process_id:
+            return self._error_result(
+                call,
+                process_id=process_id,
+                error=f"process_id is required for terminal_process action: {action}",
+                status="blocked",
+            )
         try:
+            if action == "list":
+                include_finished = bool_arg(call.arguments, "include_finished", True)
+                include_running = bool_arg(call.arguments, "include_running", True)
+                processes = self.terminal_sessions.list_processes(
+                    owner_host_session_id=self.owner_host_session_id,
+                    include_finished=include_finished,
+                    include_running=include_running,
+                )
+                return self._list_result(call, processes, action=action)
+            if action == "log":
+                assert process_id is not None
+                log = self.terminal_sessions.log_process(
+                    process_id,
+                    max_output_chars=max_output,
+                    owner_host_session_id=self.owner_host_session_id,
+                )
+                return self._log_result(call, log, action=action)
             if action == "poll":
+                assert process_id is not None
                 result = self.terminal_sessions.poll_process(
                     process_id,
                     max_output_chars=max_output,
                     owner_host_session_id=self.owner_host_session_id,
                 )
             elif action == "wait":
+                assert process_id is not None
                 timeout = bounded_int_arg(
                     call.arguments,
                     "timeout_seconds",
@@ -108,12 +138,14 @@ class TerminalProcessTool(WorkspaceTool):
                     owner_host_session_id=self.owner_host_session_id,
                 )
             elif action == "kill":
+                assert process_id is not None
                 result = self.terminal_sessions.kill_process(
                     process_id,
                     max_output_chars=max_output,
                     owner_host_session_id=self.owner_host_session_id,
                 )
             elif action in {"write", "submit"}:
+                assert process_id is not None
                 data = call.arguments.get("data")
                 if not isinstance(data, str):
                     return self._error_result(
@@ -138,6 +170,7 @@ class TerminalProcessTool(WorkspaceTool):
                     owner_host_session_id=self.owner_host_session_id,
                 )
             elif action == "close_stdin":
+                assert process_id is not None
                 result = self.terminal_sessions.close_process_stdin(
                     process_id,
                     max_output_chars=max_output,
@@ -150,6 +183,48 @@ class TerminalProcessTool(WorkspaceTool):
         except ProcessInputError as exc:
             return self._error_result(call, process_id=process_id, error=str(exc), status="blocked")
         return self._process_result(call, result, action=action)
+
+    def _list_result(self, call: ToolCall, processes, *, action: str) -> ToolExecutionResult:
+        live_count = self.terminal_sessions.live_process_count(owner_host_session_id=self.owner_host_session_id)
+        finished_count = self.terminal_sessions.finished_process_count(owner_host_session_id=self.owner_host_session_id)
+        payload = {
+            "status": "success",
+            "terminal_process_action": action,
+            "processes": [process.to_payload() for process in processes],
+            "live_process_count": live_count,
+            "finished_process_count": finished_count,
+        }
+        return self._result(
+            call,
+            status=ToolResultState.SUCCESS,
+            output=json.dumps(payload, ensure_ascii=False),
+            metadata={
+                "terminal_process_action": action,
+                "live_process_count": live_count,
+                "finished_process_count": finished_count,
+            },
+        )
+
+    def _log_result(self, call: ToolCall, log, *, action: str) -> ToolExecutionResult:
+        payload = {
+            "status": "success",
+            "terminal_process_action": action,
+            "process_id": log.process.process_id,
+            **log.to_payload(),
+        }
+        return self._result(
+            call,
+            status=ToolResultState.SUCCESS,
+            output=json.dumps(payload, ensure_ascii=False),
+            metadata={
+                "process_id": log.process.process_id,
+                "terminal_process_action": action,
+                "terminal_session_id": log.process.terminal_session_id,
+                "backend_type": log.process.backend_type,
+                "truncated": log.truncated,
+                "full_output_ref": log.full_output_ref,
+            },
+        )
 
     def _process_result(self, call: ToolCall, result, *, action: str) -> ToolExecutionResult:
         payload = terminal_result_payload(
@@ -178,7 +253,7 @@ class TerminalProcessTool(WorkspaceTool):
         self,
         call: ToolCall,
         *,
-        process_id: str,
+        process_id: str | None,
         error: str,
         status: str = "error",
         policy_code: str | None = None,
@@ -214,3 +289,8 @@ class TerminalProcessTool(WorkspaceTool):
                 "policy_code": policy_code,
             },
         )
+
+
+def _optional_process_id(args: dict[str, Any]) -> str | None:
+    raw = args.get("process_id")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None

@@ -2,7 +2,7 @@ import json
 import threading
 import time
 
-from pulsara_agent.event import EventContext, ToolResultEndEvent, ToolResultTextDeltaEvent
+from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent, ToolResultEndEvent, ToolResultTextDeltaEvent
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from pulsara_agent.runtime import RuntimeSession
@@ -395,6 +395,55 @@ def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
     assert json.loads(kill.output)["status"] == "killed"
 
 
+def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    executor = ToolExecutor(registry=registry)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "sleep 0.05 && printf LIST_LOG_OK", "yield_time_ms": 0},
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+    executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+        ),
+        event_context=CTX,
+    )
+
+    listed = executor.execute(
+        ToolCall(id="call:list", name="terminal_process", arguments={"action": "list"}),
+        event_context=CTX,
+    )
+    logged = executor.execute(
+        ToolCall(
+            id="call:log",
+            name="terminal_process",
+            arguments={"action": "log", "process_id": process_id},
+        ),
+        event_context=CTX,
+    )
+    list_payload = json.loads(listed.output)
+    log_payload = json.loads(logged.output)
+
+    assert listed.status is ToolResultState.SUCCESS
+    assert list_payload["terminal_process_action"] == "list"
+    assert list_payload["finished_process_count"] == 1
+    assert list_payload["processes"][0]["process_id"] == process_id
+    assert "started_at_monotonic" not in list_payload["processes"][0]
+    assert "ended_at_monotonic" not in list_payload["processes"][0]
+    assert log_payload["terminal_process_action"] == "log"
+    assert log_payload["process_id"] == process_id
+    assert log_payload["output"] == "LIST_LOG_OK"
+    assert log_payload["process"]["duration_seconds"] >= 0
+
+
 def test_terminal_process_wait_without_timeout_uses_finite_default(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "pulsara_agent.tools.builtins.terminal_process.DEFAULT_WAIT_TIMEOUT_SECONDS",
@@ -729,7 +778,7 @@ def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(tmp_pa
         ToolCall(
             id="call:process",
             name="terminal_process",
-            arguments={"action": "poll", "process_id": "terminal-process:fake"},
+            arguments={"action": "list"},
         )
     )
     payload = json.loads(result.output)
@@ -737,6 +786,38 @@ def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(tmp_pa
     assert result.status is ToolResultState.ERROR
     assert payload["status"] == "blocked"
     assert payload["policy_code"] == "terminal_access_off"
+
+
+def test_terminal_tool_context_records_yielded_completion_event(tmp_path) -> None:
+    registry = make_registry(tmp_path)
+    event_log = InMemoryEventLog()
+    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+
+    start = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "sleep 0.05 && printf TOOL_COMPLETE", "yield_time_ms": 0},
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+    executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+        ),
+        event_context=CTX,
+    )
+    completion = next(event for event in event_log.iter() if isinstance(event, TerminalProcessCompletedEvent))
+
+    assert completion.run_id == CTX.run_id
+    assert completion.turn_id == CTX.turn_id
+    assert completion.reply_id == CTX.reply_id
+    assert completion.tool_call_id == "call:terminal"
+    assert completion.process_id == process_id
+    assert completion.output_preview == "TOOL_COMPLETE"
 
 
 def test_terminal_tool_tty_is_valid_without_background_mode(tmp_path) -> None:

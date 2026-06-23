@@ -21,6 +21,7 @@ from pulsara_agent.event import (
     RunErrorEvent,
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
+    TerminalProcessCompletedEvent,
     ToolCallDeltaEvent,
     ToolCallStartEvent,
     ToolResultStartEvent,
@@ -338,6 +339,22 @@ def test_real_host_core_terminal_process_survives_after_real_turn(tmp_path):
     assert result["terminal_status_after_kill"] == "killed"
     assert result["replay_count"] > 0
     assert "PULSARA_HOST_TERMINAL_TURN_OK" in result["final_text"]
+
+
+def test_real_host_core_terminal_completion_note_drives_list_and_log(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_terminal_completion_note_smoke(tmp_path), timeout=180))
+
+    assert result["first_status"] == "finished"
+    assert result["second_status"] == "finished"
+    assert result["completion_event_count"] == 1
+    assert result["completion_output_preview"] == "PULSARA_COMPLETION_EVENT_OUTPUT"
+    assert "terminal_process" in result["second_tool_names"]
+    assert result["second_terminal_process_actions"][:2] == ["list", "log"]
+    assert result["log_output"] == "PULSARA_COMPLETION_EVENT_OUTPUT"
+    assert "PULSARA_TERMINAL_COMPLETION_NOTE_OK" in result["second_final_text"]
 
 
 def test_real_agent_runtime_terminal_yield_survives_wait_timeout(tmp_path):
@@ -1373,6 +1390,82 @@ async def _run_real_host_core_terminal_continuity_smoke(tmp_path: Path) -> dict:
             "terminal_status_after_run": terminal_status_after_run,
             "terminal_status_after_kill": killed.status.value,
             "replay_count": len(events),
+        }
+    finally:
+        await core.close_session(session.host_session_id)
+
+
+async def _run_real_host_core_terminal_completion_note_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    core = HostCore(settings=settings, durable=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_completion_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real-completion:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real-completion:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=768),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara terminal completion notes. "
+            "For the first user request, call terminal exactly once with the command the user specifies, "
+            "yield_time_ms exactly 0, and no unsupported terminal arguments. After the terminal tool returns a running "
+            "process_id, answer exactly PULSARA_COMPLETION_TASK_STARTED. "
+            "For any later request, if the conversation context contains a Pulsara note about a completed terminal "
+            "background task, first call terminal_process with action exactly 'list'. Then call terminal_process with "
+            "action exactly 'log' for the completed process_id from the list result. After the log result contains "
+            "PULSARA_COMPLETION_EVENT_OUTPUT, answer exactly PULSARA_TERMINAL_COMPLETION_NOTE_OK."
+        ),
+        permission_policy=_trusted_terminal_policy(),
+    )
+    try:
+        first = await session.run_turn(
+            "Call terminal with command exactly 'sleep 0.05 && printf PULSARA_COMPLETION_EVENT_OUTPUT' "
+            "and yield_time_ms exactly 0."
+        )
+        terminal_sessions = session.wiring.runtime_wiring.runtime_session.terminal_sessions
+        processes = terminal_sessions.list_processes(owner_host_session_id=session.host_session_id)
+        process_id = processes[0].process_id
+        terminal_sessions.wait_process(process_id, timeout_seconds=2, owner_host_session_id=session.host_session_id)
+        deadline = asyncio.get_running_loop().time() + 2
+        completion_events: list[TerminalProcessCompletedEvent] = []
+        while asyncio.get_running_loop().time() < deadline:
+            completion_events = [
+                event for event in session.replay_events() if isinstance(event, TerminalProcessCompletedEvent)
+            ]
+            if completion_events:
+                break
+            await asyncio.sleep(0.02)
+        second = await session.run_turn("Continue by inspecting the completed background terminal task.")
+        second_run_events = [
+            event for event in session.replay_events() if event.run_id == second.state.run_id
+        ]
+        second_tool_names = [
+            event.tool_call_name
+            for event in second_run_events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        second_payloads = _json_tool_result_payloads(second_run_events)
+        terminal_process_actions = [
+            payload["terminal_process_action"]
+            for payload in second_payloads
+            if payload.get("terminal_process_action")
+        ]
+        log_payload = next(
+            payload for payload in second_payloads if payload.get("terminal_process_action") == "log"
+        )
+        return {
+            "first_status": first.status.value,
+            "second_status": second.status.value,
+            "second_final_text": second.final_text.strip(),
+            "completion_event_count": len(completion_events),
+            "completion_output_preview": completion_events[0].output_preview if completion_events else "",
+            "second_tool_names": second_tool_names,
+            "second_terminal_process_actions": terminal_process_actions,
+            "log_output": log_payload["output"],
         }
     finally:
         await core.close_session(session.host_session_id)

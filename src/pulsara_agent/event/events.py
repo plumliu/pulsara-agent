@@ -53,6 +53,7 @@ class EventType(StrEnum):
     USER_CONFIRM_RESULT = "USER_CONFIRM_RESULT"
     REQUIRE_EXTERNAL_EXECUTION = "REQUIRE_EXTERNAL_EXECUTION"
     EXTERNAL_EXECUTION_RESULT = "EXTERNAL_EXECUTION_RESULT"
+    TERMINAL_PROCESS_COMPLETED = "TERMINAL_PROCESS_COMPLETED"
 
     MEMORY_CANDIDATE_PROPOSED = "MEMORY_CANDIDATE_PROPOSED"
     MEMORY_WRITE_RESULT = "MEMORY_WRITE_RESULT"
@@ -284,6 +285,24 @@ class ExternalExecutionResultEvent(EventBase):
     execution_results: list[ToolResultBlock]
 
 
+class TerminalProcessCompletedEvent(EventBase):
+    type: Literal[EventType.TERMINAL_PROCESS_COMPLETED] = EventType.TERMINAL_PROCESS_COMPLETED
+    process_id: str
+    terminal_session_id: str
+    command: str
+    status: str
+    exit_code: int
+    cwd: str
+    timed_out: bool = False
+    duration_seconds: float
+    output_preview: str = ""
+    output_truncated: bool = False
+    full_output_ref: str | None = None
+    backend_type: str = "local"
+    io_mode: str = "pipe"
+    tool_call_id: str | None = None
+
+
 class MemoryEventBase(EventBase):
     scope: str
     memory_type: str
@@ -443,6 +462,7 @@ AgentEvent: TypeAlias = (
     | UserConfirmResultEvent
     | RequireExternalExecutionEvent
     | ExternalExecutionResultEvent
+    | TerminalProcessCompletedEvent
     | MemoryCandidateProposedEvent
     | MemoryWriteResultEvent
     | MemoryWriteFailedEvent

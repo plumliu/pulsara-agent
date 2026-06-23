@@ -18,6 +18,7 @@ from pulsara_agent.event import (
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
+    TerminalProcessCompletedEvent,
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
@@ -391,6 +392,86 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
     assert messages[1].content[0].text == FAILURE_NOTE_TEXT
 
 
+def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_previous_run() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    first_ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
+    second_ctx = EventContext(run_id="run:second", turn_id="turn:second", reply_id="reply:second")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**first_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "run tests"}),
+            ReplyEndEvent(**first_ctx.event_fields()),
+            RunEndEvent(**first_ctx.event_fields(), status="finished", stop_reason="final"),
+            TerminalProcessCompletedEvent(
+                **first_ctx.event_fields(),
+                process_id="proc_done",
+                terminal_session_id="default",
+                command="pytest -q",
+                status="success",
+                exit_code=0,
+                cwd="/workspace",
+                duration_seconds=1.0,
+            ),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert messages[-1].role == "system"
+    assert "terminal background task update" in messages[-1].content[0].text
+    assert "proc_done" in messages[-1].content[0].text
+    assert "if still retained" in messages[-1].content[0].text.lower()
+
+    log.extend(
+        [
+            RunStartEvent(**second_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "continue"}),
+            ReplyEndEvent(**second_ctx.event_fields()),
+            RunEndEvent(**second_ctx.event_fields(), status="finished", stop_reason="final"),
+        ]
+    )
+    later_messages = rebuild_prior_messages(log)
+
+    assert all(
+        not (message.role == "system" and "terminal background task update" in message.content[0].text)
+        for message in later_messages
+    )
+
+
+def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion_happened_during_later_turn() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    first_ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
+    second_ctx = EventContext(run_id="run:second", turn_id="turn:second", reply_id="reply:second")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**first_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "start server"}),
+            ReplyEndEvent(**first_ctx.event_fields()),
+            RunEndEvent(**first_ctx.event_fields(), status="finished", stop_reason="final"),
+            RunStartEvent(**second_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "do other work"}),
+            TerminalProcessCompletedEvent(
+                **first_ctx.event_fields(),
+                process_id="proc_late",
+                terminal_session_id="default",
+                command="pytest -q",
+                status="error",
+                exit_code=1,
+                cwd="/workspace",
+                duration_seconds=2.0,
+            ),
+            ReplyEndEvent(**second_ctx.event_fields()),
+            RunEndEvent(**second_ctx.event_fields(), status="finished", stop_reason="final"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert messages[-1].role == "system"
+    assert "proc_late" in messages[-1].content[0].text
+    assert "exit code 1" in messages[-1].content[0].text
+
+
 def test_host_session_injects_failed_turn_note_into_next_context(tmp_path, monkeypatch) -> None:
     transport = FailingScriptedTransport(
         [
@@ -433,6 +514,144 @@ def test_host_session_replay_events_after_sequence(tmp_path, monkeypatch) -> Non
     missed = session.replay_events(after_sequence=2)
 
     assert [event.sequence for event in missed] == [seq for seq in [event.sequence for event in all_events] if seq > 2]
+
+
+def test_host_session_terminal_completion_event_replays_and_injects_one_shot_note(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "sleep 0.05 && printf BG_DONE", "yield_time_ms": 0}
+                        ),
+                    }
+                ]
+            },
+            {"text": "started background task"},
+            {"text": "continued after completion"},
+            {"text": "final check"},
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        seen_live: list[TerminalProcessCompletedEvent] = []
+
+        class Subscriber:
+            async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+                if isinstance(published.event, TerminalProcessCompletedEvent):
+                    seen_live.append(published.event)
+
+        session.wiring.runtime_wiring.runtime_session.publisher.subscribe(Subscriber())
+        await session.run_turn("start background task")
+        manager = session.wiring.runtime_wiring.runtime_session.terminal_sessions
+        process = manager.list_processes(owner_host_session_id=session.host_session_id)[0]
+        manager.wait_process(process.process_id, timeout_seconds=2)
+        deadline = asyncio.get_running_loop().time() + 2
+        while not seen_live and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+        replayed = [event for event in session.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
+        await session.run_turn("continue after background completion")
+        second_context = transport.contexts[-1]
+        await session.run_turn("check note is gone")
+        third_context = transport.contexts[-1]
+        return session, replayed, seen_live, second_context, third_context
+
+    session, replayed, seen_live, second_context, third_context = asyncio.run(run())
+
+    assert len(replayed) == 1
+    assert len(seen_live) == 1
+    assert replayed[0].process_id == seen_live[0].process_id
+    assert replayed[0].output_preview == "BG_DONE"
+    assert "terminal background task update" in _context_text(second_context)
+    assert replayed[0].process_id in _context_text(second_context)
+    assert "terminal background task update" not in _context_text(third_context)
+    terminal_summary = session.summary()["terminal"]
+    assert terminal_summary["finished_process_count"] == 1
+    assert terminal_summary["processes"][0]["process_id"] == replayed[0].process_id
+
+
+def test_host_session_terminal_completion_during_later_turn_appears_in_following_context(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "sleep 0.25 && printf LATE_DONE", "yield_time_ms": 0}
+                        ),
+                    }
+                ]
+            },
+            {"text": "started background task"},
+            {"text": "slow unrelated turn"},
+            {"text": "after late completion"},
+        ],
+        delay=0.2,
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        await session.run_turn("start background task")
+        await session.run_turn("do slow unrelated work")
+        second_context = transport.contexts[-1]
+        events = [event for event in session.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
+        await session.run_turn("continue after late task")
+        third_context = transport.contexts[-1]
+        return events, second_context, third_context
+
+    events, second_context, third_context = asyncio.run(run())
+
+    assert len(events) == 1
+    assert "terminal background task update" not in _context_text(second_context)
+    assert "terminal background task update" in _context_text(third_context)
+    assert events[0].process_id in _context_text(third_context)
+
+
+def test_host_session_terminal_completion_note_is_owner_isolated_across_shared_workspace(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:a-bg",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "sleep 0.05 && printf A_DONE", "yield_time_ms": 0}
+                        ),
+                    }
+                ]
+            },
+            {"text": "a started"},
+            {"text": "b sees no a completion"},
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        a = await _open_project_session(core, tmp_path, host_session_id="host:a", permission_policy=_trusted_terminal_policy())
+        b = await _open_project_session(core, tmp_path, host_session_id="host:b", permission_policy=_trusted_terminal_policy())
+        await a.run_turn("start a process")
+        manager = a.wiring.runtime_wiring.runtime_session.terminal_sessions
+        process = manager.list_processes(owner_host_session_id="host:a")[0]
+        manager.wait_process(process.process_id, timeout_seconds=2)
+        a_events = [event for event in a.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
+        b_events = [event for event in b.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
+        await b.run_turn("continue b")
+        return a_events, b_events, transport.contexts[-1]
+
+    a_events, b_events, b_context = asyncio.run(run())
+
+    assert len(a_events) == 1
+    assert b_events == []
+    assert "terminal background task update" not in _context_text(b_context)
 
 
 def test_host_session_rejects_concurrent_runs(tmp_path, monkeypatch) -> None:
@@ -1338,6 +1557,8 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, m
         a_proc = manager.list_owned("host:a")[0].process_id
         b_proc = manager.list_owned("host:b")[0].process_id
         assert a_proc is not None and b_proc is not None
+        supervisor_summary = (await core.list_workspace_supervisors())[0]
+        supervisor_process_ids = {process["process_id"] for process in supervisor_summary["processes"]}
         with pytest.raises(KeyError):
             manager.poll_process(a_proc, owner_host_session_id="host:b")
         await core.close_session("host:a")
@@ -1346,10 +1567,18 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, m
         await core.close_workspace(a.workspace.workspace_key)
         b_status_after_workspace_close = manager.poll_process(b_proc).status
         remaining_sessions = await core.list_sessions()
-        return a_status, b_status, b_status_after_workspace_close, remaining_sessions
+        return a_status, b_status, b_status_after_workspace_close, remaining_sessions, supervisor_process_ids, {a_proc, b_proc}
 
-    a_status, b_status, b_status_after_workspace_close, remaining_sessions = asyncio.run(run())
+    (
+        a_status,
+        b_status,
+        b_status_after_workspace_close,
+        remaining_sessions,
+        supervisor_process_ids,
+        expected_process_ids,
+    ) = asyncio.run(run())
 
+    assert supervisor_process_ids == expected_process_ids
     assert a_status is TerminalStatus.KILLED
     assert b_status is TerminalStatus.RUNNING
     assert b_status_after_workspace_close is TerminalStatus.KILLED

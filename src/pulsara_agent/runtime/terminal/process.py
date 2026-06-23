@@ -10,15 +10,19 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from threading import RLock, Thread
 from typing import Callable, Mapping
 from uuid import uuid4
 
+from pulsara_agent.event import AgentEvent, EventContext, TerminalProcessCompletedEvent
 from pulsara_agent.runtime.terminal.env import build_default_subprocess_env
 from pulsara_agent.runtime.terminal.models import (
     TerminalBackendType,
     TerminalIOMode,
+    TerminalProcessInfo,
+    TerminalProcessLog,
     TerminalResult,
     TerminalStatus,
 )
@@ -27,6 +31,14 @@ from pulsara_agent.runtime.terminal.shell import TerminalShellConfig, detect_ter
 
 
 _TIMEOUT_EXIT_CODE = 124
+
+
+class TerminalKillReason(StrEnum):
+    USER = "user_tool_kill"
+    TEARDOWN = "teardown"
+    LIFETIME_WATCHDOG = "lifetime_watchdog"
+
+
 class ProcessLimitError(RuntimeError):
     """Raised when a newly yielded terminal process would exceed the live limit."""
 
@@ -62,6 +74,14 @@ class TerminalProcessState:
     shell: TerminalShellConfig = field(default_factory=detect_terminal_shell)
     owner_host_session_id: str | None = None
     owner_conversation_id: str | None = None
+    origin_run_id: str | None = None
+    origin_turn_id: str | None = None
+    origin_reply_id: str | None = None
+    origin_tool_call_id: str | None = None
+    completion_event_recorded: bool = False
+    completion_suppressed: bool = False
+    completion_reason: str | None = None
+    record_event: Callable[[AgentEvent], AgentEvent] | None = field(default=None, repr=False)
     reader_thread: Thread | None = None
     lifetime_watchdog: Thread | None = None
     lock: RLock = field(default_factory=RLock, repr=False)
@@ -102,6 +122,9 @@ class ProcessRegistry:
         env_diagnostics: Mapping[str, object] | None = None,
         owner_host_session_id: str | None = None,
         owner_conversation_id: str | None = None,
+        origin_event_context: EventContext | None = None,
+        origin_tool_call_id: str | None = None,
+        record_event: Callable[[AgentEvent], AgentEvent] | None = None,
     ) -> tuple[TerminalProcessState, bool]:
         self._cleanup_finished()
         state = spawn_local_process(
@@ -120,6 +143,9 @@ class ProcessRegistry:
             env_diagnostics=env_diagnostics,
             owner_host_session_id=owner_host_session_id,
             owner_conversation_id=owner_conversation_id,
+            origin_event_context=origin_event_context,
+            origin_tool_call_id=origin_tool_call_id,
+            record_event=record_event,
         )
         if max_lifetime_seconds is not None:
             state.lifetime_watchdog = _arm_lifetime_watchdog(state, max_lifetime_seconds)
@@ -131,13 +157,14 @@ class ProcessRegistry:
         if finished:
             return state, False
         if self._live_count() >= self.max_live_processes:
-            kill_process(state)
+            kill_process(state, reason=TerminalKillReason.TEARDOWN)
             _cleanup_cwd_file(state)
             raise ProcessLimitError(f"max live terminal processes reached: {self.max_live_processes}")
         with state.lock:
             state.yielded = True
             state.output_callback = None
         self._processes[state.process_id] = state
+        _maybe_record_completion_event(state)
         return state, True
 
     def poll(
@@ -170,7 +197,7 @@ class ProcessRegistry:
         owner_host_session_id: str | None = None,
     ) -> TerminalResult:
         state = self._get(process_id, owner_host_session_id=owner_host_session_id)
-        kill_process(state)
+        kill_process(state, reason=TerminalKillReason.USER)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
     def write(
@@ -200,7 +227,7 @@ class ProcessRegistry:
     def shutdown(self) -> None:
         for state in list(self._processes.values()):
             if state.is_running:
-                kill_process(state)
+                kill_process(state, reason=TerminalKillReason.TEARDOWN)
 
     def kill_owned(self, owner_host_session_id: str) -> list[TerminalResult]:
         results: list[TerminalResult] = []
@@ -208,7 +235,7 @@ class ProcessRegistry:
             if state.owner_host_session_id != owner_host_session_id:
                 continue
             if state.is_running:
-                kill_process(state)
+                kill_process(state, reason=TerminalKillReason.TEARDOWN)
             results.append(snapshot_process(state))
         return results
 
@@ -219,6 +246,39 @@ class ProcessRegistry:
             for state in self._processes.values()
             if state.owner_host_session_id == owner_host_session_id
         ]
+
+    def list_processes(
+        self,
+        *,
+        owner_host_session_id: str | None = None,
+        include_finished: bool = True,
+        include_running: bool = True,
+    ) -> list[TerminalProcessInfo]:
+        self._cleanup_finished()
+        processes = [
+            process_info(state)
+            for state in self._processes.values()
+            if state.yielded
+            and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
+            and ((include_running and state.is_running) or (include_finished and state.is_finished))
+        ]
+        return sorted(
+            processes,
+            key=lambda info: (
+                0 if info.status == TerminalStatus.RUNNING.value else 1,
+                -(info.ended_at_monotonic or info.started_at_monotonic),
+            ),
+        )
+
+    def log(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int | None = None,
+        owner_host_session_id: str | None = None,
+    ) -> TerminalProcessLog:
+        state = self._get(process_id, owner_host_session_id=owner_host_session_id)
+        return process_log(state, max_output_chars=max_output_chars or state.max_output_chars)
 
     def live_count(self, *, owner_host_session_id: str | None = None) -> int:
         return sum(
@@ -297,6 +357,9 @@ def spawn_local_process(
     env_diagnostics: Mapping[str, object] | None = None,
     owner_host_session_id: str | None = None,
     owner_conversation_id: str | None = None,
+    origin_event_context: EventContext | None = None,
+    origin_tool_call_id: str | None = None,
+    record_event: Callable[[AgentEvent], AgentEvent] | None = None,
 ) -> TerminalProcessState:
     process_id = f"proc_{uuid4().hex}"
     shell = shell or detect_terminal_shell()
@@ -349,6 +412,11 @@ def spawn_local_process(
         shell=shell,
         owner_host_session_id=owner_host_session_id,
         owner_conversation_id=owner_conversation_id,
+        origin_run_id=origin_event_context.run_id if origin_event_context is not None else None,
+        origin_turn_id=origin_event_context.turn_id if origin_event_context is not None else None,
+        origin_reply_id=origin_event_context.reply_id if origin_event_context is not None else None,
+        origin_tool_call_id=origin_tool_call_id,
+        record_event=record_event,
         output=OutputAccumulator(
             artifact_path=artifact_path,
             artifact_threshold_chars=max_output_chars,
@@ -380,9 +448,14 @@ def wait_for_process(
         time.sleep(0.02)
 
 
-def kill_process(state: TerminalProcessState) -> None:
+def kill_process(
+    state: TerminalProcessState,
+    *,
+    reason: TerminalKillReason | str = TerminalKillReason.USER,
+) -> None:
     if state.is_finished:
         return
+    _mark_kill_reason(state, reason)
     _mark_status(state, TerminalStatus.KILLED, exit_code=-signal.SIGTERM)
     _terminate_process_group(state.process)
     _join_reader(state)
@@ -465,6 +538,8 @@ def snapshot_process(
         timed_out = state.timed_out
         process_id = state.process_id if state.yielded else None
         result_cwd = cwd or state.cwd
+        duration_seconds = _duration_seconds_locked(state)
+        stdin_closed = state.stdin_closed
     processed = state.output.snapshot(max_chars=max_output_chars or state.max_output_chars)
     full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
     return TerminalResult(
@@ -483,11 +558,48 @@ def snapshot_process(
             "process_id": process_id,
             "terminal_session_id": state.terminal_session_id,
             "full_output_ref": full_output_ref,
+            "duration_seconds": duration_seconds,
+            "stdin_closed": stdin_closed,
             "shell": state.shell.to_metadata(),
             "env": dict(state.env_diagnostics),
             "owner_host_session_id": state.owner_host_session_id,
             "owner_conversation_id": state.owner_conversation_id,
         },
+    )
+
+
+def process_info(state: TerminalProcessState) -> TerminalProcessInfo:
+    with state.lock:
+        full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
+        return TerminalProcessInfo(
+            process_id=state.process_id,
+            terminal_session_id=state.terminal_session_id,
+            command=state.command,
+            cwd=str(state.cwd),
+            backend_type=state.backend_type.value,
+            io_mode=state.io_mode.value,
+            status=state.status.value,
+            exit_code=state.exit_code,
+            timed_out=state.timed_out,
+            stdin_closed=state.stdin_closed,
+            started_at_monotonic=state.started_at,
+            ended_at_monotonic=state.ended_at,
+            duration_seconds=_duration_seconds_locked(state),
+            full_output_ref=full_output_ref,
+            owner_host_session_id=state.owner_host_session_id,
+            owner_conversation_id=state.owner_conversation_id,
+        )
+
+
+def process_log(state: TerminalProcessState, *, max_output_chars: int) -> TerminalProcessLog:
+    info = process_info(state)
+    processed = state.output.snapshot(max_chars=max_output_chars)
+    full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
+    return TerminalProcessLog(
+        process=info,
+        output=processed.text,
+        truncated=processed.truncated,
+        full_output_ref=full_output_ref,
     )
 
 
@@ -558,6 +670,7 @@ def _reader_loop(state: TerminalProcessState) -> None:
             state.pty_master_fd = None
         if state.yielded:
             _cleanup_cwd_file(state)
+        _maybe_record_completion_event(state)
 
 
 def _reader_fd(state: TerminalProcessState) -> int | None:
@@ -598,6 +711,78 @@ def _mark_status(
         state.ended_at = time.monotonic()
 
 
+def _mark_kill_reason(state: TerminalProcessState, reason: TerminalKillReason | str) -> None:
+    reason_value = str(reason)
+    with state.lock:
+        state.completion_reason = reason_value
+        if reason_value in {TerminalKillReason.TEARDOWN.value, TerminalKillReason.LIFETIME_WATCHDOG.value}:
+            state.completion_suppressed = True
+            state.record_event = None
+
+
+def _duration_seconds_locked(state: TerminalProcessState) -> float:
+    end = state.ended_at if state.ended_at is not None else time.monotonic()
+    return max(0.0, end - state.started_at)
+
+
+def _maybe_record_completion_event(state: TerminalProcessState) -> AgentEvent | None:
+    event_data = _completion_event_data(state)
+    if event_data is None:
+        return None
+    record_event, fields = event_data
+    event = TerminalProcessCompletedEvent(**fields)
+    try:
+        return record_event(event)
+    except Exception:
+        return None
+
+
+def _completion_event_data(
+    state: TerminalProcessState,
+) -> tuple[Callable[[AgentEvent], AgentEvent], dict[str, object]] | None:
+    with state.lock:
+        if not state.yielded:
+            return None
+        if state.status is TerminalStatus.RUNNING:
+            return None
+        if state.completion_suppressed:
+            return None
+        if state.completion_event_recorded:
+            return None
+        if (
+            state.record_event is None
+            or state.origin_run_id is None
+            or state.origin_turn_id is None
+            or state.origin_reply_id is None
+        ):
+            return None
+        state.completion_event_recorded = True
+        record_event = state.record_event
+        fields: dict[str, object] = {
+            "run_id": state.origin_run_id,
+            "turn_id": state.origin_turn_id,
+            "reply_id": state.origin_reply_id,
+            "process_id": state.process_id,
+            "terminal_session_id": state.terminal_session_id,
+            "command": state.command,
+            "status": state.status.value,
+            "exit_code": state.exit_code if state.exit_code is not None else -1,
+            "cwd": str(state.cwd),
+            "timed_out": state.timed_out,
+            "duration_seconds": _duration_seconds_locked(state),
+            "backend_type": state.backend_type.value,
+            "io_mode": state.io_mode.value,
+            "tool_call_id": state.origin_tool_call_id,
+            "metadata": {"completion_reason": state.completion_reason},
+        }
+    processed = state.output.snapshot(max_chars=2000)
+    full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
+    fields["output_preview"] = processed.text
+    fields["output_truncated"] = processed.truncated
+    fields["full_output_ref"] = full_output_ref
+    return record_event, fields
+
+
 def _join_reader(state: TerminalProcessState) -> None:
     if state.reader_thread is not None:
         state.reader_thread.join(timeout=2)
@@ -611,7 +796,7 @@ def _arm_lifetime_watchdog(state: TerminalProcessState, seconds: int) -> Thread:
                 return
             time.sleep(0.1)
         if state.is_running:
-            kill_process(state)
+            kill_process(state, reason=TerminalKillReason.LIFETIME_WATCHDOG)
 
     watcher = Thread(
         target=_watch,
