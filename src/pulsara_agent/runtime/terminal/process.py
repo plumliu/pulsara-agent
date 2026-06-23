@@ -61,7 +61,6 @@ class TerminalProcessState:
     env_diagnostics: dict[str, object] = field(default_factory=dict)
     capture_cwd_file: Path | None = None
     pty_master_fd: int | None = None
-    full_output_ref: str | None = None
     yielded: bool = False
     status: TerminalStatus = TerminalStatus.RUNNING
     started_at: float = field(default_factory=time.monotonic)
@@ -110,7 +109,6 @@ class ProcessRegistry:
         terminal_session_id: str,
         command: str,
         cwd: Path,
-        artifact_root: Path,
         max_output_chars: int,
         yield_time_ms: int,
         backend_type: TerminalBackendType = TerminalBackendType.LOCAL,
@@ -131,7 +129,6 @@ class ProcessRegistry:
             terminal_session_id=terminal_session_id,
             command=command,
             cwd=cwd,
-            artifact_root=artifact_root,
             max_output_chars=max_output_chars,
             backend_type=backend_type,
             io_mode=TerminalIOMode.PTY if tty else TerminalIOMode.PIPE,
@@ -346,7 +343,6 @@ def spawn_local_process(
     command: str,
     cwd: Path,
     max_output_chars: int,
-    artifact_root: Path | None = None,
     backend_type: TerminalBackendType = TerminalBackendType.LOCAL,
     io_mode: TerminalIOMode = TerminalIOMode.PIPE,
     stdin_pipe: bool,
@@ -365,8 +361,6 @@ def spawn_local_process(
     shell = shell or detect_terminal_shell()
     subprocess_env = dict(env) if env is not None else build_default_subprocess_env()
     cwd_file = _new_cwd_file() if capture_cwd else None
-    artifact_path = artifact_root / f"{process_id}.txt" if artifact_root is not None else None
-    full_output_ref = f".pulsara/terminal-output/{process_id}.txt" if artifact_path is not None else None
     wrapped = _wrap_command(command, cwd=cwd, cwd_file=cwd_file) if capture_cwd else command
     pty_master_fd: int | None = None
     if io_mode is TerminalIOMode.PTY:
@@ -407,7 +401,6 @@ def spawn_local_process(
         env_diagnostics=dict(env_diagnostics or {}),
         capture_cwd_file=cwd_file,
         pty_master_fd=pty_master_fd,
-        full_output_ref=full_output_ref,
         output_callback=output_callback,
         shell=shell,
         owner_host_session_id=owner_host_session_id,
@@ -417,10 +410,7 @@ def spawn_local_process(
         origin_reply_id=origin_event_context.reply_id if origin_event_context is not None else None,
         origin_tool_call_id=origin_tool_call_id,
         record_event=record_event,
-        output=OutputAccumulator(
-            artifact_path=artifact_path,
-            artifact_threshold_chars=max_output_chars,
-        ),
+        output=OutputAccumulator(),
     )
     reader = Thread(target=_reader_loop, args=(state,), daemon=True, name=f"pulsara-terminal-{state.process_id}")
     state.reader_thread = reader
@@ -541,7 +531,7 @@ def snapshot_process(
         duration_seconds = _duration_seconds_locked(state)
         stdin_closed = state.stdin_closed
     processed = state.output.snapshot(max_chars=max_output_chars or state.max_output_chars)
-    full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
+    full_output_text = state.output.full_text()
     return TerminalResult(
         status=status,
         output=processed.text,
@@ -550,14 +540,13 @@ def snapshot_process(
         timed_out=timed_out,
         truncated=processed.truncated,
         process_id=process_id,
-        full_output_ref=full_output_ref,
+        full_output_text=full_output_text,
         metadata={
             "command": state.command,
             "backend_type": state.backend_type.value,
             "io_mode": state.io_mode.value,
             "process_id": process_id,
             "terminal_session_id": state.terminal_session_id,
-            "full_output_ref": full_output_ref,
             "duration_seconds": duration_seconds,
             "stdin_closed": stdin_closed,
             "shell": state.shell.to_metadata(),
@@ -570,7 +559,6 @@ def snapshot_process(
 
 def process_info(state: TerminalProcessState) -> TerminalProcessInfo:
     with state.lock:
-        full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
         return TerminalProcessInfo(
             process_id=state.process_id,
             terminal_session_id=state.terminal_session_id,
@@ -585,7 +573,6 @@ def process_info(state: TerminalProcessState) -> TerminalProcessInfo:
             started_at_monotonic=state.started_at,
             ended_at_monotonic=state.ended_at,
             duration_seconds=_duration_seconds_locked(state),
-            full_output_ref=full_output_ref,
             owner_host_session_id=state.owner_host_session_id,
             owner_conversation_id=state.owner_conversation_id,
         )
@@ -594,12 +581,11 @@ def process_info(state: TerminalProcessState) -> TerminalProcessInfo:
 def process_log(state: TerminalProcessState, *, max_output_chars: int) -> TerminalProcessLog:
     info = process_info(state)
     processed = state.output.snapshot(max_chars=max_output_chars)
-    full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
     return TerminalProcessLog(
         process=info,
         output=processed.text,
         truncated=processed.truncated,
-        full_output_ref=full_output_ref,
+        full_output_text=state.output.full_text(),
     )
 
 
@@ -776,10 +762,8 @@ def _completion_event_data(
             "metadata": {"completion_reason": state.completion_reason},
         }
     processed = state.output.snapshot(max_chars=2000)
-    full_output_ref = state.full_output_ref if state.output.full_output_path is not None else None
     fields["output_preview"] = processed.text
     fields["output_truncated"] = processed.truncated
-    fields["full_output_ref"] = full_output_ref
     return record_event, fields
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
@@ -115,11 +116,10 @@ def _tool_result_messages(message: Msg, budget: LoopBudget) -> list[LLMMessage]:
     for block in message.content:
         if not isinstance(block, ToolResultBlock):
             continue
-        text = _tool_result_text(block)
-        clipped, remaining_tool_chars = _clip_with_remaining(text, remaining_tool_chars)
+        body, remaining_tool_chars = _render_tool_result_body(block, remaining_tool_chars)
         messages.append(
             LLMMessage.tool_result(
-                f"[tool_result:{block.name}:{block.state.value}]\n{clipped}",
+                f"[tool_result:{block.name}:{block.state.value}]\n{body}",
                 tool_call_id=block.id,
             )
         )
@@ -133,9 +133,8 @@ def _textual_parts(message: Msg, budget: LoopBudget) -> list[str]:
         if isinstance(block, TextBlock):
             parts.append(block.text)
         elif isinstance(block, ToolResultBlock):
-            text = _tool_result_text(block)
-            clipped, remaining_tool_chars = _clip_with_remaining(text, remaining_tool_chars)
-            parts.append(f"[tool_result:{block.name}:{block.state.value}]\n{clipped}")
+            body, remaining_tool_chars = _render_tool_result_body(block, remaining_tool_chars)
+            parts.append(f"[tool_result:{block.name}:{block.state.value}]\n{body}")
         elif isinstance(block, DataBlock):
             parts.append(_data_placeholder(block))
         else:
@@ -152,6 +151,24 @@ def _tool_result_text(block: ToolResultBlock) -> str:
         elif isinstance(output, DataBlock):
             parts.append(_data_placeholder(output))
     return "\n".join(parts)
+
+
+def _render_tool_result_body(block: ToolResultBlock, remaining_tool_chars: int) -> tuple[str, int]:
+    text = _tool_result_text(block)
+    clipped, remaining_tool_chars = _clip_with_remaining(text, remaining_tool_chars)
+    if not block.artifacts:
+        return clipped, remaining_tool_chars
+    primary = block.artifacts[0]
+    # Heuristic: preview and artifact can use different textual representations
+    # (for example terminal JSON preview vs. plain-text output artifact), so this
+    # can be conservative near escaping boundaries.
+    output_truncated = len(clipped.encode("utf-8")) < primary.size_bytes
+    envelope = {
+        "output_preview": clipped,
+        "output_truncated": output_truncated,
+        "artifacts": [artifact.to_model_payload() for artifact in block.artifacts],
+    }
+    return json.dumps(envelope, ensure_ascii=False), remaining_tool_chars
 
 
 def _clip_with_remaining(text: str, remaining: int) -> tuple[str, int]:

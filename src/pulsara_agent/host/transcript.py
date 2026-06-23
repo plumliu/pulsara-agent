@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from pulsara_agent.event import ReplyEndEvent, RunEndEvent, RunStartEvent, TerminalProcessCompletedEvent
+from pulsara_agent.event import ReplyEndEvent, RunEndEvent, RunStartEvent, TerminalProcessCompletedEvent, ToolResultEndEvent
 from pulsara_agent.event_log import EventLog
+from pulsara_agent.message import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.message import Msg, SystemMsg, UserMsg
 
 
@@ -47,6 +48,8 @@ def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
     events = event_log.iter()
     note_target = _last_terminal_run_note_target(events)
     completion_note = _completion_note_after_last_run_start(events)
+    terminal_run_ids = _terminal_run_ids(events)
+    completed_tool_call_ids_by_run = _completed_tool_call_ids_by_run(events)
     messages: list[Msg] = []
     seen_replies: set[str] = set()
     noted_runs: set[str] = set()
@@ -70,7 +73,14 @@ def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
             if event.reply_id in seen_replies:
                 continue
             seen_replies.add(event.reply_id)
-            messages.append(event_log.replay(event.reply_id))
+            message = event_log.replay(event.reply_id)
+            if event.run_id in terminal_run_ids:
+                message = _strip_unfinished_tool_calls(
+                    message,
+                    completed_tool_call_ids=completed_tool_call_ids_by_run.get(event.run_id, set()),
+                )
+            if message is not None:
+                messages.append(message)
             continue
         if event.reply_id in seen_replies:
             continue
@@ -114,6 +124,38 @@ def _should_emit_terminal_note(
     if event.run_id in noted_runs:
         return False
     return isinstance(event, RunEndEvent)
+
+
+def _terminal_run_ids(events: list) -> set[str]:
+    return {event.run_id for event in events if isinstance(event, RunEndEvent) and event.status in _NOTE_STATUS}
+
+
+def _completed_tool_call_ids_by_run(events: list) -> dict[str, set[str]]:
+    completed: dict[str, set[str]] = {}
+    for event in events:
+        if isinstance(event, ToolResultEndEvent):
+            completed.setdefault(event.run_id, set()).add(event.tool_call_id)
+    return completed
+
+
+def _strip_unfinished_tool_calls(
+    message: Msg,
+    *,
+    completed_tool_call_ids: set[str],
+) -> Msg | None:
+    filtered = [
+        block
+        for block in message.content
+        if not isinstance(block, ToolCallBlock) or block.id in completed_tool_call_ids
+    ]
+    if filtered == message.content:
+        return message
+    # A stopped pending-approval turn can end after the model emitted only a
+    # tool call. Replaying that assistant turn without a following tool result
+    # violates Chat Completions ordering, so keep only user input + stop note.
+    if not any(isinstance(block, (TextBlock, DataBlock, ToolResultBlock)) for block in filtered):
+        return None
+    return message.model_copy(update={"content": filtered})
 
 
 def _note_message(note_target: _TerminalRunNoteTarget, *, created_at: str | None) -> SystemMsg:

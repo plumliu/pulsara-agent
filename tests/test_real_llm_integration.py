@@ -24,6 +24,7 @@ from pulsara_agent.event import (
     TerminalProcessCompletedEvent,
     ToolCallDeltaEvent,
     ToolCallStartEvent,
+    ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
@@ -33,6 +34,7 @@ from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.host import HostCore, HostWorkspaceInput
+from pulsara_agent.host.transcript import INTERRUPTED_NOTE_TEXT, rebuild_prior_messages
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
@@ -228,7 +230,7 @@ def test_real_agent_runtime_read_only_policy_hides_write_and_terminal_tools(tmp_
     assert result["status"] == "finished"
     assert result["stop_reason"] == "final"
     assert result["errors"] == []
-    assert result["registry_names"] == ["read_file", "search_files", "todo"]
+    assert result["registry_names"] == ["artifact_read", "read_file", "search_files", "todo"]
     assert result["tool_names"] == ["read_file"]
     assert "PULSARA_PERMISSION_READ_ONLY_OK" in result["final_text"]
 
@@ -428,7 +430,7 @@ def test_real_agent_runtime_streams_terminal_foreground_output(tmp_path):
     assert "PULSARA_TERMINAL_STREAMING_OK" in result["final_text"]
 
 
-def test_real_agent_runtime_terminal_large_output_has_full_output_ref(tmp_path):
+def test_real_agent_runtime_terminal_large_output_has_tool_result_artifact(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
 
@@ -437,13 +439,14 @@ def test_real_agent_runtime_terminal_large_output_has_full_output_ref(tmp_path):
     assert result["status"] == "finished"
     assert result["stop_reason"] == "final"
     assert result["errors"] == []
-    assert result["tool_names"][:1] == ["terminal"]
+    assert result["tool_names"][:2] == ["terminal", "artifact_read"]
     assert result["terminal_status"] == "success"
     assert result["terminal_truncated"] is True
-    assert result["full_output_ref"]
+    assert result["artifact_id"]
+    assert result["artifact_read_status"] == "success"
     assert result["preview_chars"] < 1000
-    assert result["artifact_exists"] is True
     assert "PULSARA_LARGE_HEAD" in result["artifact_text_sample"]
+    assert "PULSARA_LARGE_TAIL" in result["artifact_text_sample"]
     assert "PULSARA_TERMINAL_LARGE_OUTPUT_OK" in result["final_text"]
 
 
@@ -486,6 +489,7 @@ def test_real_host_core_pending_approval_stop_injects_interrupted_note(tmp_path)
     assert result["second_status"] == "finished"
     assert result["tool_names"] == ["terminal"]
     assert result["pending_after_stop"] is None
+    assert result["interrupted_note_present"] is True
     assert "PULSARA_PENDING_STOP_NOTE_OK" in result["second_final_text"]
     assert result["aborted_run_end_count"] == 1
     assert result["run_errors"] == []
@@ -685,8 +689,9 @@ def test_real_llm_trajectory_suite_covers_narrow_memory_tools(tmp_path):
     assert multi_tool["event_type_names"][-1] == "RunEndEvent"
     assert multi_tool["tool_names"].count("read_file") >= 2
     assert "search_files" in multi_tool["tool_names"]
-    assert "PULSARA_MULTI_ALPHA" in multi_tool["final_text"]
-    assert "PULSARA_MULTI_BETA" in multi_tool["final_text"]
+    tool_result_text = "\n".join(multi_tool["tool_result_summaries"])
+    assert "PULSARA_MULTI_ALPHA" in tool_result_text
+    assert "PULSARA_MULTI_BETA" in tool_result_text
     memory_trajectories = trajectories[5:]
     assert [trajectory["target_tool"] for trajectory in memory_trajectories] == [
         "remember_claim",
@@ -906,6 +911,7 @@ async def _run_real_message_level_system_smoke() -> dict:
                 "Pulsara note: the previous turn did not complete. "
                 "Acknowledge this by replying with exactly: PULSARA_SYSTEM_MSG_OK"
             ),
+            LLMMessage.user("Continue now by following the Pulsara note exactly."),
         )
     )
     result = await _collect_real_events(
@@ -1698,7 +1704,9 @@ async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
             "First call terminal with command exactly "
             "\"python -c 'print(\\\"PULSARA_LARGE_HEAD\\\"); print(\\\"q\\\" * 50000); print(\\\"PULSARA_LARGE_TAIL\\\")'\" "
             "and max_output_chars exactly 120. Do not use background, tty, terminal_process, or file tools. "
-            "After the terminal tool result, answer exactly: PULSARA_TERMINAL_LARGE_OUTPUT_OK"
+            "After the terminal tool result, inspect the artifacts[] ref and call artifact_read with that artifact_id "
+            "and max_chars 60000. After artifact_read shows both PULSARA_LARGE_HEAD and PULSARA_LARGE_TAIL, "
+            "answer exactly: PULSARA_TERMINAL_LARGE_OUTPUT_OK"
         ),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -1710,16 +1718,22 @@ async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
         for event in events
         if isinstance(event, ToolCallStartEvent)
     ]
-    terminal_deltas = [
-        event.delta
+    tool_call_names = {
+        event.tool_call_id: event.tool_call_name
         for event in events
-        if isinstance(event, ToolResultTextDeltaEvent)
-    ]
+        if isinstance(event, ToolCallStartEvent)
+    }
+    deltas_by_call: dict[str, list[str]] = {}
+    for event in events:
+        if isinstance(event, ToolResultTextDeltaEvent):
+            deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
     errors = _run_error_diagnostics(events)
-    terminal_payload = json.loads("".join(terminal_deltas))
-    full_output_ref = terminal_payload["full_output_ref"]
-    artifact_path = tmp_path / full_output_ref
-    artifact_text_sample = artifact_path.read_text(encoding="utf-8")[:500] if artifact_path.exists() else ""
+    terminal_call_id = next(call_id for call_id, name in tool_call_names.items() if name == "terminal")
+    artifact_read_call_id = next(call_id for call_id, name in tool_call_names.items() if name == "artifact_read")
+    terminal_payload = json.loads("".join(deltas_by_call[terminal_call_id]))
+    artifact_read_payload = json.loads("".join(deltas_by_call[artifact_read_call_id]))
+    terminal_end = next(event for event in events if isinstance(event, ToolResultEndEvent) and event.artifacts)
+    artifact_id = terminal_end.artifacts[0].artifact_id if terminal_end.artifacts else ""
     return {
         "status": result.status.value,
         "stop_reason": result.stop_reason,
@@ -1727,10 +1741,10 @@ async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
         "tool_names": tool_names,
         "terminal_status": terminal_payload["status"],
         "terminal_truncated": terminal_payload["truncated"],
-        "full_output_ref": full_output_ref,
+        "artifact_id": artifact_id,
         "preview_chars": len(terminal_payload["output"]),
-        "artifact_exists": artifact_path.exists(),
-        "artifact_text_sample": artifact_text_sample,
+        "artifact_read_status": artifact_read_payload["status"],
+        "artifact_text_sample": artifact_read_payload.get("text", ""),
         "errors": errors,
     }
 
@@ -1862,7 +1876,16 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
         ]
         stop_result = await session.stop_current_turn()
         pending_after_stop = session.get_pending_approval()
-        second = await session.run_turn("Please continue from the stopped pending-approval turn.")
+        prior_messages = rebuild_prior_messages(session.wiring.runtime_wiring.event_log)
+        interrupted_note_present = any(
+            INTERRUPTED_NOTE_TEXT in getattr(block, "text", "")
+            for message in prior_messages
+            for block in message.content
+        )
+        second = await session.run_turn(
+            "Do not call any tools. The prior context includes the Pulsara stop note. "
+            "Answer exactly PULSARA_PENDING_STOP_NOTE_OK."
+        )
         events = session.replay_events()
         run_errors = _run_error_diagnostics(event for event in events if event.run_id == first_run_id)
         aborted_run_end_count = sum(
@@ -1878,6 +1901,7 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
             "tool_names": tool_names,
             "pending_after_stop": pending_after_stop,
             "aborted_run_end_count": aborted_run_end_count,
+            "interrupted_note_present": interrupted_note_present,
             "run_errors": run_errors,
         }
     finally:

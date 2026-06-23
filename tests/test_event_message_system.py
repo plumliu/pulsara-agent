@@ -23,7 +23,16 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.message import Base64Source, TextBlock, ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState
+from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
+from pulsara_agent.message import (
+    Base64Source,
+    TextBlock,
+    ToolCallBlock,
+    ToolCallState,
+    ToolResultArtifactRef,
+    ToolResultBlock,
+    ToolResultState,
+)
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
@@ -102,6 +111,37 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
     assert msg.usage.output_tokens == 6
     assert msg.usage.total_tokens == 10
     assert msg.finished_at is not None
+
+
+def test_tool_result_end_event_artifacts_round_trip_into_block() -> None:
+    artifact = ToolResultArtifactRef(
+        artifact_id="artifact:tool-result:run-test:call-1:output:0",
+        role="output",
+        media_type="text/plain; charset=utf-8",
+        size_bytes=123,
+    )
+    event = ToolResultEndEvent(
+        **CTX.event_fields(),
+        tool_call_id="call:1",
+        state=ToolResultState.SUCCESS,
+        artifacts=[artifact],
+    )
+    loaded = load_agent_event(dump_agent_event(event))
+    assert isinstance(loaded, ToolResultEndEvent)
+    assert loaded.artifacts == [artifact]
+
+    event_log = InMemoryEventLog()
+    event_log.extend(
+        [
+            ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:1", tool_call_name="lookup"),
+            ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:1", delta="preview"),
+            loaded,
+        ]
+    )
+
+    msg = event_log.replay("reply:test")
+    assert isinstance(msg.content[0], ToolResultBlock)
+    assert msg.content[0].artifacts == [artifact]
 
 
 def test_message_reducer_preserves_block_start_order_for_interleaved_events() -> None:

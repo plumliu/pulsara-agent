@@ -98,6 +98,14 @@ class ExecutionEvidenceLedger:
         scope: str,
         event_span: RuntimeEventSpan | None = None,
     ) -> ToolResultRecord:
+        if block.artifacts:
+            return self._record_tool_result_block_with_artifact_refs(
+                turn_id=turn_id,
+                block=block,
+                input_summary=input_summary,
+                scope=scope,
+                event_span=event_span,
+            )
         return self.record_tool_result(
             turn_id=turn_id,
             tool_name=block.name,
@@ -105,6 +113,56 @@ class ExecutionEvidenceLedger:
             input_summary=input_summary,
             output=_tool_result_output_text(block),
             scope=scope,
+            event_span=event_span,
+        )
+
+    def _record_tool_result_block_with_artifact_refs(
+        self,
+        *,
+        turn_id: str,
+        block: ToolResultBlock,
+        input_summary: str,
+        scope: str,
+        event_span: RuntimeEventSpan | None,
+    ) -> ToolResultRecord:
+        tool_result_id = f"tool-result:{uuid4()}"
+        output = _tool_result_output_text(block)
+        output_preview = _make_output_preview(output)
+        primary = block.artifacts[0]
+        artifact_info = self.archive.get_info(primary.artifact_id)
+        self.graph.put_jsonld(
+            Artifact(
+                id=primary.artifact_id,
+                stored_at=artifact_info.stored_at,
+                digest=artifact_info.digest,
+                summary=output_preview,
+                created_at=utc_now(),
+                scope=scope,
+                event_span=event_span,
+            ).to_jsonld(),
+            graph_id=self.graph_id,
+        )
+        self.graph.put_jsonld(
+            ToolResult(
+                id=tool_result_id,
+                tool_name=block.name,
+                status=_to_tool_execution_status(block.state),
+                input_summary=input_summary,
+                output_summary=output_preview,
+                truncated=len(output) > len(output_preview) or bool(block.artifacts),
+                scope=scope,
+                created_at=utc_now(),
+                stored_as=NodeRef(primary.artifact_id),
+                event_span=event_span,
+            ).to_jsonld(),
+            graph_id=self.graph_id,
+        )
+        self._record_turn_produced(turn_id=turn_id, tool_result_id=tool_result_id, scope=scope)
+        return ToolResultRecord(
+            tool_result_id=tool_result_id,
+            artifact_id=primary.artifact_id,
+            output_summary=output_preview,
+            status=_to_tool_execution_status(block.state),
             event_span=event_span,
         )
 

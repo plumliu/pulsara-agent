@@ -954,6 +954,7 @@ class AgentRuntime:
         executor = ToolExecutor(
             registry=self.tool_executor.registry,
             record_event=self.runtime_session.make_thread_recorder(state=state),
+            artifact_service=self.tool_executor.artifact_service,
         )
         tasks = [
             asyncio.create_task(

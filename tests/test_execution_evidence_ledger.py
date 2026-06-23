@@ -13,7 +13,7 @@ from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
 from pulsara_agent.memory.foundation.records import ArtifactWriteResult
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.message import ToolResultBlock, ToolResultState
+from pulsara_agent.message import TextBlock, ToolResultArtifactRef, ToolResultBlock, ToolResultState
 from pulsara_agent.ontology import memory, runtime as rt
 
 
@@ -127,6 +127,39 @@ def test_large_tool_result_creates_artifact() -> None:
     assert artifact["@type"] == [rt.ARTIFACT.name]
     assert ledger.archive.get_text(result.artifact_id) == output
     assert rt.EVENT_SPAN_PROPERTY.name not in artifact
+
+
+def test_record_tool_result_block_reuses_existing_artifact_ref() -> None:
+    ledger = build_ledger()
+    artifact_id = "artifact:tool-result:run-test:call-search:output:0"
+    ledger.archive.put_text(artifact_id, "FULL OUTPUT")
+
+    record = ledger.record_tool_result_block(
+        turn_id="turn:test/artifact-ref",
+        block=ToolResultBlock(
+            id="call:search",
+            name="search_files",
+            output=[TextBlock(text="preview")],
+            state=ToolResultState.SUCCESS,
+            artifacts=[
+                ToolResultArtifactRef(
+                    artifact_id=artifact_id,
+                    role="output",
+                    media_type="text/plain; charset=utf-8",
+                    size_bytes=len("FULL OUTPUT"),
+                )
+            ],
+        ),
+        input_summary="Search",
+        scope="ctx:workspace/test_project",
+    )
+
+    assert record.artifact_id == artifact_id
+    assert ledger.archive.get_text(artifact_id) == "FULL OUTPUT"
+    artifact = ledger.graph.get_jsonld(artifact_id)
+    assert artifact["@type"] == [rt.ARTIFACT.name]
+    tool_result = ledger.graph.get_jsonld(record.tool_result_id)
+    assert tool_result[rt.STORED_AS.name] == {"@id": artifact_id}
 
 
 def test_archive_store_write_result_does_not_expose_content() -> None:

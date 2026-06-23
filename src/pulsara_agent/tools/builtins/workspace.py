@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
 
 
 @dataclass(slots=True)
@@ -37,6 +37,7 @@ class WorkspaceTool:
         status: ToolResultState,
         output: str,
         metadata: dict[str, Any] | None = None,
+        artifact_candidates: tuple[ToolResultArtifactCandidate, ...] = (),
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
             call_id=call.id,
@@ -44,4 +45,5 @@ class WorkspaceTool:
             status=status,
             output=output,
             metadata=metadata or {},
+            artifact_candidates=artifact_candidates,
         )

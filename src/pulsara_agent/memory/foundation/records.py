@@ -31,6 +31,27 @@ class ArtifactWriteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactRecord:
+    id: str
+    media_type: str
+    digest: str
+    size_bytes: int
+    stored_at: str
+    created_at: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactTextSlice:
+    artifact: ArtifactRecord
+    text: str
+    offset_chars: int
+    returned_chars: int
+    total_chars: int | None
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ToolResultRecord:
     tool_result_id: str
     artifact_id: str | None

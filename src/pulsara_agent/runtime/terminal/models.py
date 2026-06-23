@@ -47,7 +47,7 @@ class TerminalResult:
     truncated: bool = False
     error: str | None = None
     process_id: str | None = None
-    full_output_ref: str | None = None
+    full_output_text: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -66,7 +66,6 @@ class TerminalProcessInfo:
     started_at_monotonic: float
     ended_at_monotonic: float | None
     duration_seconds: float
-    full_output_ref: str | None
     owner_host_session_id: str | None = None
     owner_conversation_id: str | None = None
 
@@ -83,7 +82,6 @@ class TerminalProcessInfo:
             "timed_out": self.timed_out,
             "stdin_closed": self.stdin_closed,
             "duration_seconds": self.duration_seconds,
-            "full_output_ref": self.full_output_ref,
         }
         if include_owner:
             payload["owner_host_session_id"] = self.owner_host_session_id
@@ -96,14 +94,13 @@ class TerminalProcessLog:
     process: TerminalProcessInfo
     output: str
     truncated: bool
-    full_output_ref: str | None
+    full_output_text: str | None = None
 
     def to_payload(self, *, include_owner: bool = False) -> dict[str, Any]:
         return {
             "process": self.process.to_payload(include_owner=include_owner),
             "output": self.output,
             "truncated": self.truncated,
-            "full_output_ref": self.full_output_ref,
         }
 
 

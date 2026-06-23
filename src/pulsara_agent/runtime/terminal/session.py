@@ -70,7 +70,6 @@ class TerminalSession:
                 terminal_session_id=self.session_id,
                 command=request.command,
                 cwd=decision.effective_cwd,
-                artifact_root=self.state.workspace_root / ".pulsara" / "terminal-output",
                 max_output_chars=request.max_output_chars,
                 yield_time_ms=request.yield_time_ms,
                 backend_type=self.state.backend_type,
@@ -114,7 +113,7 @@ class TerminalSession:
                     timed_out=result.timed_out,
                     truncated=result.truncated,
                     error="command ended outside workspace_root; current_cwd was not updated",
-                    full_output_ref=result.full_output_ref,
+                    full_output_text=result.full_output_text,
                     metadata=result.metadata,
                 )
         return TerminalResult(
@@ -126,7 +125,7 @@ class TerminalSession:
             truncated=result.truncated,
             error=result.error,
             process_id=result.process_id,
-            full_output_ref=result.full_output_ref,
+            full_output_text=result.full_output_text,
             metadata=result.metadata,
         )
 

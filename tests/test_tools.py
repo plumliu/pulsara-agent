@@ -2,8 +2,11 @@ import json
 import threading
 import time
 
+import pytest
+
 from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent, ToolResultEndEvent, ToolResultTextDeltaEvent
 from pulsara_agent.event_log import InMemoryEventLog
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.runtime.permission import (
@@ -12,10 +15,16 @@ from pulsara_agent.runtime.permission import (
     PermissionProfile,
     TerminalAccess,
 )
+from pulsara_agent.runtime.tool_artifacts import (
+    InMemoryToolResultArtifactIndex,
+    ToolResultArtifactOptions,
+    ToolResultArtifactRecord,
+)
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
-from pulsara_agent.tools import ToolCall, ToolExecutor, build_core_tool_registry
+from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutor, build_core_tool_registry
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
+from pulsara_agent.tools.registry import ToolRegistry
 
 
 CTX = EventContext(run_id="run:tools", turn_id="turn:tools", reply_id="reply:tools")
@@ -23,6 +32,13 @@ CTX = EventContext(run_id="run:tools", turn_id="turn:tools", reply_id="reply:too
 
 def make_registry(tmp_path):
     return build_core_tool_registry(RuntimeSession(tmp_path))
+
+
+def make_runtime_executor(tmp_path) -> tuple[RuntimeSession, ToolExecutor]:
+    runtime_session = RuntimeSession(tmp_path)
+    return runtime_session, runtime_session.create_tool_executor(
+        record_event=runtime_session.make_thread_recorder()
+    )
 
 
 def execute_tool(tmp_path, name: str, arguments: dict) -> tuple[ToolExecutor, object]:
@@ -39,6 +55,7 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
     registry = make_registry(tmp_path)
 
     assert registry.names() == [
+        "artifact_read",
         "edit_file",
         "read_file",
         "search_files",
@@ -79,7 +96,7 @@ def test_core_tool_registry_filters_read_only_builtin_write_and_terminal_tools(t
         ),
     )
 
-    assert registry.names() == ["read_file", "search_files", "todo"]
+    assert registry.names() == ["artifact_read", "read_file", "search_files", "todo"]
 
 
 def test_core_tool_registry_filters_terminal_and_terminal_process_together(tmp_path) -> None:
@@ -932,6 +949,134 @@ def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) 
     assert json.loads(msg.content[0].output[0].text)["output"] == "ok"
 
 
+def test_tool_executor_archives_generic_large_output(tmp_path) -> None:
+    class LargeOutputTool:
+        name = "large_output"
+        description = "Return a large plain text result."
+        parameters = {"type": "object", "properties": {}, "additionalProperties": False}
+        is_read_only = True
+        is_concurrency_safe = True
+
+        def execute(self, call: ToolCall) -> ToolExecutionResult:
+            return ToolExecutionResult(
+                call_id=call.id,
+                tool_name=call.name,
+                status=ToolResultState.SUCCESS,
+                output="GENERIC_HEAD\n" + ("g" * 9000) + "\nGENERIC_TAIL",
+            )
+
+    runtime_session = RuntimeSession(tmp_path)
+    registry = ToolRegistry()
+    registry.register(LargeOutputTool())
+    executor = ToolExecutor(
+        registry=registry,
+        record_event=runtime_session.make_thread_recorder(),
+        artifact_service=runtime_session.artifact_service,
+    )
+
+    result = executor.execute(ToolCall(id="call:large", name="large_output"), event_context=CTX)
+    msg = runtime_session.event_log.replay("reply:tools")
+    block = msg.content[0]
+
+    assert result.status is ToolResultState.SUCCESS
+    assert isinstance(block, ToolResultBlock)
+    assert block.artifacts
+    assert block.artifacts[0].role == "output"
+    stored = runtime_session.archive.get_text(
+        block.artifacts[0].artifact_id,
+        session_id=runtime_session.runtime_session_id,
+    )
+    assert "GENERIC_HEAD" in stored
+    assert "GENERIC_TAIL" in stored
+
+
+def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) -> None:
+    archive = InMemoryArchiveStore()
+    index = InMemoryToolResultArtifactIndex()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    session_a = RuntimeSession(tmp_path / "a", archive=archive, tool_result_artifacts=index)
+    session_b = RuntimeSession(tmp_path / "b", archive=archive, tool_result_artifacts=index)
+    executor_a = session_a.create_tool_executor(record_event=session_a.make_thread_recorder())
+    executor_b = session_b.create_tool_executor(record_event=session_b.make_thread_recorder())
+
+    terminal_result = executor_a.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={
+                "command": "python -c 'print(\"OWNER_HEAD\"); print(\"o\" * 50000); print(\"OWNER_TAIL\")'",
+                "max_output_chars": 200,
+            },
+        ),
+        event_context=CTX,
+    )
+    assert terminal_result.status is ToolResultState.SUCCESS
+    block = session_a.event_log.replay("reply:tools").content[0]
+    assert isinstance(block, ToolResultBlock)
+    artifact_id = block.artifacts[0].artifact_id
+
+    missing = executor_b.execute(
+        ToolCall(id="call:missing", name="artifact_read", arguments={"artifact_id": "artifact:missing"}),
+        event_context=CTX,
+    )
+    forbidden = executor_b.execute(
+        ToolCall(id="call:forbidden", name="artifact_read", arguments={"artifact_id": artifact_id}),
+        event_context=CTX,
+    )
+
+    assert json.loads(missing.output)["status"] == "not_found"
+    assert json.loads(forbidden.output) == json.loads(missing.output) | {"artifact_id": artifact_id}
+
+
+def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
+    runtime_session = RuntimeSession(tmp_path)
+    artifact_id = "artifact:tool-result:run-tools:call-binary:screenshot:0"
+    write = runtime_session.archive.put_bytes(
+        artifact_id,
+        b"\x89PNG",
+        session_id=runtime_session.runtime_session_id,
+        run_id=None,
+        media_type="image/png",
+    )
+    runtime_session.tool_result_artifacts.put(
+        ToolResultArtifactRecord(
+            id="tool-result-artifact:run-tools:call-binary:screenshot:0",
+            session_id=runtime_session.runtime_session_id,
+            run_id="run:tools",
+            turn_id="turn:tools",
+            reply_id="reply:tools",
+            tool_call_id="call:binary",
+            tool_name="screenshot_tool",
+            artifact_id=write.id,
+            role="screenshot",
+            ordinal=0,
+            media_type="image/png",
+            size_bytes=write.size_bytes,
+        )
+    )
+    executor = runtime_session.create_tool_executor(record_event=runtime_session.make_thread_recorder())
+
+    info = executor.execute(
+        ToolCall(id="call:info", name="artifact_read", arguments={"artifact_id": artifact_id, "mode": "info"}),
+        event_context=CTX,
+    )
+    text = executor.execute(
+        ToolCall(id="call:text", name="artifact_read", arguments={"artifact_id": artifact_id}),
+        event_context=CTX,
+    )
+
+    assert json.loads(info.output)["media_type"] == "image/png"
+    text_payload = json.loads(text.output)
+    assert text_payload["status"] == "error"
+    assert "not a text artifact" in text_payload["error"]
+
+
+def test_tool_result_artifact_options_reject_unrecoverable_threshold_band() -> None:
+    with pytest.raises(ValueError, match="archive_threshold_chars"):
+        ToolResultArtifactOptions(archive_threshold_chars=20_000, tool_result_context_chars=12_000)
+
+
 def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) -> None:
     registry = make_registry(tmp_path)
     event_log = InMemoryEventLog()
@@ -1004,10 +1149,8 @@ def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
     assert json.loads(streamed_json)["output"] == "JSON_A\nJSON_B"
 
 
-def test_terminal_large_output_returns_preview_and_readable_full_output_ref(tmp_path) -> None:
-    registry = make_registry(tmp_path)
-    event_log = InMemoryEventLog()
-    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -> None:
+    runtime_session, executor = make_runtime_executor(tmp_path)
 
     result = executor.execute(
         ToolCall(
@@ -1021,24 +1164,71 @@ def test_terminal_large_output_returns_preview_and_readable_full_output_ref(tmp_
         event_context=CTX,
     )
     payload = json.loads(result.output)
-    msg = event_log.replay("reply:tools")
+    msg = runtime_session.event_log.replay("reply:tools")
+    block = msg.content[0]
+    assert isinstance(block, ToolResultBlock)
     replay_payload = json.loads(msg.content[0].output[0].text)
 
     assert result.status is ToolResultState.SUCCESS
     assert payload["truncated"] is True
-    assert payload["full_output_ref"]
     assert len(payload["output"]) < 700
     assert len(replay_payload["output"]) < 700
-    assert replay_payload["full_output_ref"] == payload["full_output_ref"]
+    assert block.artifacts
+    artifact_id = block.artifacts[0].artifact_id
 
     read_result = executor.execute(
         ToolCall(
-            id="call:read",
-            name="read_file",
-            arguments={"path": payload["full_output_ref"]},
+            id="call:artifact-read",
+            name="artifact_read",
+            arguments={"artifact_id": artifact_id, "max_chars": 100000},
         ),
         event_context=CTX,
     )
     read_payload = json.loads(read_result.output)
-    assert "HEAD" in read_payload["content"]
-    assert "TAIL" in read_payload["content"]
+    assert read_payload["status"] == "success"
+    assert "HEAD" in read_payload["text"]
+    assert "TAIL" in read_payload["text"]
+
+
+def test_terminal_process_log_artifact_metadata_uses_real_process_status(tmp_path) -> None:
+    runtime_session, executor = make_runtime_executor(tmp_path)
+    start = executor.execute(
+        ToolCall(
+            id="call:start",
+            name="terminal",
+            arguments={
+                "command": "python -c 'import time; print(\"ERR_HEAD\"); print(\"e\" * 50000); print(\"ERR_TAIL\"); time.sleep(0.2); raise SystemExit(7)'",
+                "yield_time_ms": 0,
+                "max_output_chars": 200,
+            },
+        ),
+        event_context=CTX,
+    )
+    process_id = json.loads(start.output)["process_id"]
+    assert process_id
+    executor.execute(
+        ToolCall(
+            id="call:wait",
+            name="terminal_process",
+            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 5, "max_output_chars": 200},
+        ),
+        event_context=CTX,
+    )
+    executor.execute(
+        ToolCall(
+            id="call:log",
+            name="terminal_process",
+            arguments={"action": "log", "process_id": process_id, "max_output_chars": 200},
+        ),
+        event_context=CTX,
+    )
+
+    msg = runtime_session.event_log.replay("reply:tools")
+    log_block = next(block for block in msg.content if isinstance(block, ToolResultBlock) and block.id == "call:log")
+    artifact_id = log_block.artifacts[0].artifact_id
+    artifact_info = runtime_session.archive.get_info(
+        artifact_id,
+        session_id=runtime_session.runtime_session_id,
+    )
+
+    assert artifact_info.metadata["terminal_status"] == "error"

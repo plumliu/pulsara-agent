@@ -926,7 +926,7 @@ def test_terminal_runtime_rejects_write_after_process_finished(tmp_path) -> None
         manager.write_process(result.process_id, "late")
 
 
-def test_terminal_runtime_large_output_spills_redacted_full_output_ref(tmp_path) -> None:
+def test_terminal_runtime_large_output_keeps_redacted_full_output_text(tmp_path) -> None:
     session = make_session(tmp_path)
 
     result = run(
@@ -937,19 +937,17 @@ def test_terminal_runtime_large_output_spills_redacted_full_output_ref(tmp_path)
 
     assert result.status is TerminalStatus.SUCCESS
     assert result.truncated is True
-    assert result.full_output_ref is not None
+    assert result.full_output_text is not None
     assert "OUTPUT TRUNCATED" in result.output
     assert "HEAD" in result.output
     assert "TAIL" in result.output
-    artifact_path = tmp_path / result.full_output_ref
-    artifact_text = artifact_path.read_text(encoding="utf-8")
-    assert "HEAD" in artifact_text
-    assert "TAIL" in artifact_text
-    assert "API_KEY=[REDACTED]" in artifact_text
-    assert "secret-token" not in artifact_text
+    assert "HEAD" in result.full_output_text
+    assert "TAIL" in result.full_output_text
+    assert "API_KEY=[REDACTED]" in result.full_output_text
+    assert "secret-token" not in result.full_output_text
 
 
-def test_terminal_runtime_yielded_large_output_full_output_ref_is_readable(tmp_path) -> None:
+def test_terminal_runtime_yielded_large_output_log_keeps_full_output_text(tmp_path) -> None:
     manager = make_manager(tmp_path)
     session = manager.get_or_create()
 
@@ -965,12 +963,11 @@ def test_terminal_runtime_yielded_large_output_full_output_ref_is_readable(tmp_p
 
     assert final.status is TerminalStatus.SUCCESS
     assert final.truncated is True
-    assert final.full_output_ref is not None
+    assert final.full_output_text is not None
     assert log.truncated is True
-    assert log.full_output_ref == final.full_output_ref
-    artifact_text = (tmp_path / final.full_output_ref).read_text(encoding="utf-8")
-    assert "START" in artifact_text
-    assert "END" in artifact_text
+    assert log.full_output_text == final.full_output_text
+    assert "START" in final.full_output_text
+    assert "END" in final.full_output_text
 
 
 def test_terminal_runtime_pty_reports_tty(tmp_path) -> None:

@@ -11,7 +11,12 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, model_validator
 
 from pulsara_agent.event.candidates import MemoryCandidate
-from pulsara_agent.message.blocks import ToolCallBlock, ToolResultBlock, ToolResultState
+from pulsara_agent.message.blocks import (
+    ToolCallBlock,
+    ToolResultArtifactRef,
+    ToolResultBlock,
+    ToolResultState,
+)
 from pulsara_agent.ontology import memory
 
 
@@ -257,6 +262,7 @@ class ToolResultEndEvent(EventBase):
     type: Literal[EventType.TOOL_RESULT_END] = EventType.TOOL_RESULT_END
     tool_call_id: str
     state: ToolResultState
+    artifacts: list[ToolResultArtifactRef] = Field(default_factory=list)
 
 
 class RequireUserConfirmEvent(EventBase):
@@ -297,7 +303,6 @@ class TerminalProcessCompletedEvent(EventBase):
     duration_seconds: float
     output_preview: str = ""
     output_truncated: bool = False
-    full_output_ref: str | None = None
     backend_type: str = "local"
     io_mode: str = "pipe"
     tool_call_id: str | None = None

@@ -9,12 +9,19 @@ from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog
-from pulsara_agent.runtime.hooks import RuntimeHookManager
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.runtime.hooks import RuntimeHookManager
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.terminal import TerminalSessionManager
+from pulsara_agent.runtime.tool_artifacts import (
+    InMemoryToolResultArtifactIndex,
+    ToolResultArtifactIndex,
+    ToolResultArtifactService,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,14 +40,26 @@ class RuntimeSession:
     event_log: EventLog = field(default_factory=InMemoryEventLog)
     hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
+    archive: ArtifactStore | None = None
+    tool_result_artifacts: ToolResultArtifactIndex | None = None
     terminal_session_manager: TerminalSessionManager | None = None
     owns_terminal_session_manager: bool = True
     terminal_owner_host_session_id: str | None = None
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)
+    artifact_service: ToolResultArtifactService = field(init=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
+        if self.archive is None:
+            self.archive = InMemoryArchiveStore()
+        if self.tool_result_artifacts is None:
+            self.tool_result_artifacts = InMemoryToolResultArtifactIndex()
+        self.artifact_service = ToolResultArtifactService(
+            archive=self.archive,
+            index=self.tool_result_artifacts,
+            runtime_session_id=self.runtime_session_id,
+        )
         self.publisher = RuntimeEventPublisher(runtime_session_id=self.runtime_session_id)
         self.publisher.subscribe(self.hook_manager)
         if self.terminal_session_manager is None:
@@ -129,4 +148,5 @@ class RuntimeSession:
                 permission_policy=permission_policy,
             ),
             record_event=record_event,
+            artifact_service=self.artifact_service,
         )

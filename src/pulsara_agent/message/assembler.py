@@ -240,6 +240,7 @@ class BlockAssembler:
                 active = self._get(event, "tool_result", event.tool_call_id)
                 if active is not None and isinstance(active.block, ToolResultBlock):
                     active.block.state = event.state
+                    active.block.artifacts = list(event.artifacts)
                 return BlockAssemblyUpdate(
                     started=[],
                     completed=self._complete(event, "tool_result", event.tool_call_id),

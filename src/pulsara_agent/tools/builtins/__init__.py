@@ -1,5 +1,6 @@
 """Built-in runtime tools for the Pulsara MVP."""
 
+from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
     ReadFileTool,
@@ -20,6 +21,7 @@ from pulsara_agent.tools.builtins.todo import TodoTool
 
 __all__ = [
     "EditFileTool",
+    "ArtifactReadTool",
     "ReadFileTool",
     "RememberActionBoundaryTool",
     "RememberClaimTool",

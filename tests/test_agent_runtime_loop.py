@@ -44,10 +44,12 @@ from pulsara_agent.message import (
     AssistantMsg,
     Base64Source,
     DataBlock,
+    Msg,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     ToolCallState,
+    ToolResultArtifactRef,
     ToolResultBlock,
     ToolResultState,
     UserMsg,
@@ -208,6 +210,40 @@ def test_msg_to_llm_messages_compresses_context_blocks() -> None:
     assert tool_result.tool_call_id == "call:1"
     assert "data block omitted" in assistant_text
     assert "abc" not in assistant_text
+
+
+def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> None:
+    messages = [
+        Msg(
+            role="tool_result",
+            name="terminal",
+            content=[
+                ToolResultBlock(
+                    id="call:artifact",
+                    name="terminal",
+                    output=[TextBlock(text='{"status":"success","output":"' + ("x" * 80) + '"}')],
+                    state=ToolResultState.SUCCESS,
+                    artifacts=[
+                        ToolResultArtifactRef(
+                            artifact_id="artifact:tool-result:run:call:combined_output:0",
+                            role="combined_output",
+                            media_type="text/plain; charset=utf-8",
+                            size_bytes=200,
+                        )
+                    ],
+                )
+            ],
+        )
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=30))
+    content = "\n".join(llm_messages[0].content)
+    body = content.split("\n", 1)[1]
+    envelope = json.loads(body)
+
+    assert envelope["output_truncated"] is True
+    assert "TOOL RESULT TRUNCATED" in envelope["output_preview"]
+    assert envelope["artifacts"][0]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
 
 
 def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:

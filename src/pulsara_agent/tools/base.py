@@ -21,6 +21,23 @@ class ToolExecutionResult:
     status: ToolResultState
     output: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    artifact_candidates: tuple["ToolResultArtifactCandidate", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResultArtifactCandidate:
+    role: str
+    media_type: str
+    text: str | None = None
+    data: bytes | None = None
+    redacted: bool = True
+    stored_complete: bool = True
+    loss_reason: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if (self.text is None) == (self.data is None):
+            raise ValueError("ToolResultArtifactCandidate requires exactly one of text or data")
 
 
 class Tool(Protocol):

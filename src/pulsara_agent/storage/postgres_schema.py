@@ -90,6 +90,33 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_session_id ON artifacts(session_id);
+
+CREATE TABLE IF NOT EXISTS tool_result_artifacts (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    reply_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'output',
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    media_type TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    stored_complete BOOLEAN NOT NULL DEFAULT TRUE,
+    loss_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (run_id, tool_call_id, role, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_result_artifacts_session_id
+    ON tool_result_artifacts(session_id);
+
+CREATE INDEX IF NOT EXISTS idx_tool_result_artifacts_artifact_id
+    ON tool_result_artifacts(artifact_id);
 
 CREATE TABLE IF NOT EXISTS tool_execution_records (
     id TEXT PRIMARY KEY,

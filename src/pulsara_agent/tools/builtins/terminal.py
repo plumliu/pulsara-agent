@@ -10,7 +10,7 @@ from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
     MIN_TERMINAL_OUTPUT_CHARS,
@@ -215,6 +215,7 @@ class TerminalTool(WorkspaceTool):
                 "shell": result.metadata.get("shell"),
                 "env": result.metadata.get("env"),
             },
+            artifact_candidates=terminal_artifact_candidates(result),
         )
 
     def _blocked_result(
@@ -243,7 +244,6 @@ class TerminalTool(WorkspaceTool):
                     "policy_code": policy_code,
                     "suggested_args": suggested_args or {},
                     "process_id": None,
-                    "full_output_ref": None,
                     "yielded_to_background": False,
                     "terminal_session_id": session_id,
                     "backend_type": "local",
@@ -282,7 +282,6 @@ def terminal_result_payload(
         "terminal_session_id": terminal_session_id,
         "backend_type": backend_type,
         "io_mode": result.metadata.get("io_mode"),
-        "full_output_ref": result.full_output_ref,
     }
     if "command" in result.metadata:
         payload["command"] = result.metadata.get("command")
@@ -301,6 +300,26 @@ def terminal_result_payload(
     return payload
 
 
+def terminal_artifact_candidates(result) -> tuple[ToolResultArtifactCandidate, ...]:
+    text = getattr(result, "full_output_text", None)
+    if text is None:
+        return ()
+    return (
+        ToolResultArtifactCandidate(
+            role="combined_output",
+            media_type="text/plain; charset=utf-8",
+            text=text,
+            redacted=True,
+            stored_complete=True,
+            metadata={
+                "terminal_status": result.status.value,
+                "process_id": result.process_id,
+                "cwd": result.cwd,
+            },
+        ),
+    )
+
+
 def _tool_result_state(status: TerminalStatus) -> ToolResultState:
     return ToolResultState.SUCCESS if status in {TerminalStatus.SUCCESS, TerminalStatus.RUNNING} else ToolResultState.ERROR
 
@@ -316,7 +335,7 @@ def _max_output_chars_arg(args: dict[str, Any]) -> int:
 
 
 class _StreamingTerminalJsonBuilder:
-    _TRUNCATION_NOTICE = "\n\n... [OUTPUT TRUNCATED - full redacted output stored in full_output_ref] ...\n\n"
+    _TRUNCATION_NOTICE = "\n\n... [OUTPUT TRUNCATED - full redacted output available via artifact_read when an artifact is present] ...\n\n"
 
     def __init__(self, emit_delta: Callable[[str], None], *, max_output_chars: int) -> None:
         self._emit_delta = emit_delta
@@ -365,6 +384,7 @@ class _StreamingTerminalJsonBuilder:
             status=result.status,
             output=output,
             metadata={**result.metadata, "streamed_output_complete": True},
+            artifact_candidates=result.artifact_candidates,
         )
 
     def _emit_preview(self, text: str) -> None:

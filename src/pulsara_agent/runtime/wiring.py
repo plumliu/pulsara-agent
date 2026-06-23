@@ -40,6 +40,7 @@ from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal import TerminalSessionManager
+from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex, PostgresToolResultArtifactIndex
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -81,11 +82,14 @@ def build_in_memory_runtime_wiring(
     event_log = InMemoryEventLog()
     graph = InMemoryGraphStore()
     archive = InMemoryArchiveStore()
+    tool_result_artifacts = InMemoryToolResultArtifactIndex()
     candidate_pool = InMemoryCandidatePool()
     runtime_session = RuntimeSession(
         workspace_root,
         **_runtime_session_id_kwargs(runtime_session_id),
         event_log=event_log,
+        archive=archive,
+        tool_result_artifacts=tool_result_artifacts,
         terminal_session_manager=terminal_session_manager,
         terminal_owner_host_session_id=terminal_owner_host_session_id,
         owns_terminal_session_manager=owns_terminal_session_manager,
@@ -139,10 +143,14 @@ def build_durable_runtime_wiring(
         runtime_session_id=runtime_session_id,
         workspace_root=workspace_root,
     )
+    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
+    tool_result_artifacts = PostgresToolResultArtifactIndex(dsn=settings.storage.postgres_dsn)
     runtime_session = RuntimeSession(
         workspace_root,
         runtime_session_id=event_log.runtime_session_id,
         event_log=event_log,
+        archive=archive,
+        tool_result_artifacts=tool_result_artifacts,
         terminal_session_manager=terminal_session_manager,
         terminal_owner_host_session_id=terminal_owner_host_session_id,
         owns_terminal_session_manager=owns_terminal_session_manager,
@@ -154,7 +162,6 @@ def build_durable_runtime_wiring(
     )
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     graph = PostgresGraphStore(settings.storage.postgres_dsn)
-    archive = PostgresArtifactStore(dsn=settings.storage.postgres_dsn)
     candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
     memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)
     working_context_store = (

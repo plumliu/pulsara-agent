@@ -20,7 +20,7 @@ from pulsara_agent.tools.builtins.schemas import (
     object_schema,
     required_str_arg,
 )
-from pulsara_agent.tools.builtins.terminal import terminal_result_payload
+from pulsara_agent.tools.builtins.terminal import terminal_artifact_candidates, terminal_result_payload
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
 
@@ -222,8 +222,21 @@ class TerminalProcessTool(WorkspaceTool):
                 "terminal_session_id": log.process.terminal_session_id,
                 "backend_type": log.process.backend_type,
                 "truncated": log.truncated,
-                "full_output_ref": log.full_output_ref,
             },
+            artifact_candidates=(
+                ()
+                if log.full_output_text is None
+                else (
+                    terminal_artifact_candidates(
+                        _LogArtifactResult(
+                            status=TerminalStatus(log.process.status),
+                            process_id=log.process.process_id,
+                            cwd=log.process.cwd,
+                            full_output_text=log.full_output_text,
+                        )
+                    )
+                )
+            ),
         )
 
     def _process_result(self, call: ToolCall, result, *, action: str) -> ToolExecutionResult:
@@ -247,6 +260,7 @@ class TerminalProcessTool(WorkspaceTool):
                 "terminal_session_id": payload["terminal_session_id"],
                 "backend_type": payload["backend_type"],
             },
+            artifact_candidates=terminal_artifact_candidates(result),
         )
 
     def _error_result(
@@ -273,7 +287,6 @@ class TerminalProcessTool(WorkspaceTool):
                     "process_id": process_id,
                     "terminal_session_id": "default",
                     "backend_type": "local",
-                    "full_output_ref": None,
                     "policy_code": policy_code,
                 },
                 ensure_ascii=False,
@@ -294,3 +307,11 @@ class TerminalProcessTool(WorkspaceTool):
 def _optional_process_id(args: dict[str, Any]) -> str | None:
     raw = args.get("process_id")
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
+@dataclass(frozen=True, slots=True)
+class _LogArtifactResult:
+    status: TerminalStatus
+    process_id: str | None
+    cwd: str
+    full_output_text: str | None

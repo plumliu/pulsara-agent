@@ -76,12 +76,37 @@ class ToolResultState(StrEnum):
     RUNNING = "running"
 
 
+class ToolResultArtifactRef(BaseModel):
+    """Structured reference to a persisted artifact produced by a tool result."""
+
+    artifact_id: str
+    role: str
+    media_type: str
+    size_bytes: int
+    stored_complete: bool = True
+    loss_reason: str | None = None
+
+    def to_model_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "artifact_id": self.artifact_id,
+            "role": self.role,
+            "media_type": self.media_type,
+            "size_bytes": self.size_bytes,
+            "stored_complete": self.stored_complete,
+            "read_more": {"tool": "artifact_read"},
+        }
+        if self.loss_reason is not None:
+            payload["loss_reason"] = self.loss_reason
+        return payload
+
+
 class ToolResultBlock(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     id: str
     name: str
     output: list[TextBlock | DataBlock] = Field(default_factory=list)
     state: ToolResultState = ToolResultState.RUNNING
+    artifacts: list[ToolResultArtifactRef] = Field(default_factory=list)
 
 
 ContentBlock = (

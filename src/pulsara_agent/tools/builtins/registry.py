@@ -8,6 +8,7 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.memory.canonical.query import MemoryQuery
 from pulsara_agent.memory.recall.service import MemoryRecallService
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, is_tool_allowed_by_policy
+from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
     ReadFileTool,
@@ -47,6 +48,7 @@ def build_core_tool_registry(
         raise TypeError("build_core_tool_registry requires a RuntimeSession")
     root = runtime_session.workspace_root
     registry = ToolRegistry()
+    _register_if_allowed(registry, ArtifactReadTool(runtime_session), permission_policy)
     _register_if_allowed(registry, ReadFileTool(root), permission_policy)
     _register_if_allowed(registry, SearchFilesTool(root), permission_policy)
     _register_if_allowed(

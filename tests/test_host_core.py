@@ -344,6 +344,79 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
     assert messages[2].metadata == {"run_id": "run:aborted", "kind": "previous_turn_aborted"}
 
 
+def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "dangerous task"}),
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
+            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:danger", delta='{"command": "rm -rf ./x"}'),
+            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:danger"),
+            RequireUserConfirmEvent(
+                **ctx.event_fields(),
+                tool_calls=[ToolCallBlock(id="call:danger", name="terminal", input='{"command": "rm -rf ./x"}')],
+            ),
+            ReplyEndEvent(**ctx.event_fields()),
+            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "system"]
+    assert messages[1].content[0].text == INTERRUPTED_NOTE_TEXT
+
+
+def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_run() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    aborted_ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    failed_ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(
+                **aborted_ctx.event_fields(),
+                user_input_chars=10,
+                metadata={"user_input": "dangerous task"},
+            ),
+            ToolCallStartEvent(**aborted_ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
+            ToolCallDeltaEvent(
+                **aborted_ctx.event_fields(),
+                tool_call_id="call:danger",
+                delta='{"command": "rm -rf ./x"}',
+            ),
+            ToolCallEndEvent(**aborted_ctx.event_fields(), tool_call_id="call:danger"),
+            RequireUserConfirmEvent(
+                **aborted_ctx.event_fields(),
+                tool_calls=[ToolCallBlock(id="call:danger", name="terminal", input='{"command": "rm -rf ./x"}')],
+            ),
+            ReplyEndEvent(**aborted_ctx.event_fields()),
+            RunEndEvent(**aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            RunStartEvent(
+                **failed_ctx.event_fields(),
+                user_input_chars=10,
+                metadata={"user_input": "failed follow-up"},
+            ),
+            RunErrorEvent(**failed_ctx.event_fields(), message="provider failed", code="openai_responses_error"),
+            RunEndEvent(**failed_ctx.event_fields(), status="failed", stop_reason="model_error"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "user", "system"]
+    assert messages[2].content[0].text == FAILURE_NOTE_TEXT
+    assert all(
+        not isinstance(block, ToolCallBlock)
+        for message in messages
+        for block in message.content
+    )
+
+
 def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succeeds() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 

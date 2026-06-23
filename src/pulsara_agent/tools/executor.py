@@ -13,6 +13,7 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactService
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.registry import ToolRegistry
 
@@ -21,6 +22,7 @@ from pulsara_agent.tools.registry import ToolRegistry
 class ToolExecutor:
     registry: ToolRegistry
     record_event: Callable[[AgentEvent], AgentEvent] | None = None
+    artifact_service: ToolResultArtifactService | None = None
 
     def execute(self, call: ToolCall, *, event_context: EventContext) -> ToolExecutionResult:
         self._append(
@@ -56,6 +58,13 @@ class ToolExecutor:
                 status=ToolResultState.ERROR,
                 output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
             )
+        artifact_refs = ()
+        if self.artifact_service is not None:
+            result, artifact_refs = self.artifact_service.process_result(
+                result,
+                event_context=event_context,
+                tool_call=call,
+            )
         if result.output and not result.metadata.get("streamed_output_complete"):
             self._append(
                 ToolResultTextDeltaEvent(
@@ -69,6 +78,7 @@ class ToolExecutor:
                 **event_context.event_fields(),
                 tool_call_id=call.id,
                 state=result.status,
+                artifacts=list(artifact_refs),
             )
         )
         return result
