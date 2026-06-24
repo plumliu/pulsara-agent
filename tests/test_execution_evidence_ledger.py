@@ -36,6 +36,7 @@ def _tool_events(
     state: ToolResultState = ToolResultState.SUCCESS,
     include_start: bool = True,
     include_end: bool = True,
+    artifacts: tuple[ToolResultArtifactRef, ...] = (),
 ):
     ctx = EventContext(run_id=run_id, turn_id=turn_id, reply_id=reply_id)
     events = [ReplyStartEvent(**ctx.event_fields(), name="assistant")]
@@ -61,6 +62,7 @@ def _tool_events(
                 **ctx.event_fields(),
                 tool_call_id=tool_call_id,
                 state=state,
+                artifacts=artifacts,
             )
         )
     return events
@@ -110,19 +112,40 @@ def test_turn_can_produce_multiple_tool_results() -> None:
 
 
 def test_large_tool_result_creates_artifact() -> None:
-    ledger = build_ledger()
-    output = "x" * 2_100
+    """Large outputs must come through record_tool_result_block with pre-archived artifact ref.
 
-    result = ledger.record_tool_result(
+    This test demonstrates the post-debt-reduction pattern: executor archives large outputs
+    and passes artifact refs to ledger via ToolResultBlock.artifacts.
+    """
+    ledger = build_ledger()
+    output = "x" * 8_100
+    artifact_id = "artifact:tool-result:run-test:call-search:output:0"
+
+    # Simulate executor's archiving (ToolResultArtifactService.process_result does this)
+    ledger.archive.put_text(artifact_id, output)
+
+    # Ledger receives block with artifact ref, not raw output
+    result = ledger.record_tool_result_block(
         turn_id="turn:test/002",
-        tool_name="search_files",
-        status=rt.ToolExecutionStatus.SUCCESS,
+        block=ToolResultBlock(
+            id="call:search",
+            name="search_files",
+            output=[TextBlock(text="x" * 100)],  # truncated preview
+            state=ToolResultState.SUCCESS,
+            artifacts=[
+                ToolResultArtifactRef(
+                    artifact_id=artifact_id,
+                    role="output",
+                    media_type="text/plain; charset=utf-8",
+                    size_bytes=len(output),
+                )
+            ],
+        ),
         input_summary="Search",
-        output=output,
         scope="ctx:workspace/test_project",
     )
 
-    assert result.artifact_id is not None
+    assert result.artifact_id == artifact_id
     artifact = ledger.graph.get_jsonld(result.artifact_id)
     assert artifact["@type"] == [rt.ARTIFACT.name]
     assert ledger.archive.get_text(result.artifact_id) == output
@@ -155,11 +178,54 @@ def test_record_tool_result_block_reuses_existing_artifact_ref() -> None:
     )
 
     assert record.artifact_id == artifact_id
+    assert record.artifact_ids == (artifact_id,)
     assert ledger.archive.get_text(artifact_id) == "FULL OUTPUT"
     artifact = ledger.graph.get_jsonld(artifact_id)
     assert artifact["@type"] == [rt.ARTIFACT.name]
     tool_result = ledger.graph.get_jsonld(record.tool_result_id)
     assert tool_result[rt.STORED_AS.name] == {"@id": artifact_id}
+
+
+def test_record_tool_result_block_records_all_artifact_refs() -> None:
+    ledger = build_ledger()
+    output_id = "artifact:tool-result:run-test:call-export:output:0"
+    diagnostics_id = "artifact:tool-result:run-test:call-export:diagnostics:1"
+    ledger.archive.put_text(output_id, "FULL OUTPUT")
+    ledger.archive.put_text(diagnostics_id, "FULL DIAGNOSTICS")
+
+    record = ledger.record_tool_result_block(
+        turn_id="turn:test/multi-artifact",
+        block=ToolResultBlock(
+            id="call:export",
+            name="export_bundle",
+            output=[TextBlock(text="preview")],
+            state=ToolResultState.SUCCESS,
+            artifacts=[
+                ToolResultArtifactRef(
+                    artifact_id=output_id,
+                    role="output",
+                    media_type="text/plain; charset=utf-8",
+                    size_bytes=len("FULL OUTPUT"),
+                ),
+                ToolResultArtifactRef(
+                    artifact_id=diagnostics_id,
+                    role="diagnostics",
+                    media_type="text/plain; charset=utf-8",
+                    size_bytes=len("FULL DIAGNOSTICS"),
+                ),
+            ],
+        ),
+        input_summary="Export",
+        scope="ctx:workspace/test_project",
+    )
+
+    assert record.artifact_id == output_id
+    assert record.artifact_ids == (output_id, diagnostics_id)
+    assert record.to_dict()["artifact_ids"] == [output_id, diagnostics_id]
+    assert ledger.graph.get_jsonld(output_id)["@type"] == [rt.ARTIFACT.name]
+    assert ledger.graph.get_jsonld(diagnostics_id)["@type"] == [rt.ARTIFACT.name]
+    tool_result = ledger.graph.get_jsonld(record.tool_result_id)
+    assert tool_result[rt.STORED_AS.name] == {"@id": output_id}
 
 
 def test_archive_store_write_result_does_not_expose_content() -> None:
@@ -292,8 +358,15 @@ def test_record_tool_result_from_event_slice_adds_provenance() -> None:
 
 
 def test_large_slice_result_provenance_is_copied_to_artifact() -> None:
+    """Large outputs from event slice must include artifact refs in ToolResultEndEvent."""
     ledger = build_ledger()
-    payload = "x" * 2_100
+    payload = "x" * 8_100
+    artifact_id = "artifact:tool-result:run-artifact:call-artifact:output:0"
+
+    # Pre-archive (simulating executor's work)
+    ledger.archive.put_text(artifact_id, payload)
+
+    # Events now include artifact ref in ToolResultEndEvent
     events = InMemoryEventLog().extend(
         _tool_events(
             run_id="run:artifact",
@@ -301,7 +374,15 @@ def test_large_slice_result_provenance_is_copied_to_artifact() -> None:
             reply_id="reply:artifact",
             tool_call_id="call:artifact",
             tool_name="dump",
-            text=payload,
+            text="x" * 100,  # truncated preview
+            artifacts=(
+                ToolResultArtifactRef(
+                    artifact_id=artifact_id,
+                    role="output",
+                    media_type="text/plain; charset=utf-8",
+                    size_bytes=len(payload),
+                ),
+            ),
         )
     )
 
@@ -311,7 +392,7 @@ def test_large_slice_result_provenance_is_copied_to_artifact() -> None:
         session_id="runtime:test",
     )
 
-    assert result.artifact_id is not None
+    assert result.artifact_id == artifact_id
     artifact = ledger.graph.get_jsonld(result.artifact_id)
     assert artifact[rt.EVENT_SPAN_PROPERTY.name][rt.SOURCE_RUN.name] == "run:artifact"
 

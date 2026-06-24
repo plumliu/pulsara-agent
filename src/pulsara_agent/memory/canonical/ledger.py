@@ -21,7 +21,7 @@ from pulsara_agent.message.assembler import completed_tool_result_from_events
 from pulsara_agent.ontology import memory, runtime as rt
 
 
-LARGE_OUTPUT_THRESHOLD = 2_000
+LARGE_OUTPUT_THRESHOLD = 8_000
 
 
 @dataclass(slots=True)
@@ -47,22 +47,16 @@ class ExecutionEvidenceLedger:
         artifact_id: str | None = None
         output_preview = _make_output_preview(output)
 
+        # DEBT REDUCTION: Ledger no longer archives large outputs itself.
+        # Executor (ToolResultArtifactService) is the single archiving point.
+        # Large outputs without artifact refs should go through record_tool_result_block() instead.
         if len(output) > LARGE_OUTPUT_THRESHOLD:
-            artifact_id = f"artifact:{uuid4()}"
-            artifact_write = self.archive.put_text(artifact_id, output)
-            self.graph.put_jsonld(
-                Artifact(
-                    id=artifact_id,
-                    stored_at=artifact_write.stored_at,
-                    digest=artifact_write.digest,
-                    summary=output_preview,
-                    created_at=utc_now(),
-                    scope=scope,
-                    event_span=event_span,
-                ).to_jsonld(),
-                graph_id=self.graph_id,
+            raise ValueError(
+                f"record_tool_result() called with output > {LARGE_OUTPUT_THRESHOLD} chars "
+                f"but no artifact ref. Use record_tool_result_block() with artifact refs from executor."
             )
 
+        # Small outputs: store inline summary, no artifact
         self.graph.put_jsonld(
             ToolResult(
                 id=tool_result_id,
@@ -84,6 +78,7 @@ class ExecutionEvidenceLedger:
         return ToolResultRecord(
             tool_result_id=tool_result_id,
             artifact_id=artifact_id,
+            artifact_ids=(),
             output_summary=output_preview,
             status=status,
             event_span=event_span,
@@ -129,19 +124,22 @@ class ExecutionEvidenceLedger:
         output = _tool_result_output_text(block)
         output_preview = _make_output_preview(output)
         primary = block.artifacts[0]
-        artifact_info = self.archive.get_info(primary.artifact_id)
-        self.graph.put_jsonld(
-            Artifact(
-                id=primary.artifact_id,
-                stored_at=artifact_info.stored_at,
-                digest=artifact_info.digest,
-                summary=output_preview,
-                created_at=utc_now(),
-                scope=scope,
-                event_span=event_span,
-            ).to_jsonld(),
-            graph_id=self.graph_id,
-        )
+        artifact_ids = tuple(artifact.artifact_id for artifact in block.artifacts)
+        created_at = utc_now()
+        for artifact_ref in block.artifacts:
+            artifact_info = self.archive.get_info(artifact_ref.artifact_id)
+            self.graph.put_jsonld(
+                Artifact(
+                    id=artifact_ref.artifact_id,
+                    stored_at=artifact_info.stored_at,
+                    digest=artifact_info.digest,
+                    summary=output_preview,
+                    created_at=created_at,
+                    scope=scope,
+                    event_span=event_span,
+                ).to_jsonld(),
+                graph_id=self.graph_id,
+            )
         self.graph.put_jsonld(
             ToolResult(
                 id=tool_result_id,
@@ -161,6 +159,7 @@ class ExecutionEvidenceLedger:
         return ToolResultRecord(
             tool_result_id=tool_result_id,
             artifact_id=primary.artifact_id,
+            artifact_ids=artifact_ids,
             output_summary=output_preview,
             status=_to_tool_execution_status(block.state),
             event_span=event_span,

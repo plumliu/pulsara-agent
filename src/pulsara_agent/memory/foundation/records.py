@@ -58,11 +58,13 @@ class ToolResultRecord:
     output_summary: str
     status: rt.ToolExecutionStatus
     event_span: RuntimeEventSpan | None = None
+    artifact_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "tool_result_id": self.tool_result_id,
             "artifact_id": self.artifact_id,
+            "artifact_ids": list(self.artifact_ids),
             "output_summary": self.output_summary,
             "status": self.status,
         }

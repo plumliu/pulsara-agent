@@ -19,7 +19,7 @@ from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultAr
 
 DEFAULT_TOOL_ARTIFACT_THRESHOLD_CHARS = 8_000
 DEFAULT_TOOL_ARTIFACT_PREVIEW_CHARS = 8_000
-DEFAULT_TOOL_RESULT_CONTEXT_CHARS = 12_000
+DEFAULT_TOOL_RESULT_CONTEXT_CHARS = 8_000
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 

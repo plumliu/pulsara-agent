@@ -1074,7 +1074,7 @@ def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
 
 def test_tool_result_artifact_options_reject_unrecoverable_threshold_band() -> None:
     with pytest.raises(ValueError, match="archive_threshold_chars"):
-        ToolResultArtifactOptions(archive_threshold_chars=20_000, tool_result_context_chars=12_000)
+        ToolResultArtifactOptions(archive_threshold_chars=20_000, tool_result_context_chars=8_000)
 
 
 def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) -> None:

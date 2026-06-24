@@ -1488,6 +1488,33 @@ def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> No
     assert span[rt.SOURCE_SESSION.name] == agent.runtime_session.runtime_session_id
 
 
+def test_tool_result_persistence_hook_rejects_large_external_result_without_artifact_ref(tmp_path) -> None:
+    graph = InMemoryGraphStore()
+    ledger = ExecutionEvidenceLedger(
+        graph=graph,
+        archive=InMemoryArchiveStore(),
+        gate=MemoryWriteGate(),
+    )
+    hook = ExecutionEvidencePersistenceHook(ledger)
+    state = LoopState(session_id="runtime:test")
+    state.current_scope = "ctx:workspace/test_project"
+    state.pending_tool_calls = [
+        ToolCallBlock(id="call:external", name="external_tool", input='{"mode":"external"}')
+    ]
+    result = ToolResultBlock(
+        id="call:external",
+        name="external_tool",
+        output=[TextBlock(text="x" * 8_100)],
+        state=ToolResultState.SUCCESS,
+    )
+
+    with pytest.raises(ValueError, match="but no artifact ref"):
+        asyncio.run(hook.after_tool_results(state, [result]))
+
+    assert graph.find_by_type(rt.TOOL_RESULT) == []
+    assert graph.find_by_type(rt.ARTIFACT) == []
+
+
 def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> None:
     (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
     transport = ScriptedTransport(
