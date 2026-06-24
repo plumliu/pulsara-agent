@@ -19,6 +19,7 @@ from pulsara_agent.event import (
     ReplyStartEvent,
     RunEndEvent,
     RunErrorEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
     TerminalProcessCompletedEvent,
@@ -64,11 +65,13 @@ from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
     AgentRuntime,
     ApprovalResolution,
+    LoopBudget,
     LoopState,
     RuntimeSession,
     ToolApprovalDecision,
     build_agent_runtime_wiring,
 )
+from pulsara_agent.runtime.context import msg_to_llm_messages
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
@@ -813,6 +816,21 @@ def test_real_flash_memory_governance_weak_update_coexists(tmp_path):
     assert result["supersedes_edge_present"] is False
 
 
+def test_real_flash_accepts_aborted_unfinished_tool_recovery_context():
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(_run_real_aborted_unfinished_tool_recovery_context_smoke())
+
+    assert result["errors"] == []
+    assert "PULSARA_ABORTED_UNFINISHED_NOTE_OK" in result["final_text"]
+    assert result["note_present"] is True
+    assert result["tool_name_present"] is True
+    assert result["pending_not_executed_present"] is True
+    assert result["dangerous_args_present"] is False
+    assert result["tool_call_count"] == 0
+
+
 async def _run_real_flash_smoke() -> dict:
     settings = _load_settings_for_real_llm()
     runtime = build_llm_runtime(settings.llm)
@@ -852,6 +870,68 @@ async def _run_real_flash_smoke() -> dict:
         "text": "".join(text_parts).strip(),
         "replayed_text": replayed_text.strip(),
         "errors": errors,
+    }
+
+
+async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
+    ctx = EventContext(
+        run_id="run:real-aborted-unfinished",
+        turn_id="turn:real-aborted-unfinished/001",
+        reply_id="reply:real-aborted-unfinished/001",
+    )
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(
+                **ctx.event_fields(),
+                user_input_chars=20,
+                metadata={"user_input": "remove generated files"},
+            ),
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
+            ToolCallDeltaEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:danger",
+                delta='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
+            ),
+            RequireUserConfirmEvent(
+                **ctx.event_fields(),
+                tool_calls=[
+                    ToolCallBlock(
+                        id="call:danger",
+                        name="terminal",
+                        input='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
+                    )
+                ],
+            ),
+            ReplyEndEvent(**ctx.event_fields()),
+            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+        ]
+    )
+    prior_messages = rebuild_prior_messages(log)
+    llm_messages = list(msg_to_llm_messages(prior_messages, LoopBudget()))
+    llm_messages.append(
+        LLMMessage.user(
+            "If the prior context contains the Pulsara interrupted note with unfinished terminal "
+            "pending approval guidance, answer exactly PULSARA_ABORTED_UNFINISHED_NOTE_OK. "
+            "Do not call tools."
+        )
+    )
+    rendered_context = "\n".join("\n".join(message.content) for message in llm_messages)
+    result = await _collect_real_events(
+        role=ModelRole.FLASH,
+        context=LLMContext(
+            messages=tuple(llm_messages),
+            system_prompt="You are validating provider replay for Pulsara recovery notes. Do not call tools.",
+        ),
+        options=LLMOptions(temperature=0, max_output_tokens=512),
+        label="real-aborted-unfinished-recovery",
+    )
+    return {
+        **_summarize_collected_result(result),
+        "note_present": INTERRUPTED_NOTE_TEXT in rendered_context,
+        "tool_name_present": "terminal" in rendered_context,
+        "pending_not_executed_present": "pending approval and did not execute" in rendered_context,
+        "dangerous_args_present": "PULSARA_DANGEROUS_DO_NOT_RUN" in rendered_context,
     }
 
 

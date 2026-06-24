@@ -347,6 +347,48 @@ def test_aborted_run_skips_memory_reflection(tmp_path: Path) -> None:
     assert pool.list_pending() == []
 
 
+def test_failed_run_skips_memory_reflection(tmp_path: Path) -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    transport = _ScriptedTransport([{"text": _reflection_json()}])
+    agent = _agent_with_reflection(tmp_path, graph=graph, pool=pool, transport=transport)
+    state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state.status = LoopStatus.FAILED
+    state.stop_reason = "model_error"
+    state.messages.append(UserMsg(name="user", content="Please remember that I prefer concise summaries."))
+
+    async def run():
+        await agent.memory_hooks.on_session_start(state, "Please remember that I prefer concise summaries.")
+        return await agent.memory_hooks.on_session_end(state)
+
+    events = asyncio.run(run())
+
+    assert events == []
+    assert transport.contexts == []
+    assert pool.list_pending() == []
+
+
+def test_finished_run_still_allows_memory_reflection(tmp_path: Path) -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    transport = _ScriptedTransport([{"text": _reflection_json()}])
+    agent = _agent_with_reflection(tmp_path, graph=graph, pool=pool, transport=transport)
+    state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state.status = LoopStatus.FINISHED
+    state.stop_reason = "final"
+    state.messages.append(UserMsg(name="user", content="Please remember that I prefer concise summaries."))
+
+    async def run():
+        await agent.memory_hooks.on_session_start(state, "Please remember that I prefer concise summaries.")
+        return await agent.memory_hooks.on_session_end(state)
+
+    events = asyncio.run(run())
+
+    assert [event.type for event in events] == [EventType.MEMORY_REFLECTION_COMPLETED]
+    assert len(transport.contexts) == 1
+    assert len(pool.list_pending()) == 1
+
+
 def test_prompt_contains_few_shots_and_cheap_hint_warning() -> None:
     prompt = reflection_module._REFLECTION_SYSTEM_PROMPT
 

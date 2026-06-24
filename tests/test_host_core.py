@@ -22,6 +22,8 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResultEndEvent,
+    ToolResultStartEvent,
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
@@ -30,7 +32,7 @@ from pulsara_agent.host.transcript import FAILURE_NOTE_TEXT, INTERRUPTED_NOTE_TE
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.message import ToolCallBlock, ToolCallState
+from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState
 from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
@@ -367,7 +369,95 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
     messages = rebuild_prior_messages(log)
 
     assert [message.role for message in messages] == ["user", "system"]
-    assert messages[1].content[0].text == INTERRUPTED_NOTE_TEXT
+    note = messages[1].content[0].text
+    assert note.startswith(INTERRUPTED_NOTE_TEXT)
+    assert "terminal" in note
+    assert "pending approval and did not execute" in note
+    assert "rm -rf" not in note
+
+
+def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed_result() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "run command"}),
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
+            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta='{"command": "sleep 30"}'),
+            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
+            ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
+            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="tool_error"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "system"]
+    note = messages[1].content[0].text
+    assert note.startswith(FAILURE_NOTE_TEXT)
+    assert "terminal" in note
+    assert "may have partially run and may still be running in the background" in note
+    assert "sleep 30" not in note
+
+
+def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "run command"}),
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
+            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta='{"command": "printf done"}'),
+            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
+            ReplyEndEvent(**ctx.event_fields()),
+            ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
+            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            ToolResultTextDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta="done"),
+            ToolResultEndEvent(**ctx.event_fields(), tool_call_id="call:terminal", state=ToolResultState.SUCCESS),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "assistant", "system"]
+    assistant_blocks = messages[1].content
+    assert any(isinstance(block, ToolCallBlock) and block.id == "call:terminal" for block in assistant_blocks)
+    assert any(isinstance(block, ToolResultBlock) and block.id == "call:terminal" for block in assistant_blocks)
+    assert messages[2].content[0].text == INTERRUPTED_NOTE_TEXT
+
+
+def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "change files"}),
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
+            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:write", delta='{"path": "secret.txt"}'),
+            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:write"),
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:term", tool_call_name="terminal"),
+            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:term", delta='{"command": "echo hidden"}'),
+            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:term"),
+            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="model_error"),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "system"]
+    note = messages[1].content[0].text
+    assert note.startswith(FAILURE_NOTE_TEXT)
+    assert "write_file" in note
+    assert "terminal" in note
+    assert "uncertain whether it ran; verify" in note
+    assert "secret.txt" not in note
+    assert "echo hidden" not in note
 
 
 def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_run() -> None:

@@ -254,7 +254,7 @@ class ReflectiveMemoryHooks(DurableMemoryHooks):
         *,
         safe_point: str,
     ) -> list[AgentEvent]:
-        if state.status is LoopStatus.ABORTED:
+        if state.status in {LoopStatus.ABORTED, LoopStatus.FAILED}:
             return []
         trigger_reasons = self._trigger_reasons(state, safe_point=safe_point)
         if not trigger_reasons:
