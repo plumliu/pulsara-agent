@@ -48,6 +48,8 @@ _Created: 2026-06-24_
 - `ToolResultArtifactService.process_result()`：executor 侧，把大工具结果转成 artifact ref。
 - `ExecutionEvidenceLedger.record_tool_result()` / `record_tool_result_block()`：ledger 侧，对长 output 再归档一次，顺便建图。
 
+> **状态更新（2026-06-25）：已部分收口。** 当前代码已经把“长文本二次归档”这条债务收掉：`ExecutionEvidenceLedger.record_tool_result()` 不再自行 `put_text()`，大输出没有 artifact ref 时会直接拒绝；`record_tool_result_block()` 只消费 executor / artifact service 已经产生的 refs，并负责建图节点。下面仍保留原债务描述，作为为什么要守住这条边界的历史背景。
+
 另外，`runtime/context.py` 还在把 `ToolResultBlock` 渲染成模型可见文本时保留 preview / artifact envelope。
 而且这里已经不是单 artifact 形状了：`ToolResultBlock.artifacts` 是一个 refs 列表，`ToolResultArtifactRecord` 也在记录 `role` / `ordinal`，所以同一个 tool call 可以自然带出多个 artifact ref。
 如果工具本身没有显式 `artifact_candidates`，`ToolResultArtifactService.process_result()` 还会从 `result.output` 合成一个 fallback candidate 再归档，这说明“归档谁来决定”仍然是 executor 的兼容职责，不是纯被动的数据搬运。
@@ -62,6 +64,8 @@ _Created: 2026-06-24_
 - future 改 policy 时要改两处。
 
 更关键的是，`ledger` 这条路径并不是“无害的第二视图”，它自己会创建 `Artifact` / `ToolResult` 图节点，等于又多了一层事实投影。
+
+> **状态更新（2026-06-25）：主要成本已下降。** 两套阈值已经统一为 8KB；ledger 不再拥有长文本归档入口；multi-artifact refs 会全部建 `Artifact` 图节点；external / non-executor 的大 `ToolResultBlock` 如果缺少 artifacts，会在 persistence hook / ledger 路径被拒绝。剩余成本主要是 executor fallback candidate 仍然是一条兼容兜底，以及 graph/timeline 仍需要消费 artifact refs 的业务投影。
 
 ### 1.4 能不能 hard cut
 
@@ -80,6 +84,8 @@ _Created: 2026-06-24_
 2. 让 executor 产出 artifact ref，ledger 只接收 ref，不再自行 `put_text`。
 3. 再把 ledger 的长文本归档彻底删掉，只保留图节点和引用关系。
 4. 最后统一阈值和 ownership 校验入口。
+
+> **状态更新（2026-06-25）：1-4 已基本完成到 V1。** 当前还要继续守的不是“怎么再归档一次”，而是确认所有新的 tool execution surface 都能产出 `ToolResultEndEvent.artifacts`，不要绕回 ledger 或临时文件路径。
 
 这个 cut 的核心标准只有一个：**长文本只归档一次。**
 
@@ -111,6 +117,8 @@ terminal 是逐步补出来的：
 - artifact：给长输出留退路。
 - `terminal_process` log：给 yielded process 的后续状态做生命周期投影。
 
+> **状态更新（2026-06-25）：三层 surface 已正式写成契约。** 详见 [TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md)。当前代码符合 V1：preview 非权威，artifact 是完整输出读取入口，completion event 只承载生命周期元数据和 bounded preview。
+
 ### 2.3 当前成本
 
 - 模型看到的是 preview，不一定是 full output。
@@ -138,6 +146,8 @@ terminal 是逐步补出来的：
 1. 先把 terminal 输出契约写成统一规范。
 2. 再把 `terminal_process` 的只读 action 与有副作用 action 分层。
 3. 最后禁止任何“第四种 terminal output 侧路”。
+
+> **状态更新（2026-06-25）：第 1 步已完成，第 2 步已有实现。** `terminal_process list/log/poll/wait` 已作为只读观察动作处理，`write/submit/close_stdin/kill` 仍是会改变进程状态的动作。后续重点是继续守住 tool description、completion note、prompt 文案里的 preview/artifact/completion 边界，不再引入新的 output 侧路。
 
 这里的 hard cut 不是删 surface，而是**封口**。
 
@@ -212,6 +222,8 @@ yielded terminal process 先是作为后台任务存在，后来又在 transcrip
 - `TerminalProcessCompletedEvent` 从 process 生命周期里发出。
 - `rebuild_prior_messages()` 再把它投影成 transcript 里的 terminal background task note。
 - 这条 note 还会按 `_MAX_COMPLETION_NOTES` 做截断，避免一次塞太多后台完成记录。
+
+> **状态更新（2026-06-25）：当前 V1 选择是轻量 completion note。** completion note 只提示后台进程生命周期事实，并引导模型用 `terminal_process log` 查看 retained output；它不自动读取 artifact，也不把 bounded preview 说成完整日志。
 
 #### 2.7.3 当前成本
 
@@ -436,6 +448,8 @@ permission 是从简单 allow/deny 演化出来的，后来又叠了：
 - `PolicyPermissionGate` 里兼容老的危险 terminal 规则。
 - `HostSession` 里保存 pending approval / suspended state / stop state。
 - `terminal_process` 里又加了 action-level 只读特例。
+
+> **状态更新（2026-06-25）：只读 action 豁免已实现，主路径仍待收敛。** `terminal_process list/log/poll/wait` 不再因为 `terminal=ask` 反复触发审批；但 permission / approval 的产品主路径仍需要继续收敛，尤其是 `trusted_host + on_request + ask/allow` 和 `read_only + on_request + off` 的入口语义。
 
 ### 4.3 当前成本
 

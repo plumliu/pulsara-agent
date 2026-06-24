@@ -33,7 +33,10 @@ class TerminalTool(WorkspaceTool):
     name: str = "terminal"
     description: str = (
         "Run a shell command inside workspace_root. "
+        "The inline output is a bounded preview, not the complete retained output; "
+        "when artifacts[] is present, use artifact_read for the full retained tool output. "
         "If it is still running after yield_time_ms, return a process_id for terminal_process while the command keeps running. "
+        "Use terminal_process log to inspect retained output for yielded/background processes. "
         "Use read_file/search_files/write_file/edit_file for file operations; "
         "reserve terminal for builds, tests, git, package managers, scripts, network commands, and external CLIs."
     )

@@ -225,5 +225,6 @@ def _completion_note_line(event: TerminalProcessCompletedEvent) -> str:
     exit_code = event.exit_code
     return (
         f"Process {event.process_id} completed with status {event.status} "
-        f"and exit code {exit_code}. If still retained, inspect it with terminal_process log."
+        f"and exit code {exit_code}. This note is lifecycle-only, not the full output; "
+        f"if still retained, inspect retained output with terminal_process log."
     )

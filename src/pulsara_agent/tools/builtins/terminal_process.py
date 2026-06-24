@@ -37,7 +37,9 @@ class TerminalProcessTool(WorkspaceTool):
     name: str = "terminal_process"
     description: str = (
         "List, inspect, poll, wait for, kill, or send stdin to managed terminal processes returned when terminal yields a process_id. "
-        "Use list to see retained tasks, log to inspect output, write or submit for pipe/PTY input, and close_stdin to send EOF."
+        "Use list to see retained tasks. Use log to inspect retained output; its inline output is a bounded preview and may include artifacts[] "
+        "for the complete retained log. Use poll or wait for current lifecycle state and bounded output snapshots. "
+        "Use write or submit for pipe/PTY input, close_stdin to send EOF, and kill only when you intend to stop the process."
     )
     parameters: dict[str, Any] = field(
         default_factory=lambda: object_schema(
