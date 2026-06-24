@@ -3534,9 +3534,11 @@ def _summarize_collected_result(result: dict) -> dict:
     return {
         "event_type_names": [type(event).__name__ for event in result["events"]],
         "text": result["text"],
+        "final_text": result["text"],
         "replayed_text": replayed_text,
         "thinking": result["thinking"],
         "errors": result["errors"],
+        "tool_call_count": sum(1 for event in result["events"] if isinstance(event, ToolCallStartEvent)),
     }
 
 

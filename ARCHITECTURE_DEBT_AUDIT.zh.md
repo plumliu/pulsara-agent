@@ -117,7 +117,7 @@ terminal 是逐步补出来的：
 - artifact：给长输出留退路。
 - `terminal_process` log：给 yielded process 的后续状态做生命周期投影。
 
-> **状态更新（2026-06-25）：三层 surface 已正式写成契约。** 详见 [TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md)。当前代码符合 V1：preview 非权威，artifact 是完整输出读取入口，completion event 只承载生命周期元数据和 bounded preview。
+> **状态更新（2026-06-25）：三层 surface 已正式写成契约。** 详见 [TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md)。当前代码符合 V1：preview 非权威，artifact 是完整输出读取入口，completion event 只承载生命周期元数据和 bounded preview。
 
 ### 2.3 当前成本
 

@@ -79,7 +79,7 @@ class TerminalProcessState:
     origin_tool_call_id: str | None = None
     completion_event_recorded: bool = False
     completion_suppressed: bool = False
-    completion_reason: str | None = None
+    completion_reason: TerminalKillReason | None = None
     record_event: Callable[[AgentEvent], AgentEvent] | None = field(default=None, repr=False)
     reader_thread: Thread | None = None
     lifetime_watchdog: Thread | None = None
@@ -441,7 +441,7 @@ def wait_for_process(
 def kill_process(
     state: TerminalProcessState,
     *,
-    reason: TerminalKillReason | str = TerminalKillReason.USER,
+    reason: TerminalKillReason = TerminalKillReason.USER,
 ) -> None:
     if state.is_finished:
         return
@@ -697,11 +697,10 @@ def _mark_status(
         state.ended_at = time.monotonic()
 
 
-def _mark_kill_reason(state: TerminalProcessState, reason: TerminalKillReason | str) -> None:
-    reason_value = str(reason)
+def _mark_kill_reason(state: TerminalProcessState, reason: TerminalKillReason) -> None:
     with state.lock:
-        state.completion_reason = reason_value
-        if reason_value in {TerminalKillReason.TEARDOWN.value, TerminalKillReason.LIFETIME_WATCHDOG.value}:
+        state.completion_reason = reason
+        if reason in {TerminalKillReason.TEARDOWN, TerminalKillReason.LIFETIME_WATCHDOG}:
             state.completion_suppressed = True
             state.record_event = None
 
@@ -759,7 +758,7 @@ def _completion_event_data(
             "backend_type": state.backend_type.value,
             "io_mode": state.io_mode.value,
             "tool_call_id": state.origin_tool_call_id,
-            "metadata": {"completion_reason": state.completion_reason},
+            "completion_reason": state.completion_reason.value if state.completion_reason is not None else None,
         }
     processed = state.output.snapshot(max_chars=2000)
     fields["output_preview"] = processed.text

@@ -843,7 +843,39 @@ def test_terminal_runtime_user_kill_records_completion_event_but_shutdown_suppre
 
     assert len(user_events) == 1
     assert user_events[0].status == "killed"
+    assert user_events[0].completion_reason == "user_tool_kill"
+    assert "completion_reason" not in user_events[0].metadata
     assert teardown_events == []
+
+
+def test_terminal_runtime_lifetime_watchdog_suppresses_completion_event(tmp_path) -> None:
+    ctx = EventContext(run_id="run:watchdog", turn_id="turn:watchdog", reply_id="reply:watchdog")
+    events = []
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+
+    result = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            max_lifetime_seconds=1,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:watchdog",
+                "record_event": events.append,
+            },
+        )
+    )
+    assert result.process_id is not None
+
+    deadline = time.monotonic() + 3
+    final = manager.poll_process(result.process_id, owner_host_session_id="host:a")
+    while final.status is TerminalStatus.RUNNING and time.monotonic() < deadline:
+        time.sleep(0.05)
+        final = manager.poll_process(result.process_id, owner_host_session_id="host:a")
+
+    assert final.status is TerminalStatus.KILLED
+    assert events == []
 
 
 def test_output_accumulator_redacts_secret_split_across_chunks() -> None:

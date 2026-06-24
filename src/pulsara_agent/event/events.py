@@ -306,6 +306,7 @@ class TerminalProcessCompletedEvent(EventBase):
     backend_type: str = "local"
     io_mode: str = "pipe"
     tool_call_id: str | None = None
+    completion_reason: str | None = None
 
 
 class MemoryEventBase(EventBase):

@@ -635,6 +635,86 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
     assert "exit code 1" in messages[-1].content[0].text
 
 
+def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_projection() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "start background"}),
+            ReplyEndEvent(**ctx.event_fields()),
+            RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
+            TerminalProcessCompletedEvent(
+                **ctx.event_fields(),
+                process_id="proc_projection",
+                terminal_session_id="default",
+                command="printf SHOULD_NOT_SHOW_COMMAND",
+                status="success",
+                exit_code=0,
+                cwd="/workspace/SHOULD_NOT_SHOW_CWD",
+                duration_seconds=1.0,
+                output_preview="SHOULD_NOT_SHOW_OUTPUT_PREVIEW",
+                output_truncated=True,
+                completion_reason="user_tool_kill",
+            ),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+    note = messages[-1].content[0].text
+
+    assert "terminal background task update" in note
+    assert "proc_projection" in note
+    assert "status success" in note
+    assert "exit code 0" in note
+    assert "lifecycle-only" in note
+    assert "terminal_process log" in note
+    assert "SHOULD_NOT_SHOW_COMMAND" not in note
+    assert "SHOULD_NOT_SHOW_CWD" not in note
+    assert "SHOULD_NOT_SHOW_OUTPUT_PREVIEW" not in note
+    assert "user_tool_kill" not in note
+    assert "full output" in note
+
+
+def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processes() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
+    log = InMemoryEventLog()
+    events = [
+        RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "start background"}),
+        ReplyEndEvent(**ctx.event_fields()),
+        RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
+    ]
+    for index in range(4):
+        events.append(
+            TerminalProcessCompletedEvent(
+                **ctx.event_fields(),
+                process_id=f"proc_{index}",
+                terminal_session_id="default",
+                command=f"cmd_{index}",
+                status="success",
+                exit_code=0,
+                cwd="/workspace",
+                duration_seconds=1.0,
+                output_preview=f"output_{index}",
+            )
+        )
+    log.extend(events)
+
+    messages = rebuild_prior_messages(log)
+    note = messages[-1].content[0].text
+
+    assert "proc_0" in note
+    assert "proc_1" in note
+    assert "proc_2" in note
+    assert "proc_3" not in note
+    assert "1 more terminal task(s) completed" in note
+    assert "cmd_3" not in note
+    assert "output_3" not in note
+
+
 def test_host_session_injects_failed_turn_note_into_next_context(tmp_path, monkeypatch) -> None:
     transport = FailingScriptedTransport(
         [

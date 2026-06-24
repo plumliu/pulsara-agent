@@ -123,6 +123,7 @@ def test_terminal_process_completed_event_round_trips_through_agent_event_serial
         duration_seconds=1.25,
         output_preview="ok",
         tool_call_id="call:terminal",
+        completion_reason="user_tool_kill",
     )
 
     assert load_agent_event(dump_agent_event(event)) == event

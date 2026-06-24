@@ -230,6 +230,54 @@ Completion event 的主要消费者：
 这些消费者应该读结构化字段，而不是从 stdout preview 里猜状态。
 transcript completion note 只是一条生命周期提示：它不自动读取 artifact，不摘要完整日志，也不能把 bounded preview 说成 full output。需要完整日志时，模型必须显式调用 `terminal_process log` 或 `artifact_read`。
 
+### 4.6 Completion Note 投影契约
+
+`TerminalProcessCompletedEvent` 是后台进程完成事实的 canonical source。transcript completion note 只是从 event log 派生出来的轻量投影，目的是让下一轮模型知道“有后台 terminal process 后来结束了”。
+
+completion note 允许包含：
+
+- `process_id`
+- `status`
+- `exit_code`
+- retained log 的读取入口提示，例如 `terminal_process log`
+- 有限 overflow count，例如还有多少个 completed process 未逐条列出
+
+completion note 不允许包含：
+
+- 完整 stdout/stderr
+- bounded `output_preview`
+- command 全文
+- cwd / env / shell metadata
+- artifact body
+- recovery 指令或“可以直接相信结果已完成”的强语义
+
+completion note 必须满足：
+
+- 明确自己是 `lifecycle-only`，不是 full output。
+- 引导模型显式调用 `terminal_process log` 或 `artifact_read` 读取 retained output。
+- 不进入 durable memory fact。
+- 不替代 run timeline 或 terminal process view 的权威事实。
+- 不为 teardown / watchdog suppressed completion 生成模型可见 note。
+- 多个 completion 只列出最多 `_MAX_COMPLETION_NOTES` 个，超出部分只用 count summary。
+
+### 4.7 Kill Reason / Completion Suppression 契约
+
+terminal kill reason 是 terminal lifecycle 的结构化状态，不是 transcript / host 自己推断的文案规则。
+
+允许的 kill reason：
+
+- `user_tool_kill`：用户或模型通过 `terminal_process kill` 显式停止进程。
+- `teardown`：session、workspace、owner cleanup 或 live-process-limit cleanup。
+- `lifetime_watchdog`：runtime lifetime watchdog 自动清理。
+
+completion suppression 只在 terminal lifecycle 层决定：
+
+- `user_tool_kill` 不 suppress。yielded process 被用户显式 kill 后，可以发 `TerminalProcessCompletedEvent(status="killed", completion_reason="user_tool_kill")`，并可在下一轮投影轻量 completion note。
+- `teardown` suppress。cleanup 不应生成模型可见 completion event / note。
+- `lifetime_watchdog` suppress。watchdog cleanup 不应伪装成普通用户可恢复 completion note。
+
+`TerminalProcessCompletedEvent.completion_reason` 是唯一模型可见的结构化 reason 字段。新代码不应把 reason 塞进 event `metadata`，也不应让 transcript / host 从 `metadata` 或进程退出码里反推 kill 类型。
+
 ---
 
 ## 5. 三层关系

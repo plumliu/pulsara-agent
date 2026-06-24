@@ -14,6 +14,11 @@ from pulsara_agent.runtime.terminal import env as terminal_env
 from pulsara_agent.runtime.terminal.shell import TerminalShellConfig
 
 
+def _write_executable(path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
 def test_sanitize_subprocess_env_strips_provider_and_secret_envs() -> None:
     env, diagnostics = sanitize_subprocess_env(
         {
@@ -127,6 +132,23 @@ def test_passthrough_names_are_exact_user_extensions() -> None:
     }
 
 
+def test_passthrough_names_are_high_privilege_secret_value_escape_hatch() -> None:
+    env, diagnostics = sanitize_subprocess_env(
+        {
+            "FOO_TOKEN": "ghp_abcdefghijklmnopqrstuvwxyz",
+            "BAR_TOKEN": "ghp_abcdefghijklmnopqrstuvwxyz",
+        },
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=False,
+            passthrough_names=frozenset({"FOO_TOKEN"}),
+        ),
+    )
+
+    assert env == {"FOO_TOKEN": "ghp_abcdefghijklmnopqrstuvwxyz"}
+    assert diagnostics["sanitized_env_secret_value_removed_count"] == 0
+    assert diagnostics["sanitized_env_removed_count"] == 1
+
+
 def test_capture_shell_env_snapshot_filters_profile_noise_and_secrets(tmp_path) -> None:
     fake_shell = tmp_path / "fake-sh"
     fake_shell.write_text(
@@ -226,6 +248,93 @@ def test_terminal_env_builder_uses_snapshot_cache_until_startup_file_changes(tmp
     assert third.env["PATH"].split(os.pathsep)[0] == "/snapshot-2"
 
 
+def test_terminal_env_builder_path_precedence_is_canonical(tmp_path) -> None:
+    venv_bin = tmp_path / ".venv" / "bin"
+    extra_bin = tmp_path / "extra-bin"
+    snapshot_bin = tmp_path / "snapshot-bin"
+    parent_bin = tmp_path / "parent-bin"
+    for path in (venv_bin, extra_bin, snapshot_bin, parent_bin):
+        path.mkdir(parents=True)
+    fake_shell = tmp_path / "fake-sh"
+    _write_executable(
+        fake_shell,
+        "#!/bin/sh\n"
+        "printf '__PULSARA_ENV_START__\\0'\n"
+        f"printf 'PATH={snapshot_bin}:{extra_bin}\\0'\n",
+    )
+    builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=True,
+            extra_path_prepends=(extra_bin,),
+        ),
+        parent_env={"HOME": str(tmp_path), "PATH": f"{parent_bin}:{snapshot_bin}"},
+    )
+
+    result = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=TerminalShellConfig(path=fake_shell))
+    path_entries = result.env["PATH"].split(os.pathsep)
+
+    assert path_entries[:4] == [str(venv_bin), str(extra_bin), str(snapshot_bin), str(parent_bin)]
+    assert path_entries.count(str(extra_bin)) == 1
+    assert path_entries.count(str(snapshot_bin)) == 1
+    assert path_entries.index("/usr/bin") > path_entries.index(str(parent_bin))
+
+
+def test_terminal_env_builder_snapshot_non_path_vars_override_parent(tmp_path) -> None:
+    fake_shell = tmp_path / "fake-sh"
+    _write_executable(
+        fake_shell,
+        "#!/bin/sh\n"
+        "printf '__PULSARA_ENV_START__\\0'\n"
+        "printf 'PATH=/snapshot/bin:/usr/bin\\0'\n"
+        "printf 'NVM_DIR=/snapshot/nvm\\0'\n",
+    )
+    builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(enable_shell_snapshot=True),
+        parent_env={
+            "HOME": str(tmp_path),
+            "PATH": "/parent/bin",
+            "NVM_DIR": "/parent/nvm",
+        },
+    )
+
+    result = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=TerminalShellConfig(path=fake_shell))
+
+    assert result.env["NVM_DIR"] == "/snapshot/nvm"
+    assert result.env["PATH"].split(os.pathsep)[:2] == ["/snapshot/bin", "/usr/bin"]
+
+
+def test_terminal_env_builder_caches_snapshot_failure_until_ttl(tmp_path) -> None:
+    fake_shell = tmp_path / "fake-sh"
+    fake_shell.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    now = 100.0
+    builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_ttl_seconds=10),
+        parent_env={"HOME": str(tmp_path), "PATH": "/parent/bin"},
+        time_fn=lambda: now,
+    )
+    shell = TerminalShellConfig(path=fake_shell)
+
+    first = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=shell)
+    _write_executable(
+        fake_shell,
+        "#!/bin/sh\n"
+        "printf '__PULSARA_ENV_START__\\0'\n"
+        "printf 'PATH=/snapshot/bin:/usr/bin\\0'\n",
+    )
+    now = 105.0
+    second = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=shell)
+    now = 111.0
+    third = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=shell)
+
+    assert first.diagnostics["shell_snapshot_used"] is False
+    assert first.diagnostics["shell_snapshot_error"]
+    assert second.diagnostics["shell_snapshot_error"] == first.diagnostics["shell_snapshot_error"]
+    assert second.env["PATH"].split(os.pathsep)[0] == "/parent/bin"
+    assert third.diagnostics["shell_snapshot_used"] is True
+    assert third.diagnostics["shell_snapshot_error"] is None
+    assert third.env["PATH"].split(os.pathsep)[0] == "/snapshot/bin"
+
+
 def test_terminal_env_builder_uses_snapshot_cache_until_zshrc_changes(tmp_path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -301,6 +410,22 @@ def test_terminal_env_builder_snapshot_can_be_disabled(tmp_path) -> None:
     assert result.env["PATH"].split(os.pathsep)[0] == "/parent/bin"
     assert result.diagnostics["shell_snapshot_used"] is False
     assert result.diagnostics["shell_snapshot_error"] is None
+
+
+def test_terminal_env_builder_diagnostics_do_not_dump_complete_path(tmp_path) -> None:
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    builder = TerminalEnvBuilder(
+        config=TerminalEnvConfig(enable_shell_snapshot=False),
+        parent_env={"HOME": str(tmp_path), "PATH": "/parent/bin:/usr/bin:/bin"},
+    )
+
+    result = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=TerminalShellConfig(path=tmp_path / "sh"))
+
+    assert "PATH" not in result.diagnostics
+    assert "path" not in result.diagnostics
+    assert result.diagnostics["venv_overlay"] == str(venv_bin)
+    assert result.diagnostics["path_entries_count"] == len(result.env["PATH"].split(os.pathsep))
 
 
 def test_terminal_env_builder_refreshes_snapshot_after_ttl(tmp_path) -> None:
