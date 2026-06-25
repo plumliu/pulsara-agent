@@ -73,8 +73,10 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     assert wiring.agent_runtime.system_prompt == "test prompt"
     assert isinstance(wiring.agent_runtime.capability_resolver, LocalSkillResolver)
     assert wiring.agent_runtime.workspace_kind == "transient"
-    assert wiring.agent_runtime.permission_policy.profile is PermissionProfile.READ_ONLY
-    assert "terminal" not in wiring.agent_runtime.tool_executor.registry.names()
+    assert wiring.agent_runtime.permission_policy.profile is PermissionProfile.TRUSTED_HOST
+    assert wiring.agent_runtime.permission_policy.approval is ApprovalPolicy.NEVER
+    assert wiring.agent_runtime.permission_policy.terminal is TerminalAccess.ALLOW
+    assert "terminal" in wiring.agent_runtime.tool_executor.registry.names()
 
 
 def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -> None:
@@ -117,7 +119,10 @@ def test_agent_runtime_wiring_threads_memory_domain_to_capability_context(tmp_pa
 
     assert wiring.agent_runtime.memory_domain == domain
     assert wiring.agent_runtime.workspace_kind == "project"
+    # workspace_kind no longer influences the default; project gets bypass like everything else.
     assert wiring.agent_runtime.permission_policy.profile is PermissionProfile.TRUSTED_HOST
+    assert wiring.agent_runtime.permission_policy.approval is ApprovalPolicy.NEVER
+    assert wiring.agent_runtime.permission_policy.terminal is TerminalAccess.ALLOW
 
 
 def test_agent_runtime_wiring_threads_permission_policy_to_session_registry(tmp_path) -> None:

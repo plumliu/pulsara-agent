@@ -132,7 +132,7 @@ class AgentRuntime:
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
         self.tool_result_persistence_hook = tool_result_persistence_hook
-        self.permission_policy = permission_policy or default_permission_policy(workspace_kind=workspace_kind)
+        self.permission_policy = permission_policy or default_permission_policy()
         self.permission_gate = PolicyPermissionGate(
             self.permission_policy,
             inner=permission_gate or AllowAllPermissionGate(),

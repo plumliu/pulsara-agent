@@ -256,11 +256,7 @@ def build_agent_runtime_wiring(
     )
     llm_runtime = build_llm_runtime(settings.llm)
     runtime_wiring = _with_memory_governance_engine(runtime_wiring, llm_runtime=llm_runtime)
-    effective_permission_policy = permission_policy or default_permission_policy(
-        workspace_kind=runtime_wiring.memory_domain.workspace_kind
-        if runtime_wiring.memory_domain is not None
-        else "transient"
-    )
+    effective_permission_policy = permission_policy or default_permission_policy()
     agent_runtime = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=llm_runtime,

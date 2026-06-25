@@ -36,7 +36,14 @@ from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultBlock,
 from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
-from pulsara_agent.runtime.permission import ApprovalPolicy, EffectivePermissionPolicy, PermissionProfile, TerminalAccess
+from pulsara_agent.runtime.permission import (
+    ApprovalPolicy,
+    EffectivePermissionPolicy,
+    PermissionMode,
+    PermissionProfile,
+    TerminalAccess,
+    preset_to_policy,
+)
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
@@ -1203,6 +1210,291 @@ def test_host_session_hardline_under_terminal_ask_denies_without_approval(tmp_pa
     assert session.get_pending_approval() is None
     assert not any(isinstance(event, RequireUserConfirmEvent) for event in run_events)
     assert "terminal command blocked by hardline permission policy" in denied_output
+
+
+# --- Preset-driven approval-resume tests (contract main paths) ---------------
+# These exercise the four frozen permission presets via preset_to_policy() so
+# that any change to a preset's (profile, approval, terminal) triple is caught
+# by the approval-resume behavior it implies. See
+# contracts/PERMISSION_POLICY_CONTRACT.zh.md §2/§4/§5.
+
+
+def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ask-terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf PULSARA_PRESET_ASK_OK"}),
+                    }
+                ]
+            },
+            {"text": "ask-permissions terminal continuation"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+        )
+        first = await session.run_turn("run terminal under ask-permissions")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert pending.tool_calls[0].name == "terminal"
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    tool_output = "".join(
+        event.delta
+        for event in run_events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:ask-terminal"
+    )
+
+    assert first.status.value == "waiting_user"
+    assert resolved.status.value == "finished"
+    assert resolved.final_text == "ask-permissions terminal continuation"
+    assert session.get_pending_approval() is None
+    assert "PULSARA_PRESET_ASK_OK" in tool_output
+
+
+def test_ask_permissions_preset_write_suspends_then_executes_on_approve(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ask-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "ask_permissions.txt", "content": "PULSARA_ASK_WRITE_OK\n"}),
+                    }
+                ]
+            },
+            {"text": "ask-permissions write continuation"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+        )
+        first = await session.run_turn("write a file under ask-permissions")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert pending.tool_calls[0].name == "write_file"
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        return first, resolved
+
+    first, resolved = asyncio.run(run())
+
+    assert first.status.value == "waiting_user"
+    assert resolved.status.value == "finished"
+    assert (tmp_path / "ask_permissions.txt").read_text() == "PULSARA_ASK_WRITE_OK\n"
+
+
+def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkeypatch) -> None:
+    # accept-edits = trusted_host / never / ask. The only difference from
+    # ask-permissions is that file writes auto-pass while terminal still asks.
+    # Writes and the terminal are scripted in separate model rounds because the
+    # gate suspends the whole batch on the first non-ALLOW decision; isolating
+    # them proves the write auto-executed (file on disk) before any approval.
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:auto-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "accept_edits.txt", "content": "PULSARA_ACCEPT_EDITS_OK\n"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:accept-terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf PULSARA_ACCEPT_TERMINAL_OK"}),
+                    }
+                ]
+            },
+            {"text": "accept-edits continuation"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ACCEPT_EDITS)
+        )
+        first = await session.run_turn("write a file then run a terminal command")
+        # Write auto-executed without suspending; the run only paused on terminal.
+        write_exists_at_pause = (tmp_path / "accept_edits.txt").exists()
+        pending = session.get_pending_approval()
+        assert pending is not None
+        assert [call.name for call in pending.tool_calls] == ["terminal"]
+        resolved = await session.resolve_approval(
+            ApprovalResolution(
+                approval_id=pending.approval_id,
+                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+            )
+        )
+        return session, first, resolved, write_exists_at_pause
+
+    session, first, resolved, write_exists_at_pause = asyncio.run(run())
+    terminal_output = "".join(
+        event.delta
+        for event in session.replay_events()
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:accept-terminal"
+    )
+
+    assert first.status.value == "waiting_user"
+    assert write_exists_at_pause is True
+    assert (tmp_path / "accept_edits.txt").read_text() == "PULSARA_ACCEPT_EDITS_OK\n"
+    assert resolved.status.value == "finished"
+    assert resolved.final_text == "accept-edits continuation"
+    assert "PULSARA_ACCEPT_TERMINAL_OK" in terminal_output
+
+
+def test_bypass_permissions_preset_runs_without_pending_approval(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bypass-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "bypass.txt", "content": "PULSARA_BYPASS_OK\n"}),
+                    },
+                    {
+                        "id": "call:bypass-terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf PULSARA_BYPASS_TERMINAL_OK"}),
+                    },
+                ]
+            },
+            {"text": "bypass continuation"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+        )
+        result = await session.run_turn("write and run terminal under bypass")
+        return session, result
+
+    session, result = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    terminal_output = "".join(
+        event.delta
+        for event in run_events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bypass-terminal"
+    )
+
+    assert result.status.value == "finished"
+    assert result.final_text == "bypass continuation"
+    assert session.get_pending_approval() is None
+    assert not any(isinstance(event, RequireUserConfirmEvent) for event in run_events)
+    assert (tmp_path / "bypass.txt").read_text() == "PULSARA_BYPASS_OK\n"
+    assert "PULSARA_BYPASS_TERMINAL_OK" in terminal_output
+
+
+def test_bypass_permissions_preset_still_denies_hardline_terminal(tmp_path, monkeypatch) -> None:
+    # Contract §5: bypass means "no approval", NOT "no protection". Hardline
+    # terminal commands are denied under every preset, including bypass.
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bypass-hardline",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf /"}),
+                    }
+                ]
+            },
+            {"text": "bypass hardline denied"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+        )
+        result = await session.run_turn("attempt hardline command under bypass")
+        return session, result
+
+    session, result = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    denied_output = "".join(
+        event.delta
+        for event in run_events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bypass-hardline"
+    )
+
+    assert result.status.value == "finished"
+    assert result.final_text == "bypass hardline denied"
+    assert session.get_pending_approval() is None
+    assert not any(isinstance(event, RequireUserConfirmEvent) for event in run_events)
+    assert "terminal command blocked by hardline permission policy" in denied_output
+
+
+def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ro-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "read_only.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    }
+                ]
+            },
+            {"text": "read-only denied write"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.READ_ONLY)
+        )
+        result = await session.run_turn("attempt write under read-only")
+        return session, result
+
+    session, result = asyncio.run(run())
+    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    denied_output = "".join(
+        event.delta
+        for event in run_events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:ro-write"
+    )
+
+    assert result.status.value == "finished"
+    assert result.final_text == "read-only denied write"
+    assert session.get_pending_approval() is None
+    assert not any(isinstance(event, RequireUserConfirmEvent) for event in run_events)
+    assert not (tmp_path / "read_only.txt").exists()
+    assert "not allowed by permission policy" in denied_output
 
 
 def test_host_session_suspension_releases_run_lock_before_approval_resolution(tmp_path, monkeypatch) -> None:

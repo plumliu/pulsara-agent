@@ -592,3 +592,74 @@ def test_cli_skills_reset_prints_clean_error_for_invalid_name(monkeypatch, capsy
 
     assert excinfo.value.code == 2
     assert "ERROR: Invalid bundled skill name" in capsys.readouterr().err
+
+
+def test_permission_mode_preset_resolves_to_policy(tmp_path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["host", "run", "--workspace", str(tmp_path), "--permission-mode", "read-only", "say hi"]
+    )
+
+    policy = cli._permission_policy_from_host_args(args, intent="run")
+
+    assert policy.profile.value == "read_only"
+    assert policy.approval.value == "on_request"
+    assert policy.terminal.value == "off"
+
+
+def test_permission_mode_default_run_is_bypass(tmp_path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "run", "--workspace", str(tmp_path), "say hi"])
+
+    policy = cli._permission_policy_from_host_args(args, intent="run")
+
+    assert policy.profile.value == "trusted_host"
+    assert policy.approval.value == "never"
+    assert policy.terminal.value == "allow"
+
+
+def test_permission_mode_inspect_default_is_read_only(tmp_path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "inspect", "--workspace", str(tmp_path)])
+
+    policy = cli._permission_policy_from_host_args(args, intent="inspect")
+
+    assert policy.profile.value == "read_only"
+    assert policy.terminal.value == "off"
+
+
+def test_permission_mode_is_mutually_exclusive_with_raw_axes(tmp_path, capsys) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--permission-mode",
+            "bypass-permissions",
+            "--approval-policy",
+            "never",
+            "say hi",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._permission_policy_from_host_args(args, intent="run")
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "--permission-mode cannot be combined" in err
+    assert "--approval-policy" in err
+
+
+def test_permission_mode_from_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PULSARA_PERMISSION_MODE", "accept-edits")
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "run", "--workspace", str(tmp_path), "say hi"])
+
+    policy = cli._permission_policy_from_host_args(args, intent="run")
+
+    assert policy.profile.value == "trusted_host"
+    assert policy.approval.value == "never"
+    assert policy.terminal.value == "ask"

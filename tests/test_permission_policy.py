@@ -5,41 +5,68 @@ import pytest
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     ApprovalPolicy,
+    DEFAULT_PERMISSION_MODE,
     EffectivePermissionPolicy,
     PermissionDecisionKind,
+    PermissionMode,
     PermissionProfile,
     PolicyPermissionGate,
     TerminalAccess,
     default_permission_policy,
+    parse_permission_mode,
+    preset_to_policy,
     resolve_permission_policy,
 )
 from pulsara_agent.tools.base import ToolCall
 
 
-def test_default_permission_policy_without_workspace_kind_is_read_only() -> None:
+def test_default_permission_policy_defaults_to_bypass() -> None:
     policy = default_permission_policy()
 
-    assert policy.profile is PermissionProfile.READ_ONLY
-    assert policy.approval is ApprovalPolicy.ON_REQUEST
-    assert policy.terminal is TerminalAccess.OFF
-
-
-def test_default_permission_policy_treats_project_as_trusted_host() -> None:
-    policy = default_permission_policy(workspace_kind="project")
-
     assert policy.profile is PermissionProfile.TRUSTED_HOST
-    assert policy.approval is ApprovalPolicy.RISKY_ONLY
+    assert policy.approval is ApprovalPolicy.NEVER
     assert policy.terminal is TerminalAccess.ALLOW
     assert policy.execution_boundary == "host"
     assert policy.network_isolated is False
 
 
+def test_default_permission_policy_run_intent_matches_default_mode() -> None:
+    assert default_permission_policy() == preset_to_policy(DEFAULT_PERMISSION_MODE)
+    assert DEFAULT_PERMISSION_MODE is PermissionMode.BYPASS_PERMISSIONS
+
+
 def test_default_permission_policy_keeps_inspect_read_only() -> None:
-    policy = default_permission_policy(workspace_kind="project", intent="inspect")
+    policy = default_permission_policy(intent="inspect")
 
     assert policy.profile is PermissionProfile.READ_ONLY
     assert policy.approval is ApprovalPolicy.ON_REQUEST
     assert policy.terminal is TerminalAccess.OFF
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("read-only", (PermissionProfile.READ_ONLY, ApprovalPolicy.ON_REQUEST, TerminalAccess.OFF)),
+        ("ask-permissions", (PermissionProfile.TRUSTED_HOST, ApprovalPolicy.ON_REQUEST, TerminalAccess.ASK)),
+        ("accept-edits", (PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ASK)),
+        ("bypass-permissions", (PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ALLOW)),
+    ],
+)
+def test_preset_to_policy_resolves_contract_triples(mode, expected) -> None:
+    policy = preset_to_policy(mode)
+
+    assert (policy.profile, policy.approval, policy.terminal) == expected
+
+
+def test_parse_permission_mode_accepts_all_named_presets() -> None:
+    for mode in PermissionMode:
+        assert parse_permission_mode(mode.value) is mode
+        assert parse_permission_mode(mode) is mode
+
+
+def test_parse_permission_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError):
+        parse_permission_mode("paranoid")
 
 
 def test_resolve_permission_policy_uses_cli_over_env() -> None:
@@ -190,6 +217,22 @@ def test_policy_gate_hardline_terminal_command_denies_even_when_never() -> None:
             approval=ApprovalPolicy.NEVER,
             terminal=TerminalAccess.ALLOW,
         ),
+        inner=AllowAllPermissionGate(),
+    )
+
+    decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": "rm -rf /"})])
+    )
+
+    assert decision.kind is PermissionDecisionKind.DENY
+    assert decision.suggested_rules[0]["reason"] == "hardline_terminal_command"
+
+
+def test_bypass_preset_still_denies_hardline_terminal_command() -> None:
+    # Contract §5: bypass-permissions means "no approval", NOT "no protection".
+    # The hardline floor applies to the preset entry too.
+    gate = PolicyPermissionGate(
+        preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
         inner=AllowAllPermissionGate(),
     )
 
@@ -448,3 +491,188 @@ def test_policy_gate_hardline_terminal_process_input_denies_under_on_request() -
 
     assert decision.kind is PermissionDecisionKind.DENY
     assert decision.suggested_rules[0]["reason"] == "hardline_terminal_process_input"
+
+
+# --- Step 3: default-inference cleanup (PERMISSION_POLICY_CONTRACT §6) --------
+# risky_only / workspace_guarded are no longer inferred by default. They remain
+# valid ONLY as explicitly-passed custom axis values.
+
+
+def test_profile_default_no_longer_infers_risky_only() -> None:
+    # Bare custom profile (no approval/terminal) must fall back to bypass
+    # defaults (never/allow), not the old risky_only inference.
+    policy = resolve_permission_policy(profile="trusted_host", env={})
+
+    assert policy.profile is PermissionProfile.TRUSTED_HOST
+    assert policy.approval is ApprovalPolicy.NEVER
+    assert policy.terminal is TerminalAccess.ALLOW
+
+
+def test_profile_default_workspace_guarded_bare_falls_back_to_bypass() -> None:
+    # workspace_guarded is no longer a special default branch; bare it resolves
+    # to the bypass default while keeping the explicitly-named profile.
+    policy = resolve_permission_policy(profile="workspace_guarded", env={})
+
+    assert policy.profile is PermissionProfile.WORKSPACE_GUARDED
+    assert policy.approval is ApprovalPolicy.NEVER
+    assert policy.terminal is TerminalAccess.ALLOW
+
+
+def test_workspace_guarded_and_risky_only_still_valid_as_explicit_axes() -> None:
+    # The vocabulary is preserved: explicitly passing the demoted axis values
+    # still constructs a valid policy (custom three-axis feature, §7).
+    policy = resolve_permission_policy(
+        profile="workspace_guarded",
+        approval="risky_only",
+        terminal="off",
+        env={},
+    )
+
+    assert policy.profile is PermissionProfile.WORKSPACE_GUARDED
+    assert policy.approval is ApprovalPolicy.RISKY_ONLY
+    assert policy.terminal is TerminalAccess.OFF
+
+
+def test_read_only_profile_default_keeps_terminal_off() -> None:
+    policy = resolve_permission_policy(profile="read_only", env={})
+
+    assert policy.profile is PermissionProfile.READ_ONLY
+    assert policy.terminal is TerminalAccess.OFF
+
+
+def test_resolve_permission_policy_has_no_workspace_kind_parameter() -> None:
+    import inspect
+
+    params = inspect.signature(resolve_permission_policy).parameters
+    assert "workspace_kind" not in params
+
+
+# --- Step 3: hardline cross-entry enforcement (CONTRACT §5/§9) ---------------
+# The hardline judgment is a single reused function; it is enforced
+# independently at three layers so no terminal entry can bypass it:
+#   1. PolicyPermissionGate (before approval)
+#   2. TerminalExecPolicy   (before spawn)
+#   3. TerminalProcessTool  (before write/submit)
+
+_HARDLINE_COMMAND = "rm -rf /"
+_BENIGN_COMMAND = "printf ok"
+
+
+@pytest.mark.parametrize("mode", list(PermissionMode))
+def test_hardline_terminal_denied_under_every_preset(mode: PermissionMode) -> None:
+    # read-only blocks terminal as "not allowed by policy"; the mutating presets
+    # block the same command via the hardline floor. Either way: never ALLOW.
+    gate = PolicyPermissionGate(preset_to_policy(mode), inner=AllowAllPermissionGate())
+
+    decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:term", name="terminal", arguments={"command": _HARDLINE_COMMAND})])
+    )
+
+    assert decision.kind is PermissionDecisionKind.DENY
+
+
+@pytest.mark.parametrize("mode", [PermissionMode.ASK_PERMISSIONS, PermissionMode.ACCEPT_EDITS, PermissionMode.BYPASS_PERMISSIONS])
+def test_hardline_terminal_process_input_denied_under_mutating_presets(mode: PermissionMode) -> None:
+    gate = PolicyPermissionGate(preset_to_policy(mode), inner=AllowAllPermissionGate())
+
+    decision = asyncio.run(
+        gate.evaluate(
+            [
+                ToolCall(
+                    id="call:process",
+                    name="terminal_process",
+                    arguments={"action": "write", "process_id": "terminal-process:fake", "data": _HARDLINE_COMMAND},
+                )
+            ]
+        )
+    )
+
+    assert decision.kind is PermissionDecisionKind.DENY
+    assert decision.suggested_rules[0]["reason"] == "hardline_terminal_process_input"
+
+
+def test_exec_policy_blocks_hardline_independently_of_gate(tmp_path) -> None:
+    # The spawn-boundary layer blocks hardline on its own, without any gate.
+    from pulsara_agent.runtime.terminal.models import TerminalRequest
+    from pulsara_agent.runtime.terminal.policy import ExecPolicyDecisionKind, TerminalExecPolicy
+
+    policy = TerminalExecPolicy(tmp_path)
+
+    blocked = policy.evaluate(TerminalRequest(command=_HARDLINE_COMMAND), current_cwd=tmp_path)
+    allowed = policy.evaluate(TerminalRequest(command=_BENIGN_COMMAND), current_cwd=tmp_path)
+
+    assert blocked.kind is ExecPolicyDecisionKind.BLOCK
+    assert blocked.code == "hardline_terminal_command"
+    assert allowed.kind is ExecPolicyDecisionKind.ALLOW
+
+
+def test_terminal_process_tool_blocks_hardline_input_independently_of_gate(tmp_path) -> None:
+    # The tool-execution layer blocks hardline stdin on its own, even after an
+    # approval-resume path that does not re-run the gate.
+    import json
+
+    from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
+
+    tool = TerminalProcessTool(
+        tmp_path,
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+    )
+
+    result = tool.execute(
+        ToolCall(
+            id="call:process",
+            name="terminal_process",
+            arguments={"action": "submit", "process_id": "terminal-process:fake", "data": _HARDLINE_COMMAND},
+        )
+    )
+    payload = json.loads(result.output)
+
+    assert payload["status"] == "blocked"
+    assert payload["policy_code"] == "hardline_terminal_process_input"
+
+
+def test_all_three_layers_share_one_hardline_judgment(monkeypatch, tmp_path) -> None:
+    # Defense-in-depth, single source of truth: all three enforcement layers
+    # call the SAME is_hardline_terminal_command. Patch each layer's bound
+    # reference to flip a benign command into "hardline" and confirm all three
+    # deny it in lockstep (proving there is no second, divergent judgment).
+    import json
+
+    import pulsara_agent.runtime.permission as permission_mod
+    import pulsara_agent.runtime.terminal.policy as policy_mod
+    import pulsara_agent.tools.builtins.terminal_process as process_mod
+    from pulsara_agent.runtime.terminal.models import TerminalRequest
+    from pulsara_agent.runtime.terminal.policy import ExecPolicyDecisionKind, TerminalExecPolicy
+    from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
+
+    sentinel = "totally_benign_marker_cmd"
+
+    def fake_hardline(command: str) -> bool:
+        return sentinel in command
+
+    monkeypatch.setattr(permission_mod, "is_hardline_terminal_command", fake_hardline)
+    monkeypatch.setattr(policy_mod, "is_hardline_terminal_command", fake_hardline)
+    monkeypatch.setattr(process_mod, "is_hardline_terminal_command", fake_hardline)
+
+    # Layer 1: gate
+    gate = PolicyPermissionGate(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS), inner=AllowAllPermissionGate())
+    gate_decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:t", name="terminal", arguments={"command": sentinel})])
+    )
+    # Layer 2: exec policy
+    exec_decision = TerminalExecPolicy(tmp_path).evaluate(TerminalRequest(command=sentinel), current_cwd=tmp_path)
+    # Layer 3: tool write
+    tool = TerminalProcessTool(tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS))
+    tool_payload = json.loads(
+        tool.execute(
+            ToolCall(
+                id="call:p",
+                name="terminal_process",
+                arguments={"action": "write", "process_id": "terminal-process:fake", "data": sentinel},
+            )
+        ).output
+    )
+
+    assert gate_decision.kind is PermissionDecisionKind.DENY
+    assert exec_decision.kind is ExecPolicyDecisionKind.BLOCK
+    assert tool_payload["policy_code"] == "hardline_terminal_process_input"

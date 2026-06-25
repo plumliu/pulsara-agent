@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -25,7 +26,12 @@ from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import ApprovalResolution, RuntimeSession, ToolApprovalDecision
-from pulsara_agent.runtime.permission import resolve_permission_policy
+from pulsara_agent.runtime.permission import (
+    PermissionMode,
+    parse_permission_mode,
+    preset_to_policy,
+    resolve_permission_policy,
+)
 from pulsara_agent.settings import PulsaraSettings, load_env_file
 from pulsara_agent.tools import build_core_tool_registry
 
@@ -124,22 +130,33 @@ def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.Argume
 
 def _add_host_permission_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
+        "--permission-mode",
+        default=None,
+        choices=tuple(mode.value for mode in PermissionMode),
+        help=(
+            "Permission preset (main path). One of: read-only, ask-permissions, "
+            "accept-edits, bypass-permissions. Defaults to bypass-permissions for run, "
+            "read-only for inspect. Mutually exclusive with the advanced --permission-profile/"
+            "--approval-policy/--terminal-access flags."
+        ),
+    )
+    parser.add_argument(
         "--permission-profile",
         default=None,
         choices=("trusted_host", "workspace_guarded", "read_only"),
-        help="Permission profile. Defaults depend on the host command and workspace kind.",
+        help="[advanced/custom] Raw permission profile. Cannot be combined with --permission-mode.",
     )
     parser.add_argument(
         "--approval-policy",
         default=None,
         choices=("never", "risky_only", "on_request"),
-        help="Approval policy. on_request asks before write and terminal side-effect tools when available.",
+        help="[advanced/custom] Raw approval policy. Cannot be combined with --permission-mode.",
     )
     parser.add_argument(
         "--terminal-access",
         default=None,
         choices=("off", "ask", "allow"),
-        help="Terminal access policy. ask requires approval before each terminal action.",
+        help="[advanced/custom] Raw terminal access policy. Cannot be combined with --permission-mode.",
     )
     return parser
 
@@ -453,14 +470,48 @@ def _active_skill_names_from_args(args) -> frozenset[str]:
     return frozenset(name.strip() for name in getattr(args, "skill", ()) if name.strip())
 
 
+def _env_permission_mode(prefix: str) -> str | None:
+    value = os.environ.get(f"{prefix}_PERMISSION_MODE")
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
 def _permission_policy_from_host_args(args, *, intent: str):
-    workspace_kind = normalize_workspace_kind(args.workspace_kind)
     prefix = getattr(args, "prefix", "PULSARA")
+    raw_profile = getattr(args, "permission_profile", None)
+    raw_approval = getattr(args, "approval_policy", None)
+    raw_terminal = getattr(args, "terminal_access", None)
+    mode = getattr(args, "permission_mode", None) or _env_permission_mode(prefix)
+
+    if mode is not None:
+        custom_flags = [
+            flag
+            for flag, value in (
+                ("--permission-profile", raw_profile),
+                ("--approval-policy", raw_approval),
+                ("--terminal-access", raw_terminal),
+            )
+            if value is not None
+        ]
+        if custom_flags:
+            print(
+                "ERROR: --permission-mode cannot be combined with the advanced flag(s): "
+                f"{', '.join(custom_flags)}. Use a preset OR the custom three-axis flags, not both.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        try:
+            return preset_to_policy(parse_permission_mode(mode))
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+
     return resolve_permission_policy(
-        workspace_kind=workspace_kind,
         intent=intent,
-        profile=getattr(args, "permission_profile", None),
-        approval=getattr(args, "approval_policy", None),
-        terminal=getattr(args, "terminal_access", None),
+        profile=raw_profile,
+        approval=raw_approval,
+        terminal=raw_terminal,
         prefix=prefix,
     )
