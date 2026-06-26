@@ -13,7 +13,7 @@ from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.runtime.hooks import RuntimeHookManager
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy
+from pulsara_agent.runtime.permission import PermissionState
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.terminal import TerminalSessionManager
@@ -127,7 +127,7 @@ class RuntimeSession:
         memory_query=None,
         graph_id: str | None = None,
         memory_read_scopes: frozenset[str] | None = None,
-        permission_policy: EffectivePermissionPolicy | None = None,
+        permission_state: PermissionState | None = None,
     ):
         from pulsara_agent.tools import ToolExecutor
         from pulsara_agent.tools.builtins.registry import build_core_tool_registry
@@ -145,7 +145,7 @@ class RuntimeSession:
                 memory_query=memory_query,
                 graph_id=graph_id,
                 memory_read_scopes=memory_read_scopes,
-                permission_policy=permission_policy,
+                permission_state=permission_state,
             ),
             record_event=record_event,
             artifact_service=self.artifact_service,

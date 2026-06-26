@@ -46,7 +46,11 @@ class TodoTool:
         },
         required=["action"],
     ))
-    is_read_only: bool = False
+    # read-only in the permission sense: todo only mutates agent-local
+    # ephemeral state (_items), with no user-workspace / external / terminal /
+    # durable-memory side effect, so read-only mode allows it. It is NOT
+    # concurrency-safe (it mutates shared _items), so it never runs in parallel.
+    is_read_only: bool = True
     is_concurrency_safe: bool = False
     _items: list[TodoItem] = field(default_factory=list)
     _next_id: int = 1

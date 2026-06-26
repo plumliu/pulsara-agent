@@ -17,6 +17,12 @@ from pulsara_agent.runtime.approval import (
     pending_approval_from_state,
 )
 from pulsara_agent.runtime.agent import AgentRunResult
+from pulsara_agent.runtime.permission import (
+    EffectivePermissionPolicy,
+    PermissionMode,
+    parse_permission_mode,
+    preset_to_policy,
+)
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 
@@ -152,6 +158,36 @@ class HostSession:
 
     def get_pending_approval(self) -> PendingApproval | None:
         return self.pending_approval
+
+    @property
+    def current_permission_mode(self) -> PermissionMode | None:
+        return self.wiring.agent_runtime.permission_mode
+
+    def current_permission_policy(self) -> EffectivePermissionPolicy:
+        return self.wiring.agent_runtime.permission_policy
+
+    def set_permission_mode(self, mode: str | PermissionMode) -> EffectivePermissionPolicy:
+        """Switch the conversation's permission mode at a turn boundary.
+
+        Only the user/host may call this; the agent has no self-switch tool.
+        Rejected while a run is active, a turn is stopping, or an approval is
+        pending, so the switch never corrupts an in-flight turn. Takes effect
+        on the next turn (gate) / next execution (terminal tools)."""
+        if self.closed:
+            raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        if self.pending_approval is not None:
+            raise HostSessionPendingApprovalError(
+                "host session has a pending approval; resolve or deny it before switching mode"
+            )
+        if self._run_lock.locked():
+            raise HostSessionBusyError("host session already has an active run")
+        parsed = parse_permission_mode(mode)
+        policy = preset_to_policy(parsed)
+        self.wiring.agent_runtime.set_permission_policy(policy, mode=parsed)
+        self.last_active_at = time.monotonic()
+        return policy
 
     async def resolve_approval(self, resolution: ApprovalResolution) -> AgentRunResult:
         if self.closed:

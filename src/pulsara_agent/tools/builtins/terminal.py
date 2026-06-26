@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy, TerminalAccess
+from pulsara_agent.runtime.permission import PermissionState, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
 from pulsara_agent.tools.builtins.schemas import (
@@ -29,7 +29,7 @@ class TerminalTool(WorkspaceTool):
     terminal_sessions: TerminalSessionManager | None = None
     owner_host_session_id: str | None = None
     owner_conversation_id: str | None = None
-    permission_policy: EffectivePermissionPolicy | None = None
+    permission_state: PermissionState | None = None
     name: str = "terminal"
     description: str = (
         "Run a shell command inside workspace_root. "
@@ -136,7 +136,7 @@ class TerminalTool(WorkspaceTool):
         command = required_str_arg(call.arguments, "command")
         workdir = str_arg(call.arguments, "workdir")
         session_id = str_arg(call.arguments, "terminal_session_id") or "default"
-        if self.permission_policy is not None and self.permission_policy.terminal is TerminalAccess.OFF:
+        if self.permission_state is not None and self.permission_state.policy.terminal is TerminalAccess.OFF:
             return self._blocked_result(
                 call,
                 command=command,

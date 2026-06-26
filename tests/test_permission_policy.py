@@ -10,9 +10,11 @@ from pulsara_agent.runtime.permission import (
     PermissionDecisionKind,
     PermissionMode,
     PermissionProfile,
+    PermissionState,
     PolicyPermissionGate,
     TerminalAccess,
     default_permission_policy,
+    mode_for_policy,
     parse_permission_mode,
     preset_to_policy,
     resolve_permission_policy,
@@ -615,7 +617,7 @@ def test_terminal_process_tool_blocks_hardline_input_independently_of_gate(tmp_p
 
     tool = TerminalProcessTool(
         tmp_path,
-        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        permission_state=PermissionState.from_policy(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)),
     )
 
     result = tool.execute(
@@ -662,7 +664,10 @@ def test_all_three_layers_share_one_hardline_judgment(monkeypatch, tmp_path) -> 
     # Layer 2: exec policy
     exec_decision = TerminalExecPolicy(tmp_path).evaluate(TerminalRequest(command=sentinel), current_cwd=tmp_path)
     # Layer 3: tool write
-    tool = TerminalProcessTool(tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS))
+    tool = TerminalProcessTool(
+        tmp_path,
+        permission_state=PermissionState.from_policy(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)),
+    )
     tool_payload = json.loads(
         tool.execute(
             ToolCall(
@@ -676,3 +681,104 @@ def test_all_three_layers_share_one_hardline_judgment(monkeypatch, tmp_path) -> 
     assert gate_decision.kind is PermissionDecisionKind.DENY
     assert exec_decision.kind is ExecPolicyDecisionKind.BLOCK
     assert tool_payload["policy_code"] == "hardline_terminal_process_input"
+
+
+# --- Step 4: live mode switching via mutable PermissionState holder ----------
+# A switch mutates the holder in place; the gate reads it fresh each turn, so
+# no rebuild is needed. Tools stay registered (visible-but-blocked).
+
+
+def test_permission_state_holder_drives_gate_live() -> None:
+    state = PermissionState.from_policy(preset_to_policy(PermissionMode.READ_ONLY))
+    gate = PolicyPermissionGate(state, inner=AllowAllPermissionGate())
+
+    # read-only: write denied by the gate (tool still "exists" / is visible).
+    before = asyncio.run(
+        gate.evaluate([ToolCall(id="c1", name="write_file", arguments={"path": "x", "content": "y"})])
+    )
+    assert before.kind is PermissionDecisionKind.DENY
+
+    # Switch the holder to bypass; the same gate instance now allows the write.
+    state.policy = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+    state.mode = PermissionMode.BYPASS_PERMISSIONS
+    after = asyncio.run(
+        gate.evaluate([ToolCall(id="c2", name="write_file", arguments={"path": "x", "content": "y"})])
+    )
+    assert after.kind is PermissionDecisionKind.ALLOW
+
+
+def test_permission_state_switch_preserves_hardline_floor() -> None:
+    state = PermissionState.from_policy(preset_to_policy(PermissionMode.READ_ONLY))
+    gate = PolicyPermissionGate(state, inner=AllowAllPermissionGate())
+    # Switch all the way to bypass; hardline must STILL be denied.
+    state.policy = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+    decision = asyncio.run(
+        gate.evaluate([ToolCall(id="c", name="terminal", arguments={"command": "rm -rf /"})])
+    )
+    assert decision.kind is PermissionDecisionKind.DENY
+    assert decision.suggested_rules[0]["reason"] == "hardline_terminal_command"
+
+
+def test_mode_for_policy_reverse_maps_presets_and_custom() -> None:
+    for mode in PermissionMode:
+        assert mode_for_policy(preset_to_policy(mode)) is mode
+    custom = EffectivePermissionPolicy(
+        profile=PermissionProfile.WORKSPACE_GUARDED,
+        approval=ApprovalPolicy.RISKY_ONLY,
+        terminal=TerminalAccess.OFF,
+    )
+    assert mode_for_policy(custom) is None
+
+
+def test_permission_state_from_policy_infers_mode() -> None:
+    state = PermissionState.from_policy(preset_to_policy(PermissionMode.ACCEPT_EDITS))
+    assert state.mode is PermissionMode.ACCEPT_EDITS
+
+
+# --- Step 4.1: read-only is a fail-closed allowlist (CONTRACT §3) ------------
+
+
+_READ_ONLY_GATE = PolicyPermissionGate(
+    preset_to_policy(PermissionMode.READ_ONLY), inner=AllowAllPermissionGate()
+)
+
+
+def _read_only_decision(name: str, arguments: dict | None = None):
+    return asyncio.run(
+        _READ_ONLY_GATE.evaluate([ToolCall(id=f"call:{name}", name=name, arguments=arguments or {})])
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "remember_claim",
+        "remember_preference",
+        "remember_observation",
+        "remember_action_boundary",
+        "remember_decision",
+    ],
+)
+def test_read_only_denies_remember_tools(name: str) -> None:
+    # The real bug this step closes: durable-memory writes used to leak through
+    # the old denylist. Under the fail-closed allowlist they are denied.
+    assert _read_only_decision(name).kind is PermissionDecisionKind.DENY
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["read_file", "search_files", "artifact_read", "memory_search", "memory_get", "memory_related", "memory_explain", "todo"],
+)
+def test_read_only_allows_allowlist_tools(name: str) -> None:
+    assert _read_only_decision(name).kind is PermissionDecisionKind.ALLOW
+
+
+def test_read_only_denies_unknown_side_effecting_tool() -> None:
+    # fail-closed: a tool not on the allowlist is denied by default, so a future
+    # side-effecting tool cannot leak through read-only.
+    assert _read_only_decision("some_future_side_effect_tool").kind is PermissionDecisionKind.DENY
+
+
+@pytest.mark.parametrize("name", ["write_file", "edit_file", "terminal", "terminal_process"])
+def test_read_only_still_denies_write_and_terminal(name: str) -> None:
+    assert _read_only_decision(name).kind is PermissionDecisionKind.DENY

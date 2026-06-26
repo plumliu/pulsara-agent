@@ -143,8 +143,10 @@ def test_agent_runtime_wiring_threads_permission_policy_to_session_registry(tmp_
 
     assert wiring.agent_runtime.permission_policy is policy
     assert "read_file" in wiring.agent_runtime.tool_executor.registry.names()
-    assert "write_file" not in wiring.agent_runtime.tool_executor.registry.names()
-    assert "terminal" not in wiring.agent_runtime.tool_executor.registry.names()
+    # Visible-but-blocked: gate is the sole authority; tools stay registered
+    # under read-only and are denied at call time, not hidden from the registry.
+    assert "write_file" in wiring.agent_runtime.tool_executor.registry.names()
+    assert "terminal" in wiring.agent_runtime.tool_executor.registry.names()
 
 
 def test_in_memory_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> None:

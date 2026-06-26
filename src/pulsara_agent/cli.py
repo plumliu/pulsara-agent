@@ -19,7 +19,14 @@ from pulsara_agent.capability import (
     sync_bundled_skills,
 )
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.host import HostCore, HostWorkspaceInput, normalize_workspace_kind, resolve_workspace
+from pulsara_agent.host import (
+    HostCore,
+    HostSessionBusyError,
+    HostSessionPendingApprovalError,
+    HostWorkspaceInput,
+    normalize_workspace_kind,
+    resolve_workspace,
+)
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
@@ -28,6 +35,8 @@ from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import ApprovalResolution, RuntimeSession, ToolApprovalDecision
 from pulsara_agent.runtime.permission import (
     PermissionMode,
+    PermissionState,
+    mode_for_policy,
     parse_permission_mode,
     preset_to_policy,
     resolve_permission_policy,
@@ -308,6 +317,31 @@ async def _host_repl(args) -> None:
                 pending = session.get_pending_approval()
                 print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
                 continue
+            if prompt.strip() == ":status":
+                mode = session.current_permission_mode
+                print(
+                    json.dumps(
+                        {
+                            "mode": mode.value if mode is not None else "custom",
+                            "policy": session.current_permission_policy().to_dict(),
+                        },
+                        indent=2,
+                    )
+                )
+                continue
+            if prompt.strip().startswith(":mode"):
+                requested = prompt.strip()[len(":mode"):].strip()
+                if not requested:
+                    allowed = ", ".join(m.value for m in PermissionMode)
+                    print(f"Usage: :mode <preset>  (one of: {allowed})", file=sys.stderr)
+                    continue
+                try:
+                    policy = session.set_permission_mode(requested)
+                except (ValueError, HostSessionBusyError, HostSessionPendingApprovalError) as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    continue
+                print(json.dumps({"mode": requested, "policy": policy.to_dict()}, indent=2))
+                continue
             if prompt.strip() == ":stop":
                 result = await session.stop_current_turn()
                 if result is None:
@@ -351,7 +385,10 @@ async def _host_inspect(args) -> dict[str, object]:
     permission_policy = _permission_policy_from_host_args(args, intent="inspect")
     runtime_session = RuntimeSession(workspace.workspace_root)
     try:
-        registry = build_core_tool_registry(runtime_session, permission_policy=permission_policy)
+        registry = build_core_tool_registry(
+            runtime_session,
+            permission_state=PermissionState.from_policy(permission_policy),
+        )
         resolver = LocalSkillResolver()
         capabilities = resolver.resolve(
             CapabilityResolveContext(
@@ -379,6 +416,11 @@ async def _host_inspect(args) -> dict[str, object]:
         },
         "tools": registry.names(),
         "permissions": permission_policy.to_dict(),
+        "current_mode": (
+            mode_for_policy(permission_policy).value
+            if mode_for_policy(permission_policy) is not None
+            else "custom"
+        ),
         "memory": {
             "graph_id": workspace.memory_domain.graph_id,
             "tools_enabled": sorted(

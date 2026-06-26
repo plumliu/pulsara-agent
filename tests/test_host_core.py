@@ -2282,3 +2282,131 @@ def test_host_core_keeps_project_root_on_close(tmp_path, monkeypatch) -> None:
 
     assert tmp_path.exists()
     assert marker.read_text(encoding="utf-8") == "project"
+
+
+# --- Step 4: conversational permission-mode switching -----------------------
+# Mode is mutable session state, switchable at a turn boundary by the user/host
+# only. Tools stay fully visible across modes; the gate denies at call time.
+
+
+def test_host_session_switch_mode_changes_gate_behavior_next_turn(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ro-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "switch.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    }
+                ]
+            },
+            {"text": "read-only denied"},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bypass-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "switch.txt", "content": "PULSARA_SWITCH_OK\n"}),
+                    }
+                ]
+            },
+            {"text": "bypass wrote"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.READ_ONLY)
+        )
+        first = await session.run_turn("try to write under read-only")
+        denied_absent = not (tmp_path / "switch.txt").exists()
+        # User switches mode mid-conversation (turn boundary).
+        policy = session.set_permission_mode("bypass-permissions")
+        second = await session.run_turn("now write under bypass")
+        return session, first, second, denied_absent, policy
+
+    session, first, second, denied_absent, policy = asyncio.run(run())
+
+    assert first.status.value == "finished"
+    assert denied_absent  # write blocked while read-only
+    assert policy.terminal.value == "allow"
+    assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
+    assert second.status.value == "finished"
+    assert (tmp_path / "switch.txt").read_text() == "PULSARA_SWITCH_OK\n"
+
+
+def test_host_session_switch_mode_rejected_while_pending_approval(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ask-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "pending.txt", "content": "x\n"}),
+                    }
+                ]
+            },
+            {"text": "after approve"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+        )
+        await session.run_turn("write under ask-permissions")
+        assert session.get_pending_approval() is not None
+        # Switching while an approval is pending must be rejected.
+        rejected = False
+        try:
+            session.set_permission_mode("bypass-permissions")
+        except HostSessionPendingApprovalError:
+            rejected = True
+        return session, rejected
+
+    session, rejected = asyncio.run(run())
+    assert rejected
+    # Mode unchanged after the rejected switch.
+    assert session.current_permission_mode is PermissionMode.ASK_PERMISSIONS
+
+
+def test_host_session_switch_mode_preserves_live_terminal_process(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:yield",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "sleep 30", "yield_time_ms": 50}
+                        ),
+                    }
+                ]
+            },
+            {"text": "yielded a process"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+        )
+        try:
+            await session.run_turn("start a long process")
+            live_before = session.has_live_processes
+            # Switch mode; the live terminal process must survive (zero rebuild).
+            session.set_permission_mode("read-only")
+            live_after = session.has_live_processes
+            return live_before, live_after
+        finally:
+            await core.close_session(session.host_session_id)
+
+    live_before, live_after = asyncio.run(run())
+    assert live_before is True
+    assert live_after is True  # process survived the mode switch

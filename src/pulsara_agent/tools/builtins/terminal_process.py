@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy, TerminalAccess
+from pulsara_agent.runtime.permission import PermissionState, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalSessionManager, TerminalStatus
 from pulsara_agent.runtime.terminal.process import ProcessInputError
 from pulsara_agent.runtime.terminal_risk import is_hardline_terminal_command
@@ -33,7 +33,7 @@ DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 class TerminalProcessTool(WorkspaceTool):
     terminal_sessions: TerminalSessionManager | None = None
     owner_host_session_id: str | None = None
-    permission_policy: EffectivePermissionPolicy | None = None
+    permission_state: PermissionState | None = None
     name: str = "terminal_process"
     description: str = (
         "List, inspect, poll, wait for, kill, or send stdin to managed terminal processes returned when terminal yields a process_id. "
@@ -70,7 +70,7 @@ class TerminalProcessTool(WorkspaceTool):
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         action = required_str_arg(call.arguments, "action").strip()
         process_id = _optional_process_id(call.arguments)
-        if self.permission_policy is not None and self.permission_policy.terminal is TerminalAccess.OFF:
+        if self.permission_state is not None and self.permission_state.policy.terminal is TerminalAccess.OFF:
             return self._error_result(
                 call,
                 process_id=process_id,

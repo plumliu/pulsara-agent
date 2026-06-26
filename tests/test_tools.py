@@ -13,6 +13,7 @@ from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
     PermissionProfile,
+    PermissionState,
     TerminalAccess,
 )
 from pulsara_agent.runtime.tool_artifacts import (
@@ -24,6 +25,7 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutor, build_core_tool_registry
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
+from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.registry import ToolRegistry
 
 
@@ -86,64 +88,61 @@ def test_core_tool_registry_can_enable_memory_write_tools(tmp_path) -> None:
     }.issubset(registry.names())
 
 
-def test_core_tool_registry_filters_read_only_builtin_write_and_terminal_tools(tmp_path) -> None:
+def test_core_tool_registry_registers_all_tools_under_read_only(tmp_path) -> None:
+    # PERMISSION_POLICY_CONTRACT: gate is the sole authority. Tools stay fully
+    # registered (visible) under read-only; the gate denies disallowed calls.
     registry = build_core_tool_registry(
         RuntimeSession(tmp_path),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.READ_ONLY,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.OFF,
+        permission_state=PermissionState.from_policy(
+            EffectivePermissionPolicy(
+                profile=PermissionProfile.READ_ONLY,
+                approval=ApprovalPolicy.ON_REQUEST,
+                terminal=TerminalAccess.OFF,
+            )
         ),
     )
 
-    assert registry.names() == ["artifact_read", "read_file", "search_files", "todo"]
+    names = registry.names()
+    assert {"artifact_read", "read_file", "search_files", "todo"}.issubset(names)
+    # Mutating tools remain VISIBLE under read-only (blocked later by the gate).
+    assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(names)
 
 
-def test_core_tool_registry_filters_terminal_and_terminal_process_together(tmp_path) -> None:
+def test_core_tool_registry_keeps_terminal_tools_registered_when_terminal_off(tmp_path) -> None:
     registry = build_core_tool_registry(
         RuntimeSession(tmp_path),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.WORKSPACE_GUARDED,
-            approval=ApprovalPolicy.RISKY_ONLY,
-            terminal=TerminalAccess.OFF,
+        permission_state=PermissionState.from_policy(
+            EffectivePermissionPolicy(
+                profile=PermissionProfile.WORKSPACE_GUARDED,
+                approval=ApprovalPolicy.RISKY_ONLY,
+                terminal=TerminalAccess.OFF,
+            )
         ),
     )
 
-    assert "edit_file" in registry.names()
-    assert "write_file" in registry.names()
-    assert "terminal" not in registry.names()
-    assert "terminal_process" not in registry.names()
+    # terminal/terminal_process are visible even with terminal=off; the gate
+    # denies them at call time rather than hiding them from the registry.
+    assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(registry.names())
 
 
-def test_core_tool_registry_keeps_terminal_tools_when_terminal_access_is_ask(tmp_path) -> None:
-    registry = build_core_tool_registry(
-        RuntimeSession(tmp_path),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.RISKY_ONLY,
-            terminal=TerminalAccess.ASK,
-        ),
-    )
+def test_core_tool_registry_is_constant_across_permission_modes(tmp_path) -> None:
+    # The tools array must be identical across modes so the prompt prefix cache
+    # stays stable when the user switches mode mid-conversation.
+    def names_for(profile, approval, terminal):
+        return set(
+            build_core_tool_registry(
+                RuntimeSession(tmp_path),
+                permission_state=PermissionState.from_policy(
+                    EffectivePermissionPolicy(profile=profile, approval=approval, terminal=terminal)
+                ),
+            ).names()
+        )
 
-    assert "terminal" in registry.names()
-    assert "terminal_process" in registry.names()
-    assert "write_file" in registry.names()
+    read_only = names_for(PermissionProfile.READ_ONLY, ApprovalPolicy.ON_REQUEST, TerminalAccess.OFF)
+    bypass = names_for(PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ALLOW)
+    ask = names_for(PermissionProfile.TRUSTED_HOST, ApprovalPolicy.ON_REQUEST, TerminalAccess.ASK)
 
-
-def test_core_tool_registry_keeps_write_tools_for_on_request_with_terminal_off(tmp_path) -> None:
-    registry = build_core_tool_registry(
-        RuntimeSession(tmp_path),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.WORKSPACE_GUARDED,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.OFF,
-        ),
-    )
-
-    assert "edit_file" in registry.names()
-    assert "write_file" in registry.names()
-    assert "terminal" not in registry.names()
-    assert "terminal_process" not in registry.names()
+    assert read_only == bypass == ask
 
 
 def test_terminal_tool_schema_uses_yield_model_hard_cut(tmp_path) -> None:
@@ -766,10 +765,12 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
 def test_terminal_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> None:
     tool = TerminalTool(
         tmp_path,
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.WORKSPACE_GUARDED,
-            approval=ApprovalPolicy.RISKY_ONLY,
-            terminal=TerminalAccess.OFF,
+        permission_state=PermissionState.from_policy(
+            EffectivePermissionPolicy(
+                profile=PermissionProfile.WORKSPACE_GUARDED,
+                approval=ApprovalPolicy.RISKY_ONLY,
+                terminal=TerminalAccess.OFF,
+            )
         ),
     )
 
@@ -784,10 +785,12 @@ def test_terminal_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> N
 def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> None:
     tool = TerminalProcessTool(
         tmp_path,
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.WORKSPACE_GUARDED,
-            approval=ApprovalPolicy.RISKY_ONLY,
-            terminal=TerminalAccess.OFF,
+        permission_state=PermissionState.from_policy(
+            EffectivePermissionPolicy(
+                profile=PermissionProfile.WORKSPACE_GUARDED,
+                approval=ApprovalPolicy.RISKY_ONLY,
+                terminal=TerminalAccess.OFF,
+            )
         ),
     )
 
@@ -1232,3 +1235,37 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(tmp_pat
     )
 
     assert artifact_info.metadata["terminal_status"] == "error"
+
+
+# --- Step 4.1: read-only allowlist drift guard + todo semantics -------------
+
+
+def test_read_only_allowlist_matches_is_read_only_tools(tmp_path) -> None:
+    # The contract's source of truth is the per-tool is_read_only flag; the gate
+    # uses a name-set constant for self-containment. This test locks them
+    # together: if a new read-only tool is added (or a flag flips) without
+    # updating READ_ONLY_ALLOWED_TOOL_NAMES, this fails.
+    from pulsara_agent.runtime.permission import READ_ONLY_ALLOWED_TOOL_NAMES
+
+    class _StubService:
+        """Registration-only stand-in; the drift test never executes tools."""
+
+    registry = build_core_tool_registry(
+        RuntimeSession(tmp_path),
+        memory_proposal_sink=MemoryProposalSink(),
+        memory_recall_service=_StubService(),
+        memory_query=_StubService(),
+    )
+
+    read_only_tool_names = {tool.name for tool in registry.all() if tool.is_read_only}
+    assert read_only_tool_names == set(READ_ONLY_ALLOWED_TOOL_NAMES)
+
+
+def test_todo_tool_is_read_only_true() -> None:
+    # Semantic redefinition: todo only mutates agent-local ephemeral state, so
+    # it is read-only for permission purposes (allowed under read-only mode).
+    tool = TodoTool()
+    assert tool.is_read_only is True
+    # ...but it is NOT concurrency-safe (mutates shared _items), so the flip
+    # does not let it run in parallel.
+    assert tool.is_concurrency_safe is False

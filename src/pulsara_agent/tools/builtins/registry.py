@@ -7,7 +7,7 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 
 from pulsara_agent.memory.canonical.query import MemoryQuery
 from pulsara_agent.memory.recall.service import MemoryRecallService
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy, is_tool_allowed_by_policy
+from pulsara_agent.runtime.permission import PermissionState
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
@@ -42,38 +42,39 @@ def build_core_tool_registry(
     memory_query: MemoryQuery | None = None,
     graph_id: str | None = None,
     memory_read_scopes: frozenset[str] | None = None,
-    permission_policy: EffectivePermissionPolicy | None = None,
+    permission_state: PermissionState | None = None,
 ) -> ToolRegistry:
     if not isinstance(runtime_session, RuntimeSession):
         raise TypeError("build_core_tool_registry requires a RuntimeSession")
     root = runtime_session.workspace_root
     registry = ToolRegistry()
-    _register_if_allowed(registry, ArtifactReadTool(runtime_session), permission_policy)
-    _register_if_allowed(registry, ReadFileTool(root), permission_policy)
-    _register_if_allowed(registry, SearchFilesTool(root), permission_policy)
-    _register_if_allowed(
-        registry,
+    # PERMISSION_POLICY_CONTRACT: gate is the sole authority. All tools are
+    # registered unconditionally and stay visible across every mode; the
+    # PolicyPermissionGate denies disallowed calls at evaluation time
+    # (visible-but-blocked). This keeps the tools array constant across mode
+    # switches so the prompt prefix cache stays stable.
+    registry.register(ArtifactReadTool(runtime_session))
+    registry.register(ReadFileTool(root))
+    registry.register(SearchFilesTool(root))
+    registry.register(
         TerminalTool(
             root,
             runtime_session.terminal_sessions,
             owner_host_session_id=runtime_session.terminal_owner_host_session_id,
-            permission_policy=permission_policy,
-        ),
-        permission_policy,
+            permission_state=permission_state,
+        )
     )
-    _register_if_allowed(
-        registry,
+    registry.register(
         TerminalProcessTool(
             root,
             runtime_session.terminal_sessions,
             owner_host_session_id=runtime_session.terminal_owner_host_session_id,
-            permission_policy=permission_policy,
-        ),
-        permission_policy,
+            permission_state=permission_state,
+        )
     )
-    _register_if_allowed(registry, EditFileTool(root), permission_policy)
-    _register_if_allowed(registry, WriteFileTool(root), permission_policy)
-    _register_if_allowed(registry, TodoTool(), permission_policy)
+    registry.register(EditFileTool(root))
+    registry.register(WriteFileTool(root))
+    registry.register(TodoTool())
     if memory_recall_service is not None:
         registry.register(
             MemorySearchTool(
@@ -111,9 +112,3 @@ def build_core_tool_registry(
         registry.register(RememberActionBoundaryTool(sink=memory_proposal_sink))
         registry.register(RememberDecisionTool(sink=memory_proposal_sink))
     return registry
-
-
-def _register_if_allowed(registry: ToolRegistry, tool, permission_policy: EffectivePermissionPolicy | None) -> None:
-    if permission_policy is not None and not is_tool_allowed_by_policy(tool.name, permission_policy):
-        return
-    registry.register(tool)

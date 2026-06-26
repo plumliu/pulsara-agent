@@ -356,8 +356,11 @@ provides_tools:
         }
     ]
     assert "read_file" in snapshot["tools"]
-    assert "write_file" not in snapshot["tools"]
-    assert "terminal" not in snapshot["tools"]
+    # Visible-but-blocked: gate is the sole authority, so even under the
+    # read-only inspect mode the tools stay registered/visible.
+    assert "write_file" in snapshot["tools"]
+    assert "terminal" in snapshot["tools"]
+    assert snapshot["current_mode"] == "read-only"
     assert snapshot["memory"] == {
         "graph_id": "graph:user/u_local",
         "tools_enabled": [],

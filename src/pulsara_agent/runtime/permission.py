@@ -97,6 +97,26 @@ FILE_WRITE_TOOL_NAMES = frozenset({"edit_file", "write_file"})
 TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
 TERMINAL_PROCESS_READ_ONLY_ACTIONS = frozenset({"list", "log", "poll", "wait"})
 
+# read-only profile allowlist (PERMISSION_POLICY_CONTRACT §3): only tools that
+# cause no user-workspace / external / terminal / durable-memory side effect.
+# read-only is fail-closed — anything not listed here is denied, so a new
+# side-effecting tool is blocked under read-only by default. This set must stay
+# in sync with the built-in tools whose is_read_only is True (enforced by a
+# drift test). terminal_process observe actions (list/log/poll/wait) are NOT
+# here yet — that action-level exemption is a separate refinement.
+READ_ONLY_ALLOWED_TOOL_NAMES = frozenset(
+    {
+        "read_file",
+        "search_files",
+        "artifact_read",
+        "memory_search",
+        "memory_get",
+        "memory_related",
+        "memory_explain",
+        "todo",
+    }
+)
+
 
 # Named presets are the main product path (PERMISSION_POLICY_CONTRACT §2).
 # read-only's approval is contractually n/a (inert because mutating tools are
@@ -140,6 +160,32 @@ def parse_permission_mode(value: str | PermissionMode) -> PermissionMode:
 
 def preset_to_policy(mode: str | PermissionMode) -> EffectivePermissionPolicy:
     return _PRESET_POLICIES[parse_permission_mode(mode)]
+
+
+def mode_for_policy(policy: EffectivePermissionPolicy) -> PermissionMode | None:
+    """Reverse-map a policy to its preset mode, or None for a custom triple."""
+    for mode, preset in _PRESET_POLICIES.items():
+        if (preset.profile, preset.approval, preset.terminal) == (
+            policy.profile,
+            policy.approval,
+            policy.terminal,
+        ):
+            return mode
+    return None
+
+
+@dataclass(slots=True)
+class PermissionState:
+    """Mutable holder so the gate and terminal tools read one live policy
+    reference. Switching mode mutates .policy/.mode in place; everyone sees it
+    on the next turn. The frozen EffectivePermissionPolicy stays a value."""
+
+    policy: EffectivePermissionPolicy
+    mode: PermissionMode | None = None
+
+    @classmethod
+    def from_policy(cls, policy: EffectivePermissionPolicy) -> "PermissionState":
+        return cls(policy=policy, mode=mode_for_policy(policy))
 
 
 def default_permission_policy(
@@ -195,17 +241,32 @@ def resolve_permission_policy(
 
 
 def is_tool_allowed_by_policy(tool_name: str, policy: EffectivePermissionPolicy) -> bool:
-    if policy.profile is PermissionProfile.READ_ONLY and tool_name in FILE_WRITE_TOOL_NAMES | TERMINAL_TOOL_NAMES:
-        return False
+    # read-only is fail-closed: allow ONLY tools with no external side effect.
+    # Anything not in the allowlist (write/terminal/remember_*/future tools) is
+    # denied, closing PERMISSION_POLICY_CONTRACT §3 literally.
+    if policy.profile is PermissionProfile.READ_ONLY:
+        return tool_name in READ_ONLY_ALLOWED_TOOL_NAMES
+    # terminal=off independently hides terminal tools (custom-policy axis).
     if policy.terminal is TerminalAccess.OFF and tool_name in TERMINAL_TOOL_NAMES:
         return False
     return True
 
 
 class PolicyPermissionGate:
-    def __init__(self, policy: EffectivePermissionPolicy, inner: PermissionGate) -> None:
-        self.policy = policy
+    def __init__(
+        self,
+        policy: EffectivePermissionPolicy | PermissionState,
+        inner: PermissionGate,
+    ) -> None:
+        # Accept a live PermissionState holder (so mode switches are picked up
+        # next turn) or a bare policy (wrapped into a fresh holder for callers
+        # and tests that pass a static policy).
+        self._state = policy if isinstance(policy, PermissionState) else PermissionState.from_policy(policy)
         self.inner = inner
+
+    @property
+    def policy(self) -> EffectivePermissionPolicy:
+        return self._state.policy
 
     async def evaluate(self, calls: list[ToolCall]) -> PermissionDecision:
         for call in calls:

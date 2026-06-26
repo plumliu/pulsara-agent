@@ -44,7 +44,14 @@ class Tool(Protocol):
     name: str
     description: str
     parameters: dict[str, Any]
+    # True iff the tool causes no side effect on the user's workspace, external
+    # systems, terminal processes, or durable memory. Mutating agent-local
+    # ephemeral state (e.g. an in-memory todo list) still counts as read-only.
+    # The read-only permission mode allows exactly the tools with this True
+    # (see PERMISSION_POLICY_CONTRACT §3 and READ_ONLY_ALLOWED_TOOL_NAMES).
     is_read_only: bool
+    # True iff the tool can run concurrently with others in a batch (no shared
+    # mutable state / ordering dependency). Independent of is_read_only.
     is_concurrency_safe: bool
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:

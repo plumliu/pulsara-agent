@@ -57,12 +57,31 @@ _Created: 2026-06-25_
 read-only  ⊂  ask-permissions  ⊂  accept-edits  ⊂  bypass-permissions
 ```
 
-- `read-only`：只能读。文件写 / terminal 工具直接拒绝。
+- `read-only`：只能读 + 维护 agent 本地计划状态。**fail-closed allowlist**——只放行无外部副作用的工具（见 §3.1），其余（文件写 / terminal / durable memory 写 / 未来任何副作用工具）一律拒绝。
 - `ask-permissions`：在 read-only 基础上，放开“写 + terminal”，但每次都要用户确认。
 - `accept-edits`：在 ask-permissions 基础上，文件写自动通过；terminal 仍要确认。
 - `bypass-permissions`：在 accept-edits 基础上，terminal 也自动通过。除 hardline 外什么都不问。
 
 阶梯模型是这份契约对外解释权限的首选心智模型，优先于“三轴矩阵”叙述。
+
+### 3.1 read-only 的含义与 `is_read_only` 字段
+
+read-only 不是“完全只读、什么都不能动”，而是：**模型可以读取上下文、检索记忆、整理/维护本轮或会话内的工作状态，但不能修改用户工作区、启动或控制终端执行、写 durable memory，或产生任何外部副作用。**
+
+强制方式是 **fail-closed allowlist**：read-only profile 下，gate 只放行 `READ_ONLY_ALLOWED_TOOL_NAMES` 里的工具，其余一律 DENY。这与 denylist 相反——新增的副作用工具默认被 read-only 拦住，无需逐个登记到黑名单。
+
+allowlist 的真源是每个工具的 **`is_read_only` 字段**，其语义定义为：
+
+> `is_read_only=True` 表示该工具**不修改用户工作区、外部系统、终端进程或 durable memory**；允许修改 agent-local ephemeral state（如内存里的 todo 列表）。
+
+据此：
+
+- **允许**（`is_read_only=True`）：`read_file` / `search_files` / `artifact_read` / memory 读工具（`memory_search` / `memory_get` / `memory_related` / `memory_explain`）/ `todo`。
+- **拒绝**（`is_read_only=False`）：`write_file` / `edit_file`（工作区写）、`terminal` / `terminal_process`（终端执行/控制）、`remember_*`（durable memory 写）、以及未来任何副作用工具。
+
+`READ_ONLY_ALLOWED_TOOL_NAMES` 常量必须与 registry 里 `is_read_only=True` 的工具集严格一致，由防漂移测试守护（见 §10）。
+
+> **已知后续精化**：`terminal_process` 的只读 action（`list` / `log` / `poll` / `wait`）本质是观察已有进程、无副作用。严格 read-only 语义下它们本应放行，但这需要 action-level classifier，且要改本节"终端类整体不可用"的表述。本版**不开此口**：read-only 下 `terminal_process` 整体被拦。该豁免将作为独立精化放进 read-only（plan mode 据此继承），不是 plan mode 专属 grant。
 
 ---
 
@@ -72,16 +91,20 @@ read-only  ⊂  ask-permissions  ⊂  accept-edits  ⊂  bypass-permissions
 
 | 工具类别 | read-only | ask-permissions | accept-edits | bypass-permissions |
 | --- | --- | --- | --- | --- |
-| read 工具（read_file / search_files 等） | ALLOW | ALLOW | ALLOW | ALLOW |
+| read 工具（read_file / search_files / artifact_read） | ALLOW | ALLOW | ALLOW | ALLOW |
+| memory 读工具（memory_search/get/related/explain） | ALLOW | ALLOW | ALLOW | ALLOW |
+| todo（agent-local 计划状态） | ALLOW | ALLOW | ALLOW | ALLOW |
 | file write（edit_file / write_file） | DENY | WAIT | ALLOW | ALLOW |
+| memory 写工具（remember_*，durable memory） | DENY | ALLOW | ALLOW | ALLOW |
 | terminal（普通命令） | DENY | WAIT | WAIT | ALLOW |
 | terminal_process 只读 action（list/log/poll/wait） | DENY | ALLOW | ALLOW | ALLOW |
 | terminal_process 写 action（write/submit 等） | DENY | WAIT | WAIT | ALLOW |
 | terminal hardline 命令 | DENY | DENY | DENY | DENY |
+| 未在 allowlist 的未来副作用工具 | DENY | ALLOW | ALLOW | ALLOW |
 
 行为要点：
 
-- `read-only` 的 approval 轴是 `n/a`：可变工具在 `is_tool_allowed_by_policy` 阶段就被拒，根本到不了 approval 判定。该预设不对 approval 轴做承诺，阶梯连续性由 profile 轴保证，而不是靠给它填一个无效的 approval 值。
+- `read-only` 的 approval 轴是 `n/a`：read-only 是 fail-closed allowlist（见 §3.1），可变工具在 `is_tool_allowed_by_policy` 阶段就被拒（DENY），根本到不了 approval 判定。该预设不对 approval 轴做承诺，阶梯连续性由 profile 轴保证，而不是靠给它填一个无效的 approval 值。表中 read-only 列的 DENY 包含 `remember_*`（durable memory 写）及任何不在 allowlist 的工具，不只是 file write / terminal。
 - `terminal_process` 的只读 action 豁免（list/log/poll/wait）独立于 approval：只要 profile 允许 terminal 工具存在，它们就不触发审批。这是已实现且要长期保住的行为。
 - `accept-edits` 与 `ask-permissions` 的唯一差别是 file write：前者 `never` 直接放行，后者 `on_request` 等待。
 - `bypass-permissions` 与 `accept-edits` 的唯一差别是 terminal：前者 `allow` 直接放行，后者 `ask` 等待。
@@ -156,6 +179,30 @@ hardline 是这份契约里唯一不可协商的部分。
 
 ---
 
+## 8.5 强制模型：gate 唯一权威（visible-but-blocked）
+
+权限的强制点只有一个：`PolicyPermissionGate`。
+
+- **所有工具一律全量注册、跨所有 mode 可见。** 不按 mode 过滤注册表、不向模型隐藏工具。read-only 下的 write/terminal 工具仍然出现在工具清单里。
+- **不可用 = 调用时被 gate DENY**（visible-but-blocked），不是“工具不存在”。§4 表里的 DENY 全部由 gate 在 evaluate 时判定，不依赖“未注册”。
+- **tools 数组跨所有 mode 恒定。** 这是契约的一部分：模型可见的工具集合在 read-only / ask / accept-edits / bypass 之间完全相同，因此切换 mode 不改变请求前缀，prompt 前缀缓存保持稳定。
+- 这与四个主流 agent（claude-code / codex / hermes / openclaw）的共识一致：没有一家靠“按 mode 藏工具”，全是 visible-but-blocked。
+
+## 8.6 Mode 是可变会话状态
+
+permission mode 不是构造期常量，而是可在对话内切换的会话状态。
+
+- **谁能切**：仅用户 / host。Agent **没有**自切 mode 的工具，杜绝提权。
+- **何时生效**：在**轮边界**切换。运行中（run lock 持有）、有 pending approval、或正在 stopping 时，切换被拒绝（抛 `HostSessionBusyError` / `HostSessionPendingApprovalError`），mode 不变。
+- **怎么生效**：切换只改一个可变 holder（`PermissionState`）的引用；gate 下一轮、终端工具下次执行读到新 policy。**不重建** gate / executor / registry / 终端会话。
+- **不丢状态**：切换**不影响** live 终端进程、event log、artifact——它们挂在 `RuntimeSession`，不随切换重建。
+- **不变量保持**：切到任何 mode（含 bypass）后，§5 hardline 地板照旧全额生效。
+- **入口**：`HostSession.set_permission_mode(mode)` / `HostCore.set_permission_mode(...)` / CLI REPL `:mode <preset>`；`:status` 与 `host inspect` 展示当前 mode（自定义三轴显示为 `custom`）。
+
+> **plan mode 不在本权限轴内。** plan mode 将作为**独立的 workflow 子系统**（后续 Step 5）实现：它通过把 permission mode 切到 read-only 获得强制力（复用本节切换机制），并额外叠加 HITL 反问原语与 agent 发起、用户批准的退出流程。它**不**是 `PermissionMode` 的成员，权限轴始终只有四个预设。
+
+---
+
 ## 9. 禁止事项
 
 - 不允许任何预设或自定义组合把 hardline terminal 命令降级成 WAIT 或 ALLOW。
@@ -165,6 +212,11 @@ hardline 是这份契约里唯一不可协商的部分。
 - 不允许构造 `read_only + terminal≠off` 的组合。
 - 不允许把 bypass-permissions 解释成“无防护”——它只是“不审批”，hardline 地板仍在。
 - 不允许为了新增权限组合而扩展预设数量，除非该组合对应一个真实、命名的产品意图。
+- 不允许按 mode 过滤工具注册表 / 向模型隐藏工具——强制必须走 gate（visible-but-blocked，见 §8.5）。
+- 不允许给 Agent 任何自切 permission mode 的工具（仅用户/host 可切，见 §8.6）。
+- 不允许在 mode 切换时重建 gate/executor/registry/终端会话而丢失 live 终端进程或 event log。
+- 不允许把 read-only 退回 denylist（“只拦某几类、其余放行”）——read-only 必须是 fail-closed allowlist，未来副作用工具默认被拦（见 §3.1）。
+- 不允许把有外部 / 工作区 / 终端 / durable memory 副作用的工具加进 `READ_ONLY_ALLOWED_TOOL_NAMES`，或为绕过 allowlist 把这类工具标成 `is_read_only=True`。
 
 ---
 
@@ -175,6 +227,9 @@ hardline 是这份契约里唯一不可协商的部分。
 - 四个预设各自解析出 §2 表中的精确配置（read-only 断言可变工具被拒，不对 approval 值做断言）。
 - 默认（不选预设）解析为 bypass-permissions。
 - read-only 拒绝 file write 和 terminal，允许 read 工具，且该行为与底层 approval 值无关。
+- **read-only 是 fail-closed allowlist：拒绝 `remember_*`（durable memory 写）与任何不在 `READ_ONLY_ALLOWED_TOOL_NAMES` 的工具；放行 read 工具 / memory 读工具 / `todo`。**
+- **`READ_ONLY_ALLOWED_TOOL_NAMES` 与 registry 里 `is_read_only=True` 的工具集严格一致（防漂移测试）。**
+- **`todo.is_read_only` 为 True，但 `is_concurrency_safe` 仍为 False（语义重定义不改并发行为）。**
 - ask-permissions 对 write 和 terminal 都返回 WAIT，对 read 和 terminal_process 只读 action 返回 ALLOW。
 - accept-edits 对 write 返回 ALLOW、对 terminal 返回 WAIT。
 - bypass-permissions 对 write 和普通 terminal 都返回 ALLOW。
@@ -185,6 +240,12 @@ hardline 是这份契约里唯一不可协商的部分。
 - 自定义三轴 feature 能构造 `risky_only` / `workspace_guarded` 组合，且这些组合仍受 hardline 地板约束。
 - `read_only + terminal≠off` 构造期被拒。
 - 自定义入口是显式 opt-in，不会被默认路径触发。
+- **所有工具跨所有 mode 全量注册、可见；read-only 下 write/terminal 仍在工具清单里，由 gate 在调用时 DENY（visible-but-blocked）。**
+- **tools 数组在 read-only / ask / accept-edits / bypass 下集合完全相同（前缀缓存稳定）。**
+- **`set_permission_mode` 在轮边界成功切换，切后下一轮 gate 行为随新 mode 变化。**
+- **运行中 / pending approval / stopping 时 `set_permission_mode` 被拒，mode 不变。**
+- **切换 mode 后 live 终端进程与 event log 不丢（零重建）。**
+- **切到 bypass 后 hardline 仍 DENY。**
 
 ---
 

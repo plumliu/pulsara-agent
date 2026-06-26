@@ -224,7 +224,7 @@ def test_real_agent_runtime_completes_tool_loop_with_responses_api(tmp_path):
     assert "PULSARA_RESPONSES_TOOL_OK" in result["final_text"]
 
 
-def test_real_agent_runtime_read_only_policy_hides_write_and_terminal_tools(tmp_path):
+def test_real_agent_runtime_read_only_policy_keeps_tools_visible_but_blocks_them(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
 
@@ -233,7 +233,11 @@ def test_real_agent_runtime_read_only_policy_hides_write_and_terminal_tools(tmp_
     assert result["status"] == "finished"
     assert result["stop_reason"] == "final"
     assert result["errors"] == []
-    assert result["registry_names"] == ["artifact_read", "read_file", "search_files", "todo"]
+    # Visible-but-blocked: write/terminal tools stay registered under read-only
+    # (gate denies them at call time); they are NOT hidden from the registry.
+    assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(
+        set(result["registry_names"])
+    )
     assert result["tool_names"] == ["read_file"]
     assert "PULSARA_PERMISSION_READ_ONLY_OK" in result["final_text"]
 
@@ -282,8 +286,9 @@ def test_real_host_core_on_request_write_approval_completes(tmp_path):
     assert result["pending_tool_names"] in (["write_file"], ["edit_file"])
     assert result["file_text"] == "PULSARA_ON_REQUEST_WRITE_OK\n"
     assert "PULSARA_ON_REQUEST_WRITE_OK" in result["final_text"]
-    assert "terminal" not in result["registry_names"]
-    assert "terminal_process" not in result["registry_names"]
+    # Visible-but-blocked: terminal tools stay registered even with terminal=off.
+    assert "terminal" in result["registry_names"]
+    assert "terminal_process" in result["registry_names"]
     assert result["model_end_count"] >= 2
 
 

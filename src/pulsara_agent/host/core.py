@@ -104,6 +104,14 @@ class HostCore:
         session = await self.get_session(host_session_id)
         return await session.stop_current_turn(reason=reason)
 
+    async def set_permission_mode(
+        self,
+        host_session_id: str,
+        mode: str,
+    ):
+        session = await self.get_session(host_session_id)
+        return session.set_permission_mode(mode)
+
     async def stream_approval_resolution(self, host_session_id: str, resolution: ApprovalResolution):
         session = await self.get_session(host_session_id)
         async for event in session.stream_approval_resolution(resolution):

@@ -51,10 +51,13 @@ from pulsara_agent.runtime.loop_helpers import (
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     EffectivePermissionPolicy,
+    PermissionMode,
+    PermissionState,
     PolicyPermissionGate,
     PermissionDecisionKind,
     PermissionGate,
     default_permission_policy,
+    mode_for_policy,
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
@@ -132,9 +135,13 @@ class AgentRuntime:
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
         self.tool_result_persistence_hook = tool_result_persistence_hook
-        self.permission_policy = permission_policy or default_permission_policy()
+        policy = permission_policy or default_permission_policy()
+        # Mutable holder shared by the gate and the terminal tools, so a
+        # mid-conversation mode switch (set_permission_policy) is picked up by
+        # everyone on the next turn without rebuilding the gate/executor/registry.
+        self._permission_state = PermissionState.from_policy(policy)
         self.permission_gate = PolicyPermissionGate(
-            self.permission_policy,
+            self._permission_state,
             inner=permission_gate or AllowAllPermissionGate(),
         )
         self.model_role = model_role
@@ -150,8 +157,28 @@ class AgentRuntime:
             memory_query=getattr(self.memory_hooks, "memory_query", None),
             graph_id=getattr(self.memory_hooks, "graph_id", None),
             memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
-            permission_policy=self.permission_policy,
+            permission_state=self._permission_state,
         )
+
+    @property
+    def permission_policy(self) -> EffectivePermissionPolicy:
+        return self._permission_state.policy
+
+    @property
+    def permission_mode(self) -> PermissionMode | None:
+        return self._permission_state.mode
+
+    def set_permission_policy(
+        self,
+        policy: EffectivePermissionPolicy,
+        *,
+        mode: PermissionMode | None = None,
+    ) -> None:
+        """Swap the live permission policy. Takes effect on the next turn for
+        the gate and on next execution for the terminal tools. Nothing is
+        rebuilt — live terminal processes and the event log are unaffected."""
+        self._permission_state.policy = policy
+        self._permission_state.mode = mode if mode is not None else mode_for_policy(policy)
 
     async def run_task(
         self,
