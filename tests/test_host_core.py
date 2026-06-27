@@ -1677,6 +1677,7 @@ def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monk
 
 
 def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -> None:
+    expected_plan_text = "1. Edit file. 2. Run tests."
     transport = ScriptedTransport(
         [
             {
@@ -1684,7 +1685,7 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
                     {
                         "id": "call:exit",
                         "name": "exit_plan",
-                        "arguments": json.dumps({"plan": "1. Edit file. 2. Run tests.", "summary": "edit and test"}),
+                        "arguments": json.dumps({"plan": expected_plan_text, "summary": "edit and test"}),
                     }
                 ]
             },
@@ -1725,6 +1726,11 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
     exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
     assert exited[0].source == "approved_exit_plan"
     assert exited[0].restored_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    assert exited[0].accepted_plan_artifact_id
+    assert session.plan_state.latest_accepted_plan_artifact_id == exited[0].accepted_plan_artifact_id
+    assert session.wiring.runtime_wiring.runtime_session.archive.get_text(
+        exited[0].accepted_plan_artifact_id
+    ) == expected_plan_text
     post_approval_context = _context_text(transport.contexts[1])
     assert "Plan workflow is active" not in post_approval_context
     assert "You are still in Plan workflow" not in post_approval_context

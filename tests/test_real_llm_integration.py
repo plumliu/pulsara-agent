@@ -313,6 +313,7 @@ def test_real_host_core_plan_mode_exit_plan_round_trip(tmp_path):
     assert result["plan_entered_sources"] == ["user"]
     assert result["exit_decisions"] == ["approve"]
     assert result["plan_exited_sources"] == ["approved_exit_plan"]
+    assert result["accepted_plan_artifact_id"]
     assert result["plan_active_after"] is False
     assert result["mode_after_approval"] == PermissionMode.BYPASS_PERMISSIONS.value
     assert result["final_text"] == "PULSARA_PLAN_MODE_OK"
@@ -1386,6 +1387,14 @@ async def _run_real_host_core_plan_mode_smoke(tmp_path: Path) -> dict:
                 ],
                 "exit_decisions": [event.decision for event in events if isinstance(event, PlanExitResolvedEvent)],
                 "plan_exited_sources": [event.source for event in events if isinstance(event, PlanModeExitedEvent)],
+                "accepted_plan_artifact_id": next(
+                    (
+                        event.accepted_plan_artifact_id
+                        for event in events
+                        if isinstance(event, PlanModeExitedEvent) and event.accepted_plan_artifact_id
+                    ),
+                    None,
+                ),
                 "plan_active_after": session.plan_state.active,
                 "mode_after_approval": (
                     session.current_permission_mode.value if session.current_permission_mode is not None else None
@@ -1418,6 +1427,14 @@ async def _run_real_host_core_plan_mode_smoke(tmp_path: Path) -> dict:
             "plan_exited_sources": [
                 event.source for event in first_run_events if isinstance(event, PlanModeExitedEvent)
             ],
+            "accepted_plan_artifact_id": next(
+                (
+                    event.accepted_plan_artifact_id
+                    for event in first_run_events
+                    if isinstance(event, PlanModeExitedEvent) and event.accepted_plan_artifact_id
+                ),
+                None,
+            ),
             "plan_active_after": session.plan_state.active,
             "mode_after_approval": (
                 session.current_permission_mode.value if session.current_permission_mode is not None else None

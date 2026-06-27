@@ -684,29 +684,47 @@ class AgentRuntime:
                 yield await self._mark_plan_budget_exceeded(state, kind="exit_revision")
         if resolution.decision == "approve":
             plan_state = self._plan_state(state)
+            event_context = self._event_context(state)
+            accepted_summary = str(payload.get("summary") or "")
+            accepted_plan_text = str(payload.get("plan_text") or "")
+            accepted_artifact_id = _accepted_plan_artifact_id(
+                event_context.run_id,
+                exit_request_id,
+            )
+            self.runtime_session.archive.put_text(
+                accepted_artifact_id,
+                accepted_plan_text,
+                session_id=self.runtime_session.runtime_session_id,
+                run_id=event_context.run_id,
+                media_type="text/plain; charset=utf-8",
+                metadata={
+                    "kind": "accepted_plan",
+                    "exit_request_id": exit_request_id,
+                    "tool_call_id": tool_call_id,
+                    "summary": accepted_summary,
+                },
+            )
             restored_mode = plan_state.pre_plan_permission_mode
             restored_policy = self._policy_from_plan_state(plan_state)
             self.set_permission_policy(
                 restored_policy,
                 mode=parse_permission_mode(restored_mode) if restored_mode is not None else None,
             )
-            accepted_summary = str(payload.get("summary") or "")
-            accepted_artifact_id = payload.get("plan_artifact_id")
             yield await self.runtime_session.emit(
                 PlanModeExitedEvent(
-                    **self._event_context(state).event_fields(),
+                    **event_context.event_fields(),
                     source="approved_exit_plan",
                     exit_request_id=exit_request_id,
                     restored_permission_mode=restored_mode,
                     restored_permission_policy=restored_policy.to_dict(),
                     accepted_plan_summary=accepted_summary,
-                    accepted_plan_artifact_id=accepted_artifact_id if isinstance(accepted_artifact_id, str) else None,
+                    accepted_plan_artifact_id=accepted_artifact_id,
                 ),
                 state=state,
             )
             plan_state.finish(
                 accepted_plan_summary=accepted_summary,
-                accepted_plan_artifact_id=accepted_artifact_id if isinstance(accepted_artifact_id, str) else None,
+                accepted_plan_artifact_id=accepted_artifact_id,
             )
             _remove_plan_runtime_instructions(state)
         output = json.dumps(
@@ -1583,3 +1601,11 @@ def _remove_plan_runtime_instructions(state: LoopState) -> None:
         for message in state.messages
         if message.metadata.get("runtime_instruction") not in {"plan_entry", "plan_active"}
     ]
+
+
+def _accepted_plan_artifact_id(run_id: str, exit_request_id: str) -> str:
+    return f"artifact:plan:{_sanitize_artifact_part(run_id)}:{_sanitize_artifact_part(exit_request_id)}:accepted"
+
+
+def _sanitize_artifact_part(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip()) or "unknown"

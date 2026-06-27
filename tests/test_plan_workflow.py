@@ -5,6 +5,7 @@ from pulsara_agent.runtime import reduce_plan_workflow_state
 
 def test_plan_workflow_reducer_tracks_active_and_exited_state() -> None:
     ctx = EventContext(run_id="run:plan", turn_id="turn:plan", reply_id="reply:plan")
+    accepted_artifact_id = "artifact:plan:run_plan:plan_exit_1:accepted"
     log = InMemoryEventLog()
     log.extend(
         [
@@ -30,7 +31,7 @@ def test_plan_workflow_reducer_tracks_active_and_exited_state() -> None:
                     "terminal_access": "allow",
                 },
                 accepted_plan_summary="accepted summary",
-                accepted_plan_artifact_id="artifact:plan",
+                accepted_plan_artifact_id=accepted_artifact_id,
             ),
         ]
     )
@@ -40,7 +41,7 @@ def test_plan_workflow_reducer_tracks_active_and_exited_state() -> None:
     assert state.active is False
     assert state.pre_plan_permission_mode is None
     assert state.latest_accepted_plan_summary == "accepted summary"
-    assert state.latest_accepted_plan_artifact_id == "artifact:plan"
+    assert state.latest_accepted_plan_artifact_id == accepted_artifact_id
 
 
 def test_plan_workflow_reducer_restores_active_state_after_enter() -> None:

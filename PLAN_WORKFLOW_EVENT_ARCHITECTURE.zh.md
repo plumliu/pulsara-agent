@@ -1007,6 +1007,7 @@ class PlanWorkflowState:
    - `active=False`
    - 清空 pre-plan 字段
    - 保存 latest accepted plan summary/artifact（仅当 `source="approved_exit_plan"`）
+   - `accepted_plan_artifact_id` 是 approve 时写入 `ArtifactStore` 的 durable pointer，不是预留字段
 4. `PlanQuestionAskedEvent` / `PlanQuestionAnsweredEvent`：
    - 不改变 plan active 状态。
 5. `PlanExitRequestedEvent` / `PlanExitResolvedEvent`：
@@ -1163,3 +1164,4 @@ Plan workflow 可以接入当前事件系统，但接入点不是复用 approval
 - V1 不做 control run；用户 `:plan` / Plan 按钮在 host 侧同步切 read-only，并在下一次真实 run 中补发 `PlanModeEnteredEvent(source="user")`。
 - Plan 期间不写 workspace plan file；只写 control-plane state。
 - 最终 plan 的权威事实是用户批准后的 `PlanModeExitedEvent`，而不是 todo 或普通 assistant text。
+- 被批准 plan 的原文由 approve 路径同步写入 `ArtifactStore`；`accepted_plan_artifact_id` / `latest_accepted_plan_artifact_id` 指向这份 durable plan artifact。
