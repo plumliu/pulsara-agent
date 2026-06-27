@@ -200,6 +200,29 @@ def test_recall_backend_unavailable_enters_short_cooldown() -> None:
     assert backend.call_count == 1
 
 
+def test_memory_search_unavailable_payload_has_no_free_text_fallback() -> None:
+    service = LexicalMemoryRecallService(_FailingMemoryQuery())
+    search = MemorySearchTool(recall=service)
+
+    payload = json.loads(
+        search.execute(
+            ToolCall(
+                id="call:memory-search-unavailable",
+                name="memory_search",
+                arguments={"query": "concise summaries"},
+            )
+        ).output
+    )
+
+    assert set(payload) == {"status", "reason", "warnings", "can_retry"}
+    assert payload["status"] == "unavailable"
+    assert payload["reason"] == "recall_backend_unavailable"
+    assert payload["can_retry"] is False
+    assert payload["warnings"][0].startswith("recall_backend_unavailable:RuntimeError")
+    assert "fallback" not in payload
+    assert "guidance" not in payload
+
+
 def test_projection_echo_valid_candidate_is_not_written_back_to_pool() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()

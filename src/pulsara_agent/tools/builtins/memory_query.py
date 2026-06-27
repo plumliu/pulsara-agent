@@ -111,9 +111,8 @@ class MemorySearchTool:
         if result.status is RecallStatus.UNAVAILABLE:
             payload = {
                 "status": result.status.value,
+                "reason": "recall_backend_unavailable",
                 "warnings": list(result.warnings),
-                "guidance": list(result.guidance),
-                "fallback": "history_search_or_current_files",
                 "can_retry": False,
             }
         elif result.status is RecallStatus.EMPTY:

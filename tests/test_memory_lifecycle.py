@@ -9,7 +9,7 @@ import pytest
 
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.event import EventType
-from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
+from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.memory import PostgresMemoryQuery
 from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
@@ -19,24 +19,31 @@ from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 
 
-def test_in_memory_lifecycle_supersede_updates_status_and_relation() -> None:
-    graph = InMemoryGraphStore()
+def test_postgres_lifecycle_supersede_updates_status_and_relation() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    graph = PostgresGraphStore(dsn=dsn)
     lifecycle = MemoryLifecycle(graph=graph, mutable=graph)
-    graph.put_jsonld(_preference("preference:old", "The user prefers verbose summaries."))
-    graph.put_jsonld(_preference("preference:new", "The user prefers concise summaries."))
+    try:
+        graph.put_jsonld(_preference("preference:old", "The user prefers verbose summaries."), graph_id=graph_id)
+        graph.put_jsonld(_preference("preference:new", "The user prefers concise summaries."), graph_id=graph_id)
 
-    events = lifecycle.supersede(
-        old_id="preference:old",
-        new_id="preference:new",
-        governance_batch_id="governance:test:lifecycle",
-    )
+        events = lifecycle.supersede(
+            old_id="preference:old",
+            new_id="preference:new",
+            governance_batch_id="governance:test:lifecycle",
+            graph_id=graph_id,
+        )
 
-    old_doc = graph.get_jsonld("preference:old")
-    new_doc = graph.get_jsonld("preference:new")
-    assert old_doc[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
-    assert {"@id": "preference:old"} in new_doc[memory.SUPERSEDES.name]
-    assert events[0].memory_id == "preference:old"
-    assert events[0].superseded_by == "preference:new"
+        old_doc = graph.get_jsonld("preference:old", graph_id=graph_id)
+        new_doc = graph.get_jsonld("preference:new", graph_id=graph_id)
+        assert old_doc[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
+        assert {"@id": "preference:old"} in new_doc[memory.SUPERSEDES.name]
+        assert events[0].memory_id == "preference:old"
+        assert events[0].superseded_by == "preference:new"
+    finally:
+        graph.delete_graph(graph_id)
 
 
 def test_postgres_set_status_keeps_graph_document_and_memory_projection_in_sync() -> None:
@@ -101,32 +108,39 @@ def test_postgres_lifecycle_superseded_node_is_not_recalled_and_edge_is_material
         store.delete_graph(graph_id)
 
 
-def test_lifecycle_link_contradiction_keeps_both_nodes_active_and_adds_edges() -> None:
-    graph = InMemoryGraphStore()
+def test_postgres_lifecycle_link_contradiction_keeps_both_nodes_active_and_adds_edges() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    graph = PostgresGraphStore(dsn=dsn)
     lifecycle = MemoryLifecycle(graph=graph, mutable=graph)
-    graph.put_jsonld(_preference("preference:left", "The user prefers verbose summaries."))
-    graph.put_jsonld(_preference("preference:right", "The user prefers concise summaries."))
+    try:
+        graph.put_jsonld(_preference("preference:left", "The user prefers verbose summaries."), graph_id=graph_id)
+        graph.put_jsonld(_preference("preference:right", "The user prefers concise summaries."), graph_id=graph_id)
 
-    events = lifecycle.link_contradiction(
-        left_id="preference:left",
-        right_id="preference:right",
-        governance_batch_id="governance:test:contradiction",
-    )
+        events = lifecycle.link_contradiction(
+            left_id="preference:left",
+            right_id="preference:right",
+            governance_batch_id="governance:test:contradiction",
+            graph_id=graph_id,
+        )
 
-    left_doc = graph.get_jsonld("preference:left")
-    right_doc = graph.get_jsonld("preference:right")
-    assert left_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
-    assert right_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
-    assert {"@id": "preference:right"} in left_doc[memory.CONTRADICTS.name]
-    assert {"@id": "preference:left"} in right_doc[memory.CONTRADICTS.name]
-    assert [event.type for event in events] == [
-        EventType.MEMORY_CONTRADICTION_LINKED,
-        EventType.MEMORY_CONTRADICTION_LINKED,
-    ]
-    assert [(event.memory_id, event.contradicts) for event in events] == [
-        ("preference:left", "preference:right"),
-        ("preference:right", "preference:left"),
-    ]
+        left_doc = graph.get_jsonld("preference:left", graph_id=graph_id)
+        right_doc = graph.get_jsonld("preference:right", graph_id=graph_id)
+        assert left_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert right_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
+        assert {"@id": "preference:right"} in left_doc[memory.CONTRADICTS.name]
+        assert {"@id": "preference:left"} in right_doc[memory.CONTRADICTS.name]
+        assert [event.type for event in events] == [
+            EventType.MEMORY_CONTRADICTION_LINKED,
+            EventType.MEMORY_CONTRADICTION_LINKED,
+        ]
+        assert [(event.memory_id, event.contradicts) for event in events] == [
+            ("preference:left", "preference:right"),
+            ("preference:right", "preference:left"),
+        ]
+    finally:
+        graph.delete_graph(graph_id)
 
 
 def _preference(memory_id: str, statement: str) -> dict:

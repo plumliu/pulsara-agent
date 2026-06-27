@@ -751,15 +751,17 @@ canonical durable-memory recall 设计出来后，并没有立刻吞掉所有旧
 
 #### 6.7.4 能不能 hard cut
 
-**能收，但不应立刻删。**
+**已 hard cut（2026-06-27）。** 此前判断是「能收但不应立刻删」，后改判：自由文本退路即便不变成沉默失败，也仍在语用上把模型导回旧检索路径，与「canonical 是唯一答案」的目标冲突，因此现在就删，收敛成结构化 degraded-mode。
 
-只要 recall backend 还可能不可用，这个 fallback 指引就是必要的用户可恢复路径。真正能 cut 的是：等 recall backend 足够稳定后，把这条退路移成更明确的结构化降级，而不是继续让它以自由文本 fallback 形态长期存在。
+落地后的目标形状（契约见 [contracts/MEMORY_SURFACES_CONTRACT.zh.md](contracts/MEMORY_SURFACES_CONTRACT.zh.md) §5）：`memory_search` 在 backend 不可用时只返回 `{status: "unavailable", reason: "recall_backend_unavailable", warnings, can_retry: false}`，不再带 `fallback` 自由文本，也不再带把模型导回 history search / current files 的自然语言 guidance。empty（backend 正常但无命中）仍保留结果解释 guidance，因为那不是 fallback。
 
-#### 6.7.5 推荐 cut 顺序
+#### 6.7.5 cut 记录
 
-1. 先保留 `memory_search` 的显式 fallback 指引，别让 backend 不可用时变成沉默失败。
-2. 再把 fallback 退路结构化成更明确的 degraded-mode 契约。
-3. 最后当 recall 真的稳定后，再决定是否还能删掉这条退路。
+1. ~~先保留 `memory_search` 的显式 fallback 指引~~ → 改判：直接删 `fallback: history_search_or_current_files`。
+2. ~~再把 fallback 退路结构化~~ → 已结构化为 `{status, reason, warnings, can_retry}`，与 `memory_get`/`memory_related`/`memory_explain` 的 unavailable payload 同骨架。
+3. 同时删除 recall service UNAVAILABLE 分支的自然语言 guidance，避免 payload 无 fallback 字段但自由文本仍导回旧路径。
+
+degraded 语义已落为冻结契约，不再作为待办债务。
 
 ### 6.8 额外债务：run timeline 的 persisted snapshot 投影
 

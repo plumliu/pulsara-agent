@@ -343,7 +343,7 @@ async def _run_real_pr4_dogfood_llm_user_small_loop(
     )
     settings = _load_settings_for_real_llm()
     simulator = RealLLMUserSimulator(settings)
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = None
     failed = False
     try:
@@ -417,7 +417,7 @@ async def _run_real_pr4_dogfood_llm_user_long_session(
     )
     settings = _load_settings_for_real_llm()
     simulator = RealLLMUserSimulator(settings)
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = None
     failed = False
     try:

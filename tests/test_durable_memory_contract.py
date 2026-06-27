@@ -1,65 +1,29 @@
-"""Cross-store contract tests for durable memory submit_* flows.
-
-Each test runs against both InMemoryGraphStore and (when available) a live
-Oxigraph server, to guard against list/dict degradation of edge properties
-on round-trip.
-"""
+"""Postgres contract tests for durable memory submit_* flows."""
 
 from __future__ import annotations
 
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Iterator
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from pulsara_agent.entities.memory import Decision
-from pulsara_agent.graph import InMemoryGraphStore, OxigraphGraphStore
+from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
+from pulsara_agent.settings import StorageConfig
 
 
-OXIGRAPH_URL = "http://localhost:7878"
-
-
-def oxigraph_available() -> bool:
-    query = urllib.parse.urlencode({"query": "ASK { ?s ?p ?o }"}).encode("utf-8")
-    request = urllib.request.Request(
-        f"{OXIGRAPH_URL}/query",
-        data=query,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=1):
-            return True
-    except (OSError, urllib.error.URLError):
-        return False
-
-
-@pytest.fixture(
-    params=[
-        "in_memory",
-        pytest.param(
-            "oxigraph",
-            marks=pytest.mark.skipif(
-                not oxigraph_available(),
-                reason="Oxigraph is not running at http://localhost:7878",
-            ),
-        ),
-    ]
-)
-def graph_store(request) -> Iterator[tuple[object, str]]:
+@pytest.fixture
+def graph_store() -> Iterator[tuple[object, str]]:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
-    if request.param == "in_memory":
-        yield InMemoryGraphStore(), graph_id
-        return
-    store = OxigraphGraphStore(OXIGRAPH_URL)
+    store = PostgresGraphStore(dsn=dsn)
     try:
         yield store, graph_id
     finally:
@@ -69,7 +33,7 @@ def graph_store(request) -> Iterator[tuple[object, str]]:
 def _ledger(store: object, graph_id: str) -> ExecutionEvidenceLedger:
     return ExecutionEvidenceLedger(
         graph=store,
-        archive=InMemoryArchiveStore(),
+        archive=PostgresArtifactStore(dsn=StorageConfig.from_env().postgres_dsn),
         gate=MemoryWriteGate(),
         graph_id=graph_id,
     )
@@ -90,6 +54,13 @@ def _seed_evidence(ledger: ExecutionEvidenceLedger, *, scope: str) -> str:
         scope=scope,
     )
     return evidence.evidence_id
+
+
+def _connect_or_skip(dsn: str):
+    try:
+        return psycopg.connect(dsn, connect_timeout=2)
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def test_decision_single_element_edges_round_trip(graph_store) -> None:

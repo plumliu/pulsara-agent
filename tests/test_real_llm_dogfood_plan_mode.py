@@ -108,7 +108,7 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
         policy=policy.to_dict(),
     )
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = None
     failed = False
     try:

@@ -84,7 +84,6 @@ class LexicalMemoryRecallService(MemoryRecallService):
             result = RecallResult(
                 status=RecallStatus.UNAVAILABLE,
                 warnings=("recall_backend_cooldown",),
-                guidance=("Use current tools or history search if the answer needs verification.",),
             )
             self._record_trace(
                 query,
@@ -102,7 +101,6 @@ class LexicalMemoryRecallService(MemoryRecallService):
             result = RecallResult(
                 status=RecallStatus.UNAVAILABLE,
                 warnings=(f"recall_backend_unavailable:{type(exc).__name__}: {exc}",),
-                guidance=("Use current tools or history search if the answer needs verification.",),
             )
             self._record_trace(
                 query,

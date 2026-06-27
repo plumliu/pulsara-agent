@@ -1,12 +1,30 @@
+from uuid import uuid4
+
+import psycopg
+import pytest
+
 from pulsara_agent.entities.memory import ActionBoundary, Observation, Preference
-from pulsara_agent.graph import InMemoryGraphStore
+from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory
+from pulsara_agent.settings import StorageConfig
 
 
-def test_preference_round_trips() -> None:
-    graph = InMemoryGraphStore()
+@pytest.fixture
+def graph_store():
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph = PostgresGraphStore(dsn=dsn)
+    graph_id = f"graph:test:{uuid4().hex}"
+    try:
+        yield graph, graph_id
+    finally:
+        graph.delete_graph(graph_id)
+
+
+def test_preference_round_trips(graph_store) -> None:
+    graph, graph_id = graph_store
     preference = Preference(
         id="preference:tabs",
         statement="Prefer tabs over spaces.",
@@ -19,17 +37,17 @@ def test_preference_round_trips() -> None:
         updated_at=utc_now(),
         gate_reason="accepted",
     )
-    graph.put_jsonld(preference.to_jsonld())
+    graph.put_jsonld(preference.to_jsonld(), graph_id=graph_id)
 
-    doc = graph.get_jsonld("preference:tabs")
+    doc = graph.get_jsonld("preference:tabs", graph_id=graph_id)
     assert doc == preference.to_jsonld()
     assert doc["@type"] == [memory.PREFERENCE.name]
     assert doc[memory.STATEMENT.name] == "Prefer tabs over spaces."
-    assert [d["@id"] for d in graph.find_by_type(memory.PREFERENCE)] == ["preference:tabs"]
+    assert [d["@id"] for d in graph.find_by_type(memory.PREFERENCE, graph_id=graph_id)] == ["preference:tabs"]
 
 
-def test_action_boundary_round_trips_with_conditions() -> None:
-    graph = InMemoryGraphStore()
+def test_action_boundary_round_trips_with_conditions(graph_store) -> None:
+    graph, graph_id = graph_store
     boundary = ActionBoundary(
         id="action-boundary:no-force-push",
         statement="Never force-push to main.",
@@ -44,17 +62,17 @@ def test_action_boundary_round_trips_with_conditions() -> None:
         updated_at=utc_now(),
         gate_reason="accepted",
     )
-    graph.put_jsonld(boundary.to_jsonld())
+    graph.put_jsonld(boundary.to_jsonld(), graph_id=graph_id)
 
-    doc = graph.get_jsonld("action-boundary:no-force-push")
+    doc = graph.get_jsonld("action-boundary:no-force-push", graph_id=graph_id)
     assert doc == boundary.to_jsonld()
     assert doc["@type"] == [memory.ACTION_BOUNDARY.name]
     assert doc[memory.APPLIES_WHEN.name] == "branch is main"
     assert doc[memory.DO_NOT_APPLY_WHEN.name] == "user explicitly authorizes"
 
 
-def test_observation_round_trips() -> None:
-    graph = InMemoryGraphStore()
+def test_observation_round_trips(graph_store) -> None:
+    graph, graph_id = graph_store
     observation = Observation(
         id="observation:ci-flaky",
         statement="The integration suite is flaky on macOS runners.",
@@ -68,12 +86,19 @@ def test_observation_round_trips() -> None:
         gate_reason="accepted",
         evidence=(NodeRef("evidence:ci-flaky"),),
     )
-    graph.put_jsonld(observation.to_jsonld())
+    graph.put_jsonld(observation.to_jsonld(), graph_id=graph_id)
 
-    doc = graph.get_jsonld("observation:ci-flaky")
+    doc = graph.get_jsonld("observation:ci-flaky", graph_id=graph_id)
     assert doc == observation.to_jsonld()
     assert doc["@type"] == [memory.OBSERVATION.name]
     assert doc[memory.HAS_EVIDENCE.name] == [{"@id": "evidence:ci-flaky"}]
+
+
+def _connect_or_skip(dsn: str):
+    try:
+        return psycopg.connect(dsn, connect_timeout=2)
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"Postgres is not available at configured DSN: {exc}")
 
 
 def test_preference_gate_rejects_empty_statement() -> None:

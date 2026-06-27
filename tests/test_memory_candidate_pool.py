@@ -10,7 +10,6 @@ from pulsara_agent.event import EventContext, TextBlockDeltaEvent
 from pulsara_agent.event.candidates import InvalidAttemptPayload, PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory import (
-    InMemoryCandidatePool,
     MemoryGovernanceDecisionRecord,
     NoWriteOutcome,
     PooledMemoryCandidate,
@@ -32,15 +31,8 @@ class _PoolCase:
     ctx: EventContext
 
 
-@pytest.fixture(params=["memory", "postgres"])
+@pytest.fixture
 def pool_case(request, tmp_path) -> _PoolCase:
-    if request.param == "memory":
-        return _PoolCase(
-            pool=InMemoryCandidatePool(),
-            session_id="runtime:test",
-            ctx=_ctx("memory"),
-        )
-
     dsn = StorageConfig.from_env().postgres_dsn
     session_id = f"runtime:test:{uuid4().hex}"
     ctx = _ctx("postgres")

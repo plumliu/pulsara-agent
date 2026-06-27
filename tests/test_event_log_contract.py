@@ -24,7 +24,7 @@ from pulsara_agent.event import (
     TextBlockStartEvent,
 )
 from pulsara_agent.event import TerminalProcessCompletedEvent
-from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog, dump_agent_event, load_agent_event
+from pulsara_agent.event_log import EventLog, PostgresEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.settings import StorageConfig
 
 
@@ -64,12 +64,10 @@ def _reply_events(ctx: EventContext):
     ]
 
 
-@pytest.fixture(params=["memory", "postgres"])
+@pytest.fixture
 def event_log(request, tmp_path) -> EventLog:
-    if request.param == "memory":
-        return InMemoryEventLog()
-
     dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
     runtime_session_id = _runtime_session_id()
     log = PostgresEventLog(
         dsn=dsn,

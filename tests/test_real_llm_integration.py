@@ -34,26 +34,24 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.capability import LocalSkillResolver, sync_bundled_skills
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
-from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
+from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.entities.memory import Preference
-from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
+from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.host.transcript import INTERRUPTED_NOTE_TEXT, rebuild_prior_messages
 from pulsara_agent.jsonld import utc_now
 from pulsara_agent.llm import LLMMessage, ModelRole, ToolSpec, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
-    InMemoryArchiveStore,
-    InMemoryCandidatePool,
     MemoryDomainContext,
     MemoryGovernanceEngine,
     MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
     MemoryLifecycle,
     MemoryWriteUnitOfWork,
+    PostgresArtifactStore,
     PostgresCandidatePool,
     PostgresWorkingContextStore,
-    RunTimelinePersistenceHook,
     load_run_timeline,
     summarize_run_timeline,
     workspace_scope,
@@ -886,105 +884,114 @@ def test_real_flash_accepts_aborted_unfinished_tool_recovery_context():
 async def _run_real_flash_smoke() -> dict:
     settings = _load_settings_for_real_llm()
     runtime = build_llm_runtime(settings.llm)
+    runtime_session_id = f"runtime:real-llm-integration:{uuid4().hex}"
     event_context = EventContext(
-        run_id="run:real-llm-integration",
-        turn_id="turn:real-llm-integration/001",
-        reply_id="reply:real-llm-integration/001",
+        run_id=f"run:real-llm-integration:{uuid4().hex}",
+        turn_id=f"turn:real-llm-integration:{uuid4().hex}",
+        reply_id=f"reply:real-llm-integration:{uuid4().hex}",
     )
     context = LLMContext(messages=(LLMMessage.user("Reply with exactly: PULSARA_OK"),))
-    log = InMemoryEventLog()
+    log = PostgresEventLog(dsn=settings.storage.postgres_dsn, runtime_session_id=runtime_session_id)
     text_parts: list[str] = []
     errors: list[dict] = []
 
-    async for event in runtime.stream(
-        role=ModelRole.FLASH,
-        context=context,
-        event_context=event_context,
-        options=LLMOptions(temperature=0, max_output_tokens=16),
-    ):
-        log.append(event)
-        if isinstance(event, TextBlockDeltaEvent):
-            text_parts.append(event.delta)
-        if isinstance(event, RunErrorEvent):
-            errors.append(_run_error_diagnostic(event))
+    try:
+        async for event in runtime.stream(
+            role=ModelRole.FLASH,
+            context=context,
+            event_context=event_context,
+            options=LLMOptions(temperature=0, max_output_tokens=16),
+        ):
+            log.append(event)
+            if isinstance(event, TextBlockDeltaEvent):
+                text_parts.append(event.delta)
+            if isinstance(event, RunErrorEvent):
+                errors.append(_run_error_diagnostic(event))
 
-    events = log.iter(reply_id=event_context.reply_id)
-    message = log.replay(event_context.reply_id)
-    replayed_text = "".join(
-        block.text for block in message.content if isinstance(block, TextBlock)
-    )
+        events = log.iter(reply_id=event_context.reply_id)
+        message = log.replay(event_context.reply_id)
+        replayed_text = "".join(
+            block.text for block in message.content if isinstance(block, TextBlock)
+        )
 
-    assert any(isinstance(event, ModelCallStartEvent) for event in events)
-    assert any(isinstance(event, ModelCallEndEvent) for event in events)
+        assert any(isinstance(event, ModelCallStartEvent) for event in events)
+        assert any(isinstance(event, ModelCallEndEvent) for event in events)
 
-    return {
-        "event_type_names": [type(event).__name__ for event in events],
-        "text": "".join(text_parts).strip(),
-        "replayed_text": replayed_text.strip(),
-        "errors": errors,
-    }
+        return {
+            "event_type_names": [type(event).__name__ for event in events],
+            "text": "".join(text_parts).strip(),
+            "replayed_text": replayed_text.strip(),
+            "errors": errors,
+        }
+    finally:
+        _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
 async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
+    settings = _load_settings_for_real_llm()
+    runtime_session_id = f"runtime:real-aborted-unfinished:{uuid4().hex}"
     ctx = EventContext(
-        run_id="run:real-aborted-unfinished",
-        turn_id="turn:real-aborted-unfinished/001",
-        reply_id="reply:real-aborted-unfinished/001",
+        run_id=f"run:real-aborted-unfinished:{uuid4().hex}",
+        turn_id=f"turn:real-aborted-unfinished:{uuid4().hex}",
+        reply_id=f"reply:real-aborted-unfinished:{uuid4().hex}",
     )
-    log = InMemoryEventLog()
-    log.extend(
-        [
-            RunStartEvent(
-                **ctx.event_fields(),
-                user_input_chars=20,
-                metadata={"user_input": "remove generated files"},
-            ),
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
-            ToolCallDeltaEvent(
-                **ctx.event_fields(),
-                tool_call_id="call:danger",
-                delta='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
-            ),
-            RequireUserConfirmEvent(
-                **ctx.event_fields(),
-                tool_calls=[
-                    ToolCallBlock(
-                        id="call:danger",
-                        name="terminal",
-                        input='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
-                    )
-                ],
-            ),
-            ReplyEndEvent(**ctx.event_fields()),
-            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
-        ]
-    )
-    prior_messages = rebuild_prior_messages(log)
-    llm_messages = list(msg_to_llm_messages(prior_messages, LoopBudget()))
-    llm_messages.append(
-        LLMMessage.user(
-            "If the prior context contains the Pulsara interrupted note with unfinished terminal "
-            "pending approval guidance, answer exactly PULSARA_ABORTED_UNFINISHED_NOTE_OK. "
-            "Do not call tools."
+    log = PostgresEventLog(dsn=settings.storage.postgres_dsn, runtime_session_id=runtime_session_id)
+    try:
+        log.extend(
+            [
+                RunStartEvent(
+                    **ctx.event_fields(),
+                    user_input_chars=20,
+                    metadata={"user_input": "remove generated files"},
+                ),
+                ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
+                ToolCallDeltaEvent(
+                    **ctx.event_fields(),
+                    tool_call_id="call:danger",
+                    delta='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
+                ),
+                RequireUserConfirmEvent(
+                    **ctx.event_fields(),
+                    tool_calls=[
+                        ToolCallBlock(
+                            id="call:danger",
+                            name="terminal",
+                            input='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
+                        )
+                    ],
+                ),
+                ReplyEndEvent(**ctx.event_fields()),
+                RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            ]
         )
-    )
-    rendered_context = "\n".join("\n".join(message.content) for message in llm_messages)
-    result = await _collect_real_events(
-        role=ModelRole.FLASH,
-        context=LLMContext(
-            messages=tuple(llm_messages),
-            system_prompt="You are validating provider replay for Pulsara recovery notes. Do not call tools.",
-        ),
-        options=LLMOptions(temperature=0, max_output_tokens=512),
-        label="real-aborted-unfinished-recovery",
-    )
-    return {
-        **_summarize_collected_result(result),
-        "note_present": INTERRUPTED_NOTE_TEXT in rendered_context,
-        "tool_name_present": "terminal" in rendered_context,
-        "pending_not_executed_present": "pending approval and did not execute" in rendered_context,
-        "dangerous_args_present": "PULSARA_DANGEROUS_DO_NOT_RUN" in rendered_context,
-    }
+        prior_messages = rebuild_prior_messages(log)
+        llm_messages = list(msg_to_llm_messages(prior_messages, LoopBudget()))
+        llm_messages.append(
+            LLMMessage.user(
+                "If the prior context contains the Pulsara interrupted note with unfinished terminal "
+                "pending approval guidance, answer exactly PULSARA_ABORTED_UNFINISHED_NOTE_OK. "
+                "Do not call tools."
+            )
+        )
+        rendered_context = "\n".join("\n".join(message.content) for message in llm_messages)
+        result = await _collect_real_events(
+            role=ModelRole.FLASH,
+            context=LLMContext(
+                messages=tuple(llm_messages),
+                system_prompt="You are validating provider replay for Pulsara recovery notes. Do not call tools.",
+            ),
+            options=LLMOptions(temperature=0, max_output_tokens=512),
+            label="real-aborted-unfinished-recovery",
+        )
+        return {
+            **_summarize_collected_result(result),
+            "note_present": INTERRUPTED_NOTE_TEXT in rendered_context,
+            "tool_name_present": "terminal" in rendered_context,
+            "pending_not_executed_present": "pending approval and did not execute" in rendered_context,
+            "dangerous_args_present": "PULSARA_DANGEROUS_DO_NOT_RUN" in rendered_context,
+        }
+    finally:
+        _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
 async def _run_real_tool_call_smoke() -> dict:
@@ -1115,10 +1122,8 @@ async def _run_real_chat_thinking_delta_smoke() -> dict:
 async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
     probe = tmp_path / "probe.txt"
     probe.write_text("PULSARA_RESPONSES_TOOL_OK", encoding="utf-8")
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=128),
         system_prompt=(
@@ -1127,37 +1132,39 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
             "Then answer with exactly the file content and nothing else."
         ),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_call_ids = [
-        event.tool_call_id
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    tool_result_ids = [
-        event.tool_call_id
-        for event in events
-        if isinstance(event, ToolResultStartEvent)
-    ]
-    errors = _run_error_diagnostics(events)
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_call_ids": tool_call_ids,
-        "tool_result_ids": tool_result_ids,
-        "errors": errors,
-    }
+    try:
+        result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_call_ids = [
+            event.tool_call_id
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        tool_result_ids = [
+            event.tool_call_id
+            for event in events
+            if isinstance(event, ToolResultStartEvent)
+        ]
+        errors = _run_error_diagnostics(events)
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_call_ids": tool_call_ids,
+            "tool_result_ids": tool_result_ids,
+            "errors": errors,
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_read_only_permission_smoke(tmp_path: Path) -> dict:
     probe = tmp_path / "probe.txt"
     probe.write_text("PULSARA_PERMISSION_READ_ONLY_OK", encoding="utf-8")
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt=(
@@ -1172,30 +1179,32 @@ async def _run_real_agent_read_only_permission_smoke(tmp_path: Path) -> dict:
             terminal=TerminalAccess.OFF,
         ),
     )
+    agent = wiring.agent_runtime
 
-    registry_names = agent.tool_executor.registry.names()
-    result = await agent.run_task("Read probe.txt with the available tool, then answer exactly with its content.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "registry_names": registry_names,
-        "tool_names": tool_names,
-        "errors": _run_error_diagnostics(events),
-    }
+    try:
+        registry_names = agent.tool_executor.registry.names()
+        result = await agent.run_task("Read probe.txt with the available tool, then answer exactly with its content.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "registry_names": registry_names,
+            "tool_names": tool_names,
+            "errors": _run_error_diagnostics(events),
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_trusted_terminal_permission_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt=(
@@ -1206,30 +1215,34 @@ async def _run_real_agent_trusted_terminal_permission_smoke(tmp_path: Path) -> d
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Run the trusted terminal permission validation exactly as instructed.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    tool_result_payloads = list(_tool_result_payloads_by_call_id(events).values())
-    terminal_payload = next(payload for payload in tool_result_payloads if payload.get("status") == "success")
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "terminal_status": terminal_payload["status"],
-        "terminal_output": terminal_payload["output"],
-        "errors": _run_error_diagnostics(events),
-    }
+    try:
+        result = await agent.run_task("Run the trusted terminal permission validation exactly as instructed.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        tool_result_payloads = list(_tool_result_payloads_by_call_id(events).values())
+        terminal_payload = next(payload for payload in tool_result_payloads if payload.get("status") == "success")
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "terminal_status": terminal_payload["status"],
+            "terminal_output": terminal_payload["output"],
+            "errors": _run_error_diagnostics(events),
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_host_core_terminal_ask_approval_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -1301,7 +1314,7 @@ async def _run_real_host_core_terminal_ask_approval_smoke(tmp_path: Path) -> dic
 async def _run_real_host_core_on_request_write_approval_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
     target = tmp_path / "on_request.txt"
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -1365,7 +1378,7 @@ async def _run_real_host_core_on_request_write_approval_smoke(tmp_path: Path) ->
 
 async def _run_real_host_core_plan_mode_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -1477,37 +1490,37 @@ When this skill is active, answer exactly: PULSARA_SKILL_ACTIVE_OK
 """,
         encoding="utf-8",
     )
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt="Do not call tools. Follow active skill instructions if present.",
         capability_resolver=LocalSkillResolver(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("$say-sentinel")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "errors": _run_error_diagnostics(events),
-    }
+    try:
+        result = await agent.run_task("$say-sentinel")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "errors": _run_error_diagnostics(events),
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_synced_bundled_skill_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=64),
         system_prompt=(
@@ -1516,31 +1529,32 @@ async def _run_real_agent_synced_bundled_skill_smoke(tmp_path: Path) -> dict:
         ),
         capability_resolver=LocalSkillResolver(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task(
-        "$pulsara-skill-creator Validation only: answer exactly PULSARA_BUNDLED_SKILL_ACTIVE_OK and nothing else."
-    )
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "errors": _run_error_diagnostics(events),
-    }
+    try:
+        result = await agent.run_task(
+            "$pulsara-skill-creator Validation only: answer exactly PULSARA_BUNDLED_SKILL_ACTIVE_OK and nothing else."
+        )
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "errors": _run_error_diagnostics(events),
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    runtime_session = RuntimeSession(tmp_path)
-    agent = AgentRuntime(
-        runtime_session=runtime_session,
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt=(
@@ -1551,10 +1565,11 @@ async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
     try:
         result = await agent.run_task("Run the terminal yielded process validation exactly as instructed.")
-        events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
         tool_names = [
             event.tool_call_name
             for event in events
@@ -1582,12 +1597,12 @@ async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        runtime_session.close()
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_host_core_terminal_continuity_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -1637,7 +1652,7 @@ async def _run_real_host_core_terminal_continuity_smoke(tmp_path: Path) -> dict:
 
 async def _run_real_host_core_terminal_completion_note_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -1712,10 +1727,8 @@ async def _run_real_host_core_terminal_completion_note_smoke(tmp_path: Path) -> 
 
 
 async def _run_real_agent_terminal_yield_survival_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=384),
         system_prompt=(
@@ -1729,48 +1742,50 @@ async def _run_real_agent_terminal_yield_survival_smoke(tmp_path: Path) -> dict:
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Run the terminal yield survival validation exactly as instructed.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    tool_result_payloads = [
-        json.loads(event.delta)
-        for event in events
-        if isinstance(event, ToolResultTextDeltaEvent)
-    ]
-    errors = _run_error_diagnostics(events)
-    terminal_payload = next(
-        payload for payload in tool_result_payloads if payload.get("process_id") and payload.get("status") == "running"
-    )
-    wait_payloads = [
-        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
-    ]
-    submit_payload = next(
-        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
-    )
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "terminal_status": terminal_payload["status"],
-        "first_wait_status": wait_payloads[0]["status"],
-        "submit_action": submit_payload["terminal_process_action"],
-        "second_wait_status": wait_payloads[1]["status"],
-        "second_wait_output": wait_payloads[1]["output"],
-        "errors": errors,
-    }
+    try:
+        result = await agent.run_task("Run the terminal yield survival validation exactly as instructed.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        tool_result_payloads = [
+            json.loads(event.delta)
+            for event in events
+            if isinstance(event, ToolResultTextDeltaEvent)
+        ]
+        errors = _run_error_diagnostics(events)
+        terminal_payload = next(
+            payload for payload in tool_result_payloads if payload.get("process_id") and payload.get("status") == "running"
+        )
+        wait_payloads = [
+            payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
+        ]
+        submit_payload = next(
+            payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
+        )
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "terminal_status": terminal_payload["status"],
+            "first_wait_status": wait_payloads[0]["status"],
+            "submit_action": submit_payload["terminal_process_action"],
+            "second_wait_status": wait_payloads[1]["status"],
+            "second_wait_output": wait_payloads[1]["output"],
+            "errors": errors,
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_terminal_stdin_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=320),
         system_prompt=(
@@ -1783,47 +1798,49 @@ async def _run_real_agent_terminal_stdin_smoke(tmp_path: Path) -> dict:
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Run the terminal stdin validation exactly as instructed.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    tool_result_payloads = [
-        json.loads(event.delta)
-        for event in events
-        if isinstance(event, ToolResultTextDeltaEvent)
-    ]
-    errors = _run_error_diagnostics(events)
-    terminal_payload = next(
-        payload for payload in tool_result_payloads if payload.get("process_id") and payload.get("status") == "running"
-    )
-    submit_payload = next(
-        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
-    )
-    wait_payload = next(
-        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
-    )
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "terminal_status": terminal_payload["status"],
-        "submit_action": submit_payload["terminal_process_action"],
-        "wait_status": wait_payload["status"],
-        "wait_output": wait_payload["output"],
-        "errors": errors,
-    }
+    try:
+        result = await agent.run_task("Run the terminal stdin validation exactly as instructed.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        tool_result_payloads = [
+            json.loads(event.delta)
+            for event in events
+            if isinstance(event, ToolResultTextDeltaEvent)
+        ]
+        errors = _run_error_diagnostics(events)
+        terminal_payload = next(
+            payload for payload in tool_result_payloads if payload.get("process_id") and payload.get("status") == "running"
+        )
+        submit_payload = next(
+            payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
+        )
+        wait_payload = next(
+            payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
+        )
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "terminal_status": terminal_payload["status"],
+            "submit_action": submit_payload["terminal_process_action"],
+            "wait_status": wait_payload["status"],
+            "wait_output": wait_payload["output"],
+            "errors": errors,
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_terminal_pty_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=384),
         system_prompt=(
@@ -1838,54 +1855,56 @@ async def _run_real_agent_terminal_pty_smoke(tmp_path: Path) -> dict:
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Run the terminal PTY validation exactly as instructed.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    tool_result_payloads = [
-        json.loads(event.delta)
-        for event in events
-        if isinstance(event, ToolResultTextDeltaEvent)
-    ]
-    errors = _run_error_diagnostics(events)
-    terminal_payload = next(
-        payload
-        for payload in tool_result_payloads
-        if payload.get("process_id") and payload.get("status") == "running" and payload.get("io_mode") == "pty"
-    )
-    submit_payload = next(
-        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
-    )
-    close_payload = next(
-        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "close_stdin"
-    )
-    wait_payload = next(
-        payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
-    )
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "terminal_status": terminal_payload["status"],
-        "terminal_io_mode": terminal_payload["io_mode"],
-        "submit_action": submit_payload["terminal_process_action"],
-        "close_action": close_payload["terminal_process_action"],
-        "wait_status": wait_payload["status"],
-        "wait_output": wait_payload["output"],
-        "errors": errors,
-    }
+    try:
+        result = await agent.run_task("Run the terminal PTY validation exactly as instructed.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        tool_result_payloads = [
+            json.loads(event.delta)
+            for event in events
+            if isinstance(event, ToolResultTextDeltaEvent)
+        ]
+        errors = _run_error_diagnostics(events)
+        terminal_payload = next(
+            payload
+            for payload in tool_result_payloads
+            if payload.get("process_id") and payload.get("status") == "running" and payload.get("io_mode") == "pty"
+        )
+        submit_payload = next(
+            payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "submit"
+        )
+        close_payload = next(
+            payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "close_stdin"
+        )
+        wait_payload = next(
+            payload for payload in tool_result_payloads if payload.get("terminal_process_action") == "wait"
+        )
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "terminal_status": terminal_payload["status"],
+            "terminal_io_mode": terminal_payload["io_mode"],
+            "submit_action": submit_payload["terminal_process_action"],
+            "close_action": close_payload["terminal_process_action"],
+            "wait_status": wait_payload["status"],
+            "wait_output": wait_payload["output"],
+            "errors": errors,
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_terminal_streaming_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=384),
         system_prompt=(
@@ -1898,39 +1917,41 @@ async def _run_real_agent_terminal_streaming_smoke(tmp_path: Path) -> dict:
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Run the terminal streaming validation exactly as instructed.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    terminal_deltas = [
-        event.delta
-        for event in events
-        if isinstance(event, ToolResultTextDeltaEvent)
-    ]
-    errors = _run_error_diagnostics(events)
-    terminal_payload = json.loads("".join(terminal_deltas))
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "terminal_delta_count": len(terminal_deltas),
-        "terminal_status": terminal_payload["status"],
-        "terminal_output": terminal_payload["output"],
-        "terminal_shell_path": terminal_payload["shell"]["path"],
-        "errors": errors,
-    }
+    try:
+        result = await agent.run_task("Run the terminal streaming validation exactly as instructed.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        terminal_deltas = [
+            event.delta
+            for event in events
+            if isinstance(event, ToolResultTextDeltaEvent)
+        ]
+        errors = _run_error_diagnostics(events)
+        terminal_payload = json.loads("".join(terminal_deltas))
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "terminal_delta_count": len(terminal_deltas),
+            "terminal_status": terminal_payload["status"],
+            "terminal_output": terminal_payload["output"],
+            "terminal_shell_path": terminal_payload["shell"]["path"],
+            "errors": errors,
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=384),
         system_prompt=(
@@ -1944,50 +1965,52 @@ async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Run the terminal large-output validation exactly as instructed.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    tool_call_names = {
-        event.tool_call_id: event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    }
-    deltas_by_call: dict[str, list[str]] = {}
-    for event in events:
-        if isinstance(event, ToolResultTextDeltaEvent):
-            deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
-    errors = _run_error_diagnostics(events)
-    terminal_call_id = next(call_id for call_id, name in tool_call_names.items() if name == "terminal")
-    artifact_read_call_id = next(call_id for call_id, name in tool_call_names.items() if name == "artifact_read")
-    terminal_payload = json.loads("".join(deltas_by_call[terminal_call_id]))
-    artifact_read_payload = json.loads("".join(deltas_by_call[artifact_read_call_id]))
-    terminal_end = next(event for event in events if isinstance(event, ToolResultEndEvent) and event.artifacts)
-    artifact_id = terminal_end.artifacts[0].artifact_id if terminal_end.artifacts else ""
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "final_text": result.final_text.strip(),
-        "tool_names": tool_names,
-        "terminal_status": terminal_payload["status"],
-        "terminal_truncated": terminal_payload["truncated"],
-        "artifact_id": artifact_id,
-        "preview_chars": len(terminal_payload["output"]),
-        "artifact_read_status": artifact_read_payload["status"],
-        "artifact_text_sample": artifact_read_payload.get("text", ""),
-        "errors": errors,
-    }
+    try:
+        result = await agent.run_task("Run the terminal large-output validation exactly as instructed.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        tool_call_names = {
+            event.tool_call_id: event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        }
+        deltas_by_call: dict[str, list[str]] = {}
+        for event in events:
+            if isinstance(event, ToolResultTextDeltaEvent):
+                deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
+        errors = _run_error_diagnostics(events)
+        terminal_call_id = next(call_id for call_id, name in tool_call_names.items() if name == "terminal")
+        artifact_read_call_id = next(call_id for call_id, name in tool_call_names.items() if name == "artifact_read")
+        terminal_payload = json.loads("".join(deltas_by_call[terminal_call_id]))
+        artifact_read_payload = json.loads("".join(deltas_by_call[artifact_read_call_id]))
+        terminal_end = next(event for event in events if isinstance(event, ToolResultEndEvent) and event.artifacts)
+        artifact_id = terminal_end.artifacts[0].artifact_id if terminal_end.artifacts else ""
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "final_text": result.final_text.strip(),
+            "tool_names": tool_names,
+            "terminal_status": terminal_payload["status"],
+            "terminal_truncated": terminal_payload["truncated"],
+            "artifact_id": artifact_id,
+            "preview_chars": len(terminal_payload["output"]),
+            "artifact_read_status": artifact_read_payload["status"],
+            "artifact_text_sample": artifact_read_payload.get("text", ""),
+            "errors": errors,
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
-    settings = _load_settings_for_real_llm()
-    agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt=(
@@ -1998,32 +2021,36 @@ async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
         ),
         permission_policy=_trusted_terminal_policy(),
     )
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Run the terminal permission-policy validation exactly as instructed.")
-    events = list(agent.runtime_session.event_log.iter(run_id=result.state.run_id))
-    tool_names = [
-        event.tool_call_name
-        for event in events
-        if isinstance(event, ToolCallStartEvent)
-    ]
-    confirm_events = [event for event in events if isinstance(event, RequireUserConfirmEvent)]
-    tool_result_count = sum(1 for event in events if isinstance(event, ToolResultStartEvent))
-    suggested_rule_reason = None
-    if confirm_events and confirm_events[0].tool_calls and confirm_events[0].tool_calls[0].suggested_rules:
-        suggested_rule_reason = confirm_events[0].tool_calls[0].suggested_rules[0].get("reason")
-    return {
-        "status": result.status.value,
-        "stop_reason": result.stop_reason,
-        "tool_names": tool_names,
-        "confirm_count": len(confirm_events),
-        "tool_result_count": tool_result_count,
-        "suggested_rule_reason": suggested_rule_reason,
-    }
+    try:
+        result = await agent.run_task("Run the terminal permission-policy validation exactly as instructed.")
+        events = list(wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        tool_names = [
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
+        ]
+        confirm_events = [event for event in events if isinstance(event, RequireUserConfirmEvent)]
+        tool_result_count = sum(1 for event in events if isinstance(event, ToolResultStartEvent))
+        suggested_rule_reason = None
+        if confirm_events and confirm_events[0].tool_calls and confirm_events[0].tool_calls[0].suggested_rules:
+            suggested_rule_reason = confirm_events[0].tool_calls[0].suggested_rules[0].get("reason")
+        return {
+            "status": result.status.value,
+            "stop_reason": result.stop_reason,
+            "tool_names": tool_names,
+            "confirm_count": len(confirm_events),
+            "tool_result_count": tool_result_count,
+            "suggested_rule_reason": suggested_rule_reason,
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_host_core_active_stop_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -2078,7 +2105,7 @@ async def _run_real_host_core_active_stop_smoke(tmp_path: Path) -> dict:
 
 async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -2144,7 +2171,7 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
 
 async def _run_real_host_core_plan_stop_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -2218,21 +2245,8 @@ async def _run_real_host_core_plan_stop_smoke(tmp_path: Path) -> dict:
 async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
     probe = tmp_path / "probe.txt"
     probe.write_text("PULSARA_TIMELINE_TOOL_OK", encoding="utf-8")
-    settings = _load_settings_for_real_llm()
-    runtime_session = RuntimeSession(tmp_path)
-    graph = InMemoryGraphStore()
-    archive = InMemoryArchiveStore()
-    runtime_session.hook_manager.register_event(
-        None,
-        RunTimelinePersistenceHook(
-            graph=graph,
-            archive=archive,
-            event_store=runtime_session.event_log,
-        ),
-    )
-    agent = AgentRuntime(
-        runtime_session=runtime_session,
-        llm_runtime=build_llm_runtime(settings.llm),
+    wiring = _build_real_durable_agent(
+        tmp_path,
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=128),
         system_prompt=(
@@ -2241,24 +2255,30 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
             "Then answer with exactly the file content and nothing else."
         ),
     )
+    runtime_session = wiring.runtime_wiring.runtime_session
+    agent = wiring.agent_runtime
 
-    result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
-    records = graph.find_by_type(rt.RUN_TIMELINE)
-    timeline = load_run_timeline(
-        graph=graph,
-        archive=archive,
-        run_id=result.state.run_id,
-        runtime_session_id=runtime_session.runtime_session_id,
-    )
-    summary = summarize_run_timeline(timeline)
-    return {
-        "status": result.status.value,
-        "timeline_records": len(records),
-        "timeline_status": summary.status,
-        "timeline_item_kinds": [item.kind for item in timeline.items],
-        "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
-        "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
-    }
+    try:
+        result = await agent.run_task("Read probe.txt with the tool, then answer with exactly its content.")
+        records = wiring.runtime_wiring.graph.find_by_type(rt.RUN_TIMELINE, graph_id=wiring.runtime_wiring.graph_id)
+        timeline = load_run_timeline(
+            graph=wiring.runtime_wiring.graph,
+            archive=wiring.runtime_wiring.archive,
+            run_id=result.state.run_id,
+            runtime_session_id=runtime_session.runtime_session_id,
+            graph_id=wiring.runtime_wiring.graph_id,
+        )
+        summary = summarize_run_timeline(timeline)
+        return {
+            "status": result.status.value,
+            "timeline_records": len(records),
+            "timeline_status": summary.status,
+            "timeline_item_kinds": [item.kind for item in timeline.items],
+            "tool_call_arguments": [trace.arguments for trace in summary.tool_traces],
+            "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
+        }
+    finally:
+        _cleanup_real_durable_wiring(wiring)
 
 
 async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> dict:
@@ -3368,105 +3388,139 @@ async def _collect_real_events(
 ) -> dict:
     settings = _load_settings_for_real_llm()
     runtime = build_llm_runtime(settings.llm)
+    runtime_session_id = f"runtime:{label}:{uuid4().hex}"
     event_context = EventContext(
-        run_id=f"run:{label}",
-        turn_id=f"turn:{label}/001",
-        reply_id=f"reply:{label}/001",
+        run_id=f"run:{label}:{uuid4().hex}",
+        turn_id=f"turn:{label}:{uuid4().hex}",
+        reply_id=f"reply:{label}:{uuid4().hex}",
     )
-    log = InMemoryEventLog()
+    log = PostgresEventLog(dsn=settings.storage.postgres_dsn, runtime_session_id=runtime_session_id)
     text_parts: list[str] = []
     thinking_parts: list[str] = []
     errors: list[dict] = []
 
-    async for event in runtime.stream(
-        role=role,
-        context=context,
-        event_context=event_context,
-        options=options,
-    ):
-        log.append(event)
-        if isinstance(event, TextBlockDeltaEvent):
-            text_parts.append(event.delta)
-        if isinstance(event, ThinkingBlockDeltaEvent):
-            thinking_parts.append(event.delta)
-        if isinstance(event, RunErrorEvent):
-            errors.append(_run_error_diagnostic(event))
+    try:
+        async for event in runtime.stream(
+            role=role,
+            context=context,
+            event_context=event_context,
+            options=options,
+        ):
+            log.append(event)
+            if isinstance(event, TextBlockDeltaEvent):
+                text_parts.append(event.delta)
+            if isinstance(event, ThinkingBlockDeltaEvent):
+                thinking_parts.append(event.delta)
+            if isinstance(event, RunErrorEvent):
+                errors.append(_run_error_diagnostic(event))
 
-    events = log.iter(reply_id=event_context.reply_id)
-    message = log.replay(event_context.reply_id)
-    assert any(isinstance(event, ModelCallStartEvent) for event in events)
-    assert any(isinstance(event, ModelCallEndEvent) for event in events) or errors
-    assert isinstance(events[0], ReplyStartEvent)
-    assert isinstance(events[-1], ReplyEndEvent) or errors
-    return {
-        "events": events,
-        "message": message,
-        "text": "".join(text_parts).strip(),
-        "thinking": "".join(thinking_parts).strip(),
-        "errors": errors,
-    }
+        events = log.iter(reply_id=event_context.reply_id)
+        message = log.replay(event_context.reply_id)
+        assert any(isinstance(event, ModelCallStartEvent) for event in events)
+        assert any(isinstance(event, ModelCallEndEvent) for event in events) or errors
+        assert isinstance(events[0], ReplyStartEvent)
+        assert isinstance(events[-1], ReplyEndEvent) or errors
+        return {
+            "events": events,
+            "message": message,
+            "text": "".join(text_parts).strip(),
+            "thinking": "".join(thinking_parts).strip(),
+            "errors": errors,
+        }
+    finally:
+        _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
 async def _run_real_flash_memory_reflection_smoke() -> dict:
     settings = _load_settings_for_real_llm()
-    graph = InMemoryGraphStore()
-    candidate_pool = InMemoryCandidatePool()
-    event_log = InMemoryEventLog()
+    dsn = settings.storage.postgres_dsn
+    graph_id = f"graph:real-reflection/{uuid4().hex}"
+    runtime_session_id = f"runtime:real-reflection:{uuid4().hex}"
+    seed_text = "Please remember this durable preference: the user prefers concise summaries."
+    graph = PostgresGraphStore(dsn=dsn)
+    candidate_pool = PostgresCandidatePool(dsn=dsn)
+    event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
+    archive = PostgresArtifactStore(dsn=dsn)
     ledger = ExecutionEvidenceLedger(
         graph=graph,
-        archive=InMemoryArchiveStore(),
+        archive=archive,
         gate=MemoryWriteGate(),
+        graph_id=graph_id,
     )
     engine = MemoryReflectionEngine(
         llm_runtime=build_llm_runtime(settings.llm),
         candidate_pool=candidate_pool,
         graph=graph,
+        graph_id=graph_id,
         options=MemoryReflectionOptions(llm_options=LLMOptions(temperature=0, max_output_tokens=512)),
     )
-    state = LoopState(session_id="runtime:real-reflection")
+    state = LoopState(session_id=runtime_session_id)
     state.messages.append(
         UserMsg(
             name="user",
-            content="Please remember this durable preference: the user prefers concise summaries.",
+            content=seed_text,
         )
     )
 
-    events = await engine.reflect(
-        state=state,
-        event_store=event_log,
-        trigger_reasons=["cheap_memory_hint"],
-        cheap_hints=[
-            MemoryReflectionHint(
-                source="cheap_string_match",
-                reason="real LLM smoke matched explicit remember wording",
-                signal="remember",
-                excerpt="Please remember this durable preference: the user prefers concise summaries.",
-            )
-        ],
-        safe_point="on_session_end",
-    )
-    pending_after_reflection = len(candidate_pool.list_pending())
-    governance = MemoryGovernanceExecutor(
-        candidate_pool=candidate_pool,
-        memory_write_service=MemoryWriteService(ledger=ledger),
-        event_log=event_log,
-        graph=graph,
-        runtime_session_id=state.session_id,
-    )
-    governance_results = governance.submit_pending_as_is(governance_batch_id="governance:real-reflection")
-    governance_events = [event for result in governance_results for event in result.events]
-    memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
-    failures = [event for event in events if isinstance(event, MemoryReflectionFailedEvent)]
-    return {
-        "event_type_names": [type(event).__name__ for event in events],
-        "governance_event_type_names": [type(event).__name__ for event in governance_events],
-        "candidate_pool_pending_after_reflection": pending_after_reflection,
-        "candidate_pool_pending_after_governance": len(candidate_pool.list_pending()),
-        "memory_result_types": [event.memory_type for event in memory_results],
-        "memory_statuses": [event.status.value for event in memory_results],
-        "failed_events": [event.message for event in failures],
-        "preference_count": len(graph.find_by_type(memory.PREFERENCE)),
-    }
+    governance_batch_id = f"governance:real-reflection:{uuid4().hex}"
+    try:
+        seed_context = EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+        event_log.extend(
+            [
+                TextBlockDeltaEvent(
+                    **seed_context.event_fields(),
+                    block_id="text:seed",
+                    delta=seed_text,
+                )
+            ]
+        )
+        events = await engine.reflect(
+            state=state,
+            event_store=event_log,
+            trigger_reasons=["cheap_memory_hint"],
+            cheap_hints=[
+                MemoryReflectionHint(
+                    source="cheap_string_match",
+                    reason="real LLM smoke matched explicit remember wording",
+                    signal="remember",
+                    excerpt="Please remember this durable preference: the user prefers concise summaries.",
+                )
+            ],
+            safe_point="on_session_end",
+        )
+        pending_after_reflection = len(candidate_pool.list_pending())
+        governance = MemoryGovernanceExecutor(
+            candidate_pool=candidate_pool,
+            memory_write_service=MemoryWriteService(ledger=ledger),
+            event_log=event_log,
+            graph=graph,
+            graph_id=graph_id,
+            runtime_session_id=state.session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=state.session_id,
+                graph_id=graph_id,
+                archive=archive,
+            ),
+        )
+        governance_results = governance.submit_pending_as_is(governance_batch_id=governance_batch_id)
+        governance_events = [event for result in governance_results for event in result.events]
+        memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
+        failures = [event for event in events if isinstance(event, MemoryReflectionFailedEvent)]
+        return {
+            "event_type_names": [type(event).__name__ for event in events],
+            "governance_event_type_names": [type(event).__name__ for event in governance_events],
+            "candidate_pool_pending_after_reflection": pending_after_reflection,
+            "candidate_pool_pending_after_governance": len(candidate_pool.list_pending()),
+            "memory_result_types": [event.memory_type for event in memory_results],
+            "memory_statuses": [event.status.value for event in memory_results],
+            "failed_events": [event.message for event in failures],
+            "preference_count": len(graph.find_by_type(memory.PREFERENCE, graph_id=graph_id)),
+        }
+    finally:
+        _delete_postgres_governance_decisions(dsn, [governance_batch_id])
+        graph.delete_graph(graph_id)
+        _delete_postgres_runtime_session(dsn, runtime_session_id)
 
 
 async def _run_real_flash_memory_retry_json_smoke() -> dict:
@@ -3541,61 +3595,85 @@ async def _run_real_flash_memory_retry_json_smoke() -> dict:
 
 async def _run_real_flash_memory_governance_smoke() -> dict:
     settings = _load_settings_for_real_llm()
-    graph = InMemoryGraphStore()
-    candidate_pool = InMemoryCandidatePool()
-    event_log = InMemoryEventLog()
+    dsn = settings.storage.postgres_dsn
+    graph_id = f"graph:real-governance/{uuid4().hex}"
+    runtime_session_id = f"runtime:real-governance:{uuid4().hex}"
+    event_context = EventContext(
+        run_id=f"run:real-governance-source:{uuid4().hex}",
+        turn_id=f"turn:real-governance-source:{uuid4().hex}",
+        reply_id=f"reply:real-governance-source:{uuid4().hex}",
+    )
+    graph = PostgresGraphStore(dsn=dsn)
+    candidate_pool = PostgresCandidatePool(dsn=dsn)
+    event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
+    archive = PostgresArtifactStore(dsn=dsn)
     ledger = ExecutionEvidenceLedger(
         graph=graph,
-        archive=InMemoryArchiveStore(),
+        archive=archive,
         gate=MemoryWriteGate(),
+        graph_id=graph_id,
     )
-    candidate_pool.append_candidate(
-        PooledMemoryCandidate(
-            payload=ValidCandidatePayload(
-                candidate=PreferenceCandidate(
-                    candidate_id="candidate:real-governance-preference",
-                    statement="The user prefers concise summaries.",
-                    scope="ctx:user",
-                    source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
-                    verification_status=memory.VerificationStatus.USER_CONFIRMED,
-                )
-            ),
-            origin=CandidateOrigin.MAIN_AGENT_TOOL,
-            source_session_id="runtime:real-governance",
-            source_run_id="run:real-governance-source",
-            source_turn_id="turn:real-governance-source",
-            source_reply_id="reply:real-governance-source",
+    governance_batch_id = f"governance:real-governance:{uuid4().hex}"
+    try:
+        event_log.append(TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:seed", delta="The user prefers concise summaries."))
+        candidate_pool.append_candidate(
+            PooledMemoryCandidate(
+                payload=ValidCandidatePayload(
+                    candidate=PreferenceCandidate(
+                        candidate_id="candidate:real-governance-preference",
+                        statement="The user prefers concise summaries.",
+                        scope="ctx:user",
+                        source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                        verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                    )
+                ),
+                origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                source_session_id=runtime_session_id,
+                source_run_id=event_context.run_id,
+                source_turn_id=event_context.turn_id,
+                source_reply_id=event_context.reply_id,
+            )
         )
-    )
-    executor = MemoryGovernanceExecutor(
-        candidate_pool=candidate_pool,
-        memory_write_service=MemoryWriteService(ledger=ledger),
-        event_log=event_log,
-        graph=graph,
-        runtime_session_id="runtime:real-governance",
-    )
-    engine = MemoryGovernanceEngine(
-        llm_runtime=build_llm_runtime(settings.llm),
-        executor=executor,
-        options=MemoryGovernanceOptions(llm_options=LLMOptions(temperature=0, max_output_tokens=512)),
-    )
+        executor = MemoryGovernanceExecutor(
+            candidate_pool=candidate_pool,
+            memory_write_service=MemoryWriteService(ledger=ledger),
+            event_log=event_log,
+            graph=graph,
+            graph_id=graph_id,
+            runtime_session_id=runtime_session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                graph_id=graph_id,
+                archive=archive,
+            ),
+        )
+        engine = MemoryGovernanceEngine(
+            llm_runtime=build_llm_runtime(settings.llm),
+            executor=executor,
+            options=MemoryGovernanceOptions(llm_options=LLMOptions(temperature=0, max_output_tokens=512)),
+        )
 
-    result = await engine.run_pending(
-        trigger_reason="real_llm_governance_smoke",
-        governance_batch_id="governance:real-governance",
-    )
-    governance_events = [event for applied in result.applied for event in applied.events]
-    memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
-    return {
-        "error_type": result.error_type,
-        "error_message": result.error_message,
-        "decision_kinds": [decision.kind for decision in result.decisions],
-        "governance_event_type_names": [type(event).__name__ for event in governance_events],
-        "candidate_pool_pending_after_governance": len(candidate_pool.list_pending()),
-        "memory_result_types": [event.memory_type for event in memory_results],
-        "memory_statuses": [event.status.value for event in memory_results],
-        "preference_count": len(graph.find_by_type(memory.PREFERENCE)),
-    }
+        result = await engine.run_pending(
+            trigger_reason="real_llm_governance_smoke",
+            governance_batch_id=governance_batch_id,
+        )
+        governance_events = [event for applied in result.applied for event in applied.events]
+        memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
+        return {
+            "error_type": result.error_type,
+            "error_message": result.error_message,
+            "decision_kinds": [decision.kind for decision in result.decisions],
+            "governance_event_type_names": [type(event).__name__ for event in governance_events],
+            "candidate_pool_pending_after_governance": len(candidate_pool.list_pending()),
+            "memory_result_types": [event.memory_type for event in memory_results],
+            "memory_statuses": [event.status.value for event in memory_results],
+            "preference_count": len(graph.find_by_type(memory.PREFERENCE, graph_id=graph_id)),
+        }
+    finally:
+        _delete_postgres_governance_decisions(dsn, [governance_batch_id])
+        graph.delete_graph(graph_id)
+        _delete_postgres_runtime_session(dsn, runtime_session_id)
 
 
 async def _run_real_flash_memory_governance_supersede_smoke(tmp_path: Path) -> dict:
@@ -3694,9 +3772,10 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             candidate_pool=candidate_pool,
             memory_write_service=MemoryWriteService(
                 ledger=ExecutionEvidenceLedger(
-                    graph=InMemoryGraphStore(),
-                    archive=InMemoryArchiveStore(),
+                    graph=graph,
+                    archive=PostgresArtifactStore(dsn=dsn),
                     gate=MemoryWriteGate(),
+                    graph_id=graph_id,
                 )
             ),
             event_log=event_log,
@@ -3824,6 +3903,51 @@ def _load_settings_for_real_llm() -> PulsaraSettings:
     return PulsaraSettings.from_env()
 
 
+def _build_real_durable_agent(
+    workspace_root: Path,
+    *,
+    model_role: ModelRole,
+    options: LLMOptions | None = None,
+    system_prompt: str | None = None,
+    permission_policy: EffectivePermissionPolicy | None = None,
+    capability_resolver=None,
+):
+    settings = _load_settings_for_real_llm()
+    return build_agent_runtime_wiring(
+        settings,
+        workspace_root,
+        durable=True,
+        model_role=model_role,
+        options=options,
+        system_prompt=system_prompt,
+        graph_id=f"graph:real-llm/{uuid4().hex}",
+        memory_reflection=False,
+        capability_resolver=capability_resolver,
+        permission_policy=permission_policy,
+    )
+
+
+def _cleanup_real_durable_wiring(wiring) -> None:
+    wiring.agent_runtime.close()
+    _cleanup_real_runtime_wiring_storage(wiring.runtime_wiring)
+
+
+async def _close_and_cleanup_real_host_session(core: HostCore, session) -> None:
+    runtime_wiring = session.wiring.runtime_wiring
+    await core.close_session(session.host_session_id)
+    _cleanup_real_runtime_wiring_storage(runtime_wiring)
+
+
+def _cleanup_real_runtime_wiring_storage(runtime_wiring) -> None:
+    settings = _load_settings_for_real_llm()
+    runtime_session_id = runtime_wiring.runtime_session.runtime_session_id
+    graph_id = runtime_wiring.graph_id
+    if graph_id is not None:
+        runtime_wiring.graph.delete_graph(graph_id)
+    _delete_postgres_artifacts_for_session(settings.storage.postgres_dsn, runtime_session_id)
+    _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session_id)
+
+
 def _delete_postgres_runtime_session(dsn: str, runtime_session_id: str) -> None:
     import psycopg
 
@@ -3846,6 +3970,14 @@ def _delete_postgres_artifacts_with_prefix(dsn: str, blob_id_prefix: str) -> Non
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from artifacts where id like %s", (f"{blob_id_prefix}%",))
+
+
+def _delete_postgres_artifacts_for_session(dsn: str, runtime_session_id: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from artifacts where session_id = %s", (runtime_session_id,))
 
 
 def _delete_postgres_governance_decisions(dsn: str, governance_batch_ids: list[str]) -> None:

@@ -11,9 +11,8 @@ import pytest
 
 from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
 from pulsara_agent.event_log import PostgresEventLog
-from pulsara_agent.graph import InMemoryGraphStore
+from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.memory import (
-    InMemoryArchiveStore,
     PostgresArtifactStore,
     RunTimelinePersistenceHook,
     load_run_timeline,
@@ -77,12 +76,10 @@ def _artifact_id_from_node_ref(node_id: str) -> str:
     return node_id
 
 
-@pytest.fixture(params=["memory", "postgres"])
-def artifact_store(request) -> ArtifactStore:
-    if request.param == "memory":
-        return InMemoryArchiveStore()
-
+@pytest.fixture
+def artifact_store() -> ArtifactStore:
     dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
     return PostgresArtifactStore(dsn=dsn)
 
 
@@ -99,8 +96,7 @@ def test_artifact_store_puts_and_gets_text(artifact_store: ArtifactStore) -> Non
         assert result.size_bytes == len(content.encode("utf-8"))
         assert artifact_store.get_text(blob_id) == content
     finally:
-        if isinstance(artifact_store, PostgresArtifactStore):
-            _delete_artifact(artifact_store.dsn, blob_id)
+        _delete_artifact(artifact_store.dsn, blob_id)
 
 
 def test_artifact_store_put_text_is_idempotent_for_same_content(artifact_store: ArtifactStore) -> None:
@@ -113,8 +109,7 @@ def test_artifact_store_put_text_is_idempotent_for_same_content(artifact_store: 
         assert first == second
         assert artifact_store.get_text(blob_id) == "same"
     finally:
-        if isinstance(artifact_store, PostgresArtifactStore):
-            _delete_artifact(artifact_store.dsn, blob_id)
+        _delete_artifact(artifact_store.dsn, blob_id)
 
 
 def test_postgres_artifact_store_reloads_persisted_text() -> None:
@@ -261,13 +256,15 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
         event_log=event_log,
     )
     archive = PostgresArtifactStore(dsn=dsn)
-    graph = InMemoryGraphStore()
+    graph_id = f"graph:test:{uuid4().hex}"
+    graph = PostgresGraphStore(dsn=dsn)
     runtime.hook_manager.register_event(
         None,
         RunTimelinePersistenceHook(
             graph=graph,
             archive=archive,
             event_store=runtime.event_log,
+            graph_id=graph_id,
         ),
     )
     ctx = _event_context("timeline-artifact")
@@ -284,8 +281,9 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
             archive=archive,
             run_id=ctx.run_id,
             runtime_session_id=runtime_session_id,
+            graph_id=graph_id,
         )
-        record = graph.find_by_type(rt.RUN_TIMELINE)[0]
+        record = graph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)[0]
         blob_id = _artifact_id_from_node_ref(record[rt.STORED_AS.name]["@id"])
 
         assert timeline.run_id == ctx.run_id
@@ -297,4 +295,5 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("delete from artifacts where id like %s", (f"timeline:{runtime_session_id}:{ctx.run_id}:%",))
+        graph.delete_graph(graph_id)
         _delete_session(dsn, runtime_session_id)
