@@ -14,7 +14,6 @@ from pulsara_agent.event import (
     MemoryWriteResultEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
-    PlanExitRequestedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
@@ -71,6 +70,7 @@ from pulsara_agent.runtime import (
     ApprovalResolution,
     LoopBudget,
     LoopState,
+    PendingPlanInteraction,
     PlanExitResolution,
     RuntimeSession,
     ToolApprovalDecision,
@@ -527,6 +527,25 @@ def test_real_host_core_pending_approval_stop_injects_interrupted_note(tmp_path)
     assert result["pending_after_stop"] is None
     assert result["interrupted_note_present"] is True
     assert "PULSARA_PENDING_STOP_NOTE_OK" in result["second_final_text"]
+    assert result["aborted_run_end_count"] == 1
+    assert result["run_errors"] == []
+
+
+def test_real_host_core_plan_stop_injects_plan_aborted_note(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_plan_stop_smoke(tmp_path), timeout=180))
+
+    assert result["first_status"] == "waiting_user"
+    assert result["stop_result_status"] == "aborted"
+    assert result["second_status"] == "finished"
+    assert result["tool_names"] == ["ask_plan_question"]
+    assert result["pending_after_stop"] is None
+    assert result["plan_active_after_stop"] is True
+    assert result["permission_mode_after_stop"] == "read-only"
+    assert result["plan_note_present"] is True
+    assert "PULSARA_PLAN_STOP_NOTE_OK" in result["second_final_text"]
     assert result["aborted_run_end_count"] == 1
     assert result["run_errors"] == []
 
@@ -2117,6 +2136,79 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
             "pending_after_stop": pending_after_stop,
             "aborted_run_end_count": aborted_run_end_count,
             "interrupted_note_present": interrupted_note_present,
+            "run_errors": run_errors,
+        }
+    finally:
+        await core.close_session(session.host_session_id)
+
+
+async def _run_real_host_core_plan_stop_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_plan_stop_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real-plan-stop:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real-plan-stop:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=384),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara plan-stop recovery. "
+            "For the first validation request, call ask_plan_question exactly once with question exactly "
+            "'Scope?'. Do not call any other tools. "
+            "If the conversation context contains a Pulsara note saying the previous plan workflow turn was "
+            "stopped by the user and planning remains active/read-only, and the user asks to continue planning, "
+            "answer exactly PULSARA_PLAN_STOP_NOTE_OK."
+        ),
+    )
+    try:
+        session.enter_plan(reason="real llm plan stop")
+        first = await session.run_turn("Run the first validation request exactly as instructed.")
+        first_events = session.replay_events()
+        first_run_id = first.state.run_id
+        tool_names = [
+            event.tool_call_name
+            for event in first_events
+            if event.run_id == first_run_id and isinstance(event, ToolCallStartEvent)
+        ]
+        pending = session.get_pending_interaction()
+        assert isinstance(pending, PendingPlanInteraction)
+        stop_result = await session.stop_current_turn()
+        pending_after_stop = session.get_pending_interaction()
+        prior_messages = rebuild_prior_messages(session.wiring.runtime_wiring.event_log)
+        plan_note_present = any(
+            "previous plan workflow turn was stopped by the user" in getattr(block, "text", "")
+            and "Planning remains active and read-only" in getattr(block, "text", "")
+            for message in prior_messages
+            for block in message.content
+        )
+        second = await session.run_turn(
+            "Do not call any tools. Continue planning and answer exactly PULSARA_PLAN_STOP_NOTE_OK."
+        )
+        events = session.replay_events()
+        run_errors = _run_error_diagnostics(event for event in events if event.run_id == first_run_id)
+        aborted_run_end_count = sum(
+            1
+            for event in events
+            if event.run_id == first_run_id and isinstance(event, RunEndEvent) and event.status == "aborted"
+        )
+        return {
+            "first_status": first.status.value,
+            "stop_result_status": stop_result.status.value if stop_result is not None else None,
+            "second_status": second.status.value,
+            "second_final_text": second.final_text.strip(),
+            "tool_names": tool_names,
+            "pending_after_stop": pending_after_stop,
+            "aborted_run_end_count": aborted_run_end_count,
+            "plan_note_present": plan_note_present,
+            "plan_active_after_stop": session.plan_state.active,
+            "permission_mode_after_stop": session.current_permission_mode.value
+            if session.current_permission_mode is not None
+            else None,
             "run_errors": run_errors,
         }
     finally:

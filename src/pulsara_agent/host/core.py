@@ -17,6 +17,7 @@ from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.plan import PendingInteraction, PlanInteractionResolution
+from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
@@ -112,7 +113,7 @@ class HostCore:
         self,
         host_session_id: str,
         *,
-        reason: str = "user_stop",
+        reason: AbortKind = AbortKind.USER_STOP,
     ) -> AgentRunResult | None:
         session = await self.get_session(host_session_id)
         return await session.stop_current_turn(reason=reason)

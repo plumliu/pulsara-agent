@@ -367,6 +367,38 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
     assert messages[2].metadata == {"run_id": "run:aborted", "kind": "previous_turn_aborted"}
 
 
+def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    ctx = EventContext(run_id="run:plan-aborted", turn_id="turn:plan-aborted", reply_id="reply:plan-aborted")
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            PlanModeEnteredEvent(
+                **ctx.event_fields(),
+                source="user",
+                previous_permission_mode="bypass-permissions",
+                previous_permission_policy={"profile": "trusted_host"},
+                reason="plan first",
+            ),
+            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "ask plan question"}),
+            ReplyEndEvent(**ctx.event_fields()),
+            RunEndEvent(
+                **ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
+            ),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "assistant", "system"]
+    assert "plan workflow turn was stopped by the user" in messages[2].content[0].text
+    assert "Planning remains active and read-only" in messages[2].content[0].text
+
+
 def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 

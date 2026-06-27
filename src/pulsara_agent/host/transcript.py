@@ -7,22 +7,24 @@ from typing import Literal
 
 from pulsara_agent.event import ReplyEndEvent, RunEndEvent, RunStartEvent, TerminalProcessCompletedEvent, ToolResultEndEvent
 from pulsara_agent.event_log import EventLog
-from pulsara_agent.host.unfinished_tools import classify_unfinished_tool_calls, render_unfinished_summary
 from pulsara_agent.message import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.message import Msg, SystemMsg, UserMsg
-
-
-FAILURE_NOTE_TEXT = (
-    "Pulsara note: the previous turn did not complete because the runtime/provider step "
-    "failed. The user's input above was preserved. Any assistant text above from that turn "
-    "may be partial or empty; if the user asks to continue, continue from the preserved input."
+from pulsara_agent.runtime.recovery import (
+    FAILURE_NOTE_TEXT as FAILURE_NOTE_TEXT,
+    INTERRUPTED_NOTE_TEXT as INTERRUPTED_NOTE_TEXT,
+    RECOVERABLE_RUN_STATUSES,
+    RECOVERY_NOTE_ID_PREFIX_BY_STATUS,
+    RECOVERY_NOTE_KIND_BY_STATUS,
+    RecoveryProjection,
+    project_recovery_from_events,
+    render_recovery_text,
 )
 
-INTERRUPTED_NOTE_TEXT = (
-    "Pulsara note: the previous turn was stopped by the user. The user's input from that turn "
-    "was preserved. Any assistant text or tool work from that turn may be partial; if the user "
-    "asks to continue, continue from the preserved input."
-)
+__all__ = [
+    "FAILURE_NOTE_TEXT",
+    "INTERRUPTED_NOTE_TEXT",
+    "rebuild_prior_messages",
+]
 
 _MAX_COMPLETION_NOTES = 3
 
@@ -34,22 +36,15 @@ class _TerminalRunNoteTarget:
     created_at: str | None
     status: str
     kind: Literal["previous_turn_failed", "previous_turn_aborted"]
-    text: str
     id_prefix: str
-
-
-_NOTE_STATUS: dict[str, tuple[Literal["previous_turn_failed", "previous_turn_aborted"], str, str]] = {
-    "failed": ("previous_turn_failed", FAILURE_NOTE_TEXT, "failed-run-note"),
-    "aborted": ("previous_turn_aborted", INTERRUPTED_NOTE_TEXT, "aborted-run-note"),
-}
 
 
 def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
     """Rebuild completed user/assistant turns from the canonical event log."""
 
     events = event_log.iter()
-    note_target = _last_terminal_run_note_target(events)
-    unfinished_summary = _unfinished_summary(events, note_target)
+    recovery = project_recovery_from_events(events)
+    note_target = _last_terminal_run_note_target(events, recovery)
     completion_note = _completion_note_after_last_run_start(events)
     terminal_run_ids = _terminal_run_ids(events)
     completed_tool_call_ids_by_run = _completed_tool_call_ids_by_run(events)
@@ -70,7 +65,7 @@ def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
                     )
                 )
         if _should_emit_terminal_note(event, note_target, noted_runs):
-            messages.append(_note_message(note_target, created_at=event.created_at, unfinished_summary=unfinished_summary))
+            messages.append(_note_message(note_target, recovery=recovery, created_at=event.created_at))
             noted_runs.add(event.run_id)
         if isinstance(event, ReplyEndEvent):
             if event.reply_id in seen_replies:
@@ -88,42 +83,32 @@ def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
         if event.reply_id in seen_replies:
             continue
     if note_target is not None and note_target.run_id not in noted_runs:
-        messages.append(
-            _note_message(note_target, created_at=note_target.created_at, unfinished_summary=unfinished_summary)
-        )
+        messages.append(_note_message(note_target, recovery=recovery, created_at=note_target.created_at))
     if completion_note is not None:
         messages.append(completion_note)
     return messages
 
 
-def _last_terminal_run_note_target(events) -> _TerminalRunNoteTarget | None:
+def _last_terminal_run_note_target(
+    events,
+    recovery: RecoveryProjection | None,
+) -> _TerminalRunNoteTarget | None:
     last_run_end: RunEndEvent | None = None
     for event in events:
         if isinstance(event, RunEndEvent):
             last_run_end = event
     if last_run_end is None:
         return None
-    note = _NOTE_STATUS.get(last_run_end.status)
-    if note is None:
+    if recovery is None or last_run_end.status not in RECOVERABLE_RUN_STATUSES:
         return None
-    kind, text, id_prefix = note
     return _TerminalRunNoteTarget(
         run_id=last_run_end.run_id,
         reply_id=last_run_end.reply_id,
         created_at=last_run_end.created_at,
         status=last_run_end.status,
-        kind=kind,
-        text=text,
-        id_prefix=id_prefix,
+        kind=RECOVERY_NOTE_KIND_BY_STATUS[last_run_end.status],
+        id_prefix=RECOVERY_NOTE_ID_PREFIX_BY_STATUS[last_run_end.status],
     )
-
-
-def _unfinished_summary(events: list, note_target: _TerminalRunNoteTarget | None) -> str:
-    if note_target is None:
-        return ""
-    note_run_events = [event for event in events if event.run_id == note_target.run_id]
-    unfinished = classify_unfinished_tool_calls(note_run_events)
-    return render_unfinished_summary(unfinished, run_status=note_target.status)
 
 
 def _should_emit_terminal_note(
@@ -141,7 +126,11 @@ def _should_emit_terminal_note(
 
 
 def _terminal_run_ids(events: list) -> set[str]:
-    return {event.run_id for event in events if isinstance(event, RunEndEvent) and event.status in _NOTE_STATUS}
+    return {
+        event.run_id
+        for event in events
+        if isinstance(event, RunEndEvent) and event.status in RECOVERABLE_RUN_STATUSES
+    }
 
 
 def _completed_tool_call_ids_by_run(events: list) -> dict[str, set[str]]:
@@ -176,11 +165,14 @@ def _note_message(
     note_target: _TerminalRunNoteTarget,
     *,
     created_at: str | None,
-    unfinished_summary: str,
+    recovery: RecoveryProjection | None,
 ) -> SystemMsg:
+    content = ""
+    if recovery is not None:
+        content = render_recovery_text(recovery, audience="transcript")
     return SystemMsg(
         name="pulsara",
-        content=note_target.text + unfinished_summary,
+        content=content,
         id=f"{note_target.id_prefix}:{note_target.run_id}",
         created_at=created_at,
         metadata={"run_id": note_target.run_id, "kind": note_target.kind},

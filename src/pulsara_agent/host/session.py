@@ -36,6 +36,7 @@ from pulsara_agent.runtime.plan import (
     pending_plan_interaction_from_state,
     reduce_plan_workflow_state,
 )
+from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 
@@ -313,7 +314,7 @@ class HostSession:
     async def stop_current_turn(
         self,
         *,
-        reason: str = "user_stop",
+        reason: AbortKind = AbortKind.USER_STOP,
         timeout: float = 2.0,
     ) -> AgentRunResult | None:
         if self.closed:

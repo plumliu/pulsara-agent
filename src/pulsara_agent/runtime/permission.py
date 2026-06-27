@@ -12,6 +12,7 @@ from pulsara_agent.runtime.terminal_risk import (
     is_risky_terminal_command,
     is_sensitive_terminal_command,
 )
+from pulsara_agent.runtime.tool_taxonomy import FILE_WRITE_TOOL_NAMES, TERMINAL_TOOL_NAMES
 from pulsara_agent.tools.base import ToolCall
 
 
@@ -93,8 +94,6 @@ class EffectivePermissionPolicy:
         }
 
 
-FILE_WRITE_TOOL_NAMES = frozenset({"edit_file", "write_file"})
-TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
 TERMINAL_PROCESS_READ_ONLY_ACTIONS = frozenset({"list", "log", "poll", "wait"})
 
 # read-only profile allowlist (PERMISSION_POLICY_CONTRACT §3): only tools that

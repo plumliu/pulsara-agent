@@ -17,6 +17,7 @@ from pulsara_agent.message import (
     ToolResultBlock,
     URLSource,
 )
+from pulsara_agent.runtime.recovery import project_recovery_from_state, render_recovery_text
 from pulsara_agent.runtime.state import LoopBudget, LoopState
 from pulsara_agent.tools.registry import ToolRegistry
 
@@ -35,12 +36,10 @@ def build_llm_context(
 ) -> LLMContext:
     prompt = _system_prompt_with_projection(system_prompt or DEFAULT_SYSTEM_PROMPT, state.memory_projection)
     messages = list(msg_to_llm_messages(state.messages, budget))
-    if state.recovery_mode:
+    recovery = project_recovery_from_state(state)
+    if recovery is not None:
         messages.append(
-            LLMMessage.user(
-                "The previous model/tool step failed. Recover by inspecting the latest observation "
-                "and either retry with corrected tool arguments or provide a final answer."
-            )
+            LLMMessage.user(render_recovery_text(recovery, audience="prompt"))
         )
     return LLMContext(
         system_prompt=prompt,

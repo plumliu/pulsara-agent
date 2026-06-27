@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 from uuid import uuid4
 
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, Usage
+
+if TYPE_CHECKING:
+    from pulsara_agent.runtime.recovery import AbortKind
 
 StopReason: TypeAlias = Literal[
     "final",
@@ -79,6 +82,7 @@ class LoopState:
     consecutive_model_failures: int = 0
     consecutive_tool_failures: int = 0
     recovery_mode: bool = False
+    abort_kind: AbortKind | None = None
     compacted: bool = False
     stop_reason: StopReason | None = None
     error_message: str | None = None

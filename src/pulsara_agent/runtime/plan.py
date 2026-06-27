@@ -11,9 +11,6 @@ from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExited
 from pulsara_agent.runtime.approval import PendingApproval
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode
 from pulsara_agent.runtime.state import LoopState, LoopStatus
-
-
-PLAN_WORKFLOW_TOOL_NAMES = frozenset({"enter_plan", "ask_plan_question", "exit_plan"})
 PLAN_ENTRY_INSTRUCTION_NAME = "plan_entry_instruction"
 PLAN_ACTIVE_INSTRUCTION_NAME = "plan_active_instruction"
 

@@ -109,7 +109,7 @@ def test_event_log_replay_rebuilds_assistant_message(event_log: EventLog) -> Non
 def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> None:
     ctx = _ctx("contract:lifecycle")
     started = RunStartEvent(**ctx.event_fields(), user_input_chars=7)
-    ended = RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final")
+    ended = RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted", abort_kind="user_stop")
 
     assert load_agent_event(dump_agent_event(started)) == started
     assert load_agent_event(dump_agent_event(ended)) == ended

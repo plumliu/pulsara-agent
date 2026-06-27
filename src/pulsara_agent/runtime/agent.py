@@ -72,14 +72,15 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.runtime.plan import (
-    PLAN_WORKFLOW_TOOL_NAMES,
     PlanExitResolution,
     PlanInteractionResolution,
     PlanQuestionResolution,
     PlanWorkflowState,
 )
+from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
+from pulsara_agent.runtime.tool_taxonomy import PLAN_WORKFLOW_TOOL_NAMES
 from pulsara_agent.runtime.tool_loop import (
     _ToolBatchTap,
     _duplicate_tool_call_ids,
@@ -273,7 +274,7 @@ class AgentRuntime:
         self,
         state: LoopState,
         *,
-        reason: str = "user_stop",
+        reason: AbortKind = AbortKind.USER_STOP,
     ) -> AgentRunResult:
         async for _event in self.stream_abort_run(state, reason=reason):
             pass
@@ -283,7 +284,7 @@ class AgentRuntime:
         self,
         state: LoopState,
         *,
-        reason: str = "user_stop",
+        reason: AbortKind = AbortKind.USER_STOP,
     ) -> AsyncIterator[AgentEvent]:
         if state.finalized:
             return
@@ -295,7 +296,7 @@ class AgentRuntime:
         state.pending_tool_calls = []
         state.pending_interaction_kind = None
         state.pending_interaction_payload = {}
-        state.scratchpad["abort_reason"] = reason
+        state.abort_kind = reason
         async for event in self._finalize_run(state):
             yield event
 
@@ -510,6 +511,7 @@ class AgentRuntime:
         state.pending_tool_calls = []
         state.pending_interaction_kind = None
         state.pending_interaction_payload = {}
+        state.abort_kind = AbortKind.USER_STOP
         return True
 
     async def _stream_approval_resolution(
@@ -813,6 +815,7 @@ class AgentRuntime:
                 **self._event_context(state).event_fields(),
                 status=state.status.value,
                 stop_reason=state.stop_reason,
+                abort_kind=state.abort_kind.value if state.abort_kind is not None else None,
                 error_message=state.error_message,
             ),
             state=state,

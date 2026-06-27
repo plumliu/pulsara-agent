@@ -122,6 +122,7 @@ class RunEndEvent(EventBase):
     type: Literal[EventType.RUN_END] = EventType.RUN_END
     status: str
     stop_reason: str | None = None
+    abort_kind: str | None = None
     error_message: str | None = None
 
 
