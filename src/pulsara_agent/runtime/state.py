@@ -14,6 +14,7 @@ StopReason: TypeAlias = Literal[
     "max_turns",
     "model_error",
     "tool_error_budget",
+    "plan_interaction_budget",
     "memory_hook_error",
     "waiting_user",
     "aborted",
@@ -45,6 +46,8 @@ class LoopBudget:
     max_tool_calls: int = 64
     max_consecutive_model_failures: int = 2
     max_consecutive_tool_failures: int = 8
+    max_plan_interactions_per_run: int = 16
+    max_plan_exit_revisions_per_run: int = 8
     projection_token_budget: int = 2_000
     recall_hard_timeout_ms: int = 500
     tool_result_context_chars: int = 8_000
@@ -67,6 +70,8 @@ class LoopState:
     last_transition: LoopTransition = LoopTransition.START
     messages: list[Msg] = field(default_factory=list)
     pending_tool_calls: list[ToolCallBlock] = field(default_factory=list)
+    pending_interaction_kind: str | None = None
+    pending_interaction_payload: dict[str, Any] = field(default_factory=dict)
     tool_results: list[ToolResultBlock] = field(default_factory=list)
     memory_projection: dict[str, Any] | None = None
     token_usage: Usage = field(default_factory=Usage)
@@ -86,6 +91,8 @@ class LoopState:
         self.turn_id = f"turn:{uuid4().hex}"
         self.reply_id = f"reply:{uuid4().hex}"
         self.pending_tool_calls = []
+        self.pending_interaction_kind = None
+        self.pending_interaction_payload = {}
         self.tool_results = []
 
     def transition(self, transition: LoopTransition) -> None:

@@ -182,6 +182,26 @@ def test_unknown_tool_uses_unknown_effect_wording() -> None:
     assert "effect is unknown; verify before continuing" in summary
 
 
+def test_workflow_tools_are_omitted_from_unfinished_recovery_summary() -> None:
+    events = [
+        ToolCallStartEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:question",
+            tool_call_name="ask_plan_question",
+        ),
+        ToolCallStartEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:exit",
+            tool_call_name="exit_plan",
+        ),
+    ]
+
+    unfinished = classify_unfinished_tool_calls(events)
+
+    assert unfinished == []
+    assert render_unfinished_summary(unfinished, run_status="aborted") == ""
+
+
 def test_empty_tool_name_uses_unknown_effect_wording() -> None:
     events = [
         ToolCallStartEvent(

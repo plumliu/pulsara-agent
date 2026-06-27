@@ -11,6 +11,7 @@ from typing import AsyncIterator
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages
+from pulsara_agent.message import SystemMsg
 from pulsara_agent.runtime.approval import (
     ApprovalResolution,
     PendingApproval,
@@ -23,6 +24,18 @@ from pulsara_agent.runtime.permission import (
     parse_permission_mode,
     preset_to_policy,
 )
+from pulsara_agent.runtime.plan import (
+    PLAN_ACTIVE_INSTRUCTION,
+    PLAN_ACTIVE_INSTRUCTION_NAME,
+    PLAN_ENTRY_INSTRUCTION,
+    PLAN_ENTRY_INSTRUCTION_NAME,
+    PendingInteraction,
+    PendingPlanInteraction,
+    PlanInteractionResolution,
+    PlanWorkflowState,
+    pending_plan_interaction_from_state,
+    reduce_plan_workflow_state,
+)
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 
@@ -33,6 +46,10 @@ class HostSessionBusyError(RuntimeError):
 
 class HostSessionPendingApprovalError(RuntimeError):
     """Raised when a HostSession is suspended on a pending approval."""
+
+
+class HostSessionPendingInteractionError(RuntimeError):
+    """Raised when a HostSession is suspended on any pending user interaction."""
 
 
 @dataclass(slots=True)
@@ -47,12 +64,23 @@ class HostSession:
     active_run_id: str | None = None
     stopping_run_id: str | None = None
     suspended_run_id: str | None = None
-    pending_approval: PendingApproval | None = None
+    pending_interaction: PendingInteraction | None = None
+    plan_state: PlanWorkflowState = field(default_factory=PlanWorkflowState)
     _suspended_state: LoopState | None = None
     _active_state: LoopState | None = None
     _active_task: asyncio.Task[AgentRunResult] | None = None
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        reduced = reduce_plan_workflow_state(self.wiring.runtime_wiring.event_log.iter())
+        if reduced.active or reduced.latest_accepted_plan_summary or reduced.latest_accepted_plan_artifact_id:
+            self.plan_state = reduced
+        if self.plan_state.active:
+            self.wiring.agent_runtime.set_permission_policy(
+                preset_to_policy(PermissionMode.READ_ONLY),
+                mode=PermissionMode.READ_ONLY,
+            )
 
     @property
     def runtime_session_id(self) -> str:
@@ -85,15 +113,14 @@ class HostSession:
             raise RuntimeError("host session is closed")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
-        if self.pending_approval is not None:
-            raise HostSessionPendingApprovalError(
-                "host session has a pending approval; resolve or deny it before starting a new turn"
-            )
+        self._raise_if_pending_interaction("starting a new turn")
         if self._run_lock.locked():
             raise HostSessionBusyError("host session already has an active run")
         async with self._run_lock:
             prior_messages = self._prior_messages()
+            prior_messages.extend(self._plan_runtime_messages())
             state = self.wiring.agent_runtime.new_state()
+            self._prepare_state_for_plan(state)
             self.active_run_id = state.run_id
             self._active_state = state
             self.last_active_at = time.monotonic()
@@ -113,7 +140,8 @@ class HostSession:
                     if not state.scratchpad.get("stop_requested"):
                         raise
                     result = await self.wiring.agent_runtime.abort_run(state)
-                self._capture_pending_approval(result.state)
+                self._capture_pending_interaction(result.state)
+                self._clear_plan_entry_audit_if_emitted(result.state)
                 return result
             finally:
                 self._active_task = None
@@ -132,16 +160,16 @@ class HostSession:
             raise RuntimeError("host session is closed")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
-        if self.pending_approval is not None:
-            raise HostSessionPendingApprovalError(
-                "host session has a pending approval; resolve or deny it before starting a new turn"
-            )
+        self._raise_if_pending_interaction("starting a new turn")
         if self._run_lock.locked():
             raise HostSessionBusyError("host session already has an active run")
         async with self._run_lock:
             prior_messages = self._prior_messages()
+            prior_messages.extend(self._plan_runtime_messages())
             state = self.wiring.agent_runtime.new_state()
+            self._prepare_state_for_plan(state)
             self.active_run_id = state.run_id
+            self._active_state = state
             self.last_active_at = time.monotonic()
             try:
                 async for event in self.wiring.agent_runtime.stream_task(
@@ -152,12 +180,17 @@ class HostSession:
                 ):
                     yield event
             finally:
-                self._capture_pending_approval(state)
+                self._capture_pending_interaction(state)
+                self._clear_plan_entry_audit_if_emitted(state)
                 self.active_run_id = None
+                self._active_state = None
                 self.last_active_at = time.monotonic()
 
     def get_pending_approval(self) -> PendingApproval | None:
-        return self.pending_approval
+        return self.pending_interaction if isinstance(self.pending_interaction, PendingApproval) else None
+
+    def get_pending_interaction(self) -> PendingInteraction | None:
+        return self.pending_interaction
 
     @property
     def current_permission_mode(self) -> PermissionMode | None:
@@ -177,10 +210,7 @@ class HostSession:
             raise RuntimeError("host session is closed")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
-        if self.pending_approval is not None:
-            raise HostSessionPendingApprovalError(
-                "host session has a pending approval; resolve or deny it before switching mode"
-            )
+        self._raise_if_pending_interaction("switching mode")
         if self._run_lock.locked():
             raise HostSessionBusyError("host session already has an active run")
         parsed = parse_permission_mode(mode)
@@ -203,7 +233,7 @@ class HostSession:
             self.last_active_at = time.monotonic()
             try:
                 result = await self.wiring.agent_runtime.resume_after_approval(state, resolution)
-                self._capture_pending_approval(result.state)
+                self._capture_pending_interaction(result.state)
                 return result
             finally:
                 self.active_run_id = None
@@ -228,7 +258,55 @@ class HostSession:
                 async for event in self.wiring.agent_runtime.stream_after_approval(state, resolution):
                     yield event
             finally:
-                self._capture_pending_approval(state)
+                self._capture_pending_interaction(state)
+                self.active_run_id = None
+                self.last_active_at = time.monotonic()
+
+    async def resolve_plan_interaction(
+        self,
+        resolution: PlanInteractionResolution,
+    ) -> AgentRunResult:
+        if self.closed:
+            raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        pending = self._require_pending_plan_interaction(resolution.interaction_id)
+        if self._run_lock.locked():
+            raise HostSessionBusyError("host session already has an active run")
+        async with self._run_lock:
+            state = self._require_suspended_state(pending)
+            self._prepare_state_for_plan(state)
+            self.active_run_id = state.run_id
+            self.last_active_at = time.monotonic()
+            try:
+                result = await self.wiring.agent_runtime.resume_after_plan_interaction(state, resolution)
+                self._capture_pending_interaction(result.state)
+                return result
+            finally:
+                self.active_run_id = None
+                self.last_active_at = time.monotonic()
+
+    async def stream_plan_interaction_resolution(
+        self,
+        resolution: PlanInteractionResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        if self.closed:
+            raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        pending = self._require_pending_plan_interaction(resolution.interaction_id)
+        if self._run_lock.locked():
+            raise HostSessionBusyError("host session already has an active run")
+        async with self._run_lock:
+            state = self._require_suspended_state(pending)
+            self._prepare_state_for_plan(state)
+            self.active_run_id = state.run_id
+            self.last_active_at = time.monotonic()
+            try:
+                async for event in self.wiring.agent_runtime.stream_after_plan_interaction(state, resolution):
+                    yield event
+            finally:
+                self._capture_pending_interaction(state)
                 self.active_run_id = None
                 self.last_active_at = time.monotonic()
 
@@ -241,11 +319,11 @@ class HostSession:
         if self.closed:
             raise RuntimeError("host session is closed")
         async with self._stop_lock:
-            if self.pending_approval is not None:
+            if self.pending_interaction is not None:
                 if self._run_lock.locked():
                     raise HostSessionBusyError("host session already has an active run")
                 async with self._run_lock:
-                    pending = self.pending_approval
+                    pending = self.pending_interaction
                     if pending is None:
                         return None
                     state = self._require_suspended_state(pending)
@@ -254,7 +332,7 @@ class HostSession:
                     self.last_active_at = time.monotonic()
                     try:
                         result = await self.wiring.agent_runtime.abort_run(state, reason=reason)
-                        self._capture_pending_approval(result.state)
+                        self._capture_pending_interaction(result.state)
                         return result
                     finally:
                         self.active_run_id = None
@@ -284,7 +362,7 @@ class HostSession:
         if self.closed:
             return
         self.closed = True
-        self.pending_approval = None
+        self.pending_interaction = None
         self._suspended_state = None
         self._active_state = None
         self._active_task = None
@@ -308,7 +386,9 @@ class HostSession:
             "stopping_run_id": self.stopping_run_id,
             "is_stopping": self.stopping_run_id is not None,
             "suspended_run_id": self.suspended_run_id,
-            "pending_approval": self.pending_approval.to_dict() if self.pending_approval is not None else None,
+            "pending_approval": self.get_pending_approval().to_dict() if self.get_pending_approval() is not None else None,
+            "pending_interaction": self.pending_interaction.to_dict() if self.pending_interaction is not None else None,
+            "plan": self.plan_state.to_dict(),
             "has_live_processes": self.has_live_processes,
             "terminal": self.terminal_summary,
         }
@@ -316,29 +396,115 @@ class HostSession:
     def _prior_messages(self):
         return rebuild_prior_messages(self.wiring.runtime_wiring.event_log)
 
-    def _capture_pending_approval(self, state: LoopState) -> None:
+    def _capture_pending_interaction(self, state: LoopState) -> None:
         if state.status is LoopStatus.WAITING_USER:
-            self.pending_approval = pending_approval_from_state(state, self.host_session_id)
+            if state.pending_interaction_kind == "plan":
+                self.pending_interaction = pending_plan_interaction_from_state(state, self.host_session_id)
+            else:
+                self.pending_interaction = pending_approval_from_state(state, self.host_session_id)
             self._suspended_state = state
             self.suspended_run_id = state.run_id
             return
-        self.pending_approval = None
+        self.pending_interaction = None
         self._suspended_state = None
         self.suspended_run_id = None
 
     def _require_pending_approval(self, approval_id: str) -> PendingApproval:
-        if self.pending_approval is None:
+        pending = self.get_pending_approval()
+        if pending is None:
             raise ValueError("host session has no pending approval")
-        if self.pending_approval.approval_id != approval_id:
+        if pending.approval_id != approval_id:
             raise ValueError("approval id does not match the pending approval")
-        return self.pending_approval
+        return pending
 
-    def _require_suspended_state(self, pending: PendingApproval) -> LoopState:
+    def _require_pending_plan_interaction(self, interaction_id: str) -> PendingPlanInteraction:
+        pending = self.pending_interaction
+        if not isinstance(pending, PendingPlanInteraction):
+            raise ValueError("host session has no pending plan interaction")
+        if pending.interaction_id != interaction_id:
+            raise ValueError("plan interaction id does not match the pending interaction")
+        return pending
+
+    def _require_suspended_state(self, pending: PendingInteraction) -> LoopState:
         if self._suspended_state is None:
-            raise ValueError("host session has no suspended approval state")
+            raise ValueError("host session has no suspended state")
         if self._suspended_state.run_id != pending.run_id:
-            raise ValueError("suspended state does not match pending approval")
+            raise ValueError("suspended state does not match pending interaction")
         return self._suspended_state
+
+    def enter_plan(self, *, reason: str = "") -> EffectivePermissionPolicy:
+        """Host/user entry point for Plan mode.
+
+        This is the :plan / Plan button path: no control run is created, but
+        permission is synchronously narrowed before the next model turn.
+        """
+        if self.closed:
+            raise RuntimeError("host session is closed")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        self._raise_if_pending_interaction("entering plan")
+        if self._run_lock.locked():
+            raise HostSessionBusyError("host session already has an active run")
+        if not self.plan_state.active:
+            self.plan_state.begin(
+                source="user",
+                previous_mode=self.current_permission_mode,
+                previous_policy=self.current_permission_policy(),
+                reason=reason,
+                pending_entry_audit=True,
+            )
+        policy = preset_to_policy(PermissionMode.READ_ONLY)
+        self.wiring.agent_runtime.set_permission_policy(policy, mode=PermissionMode.READ_ONLY)
+        self.last_active_at = time.monotonic()
+        return policy
+
+    def _plan_runtime_messages(self):
+        if not self.plan_state.active:
+            return []
+        if self.plan_state.pending_entry_audit:
+            return [
+                SystemMsg(
+                    PLAN_ENTRY_INSTRUCTION_NAME,
+                    PLAN_ENTRY_INSTRUCTION,
+                    metadata={"runtime_instruction": "plan_entry"},
+                )
+            ]
+        return [
+            SystemMsg(
+                PLAN_ACTIVE_INSTRUCTION_NAME,
+                PLAN_ACTIVE_INSTRUCTION,
+                metadata={"runtime_instruction": "plan_active"},
+            )
+        ]
+
+    def _prepare_state_for_plan(self, state: LoopState) -> None:
+        state.scratchpad["host_session_id"] = self.host_session_id
+        state.scratchpad["plan_state"] = self.plan_state
+        if self.plan_state.active:
+            state.scratchpad["plan_active"] = True
+        if self.plan_state.pending_entry_audit:
+            state.scratchpad["plan_entry_audit"] = {
+                "source": "user",
+                "previous_permission_mode": self.plan_state.pre_plan_permission_mode,
+                "previous_permission_policy": self.plan_state.pre_plan_permission_policy or {},
+                "reason": self.plan_state.entry_reason,
+            }
+
+    def _clear_plan_entry_audit_if_emitted(self, state: LoopState) -> None:
+        if state.scratchpad.get("plan_entry_audit_emitted"):
+            self.plan_state.pending_entry_audit = False
+
+    def _raise_if_pending_interaction(self, action: str) -> None:
+        pending = self.pending_interaction
+        if pending is None:
+            return
+        if isinstance(pending, PendingApproval):
+            raise HostSessionPendingApprovalError(
+                f"host session has a pending approval; resolve or deny it before {action}"
+            )
+        raise HostSessionPendingInteractionError(
+            f"host session has a pending user interaction; resolve or stop it before {action}"
+        )
 
     def _cleanup_workspace_root(self) -> None:
         if not self.workspace.cleanup_workspace_root_on_close:

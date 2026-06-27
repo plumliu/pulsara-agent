@@ -59,6 +59,12 @@ class EventType(StrEnum):
     REQUIRE_EXTERNAL_EXECUTION = "REQUIRE_EXTERNAL_EXECUTION"
     EXTERNAL_EXECUTION_RESULT = "EXTERNAL_EXECUTION_RESULT"
     TERMINAL_PROCESS_COMPLETED = "TERMINAL_PROCESS_COMPLETED"
+    PLAN_MODE_ENTERED = "PLAN_MODE_ENTERED"
+    PLAN_QUESTION_ASKED = "PLAN_QUESTION_ASKED"
+    PLAN_QUESTION_ANSWERED = "PLAN_QUESTION_ANSWERED"
+    PLAN_EXIT_REQUESTED = "PLAN_EXIT_REQUESTED"
+    PLAN_EXIT_RESOLVED = "PLAN_EXIT_RESOLVED"
+    PLAN_MODE_EXITED = "PLAN_MODE_EXITED"
 
     MEMORY_CANDIDATE_PROPOSED = "MEMORY_CANDIDATE_PROPOSED"
     MEMORY_WRITE_RESULT = "MEMORY_WRITE_RESULT"
@@ -309,6 +315,58 @@ class TerminalProcessCompletedEvent(EventBase):
     completion_reason: str | None = None
 
 
+class PlanModeEnteredEvent(EventBase):
+    type: Literal[EventType.PLAN_MODE_ENTERED] = EventType.PLAN_MODE_ENTERED
+    source: Literal["user", "agent"]
+    previous_permission_mode: str | None = None
+    previous_permission_policy: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+
+
+class PlanQuestionAskedEvent(EventBase):
+    type: Literal[EventType.PLAN_QUESTION_ASKED] = EventType.PLAN_QUESTION_ASKED
+    question_id: str
+    tool_call_id: str
+    question: str
+    options: list[str] = Field(default_factory=list)
+    allow_free_text: bool = True
+    reason: str = ""
+
+
+class PlanQuestionAnsweredEvent(EventBase):
+    type: Literal[EventType.PLAN_QUESTION_ANSWERED] = EventType.PLAN_QUESTION_ANSWERED
+    question_id: str
+    answer_text: str
+    selected_option: str | None = None
+
+
+class PlanExitRequestedEvent(EventBase):
+    type: Literal[EventType.PLAN_EXIT_REQUESTED] = EventType.PLAN_EXIT_REQUESTED
+    exit_request_id: str
+    tool_call_id: str
+    plan_text: str = ""
+    plan_artifact_id: str | None = None
+    summary: str = ""
+
+
+class PlanExitResolvedEvent(EventBase):
+    type: Literal[EventType.PLAN_EXIT_RESOLVED] = EventType.PLAN_EXIT_RESOLVED
+    exit_request_id: str
+    tool_call_id: str
+    decision: Literal["approve", "revise", "cancel"]
+    user_feedback: str = ""
+
+
+class PlanModeExitedEvent(EventBase):
+    type: Literal[EventType.PLAN_MODE_EXITED] = EventType.PLAN_MODE_EXITED
+    source: Literal["approved_exit_plan", "user_cancel", "user_force_exit"]
+    exit_request_id: str | None = None
+    restored_permission_mode: str | None = None
+    restored_permission_policy: dict[str, Any] = Field(default_factory=dict)
+    accepted_plan_summary: str = ""
+    accepted_plan_artifact_id: str | None = None
+
+
 class MemoryEventBase(EventBase):
     scope: str
     memory_type: str
@@ -469,6 +527,12 @@ AgentEvent: TypeAlias = (
     | RequireExternalExecutionEvent
     | ExternalExecutionResultEvent
     | TerminalProcessCompletedEvent
+    | PlanModeEnteredEvent
+    | PlanQuestionAskedEvent
+    | PlanQuestionAnsweredEvent
+    | PlanExitRequestedEvent
+    | PlanExitResolvedEvent
+    | PlanModeExitedEvent
     | MemoryCandidateProposedEvent
     | MemoryWriteResultEvent
     | MemoryWriteFailedEvent

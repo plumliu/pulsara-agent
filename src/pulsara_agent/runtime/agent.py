@@ -6,6 +6,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import AsyncIterator, Literal
+from uuid import uuid4
 
 from pulsara_agent.capability.types import (
     CapabilityResolveContext,
@@ -19,6 +20,12 @@ from pulsara_agent.event import (
     CustomEvent,
     EventContext,
     ExceedMaxItersEvent,
+    PlanExitRequestedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    PlanQuestionAnsweredEvent,
+    PlanQuestionAskedEvent,
     ProjectionFailedEvent,
     ProjectionReadyEvent,
     ProjectionRequestedEvent,
@@ -50,14 +57,26 @@ from pulsara_agent.runtime.loop_helpers import (
 )
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
+    ApprovalPolicy,
     EffectivePermissionPolicy,
     PermissionMode,
+    PermissionProfile,
     PermissionState,
     PolicyPermissionGate,
     PermissionDecisionKind,
     PermissionGate,
+    TerminalAccess,
     default_permission_policy,
     mode_for_policy,
+    parse_permission_mode,
+    preset_to_policy,
+)
+from pulsara_agent.runtime.plan import (
+    PLAN_WORKFLOW_TOOL_NAMES,
+    PlanExitResolution,
+    PlanInteractionResolution,
+    PlanQuestionResolution,
+    PlanWorkflowState,
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
@@ -80,6 +99,7 @@ StopReason = Literal[
     "max_turns",
     "model_error",
     "tool_error_budget",
+    "plan_interaction_budget",
     "memory_hook_error",
     "waiting_user",
     "aborted",
@@ -232,6 +252,23 @@ class AgentRuntime:
         async for event in self._stream_approval_resolution(state, resolution):
             yield event
 
+    async def resume_after_plan_interaction(
+        self,
+        state: LoopState,
+        resolution: PlanInteractionResolution,
+    ) -> AgentRunResult:
+        async for _event in self.stream_after_plan_interaction(state, resolution):
+            pass
+        return self._run_result(state)
+
+    async def stream_after_plan_interaction(
+        self,
+        state: LoopState,
+        resolution: PlanInteractionResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        async for event in self._stream_plan_interaction_resolution(state, resolution):
+            yield event
+
     async def abort_run(
         self,
         state: LoopState,
@@ -256,6 +293,8 @@ class AgentRuntime:
         state.stop_reason = "aborted"
         state.error_message = None
         state.pending_tool_calls = []
+        state.pending_interaction_kind = None
+        state.pending_interaction_payload = {}
         state.scratchpad["abort_reason"] = reason
         async for event in self._finalize_run(state):
             yield event
@@ -284,6 +323,8 @@ class AgentRuntime:
             ),
             state=state,
         )
+        async for event in self._emit_pending_plan_entry_audit(state):
+            yield event
         ok, _result, error_event = await self._run_memory_hook(
             state,
             "on_turn_start",
@@ -325,6 +366,25 @@ class AgentRuntime:
                 active_skill_names=active_skill_names or frozenset(),
             )
         )
+
+    async def _emit_pending_plan_entry_audit(self, state: LoopState) -> AsyncIterator[AgentEvent]:
+        payload = state.scratchpad.get("plan_entry_audit")
+        if not isinstance(payload, dict):
+            return
+        if state.scratchpad.get("plan_entry_audit_emitted"):
+            return
+        event = await self.runtime_session.emit(
+            PlanModeEnteredEvent(
+                **self._event_context(state).event_fields(),
+                source="user",
+                previous_permission_mode=payload.get("previous_permission_mode"),
+                previous_permission_policy=dict(payload.get("previous_permission_policy") or {}),
+                reason=str(payload.get("reason") or ""),
+            ),
+            state=state,
+        )
+        state.scratchpad["plan_entry_audit_emitted"] = True
+        yield event
 
     async def _stream_model_loop(
         self,
@@ -448,6 +508,8 @@ class AgentRuntime:
         state.stop_reason = "aborted"
         state.error_message = None
         state.pending_tool_calls = []
+        state.pending_interaction_kind = None
+        state.pending_interaction_payload = {}
         return True
 
     async def _stream_approval_resolution(
@@ -509,6 +571,158 @@ class AgentRuntime:
             )
             state.scratchpad["capabilities"] = capabilities
         async for event in self._stream_model_loop(state, capabilities):
+            yield event
+
+    async def _stream_plan_interaction_resolution(
+        self,
+        state: LoopState,
+        resolution: PlanInteractionResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        if state.status is not LoopStatus.WAITING_USER:
+            raise ValueError("plan interaction resolution requires a waiting state")
+        if state.pending_interaction_kind != "plan":
+            raise ValueError("waiting state does not contain a pending plan interaction")
+        payload = dict(state.pending_interaction_payload)
+        if resolution.interaction_id != payload.get("interaction_id"):
+            raise ValueError("plan interaction id does not match the pending interaction")
+        kind = payload.get("kind")
+        if kind == "question":
+            if not isinstance(resolution, PlanQuestionResolution):
+                raise ValueError("question interaction requires PlanQuestionResolution")
+            async for event in self._resolve_plan_question(state, payload, resolution):
+                yield event
+        elif kind == "exit":
+            if not isinstance(resolution, PlanExitResolution):
+                raise ValueError("exit interaction requires PlanExitResolution")
+            async for event in self._resolve_plan_exit(state, payload, resolution):
+                yield event
+        else:
+            raise ValueError("pending plan interaction has invalid kind")
+
+        state.pending_interaction_kind = None
+        state.pending_interaction_payload = {}
+        if state.status is LoopStatus.WAITING_USER:
+            state.status = LoopStatus.RUNNING
+            state.stop_reason = None
+
+        async for event in self._after_tool_results(state):
+            yield event
+        if state.status is not LoopStatus.RUNNING:
+            async for event in self._finalize_run(state):
+                yield event
+            return
+        state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
+        state.begin_next_turn()
+        capabilities = state.scratchpad.get("capabilities")
+        if not isinstance(capabilities, ResolvedCapabilitySet):
+            capabilities = self._resolve_capabilities(
+                state,
+                user_input="",
+                prior_messages=[],
+                active_skill_names=frozenset(),
+            )
+            state.scratchpad["capabilities"] = capabilities
+        async for event in self._stream_model_loop(state, capabilities):
+            yield event
+
+    async def _resolve_plan_question(
+        self,
+        state: LoopState,
+        payload: dict,
+        resolution: PlanQuestionResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        question_id = str(payload.get("question_id") or "")
+        tool_call_id = str(payload["tool_call_id"])
+        tool_name = "ask_plan_question"
+        yield await self.runtime_session.emit(
+            PlanQuestionAnsweredEvent(
+                **self._event_context(state).event_fields(),
+                question_id=question_id,
+                answer_text=resolution.answer_text,
+                selected_option=resolution.selected_option,
+            ),
+            state=state,
+        )
+        output = json.dumps(
+            {
+                "answer_text": resolution.answer_text,
+                "selected_option": resolution.selected_option,
+            },
+            ensure_ascii=False,
+        )
+        async for event in self._emit_tool_result_and_record(
+            state,
+            tool_call_id=tool_call_id,
+            tool_call_name=tool_name,
+            output=output,
+            result_state=ToolResultState.SUCCESS,
+        ):
+            yield event
+
+    async def _resolve_plan_exit(
+        self,
+        state: LoopState,
+        payload: dict,
+        resolution: PlanExitResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        exit_request_id = str(payload.get("exit_request_id") or "")
+        tool_call_id = str(payload["tool_call_id"])
+        yield await self.runtime_session.emit(
+            PlanExitResolvedEvent(
+                **self._event_context(state).event_fields(),
+                exit_request_id=exit_request_id,
+                tool_call_id=tool_call_id,
+                decision=resolution.decision,
+                user_feedback=resolution.user_feedback,
+            ),
+            state=state,
+        )
+        if resolution.decision == "revise":
+            revisions = int(state.scratchpad.get("plan_exit_revisions", 0)) + 1
+            state.scratchpad["plan_exit_revisions"] = revisions
+            if revisions > state.budget.max_plan_exit_revisions_per_run:
+                yield await self._mark_plan_budget_exceeded(state, kind="exit_revision")
+        if resolution.decision == "approve":
+            plan_state = self._plan_state(state)
+            restored_mode = plan_state.pre_plan_permission_mode
+            restored_policy = self._policy_from_plan_state(plan_state)
+            self.set_permission_policy(
+                restored_policy,
+                mode=parse_permission_mode(restored_mode) if restored_mode is not None else None,
+            )
+            accepted_summary = str(payload.get("summary") or "")
+            accepted_artifact_id = payload.get("plan_artifact_id")
+            yield await self.runtime_session.emit(
+                PlanModeExitedEvent(
+                    **self._event_context(state).event_fields(),
+                    source="approved_exit_plan",
+                    exit_request_id=exit_request_id,
+                    restored_permission_mode=restored_mode,
+                    restored_permission_policy=restored_policy.to_dict(),
+                    accepted_plan_summary=accepted_summary,
+                    accepted_plan_artifact_id=accepted_artifact_id if isinstance(accepted_artifact_id, str) else None,
+                ),
+                state=state,
+            )
+            plan_state.finish(
+                accepted_plan_summary=accepted_summary,
+                accepted_plan_artifact_id=accepted_artifact_id if isinstance(accepted_artifact_id, str) else None,
+            )
+            _remove_plan_runtime_instructions(state)
+        output = json.dumps(
+            {
+                "decision": resolution.decision,
+                "user_feedback": resolution.user_feedback,
+            },
+            ensure_ascii=False,
+        )
+        async for event in self._emit_tool_result_and_record(
+            state,
+            tool_call_id=tool_call_id,
+            tool_call_name="exit_plan",
+            output=output,
+            result_state=ToolResultState.SUCCESS,
+        ):
             yield event
 
     async def _after_tool_results(self, state: LoopState) -> AsyncIterator[AgentEvent]:
@@ -823,6 +1037,11 @@ class AgentRuntime:
             if not parsed_calls:
                 return
 
+        if any(call.name in PLAN_WORKFLOW_TOOL_NAMES for call in parsed_calls):
+            async for event in self._handle_workflow_tool_batch(state, parsed_calls):
+                yield event
+            return
+
         decision = await self.permission_gate.evaluate(parsed_calls)
         if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
             blocks = [
@@ -874,6 +1093,308 @@ class AgentRuntime:
 
         async for event in self._stream_parsed_tool_calls(state, parsed_calls):
             yield event
+
+    async def _handle_workflow_tool_batch(
+        self,
+        state: LoopState,
+        parsed_calls: list[ToolCall],
+    ) -> AsyncIterator[AgentEvent]:
+        workflow_index = next(
+            index for index, call in enumerate(parsed_calls) if call.name in PLAN_WORKFLOW_TOOL_NAMES
+        )
+        workflow_call = parsed_calls[workflow_index]
+        try:
+            if workflow_call.name == "enter_plan":
+                async for event in self._execute_enter_plan(state, workflow_call):
+                    yield event
+            elif workflow_call.name == "ask_plan_question":
+                async for event in self._execute_ask_plan_question(state, workflow_call):
+                    yield event
+            elif workflow_call.name == "exit_plan":
+                async for event in self._execute_exit_plan(state, workflow_call):
+                    yield event
+            else:
+                async for event in self._emit_tool_result_and_record(
+                    state,
+                    tool_call_id=workflow_call.id,
+                    tool_call_name=workflow_call.name,
+                    output=f"unknown workflow tool: {workflow_call.name}",
+                    result_state=ToolResultState.ERROR,
+                ):
+                    yield event
+        except Exception as exc:
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=workflow_call.id,
+                tool_call_name=workflow_call.name,
+                output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
+                result_state=ToolResultState.ERROR,
+            ):
+                yield event
+
+        for index, call in enumerate(parsed_calls):
+            if index == workflow_index:
+                continue
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=call.id,
+                tool_call_name=call.name,
+                output=(
+                    "not executed because a plan workflow control tool suspended or changed workflow state; "
+                    "retry after the workflow step completes"
+                ),
+                result_state=ToolResultState.DENIED,
+            ):
+                yield event
+
+    async def _execute_enter_plan(self, state: LoopState, call: ToolCall) -> AsyncIterator[AgentEvent]:
+        plan_state = self._plan_state(state)
+        if plan_state.active:
+            output = json.dumps({"status": "already_active"}, ensure_ascii=False)
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=call.id,
+                tool_call_name=call.name,
+                output=output,
+                result_state=ToolResultState.SUCCESS,
+            ):
+                yield event
+            return
+        reason = _optional_str(call.arguments.get("reason"))
+        previous_mode = self.permission_mode
+        previous_policy = self.permission_policy
+        plan_state.begin(
+            source="agent",
+            previous_mode=previous_mode,
+            previous_policy=previous_policy,
+            reason=reason,
+            pending_entry_audit=False,
+        )
+        self.set_permission_policy(
+            preset_to_policy(PermissionMode.READ_ONLY),
+            mode=PermissionMode.READ_ONLY,
+        )
+        yield await self.runtime_session.emit(
+            PlanModeEnteredEvent(
+                **self._event_context(state).event_fields(),
+                source="agent",
+                previous_permission_mode=(
+                    previous_mode.value if isinstance(previous_mode, PermissionMode) else previous_mode
+                ),
+                previous_permission_policy=previous_policy.to_dict(),
+                reason=reason,
+            ),
+            state=state,
+        )
+        output = json.dumps({"status": "entered", "permission_mode": PermissionMode.READ_ONLY.value}, ensure_ascii=False)
+        async for event in self._emit_tool_result_and_record(
+            state,
+            tool_call_id=call.id,
+            tool_call_name=call.name,
+            output=output,
+            result_state=ToolResultState.SUCCESS,
+        ):
+            yield event
+
+    async def _execute_ask_plan_question(self, state: LoopState, call: ToolCall) -> AsyncIterator[AgentEvent]:
+        if not self._plan_state(state).active:
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=call.id,
+                tool_call_name=call.name,
+                output="ask_plan_question can only be used while Plan workflow is active",
+                result_state=ToolResultState.DENIED,
+            ):
+                yield event
+            return
+        if not self._consume_plan_interaction_budget(state):
+            async for event in self._emit_plan_budget_error_result(state, call, kind="interaction"):
+                yield event
+            return
+        question = _required_str(call.arguments.get("question"), "question")
+        raw_options = call.arguments.get("options")
+        if raw_options is None:
+            raw_options = []
+        if not isinstance(raw_options, list):
+            raise ValueError("options must be a list of strings")
+        options = tuple(str(option) for option in raw_options)
+        allow_free_text = bool(call.arguments.get("allow_free_text", True))
+        reason = _optional_str(call.arguments.get("reason"))
+        question_id = f"plan_question:{uuid4().hex}"
+        interaction_id = f"plan_interaction:{uuid4().hex}"
+        yield await self.runtime_session.emit(
+            PlanQuestionAskedEvent(
+                **self._event_context(state).event_fields(),
+                question_id=question_id,
+                tool_call_id=call.id,
+                question=question,
+                options=list(options),
+                allow_free_text=allow_free_text,
+                reason=reason,
+            ),
+            state=state,
+        )
+        state.pending_tool_calls = []
+        state.pending_interaction_kind = "plan"
+        state.pending_interaction_payload = {
+            "interaction_id": interaction_id,
+            "kind": "question",
+            "tool_call_id": call.id,
+            "question_id": question_id,
+            "question": question,
+            "options": list(options),
+            "allow_free_text": allow_free_text,
+        }
+        state.status = LoopStatus.WAITING_USER
+        state.stop_reason = "waiting_user"
+        state.transition(LoopTransition.WAIT_FOR_USER)
+
+    async def _execute_exit_plan(self, state: LoopState, call: ToolCall) -> AsyncIterator[AgentEvent]:
+        if not self._plan_state(state).active:
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=call.id,
+                tool_call_name=call.name,
+                output="exit_plan can only be used while Plan workflow is active",
+                result_state=ToolResultState.DENIED,
+            ):
+                yield event
+            return
+        if not self._consume_plan_interaction_budget(state):
+            async for event in self._emit_plan_budget_error_result(state, call, kind="interaction"):
+                yield event
+            return
+        plan_text = _required_str(call.arguments.get("plan"), "plan")
+        summary = _optional_str(call.arguments.get("summary"))
+        exit_request_id = f"plan_exit:{uuid4().hex}"
+        interaction_id = f"plan_interaction:{uuid4().hex}"
+        yield await self.runtime_session.emit(
+            PlanExitRequestedEvent(
+                **self._event_context(state).event_fields(),
+                exit_request_id=exit_request_id,
+                tool_call_id=call.id,
+                plan_text=plan_text,
+                summary=summary,
+            ),
+            state=state,
+        )
+        state.pending_tool_calls = []
+        state.pending_interaction_kind = "plan"
+        state.pending_interaction_payload = {
+            "interaction_id": interaction_id,
+            "kind": "exit",
+            "tool_call_id": call.id,
+            "exit_request_id": exit_request_id,
+            "plan_text": plan_text,
+            "summary": summary,
+        }
+        state.status = LoopStatus.WAITING_USER
+        state.stop_reason = "waiting_user"
+        state.transition(LoopTransition.WAIT_FOR_USER)
+
+    async def _emit_tool_result_and_record(
+        self,
+        state: LoopState,
+        *,
+        tool_call_id: str,
+        tool_call_name: str,
+        output: str,
+        result_state: ToolResultState,
+    ) -> AsyncIterator[AgentEvent]:
+        stored_events = await self.runtime_session.emit_many(
+            build_tool_result_error_events(
+                self._event_context(state),
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_call_name,
+                message=output,
+                state=result_state,
+            ),
+            state=state,
+        )
+        for event in stored_events:
+            yield event
+        result_block = _tool_result_from_event_slice(stored_events, tool_call_id)
+        _remember_tool_result_event_span(state, stored_events, tool_call_id)
+        state.tool_results.append(result_block)
+        state.messages.append(
+            Msg(
+                role="tool_result",
+                name=tool_call_name,
+                id=f"tool-result-message:{tool_call_id}",
+                content=[result_block],
+            )
+        )
+
+    def _plan_state(self, state: LoopState) -> PlanWorkflowState:
+        plan_state = state.scratchpad.get("plan_state")
+        if isinstance(plan_state, PlanWorkflowState):
+            return plan_state
+        plan_state = PlanWorkflowState()
+        state.scratchpad["plan_state"] = plan_state
+        return plan_state
+
+    def _consume_plan_interaction_budget(self, state: LoopState) -> bool:
+        consumed = int(state.scratchpad.get("plan_interactions", 0))
+        if consumed >= state.budget.max_plan_interactions_per_run:
+            state.status = LoopStatus.FAILED
+            state.stop_reason = "plan_interaction_budget"
+            state.error_message = "plan interaction budget exceeded"
+            state.transition(LoopTransition.FAIL)
+            return False
+        state.scratchpad["plan_interactions"] = consumed + 1
+        return True
+
+    async def _emit_plan_budget_error_result(
+        self,
+        state: LoopState,
+        call: ToolCall,
+        *,
+        kind: str,
+    ) -> AsyncIterator[AgentEvent]:
+        message = f"plan {kind} budget exceeded"
+        async for event in self._emit_tool_result_and_record(
+            state,
+            tool_call_id=call.id,
+            tool_call_name=call.name,
+            output=message,
+            result_state=ToolResultState.ERROR,
+        ):
+            yield event
+        yield await self.runtime_session.emit(
+            RunErrorEvent(
+                **self._event_context(state).event_fields(),
+                message=message,
+                code="plan_interaction_budget_exceeded",
+            ),
+            state=state,
+        )
+
+    async def _mark_plan_budget_exceeded(self, state: LoopState, *, kind: str) -> AgentEvent:
+        message = f"plan {kind} budget exceeded"
+        state.status = LoopStatus.FAILED
+        state.stop_reason = "plan_interaction_budget"
+        state.error_message = message
+        state.transition(LoopTransition.FAIL)
+        return await self.runtime_session.emit(
+            RunErrorEvent(
+                **self._event_context(state).event_fields(),
+                message=message,
+                code="plan_interaction_budget_exceeded",
+            ),
+            state=state,
+        )
+
+    def _policy_from_plan_state(self, plan_state: PlanWorkflowState) -> EffectivePermissionPolicy:
+        payload = plan_state.pre_plan_permission_policy or {}
+        if not payload:
+            return default_permission_policy()
+        return EffectivePermissionPolicy(
+            profile=PermissionProfile(str(payload["profile"])),
+            approval=ApprovalPolicy(str(payload["approval_policy"])),
+            terminal=TerminalAccess(str(payload["terminal_access"])),
+            execution_boundary="host",
+            network_isolated=bool(payload.get("network_isolated", False)),
+        )
 
     async def _stream_confirmed_tool_blocks(
         self,
@@ -1040,3 +1561,25 @@ class AgentRuntime:
 def _is_overridden_hook(instance: object, name: str, base: type) -> bool:
     method = getattr(type(instance), name, None)
     return method is not None and method is not getattr(base, name, None)
+
+
+def _optional_str(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("expected a string")
+    return value
+
+
+def _required_str(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} is required")
+    return value
+
+
+def _remove_plan_runtime_instructions(state: LoopState) -> None:
+    state.messages = [
+        message
+        for message in state.messages
+        if message.metadata.get("runtime_instruction") not in {"plan_entry", "plan_active"}
+    ]

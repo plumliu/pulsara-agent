@@ -13,6 +13,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     ToolResultStartEvent,
 )
+from pulsara_agent.runtime.plan import PLAN_WORKFLOW_TOOL_NAMES
 from pulsara_agent.runtime.permission import FILE_WRITE_TOOL_NAMES, TERMINAL_TOOL_NAMES
 
 
@@ -71,6 +72,8 @@ def classify_unfinished_tool_calls(events: Iterable[AgentEvent]) -> list[Unfinis
             pending=pending,
             result_start_names=result_start_names,
         )
+        if tool_name in PLAN_WORKFLOW_TOOL_NAMES:
+            continue
         state = _classify_state(tool_call_id, attempted=attempted, pending=pending)
         unfinished.append(
             UnfinishedToolCall(

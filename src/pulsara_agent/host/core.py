@@ -16,6 +16,7 @@ from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
+from pulsara_agent.runtime.plan import PendingInteraction, PlanInteractionResolution
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
@@ -87,6 +88,10 @@ class HostCore:
         session = await self.get_session(host_session_id)
         return session.get_pending_approval()
 
+    async def get_pending_interaction(self, host_session_id: str) -> PendingInteraction | None:
+        session = await self.get_session(host_session_id)
+        return session.get_pending_interaction()
+
     async def resolve_approval(
         self,
         host_session_id: str,
@@ -94,6 +99,14 @@ class HostCore:
     ) -> AgentRunResult:
         session = await self.get_session(host_session_id)
         return await session.resolve_approval(resolution)
+
+    async def resolve_plan_interaction(
+        self,
+        host_session_id: str,
+        resolution: PlanInteractionResolution,
+    ) -> AgentRunResult:
+        session = await self.get_session(host_session_id)
+        return await session.resolve_plan_interaction(resolution)
 
     async def stop_current_turn(
         self,
@@ -112,9 +125,22 @@ class HostCore:
         session = await self.get_session(host_session_id)
         return session.set_permission_mode(mode)
 
+    async def enter_plan(self, host_session_id: str, *, reason: str = ""):
+        session = await self.get_session(host_session_id)
+        return session.enter_plan(reason=reason)
+
     async def stream_approval_resolution(self, host_session_id: str, resolution: ApprovalResolution):
         session = await self.get_session(host_session_id)
         async for event in session.stream_approval_resolution(resolution):
+            yield event
+
+    async def stream_plan_interaction_resolution(
+        self,
+        host_session_id: str,
+        resolution: PlanInteractionResolution,
+    ):
+        session = await self.get_session(host_session_id)
+        async for event in session.stream_plan_interaction_resolution(resolution):
             yield event
 
     async def list_sessions(self) -> list[HostSessionSummary]:

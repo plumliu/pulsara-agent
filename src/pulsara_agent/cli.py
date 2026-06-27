@@ -23,6 +23,7 @@ from pulsara_agent.host import (
     HostCore,
     HostSessionBusyError,
     HostSessionPendingApprovalError,
+    HostSessionPendingInteractionError,
     HostWorkspaceInput,
     normalize_workspace_kind,
     resolve_workspace,
@@ -32,7 +33,14 @@ from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
-from pulsara_agent.runtime import ApprovalResolution, RuntimeSession, ToolApprovalDecision
+from pulsara_agent.runtime import (
+    ApprovalResolution,
+    PendingPlanInteraction,
+    PlanExitResolution,
+    PlanQuestionResolution,
+    RuntimeSession,
+    ToolApprovalDecision,
+)
 from pulsara_agent.runtime.permission import (
     PermissionMode,
     PermissionState,
@@ -233,7 +241,9 @@ def main() -> None:
                 result = asyncio.run(_host_run(args))
             except ValueError as exc:
                 parser.error(str(exc))
-            if isinstance(result, dict) and result.get("pending_approval") is not None:
+            if isinstance(result, dict) and (
+                result.get("pending_approval") is not None or result.get("pending_interaction") is not None
+            ):
                 print(json.dumps(result, indent=2))
             else:
                 print(result.final_text)
@@ -290,6 +300,13 @@ async def _host_run(args) -> object:
                 "message": "This one-shot host run is waiting for approval. Use host repl or HostCore APIs to resolve it.",
                 "pending_approval": pending.to_dict(),
             }
+        pending_interaction = session.get_pending_interaction()
+        if pending_interaction is not None:
+            return {
+                "status": "waiting_user",
+                "message": "This one-shot host run is waiting for a user interaction. Use host repl or HostCore APIs to resolve it.",
+                "pending_interaction": pending_interaction.to_dict(),
+            }
         return result
     finally:
         await core.close_session(session.host_session_id)
@@ -317,6 +334,19 @@ async def _host_repl(args) -> None:
                 pending = session.get_pending_approval()
                 print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
                 continue
+            if prompt.strip() == ":interaction":
+                pending = session.get_pending_interaction()
+                print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
+                continue
+            if prompt.strip().startswith(":plan"):
+                reason = prompt.strip()[len(":plan"):].strip()
+                try:
+                    policy = session.enter_plan(reason=reason)
+                except (HostSessionBusyError, HostSessionPendingApprovalError, HostSessionPendingInteractionError) as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    continue
+                print(json.dumps({"plan": session.plan_state.to_dict(), "policy": policy.to_dict()}, indent=2))
+                continue
             if prompt.strip() == ":status":
                 mode = session.current_permission_mode
                 print(
@@ -337,7 +367,12 @@ async def _host_repl(args) -> None:
                     continue
                 try:
                     policy = session.set_permission_mode(requested)
-                except (ValueError, HostSessionBusyError, HostSessionPendingApprovalError) as exc:
+                except (
+                    ValueError,
+                    HostSessionBusyError,
+                    HostSessionPendingApprovalError,
+                    HostSessionPendingInteractionError,
+                ) as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     continue
                 print(json.dumps({"mode": requested, "policy": policy.to_dict()}, indent=2))
@@ -348,6 +383,62 @@ async def _host_repl(args) -> None:
                     print("No active turn to stop.")
                 else:
                     print(json.dumps({"status": result.status.value, "stop_reason": result.stop_reason}, indent=2))
+                continue
+            if prompt.strip().startswith(":answer"):
+                pending = session.get_pending_interaction()
+                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "question":
+                    print("No pending plan question.")
+                    continue
+                answer = prompt.strip()[len(":answer"):].strip()
+                if not answer:
+                    print("Usage: :answer <text>", file=sys.stderr)
+                    continue
+                result = await session.resolve_plan_interaction(
+                    PlanQuestionResolution(interaction_id=pending.interaction_id, answer_text=answer)
+                )
+                if result.final_text:
+                    print(result.final_text)
+                pending = session.get_pending_interaction()
+                if pending is not None:
+                    print(json.dumps({"pending_interaction": pending.to_dict()}, indent=2))
+                continue
+            if prompt.strip() == ":approve-plan":
+                pending = session.get_pending_interaction()
+                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
+                    print("No pending plan exit request.")
+                    continue
+                result = await session.resolve_plan_interaction(
+                    PlanExitResolution(interaction_id=pending.interaction_id, decision="approve")
+                )
+                if result.final_text:
+                    print(result.final_text)
+                continue
+            if prompt.strip().startswith(":revise-plan"):
+                pending = session.get_pending_interaction()
+                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
+                    print("No pending plan exit request.")
+                    continue
+                feedback = prompt.strip()[len(":revise-plan"):].strip()
+                result = await session.resolve_plan_interaction(
+                    PlanExitResolution(
+                        interaction_id=pending.interaction_id,
+                        decision="revise",
+                        user_feedback=feedback,
+                    )
+                )
+                if result.final_text:
+                    print(result.final_text)
+                continue
+            if prompt.strip() == ":cancel-plan":
+                pending = session.get_pending_interaction()
+                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
+                    print("No pending plan exit request.")
+                    continue
+                result = await session.resolve_plan_interaction(
+                    PlanExitResolution(interaction_id=pending.interaction_id, decision="cancel")
+                )
+                if result.final_text:
+                    print(result.final_text)
                 continue
             if prompt.strip() in {":approve", ":deny"}:
                 pending = session.get_pending_approval()
@@ -375,6 +466,9 @@ async def _host_repl(args) -> None:
             pending = session.get_pending_approval()
             if pending is not None:
                 print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
+            pending_interaction = session.get_pending_interaction()
+            if pending_interaction is not None:
+                print(json.dumps({"pending_interaction": pending_interaction.to_dict()}, indent=2))
     finally:
         await core.close_session(session.host_session_id)
 

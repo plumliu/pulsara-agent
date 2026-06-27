@@ -9,6 +9,12 @@ from pulsara_agent.event import (
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    PlanExitRequestedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    PlanQuestionAnsweredEvent,
+    PlanQuestionAskedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RequireUserConfirmEvent,
@@ -153,6 +159,75 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
     )
 
     assert timeline.status == "completed"
+
+
+def test_build_run_timeline_projects_plan_waiting_and_resolution(tmp_path) -> None:
+    runtime = RuntimeSession(tmp_path)
+
+    async def run() -> None:
+        for event in [
+            PlanModeEnteredEvent(
+                **CTX.event_fields(),
+                source="user",
+                previous_permission_mode="bypass-permissions",
+                previous_permission_policy={"profile": "trusted_host"},
+                reason="plan",
+            ),
+            PlanQuestionAskedEvent(
+                **CTX.event_fields(),
+                question_id="plan_question:1",
+                tool_call_id="call:question",
+                question="Scope?",
+                options=["small"],
+                allow_free_text=True,
+            ),
+            PlanQuestionAnsweredEvent(
+                **CTX.event_fields(),
+                question_id="plan_question:1",
+                answer_text="small",
+                selected_option="small",
+            ),
+            PlanExitRequestedEvent(
+                **CTX.event_fields(),
+                exit_request_id="plan_exit:1",
+                tool_call_id="call:exit",
+                plan_text="draft",
+                summary="draft summary",
+            ),
+            PlanExitResolvedEvent(
+                **CTX.event_fields(),
+                exit_request_id="plan_exit:1",
+                tool_call_id="call:exit",
+                decision="approve",
+                user_feedback="ok",
+            ),
+            PlanModeExitedEvent(
+                **CTX.event_fields(),
+                source="approved_exit_plan",
+                exit_request_id="plan_exit:1",
+                restored_permission_mode="bypass-permissions",
+                restored_permission_policy={"profile": "trusted_host"},
+                accepted_plan_summary="draft summary",
+            ),
+        ]:
+            await runtime.emit(event)
+
+    asyncio.run(run())
+
+    timeline = build_run_timeline(
+        runtime.event_log.iter(run_id=CTX.run_id),
+        runtime_session_id=runtime.runtime_session_id,
+    )
+
+    assert timeline.status == "completed"
+    kinds = [item.kind for item in timeline.items]
+    assert kinds == ["plan_mode", "plan_question", "plan_exit_request", "plan_mode"]
+    question = next(item for item in timeline.items if item.kind == "plan_question")
+    exit_request = next(item for item in timeline.items if item.kind == "plan_exit_request")
+    assert question.status == "answered"
+    assert question.metadata["answer_text"] == "small"
+    assert exit_request.status == "approve"
+    assert exit_request.summary == "draft summary"
 
 
 def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(tmp_path) -> None:

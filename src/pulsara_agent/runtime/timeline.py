@@ -10,6 +10,12 @@ from pulsara_agent.event import (
     ExceedMaxItersEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    PlanExitRequestedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    PlanQuestionAnsweredEvent,
+    PlanQuestionAskedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RequireUserConfirmEvent,
@@ -35,6 +41,9 @@ TimelineItemKind = Literal[
     "tool_call",
     "tool_result",
     "permission_request",
+    "plan_mode",
+    "plan_question",
+    "plan_exit_request",
     "error",
 ]
 
@@ -136,6 +145,8 @@ def build_run_timeline(
     thinking_blocks: dict[tuple[str, str], RunTimelineItem] = {}
     tool_calls: dict[str, RunTimelineItem] = {}
     tool_results: dict[str, RunTimelineItem] = {}
+    plan_questions: dict[str, RunTimelineItem] = {}
+    plan_exits: dict[str, RunTimelineItem] = {}
     failed = False
     waiting_user = False
     terminal_status: str | None = None
@@ -283,6 +294,88 @@ def build_run_timeline(
         if isinstance(event, RunErrorEvent):
             failed = True
             items.append(_item("error", event.code, event, status="error", summary=event.message))
+            continue
+        if isinstance(event, PlanModeEnteredEvent):
+            items.append(
+                _item(
+                    "plan_mode",
+                    "Plan mode entered",
+                    event,
+                    status="active",
+                    summary=event.reason,
+                    metadata={
+                        "source": event.source,
+                        "previous_permission_mode": event.previous_permission_mode,
+                    },
+                )
+            )
+            continue
+        if isinstance(event, PlanQuestionAskedEvent):
+            waiting_user = True
+            item = _item(
+                "plan_question",
+                "Plan question",
+                event,
+                status="waiting",
+                summary=event.question,
+                metadata={
+                    "question_id": event.question_id,
+                    "tool_call_id": event.tool_call_id,
+                    "options": list(event.options),
+                    "allow_free_text": event.allow_free_text,
+                },
+            )
+            plan_questions[event.question_id] = item
+            items.append(item)
+            continue
+        if isinstance(event, PlanQuestionAnsweredEvent):
+            waiting_user = False
+            item = plan_questions.get(event.question_id)
+            _finish(item, event, status="answered")
+            if item is not None:
+                item.metadata["answer_text"] = event.answer_text
+                item.metadata["selected_option"] = event.selected_option
+            continue
+        if isinstance(event, PlanExitRequestedEvent):
+            waiting_user = True
+            item = _item(
+                "plan_exit_request",
+                "Plan exit requested",
+                event,
+                status="waiting",
+                summary=event.summary,
+                metadata={
+                    "exit_request_id": event.exit_request_id,
+                    "tool_call_id": event.tool_call_id,
+                    "plan_artifact_id": event.plan_artifact_id,
+                },
+            )
+            plan_exits[event.exit_request_id] = item
+            items.append(item)
+            continue
+        if isinstance(event, PlanExitResolvedEvent):
+            waiting_user = False
+            item = plan_exits.get(event.exit_request_id)
+            _finish(item, event, status=event.decision)
+            if item is not None:
+                item.metadata["user_feedback"] = event.user_feedback
+            continue
+        if isinstance(event, PlanModeExitedEvent):
+            items.append(
+                _item(
+                    "plan_mode",
+                    "Plan mode exited",
+                    event,
+                    status="completed",
+                    summary=event.accepted_plan_summary,
+                    metadata={
+                        "source": event.source,
+                        "exit_request_id": event.exit_request_id,
+                        "restored_permission_mode": event.restored_permission_mode,
+                        "accepted_plan_artifact_id": event.accepted_plan_artifact_id,
+                    },
+                )
+            )
             continue
         if isinstance(event, ExceedMaxItersEvent):
             failed = True

@@ -9,7 +9,9 @@ from pulsara_agent.capability.bundled_skills import (
 )
 from pulsara_agent.host import HostWorkspaceInput
 from pulsara_agent.message import ToolCallBlock, ToolCallState
-from pulsara_agent.runtime import PendingApproval
+from pulsara_agent.runtime import PendingApproval, PendingPlanInteraction
+from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus
 
 
@@ -25,6 +27,8 @@ class FakeSession:
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.active_skill_names: list[frozenset[str] | None] = []
+        self.plan_state = PlanWorkflowState()
+        self.enter_plan_reasons: list[str] = []
 
     async def run_turn(self, prompt: str, *, active_skill_names=None):
         self.prompts.append(prompt)
@@ -33,6 +37,20 @@ class FakeSession:
 
     def get_pending_approval(self):
         return None
+
+    def get_pending_interaction(self):
+        return None
+
+    def enter_plan(self, *, reason: str = ""):
+        self.enter_plan_reasons.append(reason)
+        self.plan_state.begin(
+            source="user",
+            previous_mode=PermissionMode.BYPASS_PERMISSIONS,
+            previous_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+            reason=reason,
+            pending_entry_audit=True,
+        )
+        return preset_to_policy(PermissionMode.READ_ONLY)
 
     async def stop_current_turn(self):
         return None
@@ -68,6 +86,35 @@ class PendingFakeSession(FakeSession):
         result.status = LoopStatus.ABORTED
         result.stop_reason = "aborted"
         return result
+
+
+class PendingPlanFakeSession(FakeSession):
+    def __init__(self, *, kind: str = "question") -> None:
+        super().__init__()
+        self.resolutions = []
+        self._pending = PendingPlanInteraction(
+            interaction_id="plan_interaction:test",
+            kind=kind,
+            host_session_id=self.host_session_id,
+            runtime_session_id="runtime:test",
+            run_id="run:test",
+            turn_id="turn:test",
+            reply_id="reply:test",
+            tool_call_id="call:plan",
+            question_id="plan_question:test" if kind == "question" else None,
+            question="Scope?" if kind == "question" else "",
+            exit_request_id="plan_exit:test" if kind == "exit" else None,
+            plan_text="draft" if kind == "exit" else "",
+            summary="draft summary" if kind == "exit" else "",
+        )
+
+    def get_pending_interaction(self):
+        return self._pending
+
+    async def resolve_plan_interaction(self, resolution):
+        self.resolutions.append(resolution)
+        self._pending = None
+        return FakeResult()
 
 
 class FakeCore:
@@ -239,6 +286,72 @@ def test_cli_host_repl_approval_commands_show_and_resolve_pending(monkeypatch, t
     out = capsys.readouterr().out
     assert '"approval_id": "approval:test"' in out
     assert "fake final" in out
+
+
+def test_cli_host_repl_plan_command_enters_plan_without_running_prompt(monkeypatch, tmp_path, capsys) -> None:
+    FakeCore.instances.clear()
+    inputs = iter([":plan inspect first", "quit"])
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    session = FakeCore.instances[0].session
+    assert session.enter_plan_reasons == ["inspect first"]
+    assert session.prompts == []
+    out = capsys.readouterr().out
+    assert '"pending_entry_audit": true' in out
+
+
+def test_cli_host_repl_answers_pending_plan_question(monkeypatch, tmp_path, capsys) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings, durable: bool = False):
+            super().__init__(settings=settings, durable=durable)
+            self.session = PendingPlanFakeSession(kind="question")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter([":interaction", ":answer runtime", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    session = PendingPlanCore.instances[0].session
+    assert session.resolutions[0].interaction_id == "plan_interaction:test"
+    assert session.resolutions[0].answer_text == "runtime"
+    out = capsys.readouterr().out
+    assert '"kind": "question"' in out
+    assert "fake final" in out
+
+
+def test_cli_host_repl_approves_pending_plan_exit(monkeypatch, tmp_path) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings, durable: bool = False):
+            super().__init__(settings=settings, durable=durable)
+            self.session = PendingPlanFakeSession(kind="exit")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter([":approve-plan", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    resolution = PendingPlanCore.instances[0].session.resolutions[0]
+    assert resolution.interaction_id == "plan_interaction:test"
+    assert resolution.decision == "approve"
 
 
 def test_cli_host_repl_stop_aborts_pending_approval(monkeypatch, tmp_path, capsys) -> None:

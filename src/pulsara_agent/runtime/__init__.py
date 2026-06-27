@@ -31,6 +31,15 @@ from pulsara_agent.runtime.permission import (
     default_permission_policy,
     resolve_permission_policy,
 )
+from pulsara_agent.runtime.plan import (
+    PendingInteraction,
+    PendingPlanInteraction,
+    PlanExitResolution,
+    PlanInteractionResolution,
+    PlanQuestionResolution,
+    PlanWorkflowState,
+    reduce_plan_workflow_state,
+)
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
 from pulsara_agent.runtime.timeline import RunTimeline, RunTimelineItem, build_run_timeline
@@ -86,6 +95,13 @@ __all__ = [
     "PermissionGate",
     "PermissionProfile",
     "PendingApproval",
+    "PendingInteraction",
+    "PendingPlanInteraction",
+    "PlanExitResolution",
+    "PlanInteractionResolution",
+    "PlanQuestionResolution",
+    "PlanWorkflowState",
+    "reduce_plan_workflow_state",
     "PolicyPermissionGate",
     "RuntimeEventPublisher",
     "RuntimeEventSubscriber",

@@ -10,6 +10,12 @@ from pulsara_agent.event import (
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    PlanExitRequestedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    PlanQuestionAnsweredEvent,
+    PlanQuestionAskedEvent,
     ReplyEndEvent,
     RequireUserConfirmEvent,
     RunEndEvent,
@@ -27,7 +33,13 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
-from pulsara_agent.host import HostCore, HostSessionBusyError, HostSessionPendingApprovalError, HostWorkspaceInput
+from pulsara_agent.host import (
+    HostCore,
+    HostSessionBusyError,
+    HostSessionPendingApprovalError,
+    HostSessionPendingInteractionError,
+    HostWorkspaceInput,
+)
 from pulsara_agent.host.transcript import FAILURE_NOTE_TEXT, INTERRUPTED_NOTE_TEXT, rebuild_prior_messages
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
@@ -36,6 +48,8 @@ from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultBlock,
 from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.plan import PendingPlanInteraction, PlanExitResolution, PlanQuestionResolution
+from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
@@ -1495,6 +1509,480 @@ def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkey
     assert not any(isinstance(event, RequireUserConfirmEvent) for event in run_events)
     assert not (tmp_path / "read_only.txt").exists()
     assert "not allowed by permission policy" in denied_output
+
+
+def test_user_enter_plan_immediately_switches_read_only_and_emits_entry_audit(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:write-in-plan",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "plan_write.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    }
+                ]
+            },
+            {"text": "planned only"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        policy = session.enter_plan(reason="user pressed plan")
+        assert policy == preset_to_policy(PermissionMode.READ_ONLY)
+        assert session.current_permission_mode is PermissionMode.READ_ONLY
+        assert session.plan_state.active is True
+        assert session.plan_state.pending_entry_audit is True
+        result = await session.run_turn("please plan the change")
+        return session, result
+
+    session, result = asyncio.run(run())
+    events = session.replay_events()
+    entered = [event for event in events if isinstance(event, PlanModeEnteredEvent)]
+    write_output = "".join(
+        event.delta
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:write-in-plan"
+    )
+    first_context = _context_text(transport.contexts[0])
+
+    assert result.final_text == "planned only"
+    assert session.plan_state.active is True
+    assert session.plan_state.pending_entry_audit is False
+    assert entered[0].source == "user"
+    assert entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    assert "Plan workflow is active" in first_context
+    assert "please plan the change" in first_context
+    assert not (tmp_path / "plan_write.txt").exists()
+    assert "not allowed by permission policy" in write_output
+
+
+def test_agent_enter_plan_tool_switches_read_only_before_next_tool_turn(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:enter-plan",
+                        "name": "enter_plan",
+                        "arguments": json.dumps({"reason": "need a plan"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:write-after-enter",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "after_enter.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    }
+                ]
+            },
+            {"text": "stayed in plan"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        result = await session.run_turn("decide whether to plan")
+        return session, result
+
+    session, result = asyncio.run(run())
+    events = session.replay_events()
+    entered = [event for event in events if isinstance(event, PlanModeEnteredEvent)]
+    write_output = "".join(
+        event.delta
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:write-after-enter"
+    )
+
+    assert result.final_text == "stayed in plan"
+    assert session.plan_state.active is True
+    assert session.current_permission_mode is PermissionMode.READ_ONLY
+    assert entered[0].source == "agent"
+    assert entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    assert not (tmp_path / "after_enter.txt").exists()
+    assert "not allowed by permission policy" in write_output
+
+
+def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:question",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps(
+                            {
+                                "question": "Which module should I inspect?",
+                                "options": ["runtime", "host"],
+                                "allow_free_text": True,
+                            }
+                        ),
+                    }
+                ]
+            },
+            {"text": "question answered"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.enter_plan(reason="ask first")
+        first = await session.run_turn("plan with a question")
+        pending = session.get_pending_interaction()
+        assert isinstance(pending, PendingPlanInteraction)
+        assert pending.kind == "question"
+        assert pending.question == "Which module should I inspect?"
+        assert pending.options == ("runtime", "host")
+        with pytest.raises(HostSessionPendingInteractionError):
+            await session.run_turn("new prompt should not start")
+        resolved = await session.resolve_plan_interaction(
+            PlanQuestionResolution(
+                interaction_id=pending.interaction_id,
+                answer_text="runtime",
+                selected_option="runtime",
+            )
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+    events = session.replay_events()
+
+    assert first.status.value == "waiting_user"
+    assert resolved.status.value == "finished"
+    assert resolved.final_text == "question answered"
+    assert session.get_pending_interaction() is None
+    assert any(isinstance(event, PlanQuestionAskedEvent) for event in events)
+    assert any(
+        isinstance(event, PlanQuestionAnsweredEvent) and event.answer_text == "runtime"
+        for event in events
+    )
+    assert {event.run_id for event in events if isinstance(event, PlanQuestionAskedEvent | PlanQuestionAnsweredEvent)} == {
+        first.state.run_id
+    }
+
+
+def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:exit",
+                        "name": "exit_plan",
+                        "arguments": json.dumps({"plan": "1. Edit file. 2. Run tests.", "summary": "edit and test"}),
+                    }
+                ]
+            },
+            {"text": "approved execution can begin"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        session.enter_plan(reason="make a plan")
+        first = await session.run_turn("submit plan")
+        pending = session.get_pending_interaction()
+        assert isinstance(pending, PendingPlanInteraction)
+        assert pending.kind == "exit"
+        resolved = await session.resolve_plan_interaction(
+            PlanExitResolution(
+                interaction_id=pending.interaction_id,
+                decision="approve",
+                user_feedback="looks good",
+            )
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+    events = session.replay_events()
+
+    assert first.status.value == "waiting_user"
+    assert resolved.final_text == "approved execution can begin"
+    assert session.plan_state.active is False
+    assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
+    assert any(isinstance(event, PlanExitRequestedEvent) for event in events)
+    assert any(isinstance(event, PlanExitResolvedEvent) and event.decision == "approve" for event in events)
+    exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
+    assert exited[0].source == "approved_exit_plan"
+    assert exited[0].restored_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    post_approval_context = _context_text(transport.contexts[1])
+    assert "Plan workflow is active" not in post_approval_context
+    assert "You are still in Plan workflow" not in post_approval_context
+
+
+def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:exit",
+                        "name": "exit_plan",
+                        "arguments": json.dumps({"plan": "draft", "summary": "draft"}),
+                    }
+                ]
+            },
+            {"text": "revising plan"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.enter_plan(reason="revise path")
+        await session.run_turn("submit plan")
+        pending = session.get_pending_interaction()
+        assert isinstance(pending, PendingPlanInteraction)
+        result = await session.resolve_plan_interaction(
+            PlanExitResolution(
+                interaction_id=pending.interaction_id,
+                decision="revise",
+                user_feedback="add tests",
+            )
+        )
+        return session, result
+
+    session, result = asyncio.run(run())
+
+    assert result.final_text == "revising plan"
+    assert session.plan_state.active is True
+    assert session.current_permission_mode is PermissionMode.READ_ONLY
+    assert not any(isinstance(event, PlanModeExitedEvent) for event in session.replay_events())
+
+
+def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:question",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps({"question": "Proceed?"}),
+                    },
+                    {
+                        "id": "call:sibling-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "sibling.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    },
+                ]
+            }
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.enter_plan(reason="barrier")
+        result = await session.run_turn("ask and write in one batch")
+        return session, result
+
+    session, result = asyncio.run(run())
+    events = session.replay_events()
+    sibling_output = "".join(
+        event.delta
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:sibling-write"
+    )
+
+    assert result.status.value == "waiting_user"
+    assert isinstance(session.get_pending_interaction(), PendingPlanInteraction)
+    assert not (tmp_path / "sibling.txt").exists()
+    assert "not executed because a plan workflow control tool" in sibling_output
+
+
+def test_stop_pending_plan_interaction_keeps_plan_active_read_only(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:question",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps({"question": "Scope?"}),
+                    }
+                ]
+            },
+            {"text": "still planning"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.enter_plan(reason="stop question")
+        first = await session.run_turn("ask")
+        assert isinstance(session.get_pending_interaction(), PendingPlanInteraction)
+        stopped = await session.stop_current_turn()
+        assert stopped is not None
+        second = await session.run_turn("continue planning")
+        return session, first, stopped, second
+
+    session, first, stopped, second = asyncio.run(run())
+
+    assert first.status.value == "waiting_user"
+    assert stopped.status.value == "aborted"
+    assert second.final_text == "still planning"
+    assert session.plan_state.active is True
+    assert session.current_permission_mode is PermissionMode.READ_ONLY
+    assert session.get_pending_interaction() is None
+    assert not any(isinstance(event, PlanModeExitedEvent) for event in session.replay_events())
+
+
+def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(tmp_path, monkeypatch) -> None:
+    # §9.6: plan HITL has its own per-run budget. A second ask_plan_question
+    # after the budget of 1 trips a plan-specific failure, not an ordinary
+    # tool-error budget failure.
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:q1",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps({"question": "First?"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:q2",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps({"question": "Second?"}),
+                    }
+                ]
+            },
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.wiring.agent_runtime.budget = LoopBudget(max_plan_interactions_per_run=1)
+        session.enter_plan(reason="budget")
+        first = await session.run_turn("plan with questions")
+        pending = session.get_pending_interaction()
+        assert isinstance(pending, PendingPlanInteraction)
+        # Resolving the first question continues the same run, where the model
+        # immediately asks again and trips the interaction budget.
+        resolved = await session.resolve_plan_interaction(
+            PlanQuestionResolution(interaction_id=pending.interaction_id, answer_text="ok")
+        )
+        return session, first, resolved
+
+    session, first, resolved = asyncio.run(run())
+    events = session.replay_events()
+
+    assert first.status.value == "waiting_user"
+    assert resolved.status.value == "failed"
+    assert resolved.stop_reason == "plan_interaction_budget"
+    assert session.get_pending_interaction() is None
+    # The failure is plan-specific, not an ordinary tool-error budget failure.
+    assert any(
+        isinstance(event, RunErrorEvent) and event.code == "plan_interaction_budget_exceeded"
+        for event in events
+    )
+    # Plan stays active / read-only; budget exhaustion is not an approved exit.
+    assert session.plan_state.active is True
+    assert session.current_permission_mode is PermissionMode.READ_ONLY
+    assert not any(isinstance(event, PlanModeExitedEvent) for event in events)
+
+
+def test_plan_exit_revision_budget_exhaustion_fails_run(tmp_path, monkeypatch) -> None:
+    # §9.6: exit_plan revisions have a dedicated budget. With a limit of 1, the
+    # second revise trips the budget rather than looping forever.
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:exit1",
+                        "name": "exit_plan",
+                        "arguments": json.dumps({"plan": "draft one", "summary": "v1"}),
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:exit2",
+                        "name": "exit_plan",
+                        "arguments": json.dumps({"plan": "draft two", "summary": "v2"}),
+                    }
+                ]
+            },
+            {"text": "should not reach here"},
+        ]
+    )
+    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.wiring.agent_runtime.budget = LoopBudget(
+            max_plan_interactions_per_run=8,
+            max_plan_exit_revisions_per_run=1,
+        )
+        session.enter_plan(reason="budget")
+        first = await session.run_turn("plan then exit")
+        first_pending = session.get_pending_interaction()
+        assert isinstance(first_pending, PendingPlanInteraction)
+        assert first_pending.kind == "exit"
+        # First revise (revisions=1, within budget) -> continue, model exits again.
+        second = await session.resolve_plan_interaction(
+            PlanExitResolution(
+                interaction_id=first_pending.interaction_id,
+                decision="revise",
+                user_feedback="tighten scope",
+            )
+        )
+        second_pending = session.get_pending_interaction()
+        assert isinstance(second_pending, PendingPlanInteraction)
+        # Second revise (revisions=2, over budget of 1) -> plan-specific failure.
+        third = await session.resolve_plan_interaction(
+            PlanExitResolution(
+                interaction_id=second_pending.interaction_id,
+                decision="revise",
+                user_feedback="again",
+            )
+        )
+        return session, first, second, third
+
+    session, first, second, third = asyncio.run(run())
+    events = session.replay_events()
+
+    assert first.status.value == "waiting_user"
+    assert second.status.value == "waiting_user"
+    assert third.status.value == "failed"
+    assert third.stop_reason == "plan_interaction_budget"
+    assert any(
+        isinstance(event, RunErrorEvent) and event.code == "plan_interaction_budget_exceeded"
+        for event in events
+    )
+    # Revise never restores permission; plan stays active / read-only.
+    assert session.plan_state.active is True
+    assert session.current_permission_mode is PermissionMode.READ_ONLY
+    assert not any(isinstance(event, PlanModeExitedEvent) for event in events)
 
 
 def test_host_session_suspension_releases_run_lock_before_approval_resolution(tmp_path, monkeypatch) -> None:

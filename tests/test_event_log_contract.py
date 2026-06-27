@@ -9,6 +9,12 @@ import pytest
 
 from pulsara_agent.event import (
     EventContext,
+    PlanExitRequestedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    PlanQuestionAnsweredEvent,
+    PlanQuestionAskedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RunEndEvent,
@@ -126,6 +132,59 @@ def test_terminal_process_completed_event_round_trips_through_agent_event_serial
         completion_reason="user_tool_kill",
     )
 
+    assert load_agent_event(dump_agent_event(event)) == event
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        PlanModeEnteredEvent(
+            **_ctx("contract:plan-entered").event_fields(),
+            source="user",
+            previous_permission_mode="bypass-permissions",
+            previous_permission_policy={"profile": "trusted_host"},
+            reason="plan first",
+        ),
+        PlanQuestionAskedEvent(
+            **_ctx("contract:plan-question").event_fields(),
+            question_id="plan_question:1",
+            tool_call_id="call:question",
+            question="Which path?",
+            options=["A", "B"],
+            allow_free_text=True,
+            reason="need scope",
+        ),
+        PlanQuestionAnsweredEvent(
+            **_ctx("contract:plan-answer").event_fields(),
+            question_id="plan_question:1",
+            answer_text="A",
+            selected_option="A",
+        ),
+        PlanExitRequestedEvent(
+            **_ctx("contract:plan-exit-request").event_fields(),
+            exit_request_id="plan_exit:1",
+            tool_call_id="call:exit",
+            plan_text="Do the thing.",
+            summary="Thing plan",
+        ),
+        PlanExitResolvedEvent(
+            **_ctx("contract:plan-exit-resolved").event_fields(),
+            exit_request_id="plan_exit:1",
+            tool_call_id="call:exit",
+            decision="approve",
+            user_feedback="ok",
+        ),
+        PlanModeExitedEvent(
+            **_ctx("contract:plan-exited").event_fields(),
+            source="approved_exit_plan",
+            exit_request_id="plan_exit:1",
+            restored_permission_mode="bypass-permissions",
+            restored_permission_policy={"profile": "trusted_host"},
+            accepted_plan_summary="Thing plan",
+        ),
+    ],
+)
+def test_plan_workflow_events_round_trip_through_agent_event_serialization(event) -> None:
     assert load_agent_event(dump_agent_event(event)) == event
 
 

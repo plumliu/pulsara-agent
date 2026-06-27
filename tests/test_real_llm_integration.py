@@ -14,6 +14,10 @@ from pulsara_agent.event import (
     MemoryWriteResultEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    PlanExitRequestedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
     RequireUserConfirmEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -67,6 +71,7 @@ from pulsara_agent.runtime import (
     ApprovalResolution,
     LoopBudget,
     LoopState,
+    PlanExitResolution,
     RuntimeSession,
     ToolApprovalDecision,
     build_agent_runtime_wiring,
@@ -75,8 +80,10 @@ from pulsara_agent.runtime.context import msg_to_llm_messages
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
+    PermissionMode,
     PermissionProfile,
     TerminalAccess,
+    preset_to_policy,
 )
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.tools.builtins.memory import RememberPreferenceTool
@@ -290,6 +297,26 @@ def test_real_host_core_on_request_write_approval_completes(tmp_path):
     assert "terminal" in result["registry_names"]
     assert "terminal_process" in result["registry_names"]
     assert result["model_end_count"] >= 2
+
+
+def test_real_host_core_plan_mode_exit_plan_round_trip(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(asyncio.wait_for(_run_real_host_core_plan_mode_smoke(tmp_path), timeout=180))
+
+    assert result["first_status"] == "waiting_user"
+    assert result["resolved_status"] == "finished"
+    assert result["pending_kind"] == "exit"
+    assert result["tool_names"] == ["exit_plan"]
+    assert {"enter_plan", "ask_plan_question", "exit_plan"}.issubset(set(result["registry_names"]))
+    assert result["plan_entered_sources"] == ["user"]
+    assert result["exit_decisions"] == ["approve"]
+    assert result["plan_exited_sources"] == ["approved_exit_plan"]
+    assert result["plan_active_after"] is False
+    assert result["mode_after_approval"] == PermissionMode.BYPASS_PERMISSIONS.value
+    assert result["final_text"] == "PULSARA_PLAN_MODE_OK"
+    assert result["errors"] == []
 
 
 def test_real_agent_runtime_uses_active_workspace_skill(tmp_path):
@@ -1310,6 +1337,92 @@ async def _run_real_host_core_on_request_write_approval_smoke(tmp_path: Path) ->
             "file_text": target.read_text(encoding="utf-8") if target.exists() else None,
             "model_end_count": sum(isinstance(event, ModelCallEndEvent) for event in first_run_events),
             "model_end_metadata": [event.metadata for event in first_run_events if isinstance(event, ModelCallEndEvent)],
+            "errors": _run_error_diagnostics(first_run_events),
+        }
+    finally:
+        await core.close_session(session.host_session_id)
+
+
+async def _run_real_host_core_plan_mode_smoke(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=False)
+    session = await core.open_session(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=tmp_path,
+            memory_domain_id=f"u_real_plan_{uuid4().hex[:12]}",
+        ),
+        host_session_id=f"host:real-plan:{uuid4().hex[:12]}",
+        conversation_id=f"conversation:real-plan:{uuid4().hex[:12]}",
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=512),
+        memory_reflection=False,
+        system_prompt=(
+            "You are validating Pulsara Plan workflow. The host will already have entered Plan mode. "
+            "For the first validation request, call exit_plan exactly once. The exit_plan plan must be exactly "
+            "'Return PULSARA_PLAN_MODE_OK after approval.' and summary exactly 'sentinel plan'. "
+            "Do not call enter_plan, ask_plan_question, write_file, edit_file, terminal, terminal_process, or read_file. "
+            "After the approved exit_plan tool result, answer exactly: PULSARA_PLAN_MODE_OK"
+        ),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+    )
+    try:
+        registry_names = session.wiring.agent_runtime.tool_executor.registry.names()
+        session.enter_plan(reason="real llm plan smoke")
+        first = await session.run_turn("Submit the validation plan with exit_plan exactly as instructed.")
+        pending = session.get_pending_interaction()
+        pending_kind = pending.kind if pending is not None else None
+        if pending is None:
+            events = session.replay_events()
+            return {
+                "first_status": first.status.value,
+                "resolved_status": None,
+                "final_text": first.final_text.strip(),
+                "pending_kind": pending_kind,
+                "tool_names": [event.tool_call_name for event in events if isinstance(event, ToolCallStartEvent)],
+                "registry_names": registry_names,
+                "plan_entered_sources": [
+                    event.source for event in events if isinstance(event, PlanModeEnteredEvent)
+                ],
+                "exit_decisions": [event.decision for event in events if isinstance(event, PlanExitResolvedEvent)],
+                "plan_exited_sources": [event.source for event in events if isinstance(event, PlanModeExitedEvent)],
+                "plan_active_after": session.plan_state.active,
+                "mode_after_approval": (
+                    session.current_permission_mode.value if session.current_permission_mode is not None else None
+                ),
+                "model_end_count": sum(isinstance(event, ModelCallEndEvent) for event in events),
+                "errors": _run_error_diagnostics(events),
+            }
+        resolved = await session.resolve_plan_interaction(
+            PlanExitResolution(
+                interaction_id=pending.interaction_id,
+                decision="approve",
+                user_feedback="approved",
+            )
+        )
+        events = session.replay_events()
+        first_run_events = [event for event in events if event.run_id == first.state.run_id]
+        return {
+            "first_status": first.status.value,
+            "resolved_status": resolved.status.value,
+            "final_text": resolved.final_text.strip(),
+            "pending_kind": pending_kind,
+            "tool_names": [event.tool_call_name for event in first_run_events if isinstance(event, ToolCallStartEvent)],
+            "registry_names": registry_names,
+            "plan_entered_sources": [
+                event.source for event in first_run_events if isinstance(event, PlanModeEnteredEvent)
+            ],
+            "exit_decisions": [
+                event.decision for event in first_run_events if isinstance(event, PlanExitResolvedEvent)
+            ],
+            "plan_exited_sources": [
+                event.source for event in first_run_events if isinstance(event, PlanModeExitedEvent)
+            ],
+            "plan_active_after": session.plan_state.active,
+            "mode_after_approval": (
+                session.current_permission_mode.value if session.current_permission_mode is not None else None
+            ),
+            "model_end_count": sum(isinstance(event, ModelCallEndEvent) for event in first_run_events),
             "errors": _run_error_diagnostics(first_run_events),
         }
     finally:

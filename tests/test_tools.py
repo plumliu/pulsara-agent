@@ -58,7 +58,10 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
 
     assert registry.names() == [
         "artifact_read",
+        "ask_plan_question",
         "edit_file",
+        "enter_plan",
+        "exit_plan",
         "read_file",
         "search_files",
         "terminal",
@@ -106,6 +109,8 @@ def test_core_tool_registry_registers_all_tools_under_read_only(tmp_path) -> Non
     assert {"artifact_read", "read_file", "search_files", "todo"}.issubset(names)
     # Mutating tools remain VISIBLE under read-only (blocked later by the gate).
     assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(names)
+    # Workflow tools are also always visible; runtime handles them before the permission gate.
+    assert {"enter_plan", "ask_plan_question", "exit_plan"}.issubset(names)
 
 
 def test_core_tool_registry_keeps_terminal_tools_registered_when_terminal_off(tmp_path) -> None:

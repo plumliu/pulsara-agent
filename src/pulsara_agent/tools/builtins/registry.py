@@ -28,6 +28,7 @@ from pulsara_agent.tools.builtins.memory_query import (
     MemoryRelatedTool,
     MemorySearchTool,
 )
+from pulsara_agent.tools.builtins.plan import AskPlanQuestionTool, EnterPlanTool, ExitPlanTool
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
@@ -54,6 +55,9 @@ def build_core_tool_registry(
     # (visible-but-blocked). This keeps the tools array constant across mode
     # switches so the prompt prefix cache stays stable.
     registry.register(ArtifactReadTool(runtime_session))
+    registry.register(EnterPlanTool())
+    registry.register(AskPlanQuestionTool())
+    registry.register(ExitPlanTool())
     registry.register(ReadFileTool(root))
     registry.register(SearchFilesTool(root))
     registry.register(
