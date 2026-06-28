@@ -42,6 +42,7 @@ from pulsara_agent.memory.governance.engine import (
 )
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
+from pulsara_agent.memory.canonical.oxigraph_materializer import OxigraphMaterializer
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.memory.recall.projection import ProjectionBuilder
 from pulsara_agent.memory.recall.projection_ledger import ProjectionLedger
@@ -136,6 +137,7 @@ __all__ = [
     "MemoryReflectionHint",
     "MemoryReflectionOptions",
     "NoWriteOutcome",
+    "OxigraphMaterializer",
     "PooledMemoryCandidate",
     "PostgresArtifactStore",
     "PostgresCandidatePool",

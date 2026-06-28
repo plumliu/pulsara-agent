@@ -31,6 +31,13 @@ from pulsara_agent.memory.candidates.pool import (
 )
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
+from pulsara_agent.memory.canonical.mutation_outbox import (
+    CanonicalMutationLane,
+    CanonicalMutationSurface,
+    CanonicalMutationPayload,
+    MutationOutboxWriter,
+    governed_memory_mutation_payload,
+)
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -241,37 +248,19 @@ class OutboxRepository:
         graph_id: str,
         target_entry_key: str | None = None,
         payload: dict[str, Any] | None = None,
-    ) -> str:
-        outbox_id = f"outbox:{uuid4().hex}"
+    ) -> str | None:
+        if payload is None:
+            return None
         target_key = target_entry_key or target_entry_key_for_decision(record.decision)
-        body = payload or {
-            "kind": "memory_governance_decision_committed",
-            "decision_record": record.model_dump(mode="json"),
-        }
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO memory_write_outbox (
-                    outbox_id,
-                    graph_id,
-                    governance_batch_id,
-                    decision_id,
-                    target_entry_key,
-                    payload
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (governance_batch_id, decision_id) DO NOTHING
-                """,
-                (
-                    outbox_id,
-                    graph_id,
-                    record.governance_batch_id,
-                    record.decision_id,
-                    target_key,
-                    Jsonb(body),
-                ),
-            )
-        return outbox_id
+        writer = MutationOutboxWriter(connection=self.connection)
+        return writer.append_payload(
+            payload,
+            graph_id=graph_id,
+            target_entry_key=target_key,
+            governance_batch_id=record.governance_batch_id,
+            decision_id=record.decision_id,
+            sequence_key=graph_id,
+        )
 
 
 def target_entry_key_for_decision(decision: GovernanceDecision) -> str:

@@ -207,9 +207,76 @@ def test_durable_runtime_wiring_uses_postgres_graph_event_log_and_artifacts(tmp_
         assert timeline_blob_id.startswith(f"timeline:{runtime_session_id}:{ctx.run_id}:")
         assert "hello durable wiring" in wiring.archive.get_text(timeline_blob_id)
         assert summary.assistant_text == "hello durable wiring"
+        with _connect_or_skip(storage.postgres_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT mutation_lane, target_entry_key, payload, status, governance_batch_id, decision_id
+                    FROM memory_write_outbox
+                    WHERE graph_id = %s
+                    ORDER BY created_at DESC, outbox_id DESC
+                    LIMIT 1
+                    """,
+                    (graph_id,),
+                )
+                row = cursor.fetchone()
+        assert row is not None
+        mutation_lane, target_entry_key, payload, status, governance_batch_id, decision_id = row
+        assert mutation_lane == "runtime_semantic"
+        assert target_entry_key == f"run-timeline:{runtime_session_id}:{ctx.run_id}"
+        assert payload["kind"] == "canonical_mutation"
+        assert payload["mutation_lane"] == "runtime_semantic"
+        assert payload["surface_apply_status"] == {"oxigraph": "applied"}
+        assert payload["source_runtime_session_id"] == runtime_session_id
+        assert payload["source_run_id"] == ctx.run_id
+        assert payload["source_artifact_ids"] == [timeline_blob_id]
+        assert payload["mutation_lane"] == "runtime_semantic"
+        assert "decision_id" not in payload
+        assert status == "applied"
+        assert governance_batch_id is None
+        assert decision_id is None
     finally:
         wiring.graph.delete_graph(graph_id)
         _delete_postgres_artifacts_with_prefix(storage.postgres_dsn, f"timeline:{runtime_session_id}:{ctx.run_id}:")
+        _delete_postgres_outbox_by_graph(storage.postgres_dsn, graph_id)
+        _delete_postgres_runtime_session(storage.postgres_dsn, runtime_session_id)
+
+
+def test_durable_runtime_wiring_replays_runtime_semantic_outbox_on_run_end(tmp_path) -> None:
+    storage = StorageConfig.from_env()
+    _connect_or_skip(storage.postgres_dsn).close()
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    graph_id = f"graph:test/{uuid4().hex}"
+    ctx = _event_context("durable-outbox-replay")
+    wiring = build_durable_runtime_wiring(
+        _settings_for_storage(storage),
+        tmp_path,
+        runtime_session_id=runtime_session_id,
+        graph_id=graph_id,
+    )
+    try:
+        asyncio.run(_emit_timeline_events(wiring.runtime_session, ctx, "hello outbox replay"))
+        with _connect_or_skip(storage.postgres_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT status, payload
+                    FROM memory_write_outbox
+                    WHERE graph_id = %s AND mutation_lane = 'runtime_semantic'
+                    ORDER BY created_at DESC, outbox_id DESC
+                    LIMIT 1
+                    """,
+                    (graph_id,),
+                )
+                row = cursor.fetchone()
+        assert row is not None
+        status, payload = row
+        assert status in {"applied", "partial"}
+        assert payload["surface_apply_status"]["oxigraph"] == "applied"
+    finally:
+        wiring.graph.delete_graph(graph_id)
+        _delete_postgres_artifacts_with_prefix(storage.postgres_dsn, f"timeline:{runtime_session_id}:{ctx.run_id}:")
+        _delete_postgres_outbox_by_graph(storage.postgres_dsn, graph_id)
         _delete_postgres_runtime_session(storage.postgres_dsn, runtime_session_id)
 
 
@@ -300,6 +367,12 @@ def _delete_postgres_artifacts_with_prefix(dsn: str, blob_id_prefix: str) -> Non
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from artifacts where id like %s", (f"{blob_id_prefix}%",))
+
+
+def _delete_postgres_outbox_by_graph(dsn: str, graph_id: str) -> None:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from memory_write_outbox where graph_id = %s", (graph_id,))
 
 
 def _artifact_id_from_node_ref(node_id: str) -> str:

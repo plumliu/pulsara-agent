@@ -9,6 +9,8 @@ from uuid import uuid4
 from pulsara_agent.capability import CapabilityResolver, LocalSkillResolver
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore, InMemoryGraphStore, PostgresGraphStore
+from pulsara_agent.graph.durable_facade import DurableGraphFacade
+from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.llm import ModelRole, build_llm_runtime
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import (
@@ -25,6 +27,7 @@ from pulsara_agent.memory import (
     PostgresArtifactStore,
     PostgresCandidatePool,
 )
+from pulsara_agent.memory.canonical.outbox_replay_hook import CanonicalMutationOutboxReplayHook
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks, ReflectiveMemoryHooks
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionOptions
@@ -32,6 +35,7 @@ from pulsara_agent.memory.hooks.run_timeline_persistence import RunTimelinePersi
 from pulsara_agent.memory.hooks.runtime_persistence import ExecutionEvidencePersistenceHook
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
+from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
@@ -99,8 +103,14 @@ def build_in_memory_runtime_wiring(
         graph=graph,
         archive=archive,
         graph_id=resolved_graph_id,
+        mutation_outbox=None,
     )
-    ledger, memory_write_service = _build_ledger_and_service(graph, archive, resolved_graph_id)
+    ledger, memory_write_service = _build_ledger_and_service(
+        graph,
+        archive,
+        resolved_graph_id,
+        mutation_outbox=None,
+    )
     memory_governance_executor = _build_memory_governance_executor(
         candidate_pool=candidate_pool,
         memory_write_service=memory_write_service,
@@ -161,7 +171,13 @@ def build_durable_runtime_wiring(
         else f"graph:runtime/{runtime_session.runtime_session_id}"
     )
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
-    graph = PostgresGraphStore(settings.storage.postgres_dsn)
+    postgres_graph = PostgresGraphStore(settings.storage.postgres_dsn)
+    oxigraph_graph = (
+        OxigraphGraphStore(settings.storage.oxigraph_url)
+        if settings.storage.oxigraph_url
+        else None
+    )
+    graph: GraphStore = DurableGraphFacade(postgres=postgres_graph, oxigraph=oxigraph_graph)
     candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
     memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)
     working_context_store = (
@@ -178,8 +194,22 @@ def build_durable_runtime_wiring(
         graph=graph,
         archive=archive,
         graph_id=resolved_graph_id,
+        mutation_outbox=MutationOutboxWriter(dsn=settings.storage.postgres_dsn),
     )
-    ledger, memory_write_service = _build_ledger_and_service(graph, archive, resolved_graph_id)
+    runtime_session.hook_manager.register_event(
+        None,
+        CanonicalMutationOutboxReplayHook(
+            dsn=settings.storage.postgres_dsn,
+            graph_id=resolved_graph_id,
+            oxigraph_url=settings.storage.oxigraph_url,
+        ),
+    )
+    ledger, memory_write_service = _build_ledger_and_service(
+        graph,
+        archive,
+        resolved_graph_id,
+        mutation_outbox=MutationOutboxWriter(dsn=settings.storage.postgres_dsn),
+    )
     memory_governance_executor = _build_memory_governance_executor(
         candidate_pool=candidate_pool,
         memory_write_service=memory_write_service,
@@ -350,12 +380,14 @@ def _build_ledger_and_service(
     graph: GraphStore,
     archive: ArtifactStore,
     graph_id: str | None,
+    mutation_outbox: MutationOutboxWriter | None = None,
 ) -> tuple[ExecutionEvidenceLedger, MemoryWriteService]:
     ledger = ExecutionEvidenceLedger(
         graph=graph,
         archive=archive,
         gate=MemoryWriteGate(),
         graph_id=graph_id or DEFAULT_GRAPH_ID,
+        mutation_outbox=mutation_outbox,
     )
     return ledger, MemoryWriteService(ledger=ledger)
 
@@ -389,6 +421,7 @@ def _register_timeline_hook(
     graph: GraphStore,
     archive: ArtifactStore,
     graph_id: str | None,
+    mutation_outbox: MutationOutboxWriter | None = None,
 ) -> None:
     runtime_session.hook_manager.register_event(
         None,
@@ -397,6 +430,7 @@ def _register_timeline_hook(
             archive=archive,
             event_store=runtime_session.event_log,
             graph_id=graph_id,
+            mutation_outbox=mutation_outbox,
         ),
     )
 

@@ -109,6 +109,17 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
         assert (memory.SUPERSEDES.name, old_id) in fetched[new_id].outgoing
         old_explanation = explain_memory(fetched[old_id])
         assert any(claim.kind is ClaimKind.SUPERSEDED_BY for claim in old_explanation.claims)
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select payload from memory_write_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                payload = cursor.fetchone()[0]
+        documents = {item["node_id"]: item["document"] for item in payload["documents"]}
+        assert set(documents) == {old_id, new_id}
+        assert documents[old_id][memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
+        assert {"@id": old_id} in documents[new_id][memory.SUPERSEDES.name]
     finally:
         _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
 
@@ -404,6 +415,13 @@ def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersed
         assert isinstance(result.decision_record.write_outcome, WriteFailedOutcome)
         assert store.get_jsonld(old_id, graph_id=graph_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
         assert _governance_candidate_count(pool) == 0
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select count(*) from memory_write_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                assert cursor.fetchone() == (0,)
     finally:
         _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
 

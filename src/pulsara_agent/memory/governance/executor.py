@@ -30,6 +30,10 @@ from pulsara_agent.memory.candidates.pool import (
 )
 from pulsara_agent.memory.governance.dedupe import already_exists
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
+from pulsara_agent.memory.canonical.mutation_outbox import (
+    CanonicalMutationSurface,
+    governed_memory_mutation_payload,
+)
 from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER
 from pulsara_agent.ontology import memory
@@ -271,7 +275,20 @@ class MemoryGovernanceExecutor:
                 ),
             )
             uow.decisions.append_decision(record)
-            uow.outbox.append_decision(record, graph_id=uow.resolved_graph_id)
+            mutation_payload = governed_memory_mutation_payload(
+                record=record,
+                graph=uow.graph,
+                graph_id=uow.resolved_graph_id,
+                async_surfaces=(
+                    CanonicalMutationSurface.SEARCH_INDEX.value,
+                    CanonicalMutationSurface.OXIGRAPH.value,
+                ),
+            )
+            uow.outbox.append_decision(
+                record,
+                graph_id=uow.resolved_graph_id,
+                payload=mutation_payload.model_dump(mode="json") if mutation_payload is not None else None,
+            )
 
         stored_events = self.event_log.extend(outcome.events + supersede_events + contradiction_events)
         return MemoryGovernanceApplyResult(decision_record=record, events=stored_events)

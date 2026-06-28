@@ -12,6 +12,7 @@ from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
 from pulsara_agent.jsonld import NodeRef, utc_now
 from pulsara_agent.entities.memory import ActionBoundary, Claim, Decision, Observation, Preference
 from pulsara_agent.entities.runtime import Artifact, Evidence, ToolResult, Turn
+from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter, runtime_semantic_mutation_payload
 from pulsara_agent.memory.foundation.protocols import ArtifactStore, RuntimeEventReadStore
 from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan, runtime_event_span_from_events
 from pulsara_agent.memory.foundation.records import ClaimRecord, EvidenceRecord, MemoryWriteRecord, ToolResultRecord
@@ -30,6 +31,7 @@ class ExecutionEvidenceLedger:
     archive: ArtifactStore
     gate: MemoryWriteGate
     graph_id: str = DEFAULT_GRAPH_ID
+    mutation_outbox: MutationOutboxWriter | None = None
 
     def record_tool_result(
         self,
@@ -57,20 +59,24 @@ class ExecutionEvidenceLedger:
             )
 
         # Small outputs: store inline summary, no artifact
-        self.graph.put_jsonld(
-            ToolResult(
-                id=tool_result_id,
-                tool_name=tool_name,
-                status=status,
-                input_summary=input_summary,
-                output_summary=output_preview,
-                truncated=len(output) > len(output_preview),
-                scope=scope,
-                created_at=utc_now(),
-                stored_as=NodeRef(artifact_id) if artifact_id else None,
-                event_span=event_span,
-            ).to_jsonld(),
-            graph_id=self.graph_id,
+        tool_result_doc = ToolResult(
+            id=tool_result_id,
+            tool_name=tool_name,
+            status=status,
+            input_summary=input_summary,
+            output_summary=output_preview,
+            truncated=len(output) > len(output_preview),
+            scope=scope,
+            created_at=utc_now(),
+            stored_as=NodeRef(artifact_id) if artifact_id else None,
+            event_span=event_span,
+        ).to_jsonld()
+        self.graph.put_jsonld(tool_result_doc, graph_id=self.graph_id)
+        self._mirror_runtime_semantic_document(
+            tool_result_id,
+            tool_result_doc,
+            event_span=event_span,
+            source_turn_id=turn_id,
         )
 
         self._record_turn_produced(turn_id=turn_id, tool_result_id=tool_result_id, scope=scope)
@@ -128,32 +134,48 @@ class ExecutionEvidenceLedger:
         created_at = utc_now()
         for artifact_ref in block.artifacts:
             artifact_info = self.archive.get_info(artifact_ref.artifact_id)
+            artifact_doc = Artifact(
+                id=artifact_ref.artifact_id,
+                stored_at=artifact_info.stored_at,
+                digest=artifact_info.digest,
+                summary=output_preview,
+                created_at=created_at,
+                scope=scope,
+                event_span=event_span,
+            ).to_jsonld()
             self.graph.put_jsonld(
-                Artifact(
-                    id=artifact_ref.artifact_id,
-                    stored_at=artifact_info.stored_at,
-                    digest=artifact_info.digest,
-                    summary=output_preview,
-                    created_at=created_at,
-                    scope=scope,
-                    event_span=event_span,
-                ).to_jsonld(),
+                artifact_doc,
                 graph_id=self.graph_id,
             )
-        self.graph.put_jsonld(
-            ToolResult(
-                id=tool_result_id,
-                tool_name=block.name,
-                status=_to_tool_execution_status(block.state),
-                input_summary=input_summary,
-                output_summary=output_preview,
-                truncated=len(output) > len(output_preview) or bool(block.artifacts),
-                scope=scope,
-                created_at=utc_now(),
-                stored_as=NodeRef(primary.artifact_id),
+            self._mirror_runtime_semantic_document(
+                artifact_ref.artifact_id,
+                artifact_doc,
                 event_span=event_span,
-            ).to_jsonld(),
+                source_turn_id=turn_id,
+                source_artifact_ids=(artifact_ref.artifact_id,),
+            )
+        tool_result_doc = ToolResult(
+            id=tool_result_id,
+            tool_name=block.name,
+            status=_to_tool_execution_status(block.state),
+            input_summary=input_summary,
+            output_summary=output_preview,
+            truncated=len(output) > len(output_preview) or bool(block.artifacts),
+            scope=scope,
+            created_at=utc_now(),
+            stored_as=NodeRef(primary.artifact_id),
+            event_span=event_span,
+        ).to_jsonld()
+        self.graph.put_jsonld(
+            tool_result_doc,
             graph_id=self.graph_id,
+        )
+        self._mirror_runtime_semantic_document(
+            tool_result_id,
+            tool_result_doc,
+            event_span=event_span,
+            source_turn_id=turn_id,
+            source_artifact_ids=artifact_ids,
         )
         self._record_turn_produced(turn_id=turn_id, tool_result_id=tool_result_id, scope=scope)
         return ToolResultRecord(
@@ -221,17 +243,24 @@ class ExecutionEvidenceLedger:
         scope: str,
     ) -> EvidenceRecord:
         evidence_id = f"evidence:{uuid4()}"
+        evidence_doc = Evidence(
+            id=evidence_id,
+            statement=statement,
+            source_type=rt.EvidenceSourceType.TOOL_RESULT,
+            status=memory.NodeStatus.ACTIVE,
+            observed_at=utc_now(),
+            scope=scope,
+            created_from=NodeRef(tool_result_id),
+        ).to_jsonld()
         self.graph.put_jsonld(
-            Evidence(
-                id=evidence_id,
-                statement=statement,
-                source_type=rt.EvidenceSourceType.TOOL_RESULT,
-                status=memory.NodeStatus.ACTIVE,
-                observed_at=utc_now(),
-                scope=scope,
-                created_from=NodeRef(tool_result_id),
-            ).to_jsonld(),
+            evidence_doc,
             graph_id=self.graph_id,
+        )
+        self._mirror_runtime_semantic_document(
+            evidence_id,
+            evidence_doc,
+            event_span=None,
+            source_turn_id=None,
         )
         self._add_relation(tool_result_id, rt.PROVIDES, evidence_id)
         return EvidenceRecord(evidence_id=evidence_id, statement=statement, source_id=tool_result_id)
@@ -512,6 +541,12 @@ class ExecutionEvidenceLedger:
         document[rt.PRODUCED.name] = values
         document[rt.UPDATED_AT.name] = utc_now()
         self.graph.put_jsonld(document, graph_id=self.graph_id)
+        self._mirror_runtime_semantic_document(
+            turn_id,
+            document,
+            event_span=None,
+            source_turn_id=turn_id,
+        )
 
     def _add_relation(self, source_id: str, relation, target_id: str) -> None:
         document = self.graph.get_jsonld(source_id, graph_id=self.graph_id)
@@ -521,6 +556,38 @@ class ExecutionEvidenceLedger:
             values.append(target)
         document[relation.name] = values
         self.graph.put_jsonld(document, graph_id=self.graph_id)
+        self._mirror_runtime_semantic_document(
+            source_id,
+            document,
+            event_span=None,
+            source_turn_id=None,
+        )
+
+    def _mirror_runtime_semantic_document(
+        self,
+        node_id: str,
+        document: dict,
+        *,
+        event_span: RuntimeEventSpan | None,
+        source_turn_id: str | None,
+        source_artifact_ids: tuple[str, ...] = (),
+    ) -> None:
+        if self.mutation_outbox is None:
+            return
+        self.mutation_outbox.append_payload(
+            runtime_semantic_mutation_payload(
+                node_id=node_id,
+                document=document,
+                source_runtime_session_id=event_span.session_id if event_span is not None else None,
+                source_run_id=event_span.run_id if event_span is not None else None,
+                source_turn_id=event_span.turn_id if event_span is not None else source_turn_id,
+                source_reply_id=event_span.reply_id if event_span is not None else None,
+                source_artifact_ids=source_artifact_ids,
+            ),
+            graph_id=self.graph_id,
+            target_entry_key=node_id,
+            sequence_key=self.graph_id,
+        )
 
     def _require_existing_nodes(self, node_ids: list[str], *, role: str) -> None:
         missing = [

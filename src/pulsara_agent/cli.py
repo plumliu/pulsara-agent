@@ -119,7 +119,16 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         default=[],
         help="Activate a workspace skill by name for this turn. May be repeated.",
     )
-    parser.add_argument("--durable", action="store_true", help="Use durable runtime wiring.")
+    parser.add_argument(
+        "--in-memory",
+        action="store_true",
+        help="Use the in-memory test-double runtime wiring instead of durable Postgres wiring.",
+    )
+    parser.add_argument(
+        "--durable",
+        action="store_true",
+        help="Explicitly confirm durable runtime wiring. Durable is the default.",
+    )
     parser.add_argument("--env-file", default=None, help="Load settings from a .env file before running.")
     parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
     parser.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
@@ -130,6 +139,14 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         help="Model role to use.",
     )
     return parser
+
+
+def _host_runtime_durable(args) -> bool:
+    if getattr(args, "in_memory", False) and getattr(args, "durable", False):
+        raise ValueError("--in-memory and --durable cannot be combined")
+    if getattr(args, "in_memory", False):
+        return False
+    return True
 
 
 def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -285,7 +302,7 @@ async def _host_run(args) -> object:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
-    core = HostCore(settings=settings, durable=bool(args.durable))
+    core = HostCore(settings=settings, durable=_host_runtime_durable(args))
     session = await core.open_session(
         _workspace_input_from_args(args),
         model_role=ModelRole(args.model_role),
@@ -316,7 +333,7 @@ async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
-    core = HostCore(settings=settings, durable=bool(args.durable))
+    core = HostCore(settings=settings, durable=_host_runtime_durable(args))
     session = await core.open_session(
         _workspace_input_from_args(args),
         model_role=ModelRole(args.model_role),

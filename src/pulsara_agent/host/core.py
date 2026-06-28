@@ -25,7 +25,7 @@ from pulsara_agent.settings import PulsaraSettings
 @dataclass(slots=True)
 class HostCore:
     settings: PulsaraSettings
-    durable: bool = False
+    durable: bool = True
     scratch_root: Path | None = None
     registry: HostSessionRegistry = field(default_factory=HostSessionRegistry)
     use_workspace_supervisor: bool = True

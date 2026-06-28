@@ -5,6 +5,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from pulsara_agent.graph.durable_facade import DurableGraphFacade
+from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.entities.runtime import Evidence
 from pulsara_agent.graph import PostgresGraphStore
@@ -78,6 +80,98 @@ def test_postgres_graph_store_projects_memory_nodes_and_runtime_source_relations
 
     store.delete_graph(graph_id)
     assert query.fetch_nodes(["preference:test-concise"], graph_id=graph_id) == []
+
+
+def test_durable_facade_delete_graph_still_clears_postgres_when_oxigraph_is_unavailable() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    now = utc_now()
+    postgres = PostgresGraphStore(dsn=dsn)
+    facade = DurableGraphFacade(
+        postgres=postgres,
+        oxigraph=OxigraphGraphStore("http://127.0.0.1:1"),
+    )
+
+    facade.put_jsonld(
+        Preference(
+            id="preference:test-delete-fallback",
+            statement="The user prefers concise summaries.",
+            scope="ctx:user",
+            status=memory.NodeStatus.ACTIVE,
+            confidence_level=memory.ConfidenceLevel.HIGH,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=now,
+            updated_at=now,
+            gate_reason="explicit user preference",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
+
+    facade.delete_graph(graph_id)
+
+    query = PostgresMemoryQuery(dsn=dsn)
+    assert query.fetch_nodes(["preference:test-delete-fallback"], graph_id=graph_id) == []
+    with _connect_or_skip(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select payload, status, last_error
+                from memory_write_outbox
+                where graph_id = %s and mutation_lane = 'graph_reset'
+                order by created_at desc, outbox_id desc
+                limit 1
+                """,
+                (graph_id,),
+            )
+            payload, status, last_error = cursor.fetchone()
+            assert payload["graph_reset"] is True
+            assert payload["surface_apply_status"]["oxigraph"] == "failed"
+            assert status == "failed"
+            assert isinstance(last_error, str) and last_error
+
+
+def test_durable_facade_delete_graph_without_oxigraph_does_not_emit_graph_reset_tombstone() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    now = utc_now()
+    postgres = PostgresGraphStore(dsn=dsn)
+    facade = DurableGraphFacade(postgres=postgres, oxigraph=None)
+
+    facade.put_jsonld(
+        Preference(
+            id="preference:test-delete-no-oxigraph",
+            statement="The user prefers concise summaries.",
+            scope="ctx:user",
+            status=memory.NodeStatus.ACTIVE,
+            confidence_level=memory.ConfidenceLevel.HIGH,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=now,
+            updated_at=now,
+            gate_reason="explicit user preference",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
+
+    facade.delete_graph(graph_id)
+
+    query = PostgresMemoryQuery(dsn=dsn)
+    assert query.fetch_nodes(["preference:test-delete-no-oxigraph"], graph_id=graph_id) == []
+    with _connect_or_skip(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select count(*)
+                from memory_write_outbox
+                where graph_id = %s and mutation_lane = 'graph_reset'
+                """,
+                (graph_id,),
+            )
+            (count,) = cursor.fetchone()
+            assert count == 0
 
 
 def _connect_or_skip(dsn: str):

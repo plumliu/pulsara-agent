@@ -389,18 +389,104 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select decision_id, target_entry_key, status
+                    select decision_id, target_entry_key, status, mutation_lane, sequence_key, dirty_memory_ids, payload
                     from memory_write_outbox
                     where governance_batch_id = %s
                     """,
                     (batch_id,),
                 )
                 rows = cursor.fetchall()
-        assert rows == [(result.decision_record.decision_id, invalid.entry_id, "pending")]
+        assert len(rows) == 1
+        decision_id, target_entry_key, status, mutation_lane, sequence_key, dirty_memory_ids, payload = rows[0]
+        assert decision_id == result.decision_record.decision_id
+        assert target_entry_key == invalid.entry_id
+        assert status == "pending"
+        assert mutation_lane == "governed_memory"
+        assert sequence_key == graph_id
+        assert isinstance(dirty_memory_ids, list) and len(dirty_memory_ids) == 1
+        assert payload["kind"] == "canonical_mutation"
+        assert payload["mutation_lane"] == "governed_memory"
+        assert payload["surface_apply_status"] == {"search_index": "pending", "oxigraph": "pending"}
+        assert isinstance(payload["documents"], list) and len(payload["documents"]) == 1
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("delete from memory_write_outbox where governance_batch_id = %s", (batch_id,))
+                cursor.execute(
+                    "delete from memory_governance_decisions where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
+                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+
+
+def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_outbox(tmp_path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    graph_id = f"graph:test/{uuid4().hex}"
+    batch_id = f"governance:test:uow-failed:{uuid4().hex}"
+    source_ctx = EventContext(
+        run_id=f"run:source:{uuid4().hex}",
+        turn_id=f"turn:source:{uuid4().hex}",
+        reply_id=f"reply:source:{uuid4().hex}",
+    )
+    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    pool = PostgresCandidatePool(dsn=dsn)
+    try:
+        log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+        candidate = pool.append_candidate(
+            PooledMemoryCandidate(
+                payload=ValidCandidatePayload(
+                    candidate=_preference(
+                        f"candidate:failed:{uuid4().hex}",
+                        evidence_ids=("evidence:missing",),
+                    )
+                ),
+                origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                source_session_id=runtime_session_id,
+                source_run_id=source_ctx.run_id,
+                source_turn_id=source_ctx.turn_id,
+                source_reply_id=source_ctx.reply_id,
+            )
+        )
+        executor = MemoryGovernanceExecutor(
+            candidate_pool=pool,
+            memory_write_service=_service_on(InMemoryGraphStore()),
+            event_log=log,
+            graph=InMemoryGraphStore(),
+            runtime_session_id=runtime_session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                graph_id=graph_id,
+                workspace_root=tmp_path,
+            ),
+        )
+
+        result = executor.apply_decision(
+            SubmitAsIsDecision(target_entry_id=candidate.entry_id, reason="missing evidence should fail"),
+            governance_batch_id=batch_id,
+        )
+
+        assert isinstance(result.decision_record.write_outcome, WriteFailedOutcome)
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select count(*) from memory_governance_decisions where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                assert cursor.fetchone() == (1,)
+                cursor.execute(
+                    "select count(*) from memory_write_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                assert cursor.fetchone() == (0,)
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
                 cursor.execute(
                     "delete from memory_governance_decisions where governance_batch_id = %s",
                     (batch_id,),

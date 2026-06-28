@@ -209,6 +209,43 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(tmp_p
         _delete_postgres_runtime_session(storage.postgres_dsn, runtime_session_id)
 
 
+def test_durable_runtime_delete_graph_clears_oxigraph_named_graph(tmp_path) -> None:
+    storage = StorageConfig.from_env()
+    graph_id = f"graph:test/{uuid4().hex}"
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    ctx = EventContext(
+        run_id=f"run:oxigraph-delete:{uuid4().hex}",
+        turn_id=f"turn:oxigraph-delete:{uuid4().hex}",
+        reply_id=f"reply:oxigraph-delete:{uuid4().hex}",
+    )
+    wiring = build_durable_runtime_wiring(
+        _settings_for_storage(storage),
+        tmp_path,
+        runtime_session_id=runtime_session_id,
+        graph_id=graph_id,
+    )
+    oxigraph = OxigraphGraphStore(storage.oxigraph_url)
+
+    async def run() -> None:
+        await wiring.runtime_session.emit(
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello delete graph")
+        )
+        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields()))
+
+    try:
+        import asyncio
+
+        asyncio.run(run())
+        assert oxigraph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
+
+        wiring.graph.delete_graph(graph_id)
+
+        assert not oxigraph.find_by_type(rt.RUN_TIMELINE, graph_id=graph_id)
+    finally:
+        _delete_postgres_artifacts_with_prefix(storage.postgres_dsn, f"timeline:{runtime_session_id}:{ctx.run_id}:")
+        _delete_postgres_runtime_session(storage.postgres_dsn, runtime_session_id)
+
+
 def _settings_for_storage(storage: StorageConfig) -> PulsaraSettings:
     return PulsaraSettings(
         llm=LLMConfig(

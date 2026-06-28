@@ -22,37 +22,9 @@ from pulsara_agent.graph.jsonld_codec import graph_key as _graph_key
 from pulsara_agent.graph.jsonld_codec import normalize_jsonld_document
 from pulsara_agent.jsonld import Term
 from pulsara_agent.ontology import memory
-from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.ontology.registry import CORE_CONTEXT
+from pulsara_agent.storage.postgres_memory_projection import refresh_document_projection
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
-
-
-_MEMORY_TYPE_NAMES = {
-    memory.CLAIM.name,
-    memory.DECISION.name,
-    memory.PREFERENCE.name,
-    memory.ACTION_BOUNDARY.name,
-    memory.OBSERVATION.name,
-}
-
-_REQUIRED_MEMORY_PROJECTION_KEYS = (
-    memory.STATEMENT.name,
-    memory.SCOPE.name,
-    memory.STATUS.name,
-    memory.CREATED_AT.name,
-    memory.UPDATED_AT.name,
-)
-_PROJECTED_RELATION_PREDICATES = frozenset(
-    {
-        rt.PROVIDES.name,
-        memory.SUPPORTS.name,
-        memory.SUPERSEDES.name,
-        memory.CONTRADICTS.name,
-        memory.HAS_EVIDENCE.name,
-        memory.BASED_ON.name,
-        memory.DERIVED_FROM.name,
-    }
-)
 
 
 @dataclass(slots=True)
@@ -83,8 +55,6 @@ class PostgresGraphStore:
             raise ValueError("JSON-LD document must include a string @id")
         graph = _graph_key(graph_id)
         first_type = _first_type(normalized)
-        projection = _memory_node_projection(normalized)
-        relation_rows = tuple(_relation_rows(normalized))
 
         with self._cursor() as cursor:
             cursor.execute(
@@ -98,56 +68,7 @@ class PostgresGraphStore:
                 """,
                 (graph, node_id, first_type, Jsonb(normalized)),
             )
-            cursor.execute(
-                "DELETE FROM memory_nodes WHERE graph_id = %s AND id = %s",
-                (graph, node_id),
-            )
-            if projection is not None:
-                cursor.execute(
-                    """
-                    INSERT INTO memory_nodes (
-                        graph_id,
-                        id,
-                        memory_type,
-                        scope,
-                        status,
-                        statement,
-                        summary,
-                        source_authority,
-                        verification_status,
-                        confidence_level,
-                        applies_when,
-                        do_not_apply_when,
-                        created_at,
-                        updated_at,
-                        stale_after,
-                        expires_at
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s::timestamptz, %s::timestamptz, %s::timestamptz, %s::timestamptz
-                    )
-                    """,
-                    (
-                        graph,
-                        node_id,
-                        projection["memory_type"],
-                        projection["scope"],
-                        projection["status"],
-                        projection["statement"],
-                        projection["summary"],
-                        projection["source_authority"],
-                        projection["verification_status"],
-                        projection["confidence_level"],
-                        projection["applies_when"],
-                        projection["do_not_apply_when"],
-                        projection["created_at"],
-                        projection["updated_at"],
-                        projection["stale_after"],
-                        projection["expires_at"],
-                    ),
-                )
-            self._sync_relations_from_document(cursor, graph_id=graph, source_id=node_id, rows=relation_rows)
+            refresh_document_projection(cursor, graph_id=graph, node_id=node_id, document=normalized)
 
     def get_jsonld(self, node_id: str, graph_id: str | None = None) -> dict[str, Any]:
         with self._cursor(row_factory=dict_row) as cursor:
@@ -221,9 +142,6 @@ class PostgresGraphStore:
             payload[memory.STATUS.name] = status.value
             payload[memory.UPDATED_AT.name] = updated_at.isoformat()
             normalized = normalize_jsonld_document(payload, self.default_context)
-            projection = _memory_node_projection(normalized)
-            if projection is None:
-                raise ValueError(f"node is not a canonical memory node: {node_id}")
             cursor.execute(
                 """
                 UPDATE graph_documents
@@ -232,14 +150,12 @@ class PostgresGraphStore:
                 """,
                 (Jsonb(normalized), graph, node_id),
             )
+            if memory.STATUS.name not in normalized:
+                raise ValueError(f"node is not a canonical memory node: {node_id}")
+            refresh_document_projection(cursor, graph_id=graph, node_id=node_id, document=normalized)
             cursor.execute(
-                """
-                UPDATE memory_nodes
-                SET status = %s,
-                    updated_at = %s::timestamptz
-                WHERE graph_id = %s AND id = %s
-                """,
-                (status.value, updated_at.isoformat(), graph, node_id),
+                "SELECT 1 FROM memory_nodes WHERE graph_id = %s AND id = %s",
+                (graph, node_id),
             )
             if cursor.rowcount == 0:
                 raise KeyError(node_id)
@@ -253,26 +169,11 @@ class PostgresGraphStore:
     def delete_graph(self, graph_id: str) -> None:
         graph = _graph_key(graph_id)
         with self._cursor() as cursor:
+            cursor.execute("DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph,))
+            cursor.execute("DELETE FROM memory_search_index WHERE graph_id = %s", (graph,))
             cursor.execute("DELETE FROM memory_relations WHERE graph_id = %s", (graph,))
             cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph,))
             cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph,))
-
-    @staticmethod
-    def _sync_relations_from_document(cursor, *, graph_id: str, source_id: str, rows: tuple[tuple[str, str], ...]) -> None:
-        cursor.execute(
-            "DELETE FROM memory_relations WHERE graph_id = %s AND source_id = %s",
-            (graph_id, source_id),
-        )
-        if not rows:
-            return
-        cursor.executemany(
-            """
-            INSERT INTO memory_relations (graph_id, source_id, predicate, target_id)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-            """,
-            [(graph_id, source_id, predicate, target_id) for predicate, target_id in rows],
-        )
 
     @contextmanager
     def _cursor(self, *, row_factory=None) -> Iterator:
@@ -305,69 +206,3 @@ def _first_type(document: dict[str, Any]) -> str | None:
     if isinstance(types, str):
         return types
     return None
-
-
-def _memory_node_projection(document: dict[str, Any]) -> dict[str, Any] | None:
-    memory_type = _canonical_memory_type(document)
-    if memory_type is None:
-        return None
-    if any(not _non_empty(document.get(key)) for key in _REQUIRED_MEMORY_PROJECTION_KEYS):
-        return None
-    return {
-        "memory_type": memory_type,
-        "scope": str(document[memory.SCOPE.name]),
-        "status": str(document[memory.STATUS.name]),
-        "statement": str(document[memory.STATEMENT.name]),
-        "summary": _optional_str(document.get(memory.SUMMARY.name)),
-        "source_authority": _optional_str(document.get(memory.SOURCE_AUTHORITY.name)),
-        "verification_status": _optional_str(document.get(memory.VERIFICATION_STATUS.name)),
-        "confidence_level": _optional_str(document.get(memory.CONFIDENCE_LEVEL.name)),
-        "applies_when": _optional_str(document.get(memory.APPLIES_WHEN.name)),
-        "do_not_apply_when": _optional_str(document.get(memory.DO_NOT_APPLY_WHEN.name)),
-        "created_at": str(document[memory.CREATED_AT.name]),
-        "updated_at": str(document[memory.UPDATED_AT.name]),
-        "stale_after": _optional_str(document.get(memory.STALE_AFTER.name)),
-        "expires_at": _optional_str(document.get(memory.EXPIRES_AT.name)),
-    }
-
-
-def _canonical_memory_type(document: dict[str, Any]) -> str | None:
-    types = document.get("@type")
-    values = types if isinstance(types, list) else [types]
-    for value in values:
-        type_name = str(value)
-        if type_name in _MEMORY_TYPE_NAMES:
-            return type_name
-    return None
-
-
-def _relation_rows(document: dict[str, Any]) -> Iterator[tuple[str, str]]:
-    for key, value in document.items():
-        if key in {"@context", "@id", "@type"}:
-            continue
-        if key not in _PROJECTED_RELATION_PREDICATES:
-            continue
-        for target_id in _node_ref_ids(value):
-            yield key, target_id
-
-
-def _node_ref_ids(value: Any) -> Iterator[str]:
-    if isinstance(value, list):
-        for item in value:
-            yield from _node_ref_ids(item)
-        return
-    if not isinstance(value, dict):
-        return
-    node_id = value.get("@id")
-    if isinstance(node_id, str) and node_id:
-        yield node_id
-
-
-def _non_empty(value: Any) -> bool:
-    return value is not None and str(value) != ""
-
-
-def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)

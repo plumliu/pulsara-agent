@@ -115,6 +115,17 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
         assert fetched[new_id].status is memory.NodeStatus.ACTIVE
         assert (memory.CONTRADICTS.name, new_id) in fetched[old_id].outgoing
         assert (memory.CONTRADICTS.name, old_id) in fetched[new_id].outgoing
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select payload from memory_write_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                payload = cursor.fetchone()[0]
+        documents = {item["node_id"]: item["document"] for item in payload["documents"]}
+        assert set(documents) == {old_id, new_id}
+        assert {"@id": new_id} in documents[old_id][memory.CONTRADICTS.name]
+        assert {"@id": old_id} in documents[new_id][memory.CONTRADICTS.name]
     finally:
         _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
 
@@ -371,6 +382,13 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
         assert old_doc[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value
         assert memory.CONTRADICTS.name not in old_doc
         assert _governance_candidate_count(pool) == 0
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select count(*) from memory_write_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                assert cursor.fetchone() == (0,)
     finally:
         _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
 
@@ -616,15 +634,11 @@ def test_merge_projection_preserves_conflict_groups() -> None:
 def test_outbox_memory_ids_ignores_contradicted_memory_ids() -> None:
     assert _outbox_memory_ids(
         {
-            "decision_record": {
-                "write_outcome": {
-                    "kind": "write_succeeded",
-                    "memory_id": "preference:new",
-                    "contradicted_memory_ids": ["preference:old"],
-                }
-            }
+            "kind": "canonical_mutation",
+            "mutation_lane": "governed_memory",
+            "dirty_memory_ids": ["preference:new", "preference:old"],
         }
-    ) == ("preference:new",)
+    ) == ("preference:new", "preference:old")
 
 
 def _postgres_executor(

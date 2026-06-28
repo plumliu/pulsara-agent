@@ -16,8 +16,14 @@ def test_memory_substrate_schema_partitions_graph_tables_by_graph_id() -> None:
 
 
 def test_memory_write_outbox_uses_decision_level_idempotency_key() -> None:
-    assert "UNIQUE (governance_batch_id, decision_id)" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_write_outbox_governance_decision" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "WHERE governance_batch_id IS NOT NULL AND decision_id IS NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL
     assert "target_entry_key TEXT NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "mutation_lane TEXT NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "sequence_key TEXT NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "dirty_memory_ids JSONB NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "attempt_count INTEGER NOT NULL DEFAULT 0" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "last_error TEXT" in MEMORY_SUBSTRATE_SCHEMA_SQL
 
 
 def test_memory_search_index_uses_compound_canonical_fk() -> None:

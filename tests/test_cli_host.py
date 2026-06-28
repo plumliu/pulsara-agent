@@ -183,6 +183,73 @@ def test_cli_host_run_uses_host_core_and_normalizes_ephemeral(monkeypatch, tmp_p
     assert sync_calls == ["sync"]
 
 
+def test_cli_host_run_defaults_to_durable_runtime(monkeypatch, tmp_path) -> None:
+    FakeCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--model-role",
+            "flash",
+            "say hi",
+        ]
+    )
+
+    asyncio.run(cli._host_run(args))
+
+    assert FakeCore.instances[0].durable is True
+
+
+def test_cli_host_run_can_opt_out_to_in_memory(monkeypatch, tmp_path) -> None:
+    FakeCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "run",
+            "--in-memory",
+            "--workspace",
+            str(tmp_path),
+            "--model-role",
+            "flash",
+            "say hi",
+        ]
+    )
+
+    asyncio.run(cli._host_run(args))
+
+    assert FakeCore.instances[0].durable is False
+
+
+def test_cli_host_runtime_mode_flags_are_mutually_exclusive(tmp_path) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "run",
+            "--in-memory",
+            "--durable",
+            "--workspace",
+            str(tmp_path),
+            "--model-role",
+            "flash",
+            "say hi",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        cli._host_runtime_durable(args)
+
+
 def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) -> None:
     class PolicyCapturingCore(FakeCore):
         async def open_session(self, workspace_input, *, model_role, permission_policy=None):

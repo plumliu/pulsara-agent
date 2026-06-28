@@ -87,18 +87,54 @@ CREATE INDEX IF NOT EXISTS idx_memory_relations_target
 CREATE TABLE IF NOT EXISTS memory_write_outbox (
     outbox_id TEXT PRIMARY KEY,
     graph_id TEXT NOT NULL,
-    governance_batch_id TEXT NOT NULL,
-    decision_id TEXT NOT NULL,
+    governance_batch_id TEXT,
+    decision_id TEXT,
+    mutation_lane TEXT NOT NULL DEFAULT 'governed_memory',
+    sequence_key TEXT NOT NULL DEFAULT '',
     target_entry_key TEXT NOT NULL,
+    dirty_memory_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     payload JSONB NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    applied_at TIMESTAMPTZ,
-    UNIQUE (governance_batch_id, decision_id)
+    applied_at TIMESTAMPTZ
 );
+
+ALTER TABLE memory_write_outbox
+    ADD COLUMN IF NOT EXISTS mutation_lane TEXT NOT NULL DEFAULT 'governed_memory';
+
+ALTER TABLE memory_write_outbox
+    ADD COLUMN IF NOT EXISTS sequence_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_write_outbox
+    ADD COLUMN IF NOT EXISTS dirty_memory_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+ALTER TABLE memory_write_outbox
+    ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE memory_write_outbox
+    ADD COLUMN IF NOT EXISTS last_error TEXT;
+
+ALTER TABLE memory_write_outbox
+    ALTER COLUMN governance_batch_id DROP NOT NULL;
+
+ALTER TABLE memory_write_outbox
+    ALTER COLUMN decision_id DROP NOT NULL;
+
+UPDATE memory_write_outbox
+SET sequence_key = graph_id
+WHERE sequence_key = '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_write_outbox_governance_decision
+    ON memory_write_outbox(governance_batch_id, decision_id)
+    WHERE governance_batch_id IS NOT NULL AND decision_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_memory_write_outbox_status
     ON memory_write_outbox(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_memory_write_outbox_sequence
+    ON memory_write_outbox(sequence_key, created_at, outbox_id);
 
 CREATE TABLE IF NOT EXISTS memory_search_index (
     graph_id TEXT NOT NULL,

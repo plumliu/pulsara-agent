@@ -36,7 +36,8 @@ from pulsara_agent.capability import LocalSkillResolver, sync_bundled_skills
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.entities.memory import Preference
-from pulsara_agent.graph import PostgresGraphStore
+from pulsara_agent.graph import OxigraphGraphStore, PostgresGraphStore
+from pulsara_agent.graph.durable_facade import DurableGraphFacade
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.host.transcript import INTERRUPTED_NOTE_TEXT, rebuild_prior_messages
 from pulsara_agent.jsonld import utc_now
@@ -58,6 +59,7 @@ from pulsara_agent.memory import (
 )
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
+from pulsara_agent.memory.canonical.reconcile import PostgresMemoryReconciler
 from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint, MemoryReflectionOptions
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -580,6 +582,8 @@ def test_real_agent_runtime_persists_events_to_postgres_and_timeline_with_respon
     assert any("PULSARA_POSTGRES_CHAIN_OK" in summary for summary in result["tool_result_summaries"])
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["replayed_text"]
     assert "PULSARA_POSTGRES_CHAIN_OK" in result["timeline_artifact_text"]
+    assert result["timeline_outbox_mutation_lane"] == "runtime_semantic"
+    assert result["timeline_outbox_surface_apply_status"] == {"oxigraph": "applied"}
 
 
 def test_real_agent_runtime_reads_recalled_memory_projection_with_responses_api(tmp_path):
@@ -781,6 +785,9 @@ def test_real_flash_memory_reflection_queues_preference_and_governance_writes_it
     assert result["memory_result_types"] == ["Preference"]
     assert result["memory_statuses"] == ["active"]
     assert result["preference_count"] == 1
+    assert result["outbox_payload_kind"] == "canonical_mutation"
+    assert result["outbox_surface_apply_status"] == {"search_index": "applied", "oxigraph": "applied"}
+    assert result["outbox_applied_count"] >= 1
 
 
 def test_real_flash_model_retries_memory_tool_after_invalid_json():
@@ -815,6 +822,9 @@ def test_real_flash_memory_governance_engine_writes_preference():
     assert result["memory_result_types"] == ["Preference"]
     assert result["memory_statuses"] == ["active"]
     assert result["preference_count"] == 1
+    assert result["outbox_payload_kind"] == "canonical_mutation"
+    assert result["outbox_surface_apply_status"] == {"search_index": "applied", "oxigraph": "applied"}
+    assert result["outbox_applied_count"] >= 1
 
 
 def test_real_flash_memory_governance_explicit_change_supersedes_preference(tmp_path):
@@ -830,6 +840,7 @@ def test_real_flash_memory_governance_explicit_change_supersedes_preference(tmp_
     assert result["new_status"] == "active"
     assert result["superseded_memory_ids"] == ["preference:real-governance-supersede-old"]
     assert result["governance_candidate_count"] == 0
+    assert result["outbox_applied_count"] >= 1
 
 
 def test_real_flash_memory_governance_non_explicit_conflict_links_contradiction(tmp_path):
@@ -849,6 +860,7 @@ def test_real_flash_memory_governance_non_explicit_conflict_links_contradiction(
     assert result["supersedes_edge_present"] is False
     assert result["contradicts_edge_present"] is True
     assert result["governance_candidate_count"] == 0
+    assert result["outbox_applied_count"] >= 1
 
 
 def test_real_flash_memory_governance_weak_update_coexists(tmp_path):
@@ -864,6 +876,7 @@ def test_real_flash_memory_governance_weak_update_coexists(tmp_path):
     assert result["new_status"] == "active"
     assert result["superseded_memory_ids"] == []
     assert result["supersedes_edge_present"] is False
+    assert result["outbox_applied_count"] >= 1
 
 
 def test_real_flash_accepts_aborted_unfinished_tool_recovery_context():
@@ -2325,6 +2338,26 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
         persisted_events = reloaded_log.iter(run_id=result.state.run_id)
         replayed = reloaded_log.replay(result.state.reply_id)
         replayed_text = "".join(block.text for block in replayed.content if isinstance(block, TextBlock))
+        import psycopg
+
+        timeline_outbox_mutation_lane = None
+        timeline_outbox_surface_apply_status = None
+        with psycopg.connect(settings.storage.postgres_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT mutation_lane, payload
+                    FROM memory_write_outbox
+                    WHERE graph_id = %s AND mutation_lane = 'runtime_semantic'
+                    ORDER BY created_at DESC, outbox_id DESC
+                    LIMIT 1
+                    """,
+                    (graph_id,),
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    timeline_outbox_mutation_lane = row[0]
+                    timeline_outbox_surface_apply_status = row[1].get("surface_apply_status")
         return {
             "status": result.status.value,
             "timeline_records": len(records),
@@ -2337,11 +2370,14 @@ async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> d
             "postgres_sequence_numbers": [event.sequence for event in persisted_events],
             "replayed_text": replayed_text.strip(),
             "timeline_artifact_text": wiring.runtime_wiring.archive.get_text(timeline_blob_id),
+            "timeline_outbox_mutation_lane": timeline_outbox_mutation_lane,
+            "timeline_outbox_surface_apply_status": timeline_outbox_surface_apply_status,
         }
     finally:
         wiring.runtime_wiring.graph.delete_graph(graph_id)
         if timeline_blob_prefix is not None:
             _delete_postgres_artifacts_with_prefix(settings.storage.postgres_dsn, timeline_blob_prefix)
+        _delete_postgres_outbox_by_graph(settings.storage.postgres_dsn, graph_id)
         _delete_postgres_runtime_session(settings.storage.postgres_dsn, runtime_session.runtime_session_id)
 
 
@@ -3437,7 +3473,7 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
     graph_id = f"graph:real-reflection/{uuid4().hex}"
     runtime_session_id = f"runtime:real-reflection:{uuid4().hex}"
     seed_text = "Please remember this durable preference: the user prefers concise summaries."
-    graph = PostgresGraphStore(dsn=dsn)
+    graph = _build_real_durable_graph(settings)
     candidate_pool = PostgresCandidatePool(dsn=dsn)
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
     archive = PostgresArtifactStore(dsn=dsn)
@@ -3504,9 +3540,25 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
             ),
         )
         governance_results = governance.submit_pending_as_is(governance_batch_id=governance_batch_id)
+        outbox_applied_count = _replay_real_graph_outbox(settings, graph_id=graph_id)
         governance_events = [event for result in governance_results for event in result.events]
         memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
         failures = [event for event in events if isinstance(event, MemoryReflectionFailedEvent)]
+        outbox_payload_kind = None
+        outbox_surface_apply_status = None
+        import psycopg
+
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select payload from memory_write_outbox where governance_batch_id = %s",
+                    (governance_batch_id,),
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    payload = row[0]
+                    outbox_payload_kind = payload.get("kind")
+                    outbox_surface_apply_status = payload.get("surface_apply_status")
         return {
             "event_type_names": [type(event).__name__ for event in events],
             "governance_event_type_names": [type(event).__name__ for event in governance_events],
@@ -3516,6 +3568,9 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
             "memory_statuses": [event.status.value for event in memory_results],
             "failed_events": [event.message for event in failures],
             "preference_count": len(graph.find_by_type(memory.PREFERENCE, graph_id=graph_id)),
+            "outbox_payload_kind": outbox_payload_kind,
+            "outbox_surface_apply_status": outbox_surface_apply_status,
+            "outbox_applied_count": outbox_applied_count,
         }
     finally:
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
@@ -3603,7 +3658,7 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
         turn_id=f"turn:real-governance-source:{uuid4().hex}",
         reply_id=f"reply:real-governance-source:{uuid4().hex}",
     )
-    graph = PostgresGraphStore(dsn=dsn)
+    graph = _build_real_durable_graph(settings)
     candidate_pool = PostgresCandidatePool(dsn=dsn)
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
     archive = PostgresArtifactStore(dsn=dsn)
@@ -3658,8 +3713,24 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
             trigger_reason="real_llm_governance_smoke",
             governance_batch_id=governance_batch_id,
         )
+        outbox_applied_count = _replay_real_graph_outbox(settings, graph_id=graph_id)
         governance_events = [event for applied in result.applied for event in applied.events]
         memory_results = [event for event in governance_events if isinstance(event, MemoryWriteResultEvent)]
+        outbox_payload_kind = None
+        outbox_surface_apply_status = None
+        import psycopg
+
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select payload from memory_write_outbox where governance_batch_id = %s",
+                    (governance_batch_id,),
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    payload = row[0]
+                    outbox_payload_kind = payload.get("kind")
+                    outbox_surface_apply_status = payload.get("surface_apply_status")
         return {
             "error_type": result.error_type,
             "error_message": result.error_message,
@@ -3669,6 +3740,9 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
             "memory_result_types": [event.memory_type for event in memory_results],
             "memory_statuses": [event.status.value for event in memory_results],
             "preference_count": len(graph.find_by_type(memory.PREFERENCE, graph_id=graph_id)),
+            "outbox_payload_kind": outbox_payload_kind,
+            "outbox_surface_apply_status": outbox_surface_apply_status,
+            "outbox_applied_count": outbox_applied_count,
         }
     finally:
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
@@ -3728,7 +3802,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
         reply_id=f"reply:real-governance-{label}-source:{uuid4().hex}",
     )
     governance_batch_id = f"governance:real-governance-{label}:{uuid4().hex}"
-    graph = PostgresGraphStore(dsn=dsn)
+    graph = _build_real_durable_graph(settings)
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
     event_log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta=user_quote))
     candidate_pool = PostgresCandidatePool(dsn=dsn)
@@ -3799,6 +3873,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             trigger_reason=f"real_llm_governance_{label}_smoke",
             governance_batch_id=governance_batch_id,
         )
+        outbox_applied_count = _replay_real_graph_outbox(settings, graph_id=graph_id)
         old_doc = graph.get_jsonld(old_id, graph_id=graph_id)
         write_outcome = result.applied[0].decision_record.write_outcome if result.applied else None
         new_id = getattr(write_outcome, "memory_id", None)
@@ -3825,6 +3900,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             "governance_candidate_count": sum(
                 1 for candidate in candidate_pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE
             ),
+            "outbox_applied_count": outbox_applied_count,
         }
     finally:
         graph.delete_graph(graph_id)
@@ -3903,6 +3979,25 @@ def _load_settings_for_real_llm() -> PulsaraSettings:
     return PulsaraSettings.from_env()
 
 
+def _build_real_durable_graph(settings: PulsaraSettings) -> DurableGraphFacade:
+    return DurableGraphFacade(
+        postgres=PostgresGraphStore(dsn=settings.storage.postgres_dsn),
+        oxigraph=OxigraphGraphStore(settings.storage.oxigraph_url)
+        if settings.storage.oxigraph_url
+        else None,
+    )
+
+
+def _replay_real_graph_outbox(settings: PulsaraSettings, *, graph_id: str) -> int:
+    reconciler = PostgresMemoryReconciler(
+        dsn=settings.storage.postgres_dsn,
+        oxigraph=OxigraphGraphStore(settings.storage.oxigraph_url)
+        if settings.storage.oxigraph_url
+        else None,
+    )
+    return reconciler.replay_outbox(graph_id=graph_id)
+
+
 def _build_real_durable_agent(
     workspace_root: Path,
     *,
@@ -3970,6 +4065,14 @@ def _delete_postgres_artifacts_with_prefix(dsn: str, blob_id_prefix: str) -> Non
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from artifacts where id like %s", (f"{blob_id_prefix}%",))
+
+
+def _delete_postgres_outbox_by_graph(dsn: str, graph_id: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("delete from memory_write_outbox where graph_id = %s", (graph_id,))
 
 
 def _delete_postgres_artifacts_for_session(dsn: str, runtime_session_id: str) -> None:
