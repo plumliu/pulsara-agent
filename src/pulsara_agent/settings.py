@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pulsara_agent.llm.config import LLMConfig
+from pulsara_agent.retrieval.config import RetrievalConfig
 
 
 DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
@@ -38,12 +39,14 @@ class PulsaraSettings:
 
     llm: LLMConfig
     storage: StorageConfig
+    retrieval: RetrievalConfig = RetrievalConfig()
 
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "PulsaraSettings":
         return cls(
             llm=LLMConfig.from_env(prefix=prefix),
             storage=StorageConfig.from_env(prefix=prefix),
+            retrieval=RetrievalConfig.from_env(prefix=prefix),
         )
 
     @classmethod
@@ -68,6 +71,26 @@ class PulsaraSettings:
                 "api_key_set": bool(self.llm.api_key),
             },
             "storage": self.storage.redacted_dict(),
+            "retrieval": {
+                "embedding": {
+                    "provider": self.retrieval.embedding.provider,
+                    "base_url": self.retrieval.embedding.base_url,
+                    "model": self.retrieval.embedding.model,
+                    "dimensions": self.retrieval.embedding.dimensions,
+                    "api_key_set": bool(self.retrieval.embedding.api_key),
+                },
+                "rerank": {
+                    "provider": self.retrieval.rerank.provider,
+                    "base_url": self.retrieval.rerank.base_url,
+                    "model": self.retrieval.rerank.model,
+                    "api_key_set": bool(self.retrieval.rerank.api_key),
+                },
+                "tokenizer": {
+                    "provider": self.retrieval.tokenizer.provider,
+                    "min_token_length": self.retrieval.tokenizer.min_token_length,
+                    "lowercase": self.retrieval.tokenizer.lowercase,
+                },
+            },
         }
 
 

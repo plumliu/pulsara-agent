@@ -5,6 +5,7 @@ description = "Pulsara backend runtime for a JSON-LD grounded agent memory MVP."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "jieba>=0.42.1",
     "openai>=2.43.0",
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.0",
@@ -25,6 +26,7 @@ packages = ["src/pulsara_agent"]
 testpaths = ["tests"]
 markers = [
     "real_llm: opt-in tests that call a configured real LLM provider",
+    "retrieval_live: opt-in tests that call live retrieval-side model APIs",
 ]
 
 [dependency-groups]
