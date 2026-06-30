@@ -40,6 +40,26 @@ class AbortKind(StrEnum):
     USER_STOP = "user_stop"
 
 
+@dataclass(frozen=True, slots=True)
+class StopRequest:
+    reason: AbortKind
+
+
+class InRunRecoveryCause(StrEnum):
+    MODEL_FAILURE = "model_failure"
+    TOOL_FAILURE = "tool_failure"
+
+
+@dataclass(frozen=True, slots=True)
+class InRunRecoveryState:
+    cause: InRunRecoveryCause
+    consecutive_failures: int
+
+    def __post_init__(self) -> None:
+        if self.consecutive_failures < 1:
+            raise ValueError("consecutive_failures must be positive")
+
+
 class GuidanceKind(StrEnum):
     RUN_FAILED = "run_failed"
     USER_ABORTED = "user_aborted"
@@ -213,7 +233,7 @@ def project_recovery_from_events(events: Iterable[AgentEvent]) -> RecoveryProjec
 
 
 def project_recovery_from_state(state: LoopState) -> RecoveryProjection | None:
-    if not state.recovery_mode:
+    if state.in_run_recovery is None:
         return None
     return RecoveryProjection(
         run_status=None,

@@ -77,7 +77,11 @@ from pulsara_agent.runtime.plan import (
     PlanQuestionResolution,
     PlanWorkflowState,
 )
-from pulsara_agent.runtime.recovery import AbortKind
+from pulsara_agent.runtime.recovery import (
+    AbortKind,
+    InRunRecoveryCause,
+    InRunRecoveryState,
+)
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
 from pulsara_agent.runtime.tool_taxonomy import PLAN_WORKFLOW_TOOL_NAMES
@@ -296,6 +300,7 @@ class AgentRuntime:
         state.pending_tool_calls = []
         state.pending_interaction_kind = None
         state.pending_interaction_payload = {}
+        state.stop_request = None
         state.abort_kind = reason
         async for event in self._finalize_run(state):
             yield event
@@ -501,8 +506,10 @@ class AgentRuntime:
             yield event
 
     def _apply_stop_request(self, state: LoopState) -> bool:
-        if not state.scratchpad.get("stop_requested"):
+        request = state.stop_request
+        if request is None:
             return False
+        state.stop_request = None
         if state.status is not LoopStatus.RUNNING:
             return state.status is LoopStatus.ABORTED
         state.status = LoopStatus.ABORTED
@@ -511,7 +518,7 @@ class AgentRuntime:
         state.pending_tool_calls = []
         state.pending_interaction_kind = None
         state.pending_interaction_payload = {}
-        state.abort_kind = AbortKind.USER_STOP
+        state.abort_kind = request.reason
         return True
 
     async def _stream_approval_resolution(
@@ -749,7 +756,10 @@ class AgentRuntime:
         tool_error_count = sum(1 for result in state.tool_results if result.state is not ToolResultState.SUCCESS)
         if tool_error_count:
             state.consecutive_tool_failures += tool_error_count
-            state.recovery_mode = True
+            state.in_run_recovery = InRunRecoveryState(
+                cause=InRunRecoveryCause.TOOL_FAILURE,
+                consecutive_failures=state.consecutive_tool_failures,
+            )
             if state.consecutive_tool_failures > self.budget.max_consecutive_tool_failures:
                 state.status = LoopStatus.FAILED
                 state.stop_reason = "tool_error_budget"
@@ -758,7 +768,7 @@ class AgentRuntime:
                 return
         else:
             state.consecutive_tool_failures = 0
-            state.recovery_mode = False
+            state.in_run_recovery = None
 
         if self.tool_result_persistence_hook is not None:
             event = await self._run_tool_result_persistence_hook(state)
@@ -1566,7 +1576,10 @@ class AgentRuntime:
 
     def _recover_or_fail_model(self, state: LoopState) -> bool:
         state.consecutive_model_failures += 1
-        state.recovery_mode = True
+        state.in_run_recovery = InRunRecoveryState(
+            cause=InRunRecoveryCause.MODEL_FAILURE,
+            consecutive_failures=state.consecutive_model_failures,
+        )
         if state.consecutive_model_failures > self.budget.max_consecutive_model_failures:
             state.status = LoopStatus.FAILED
             state.stop_reason = "model_error"

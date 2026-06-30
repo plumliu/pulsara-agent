@@ -10,7 +10,11 @@ from uuid import uuid4
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, Usage
 
 if TYPE_CHECKING:
-    from pulsara_agent.runtime.recovery import AbortKind
+    from pulsara_agent.runtime.recovery import (
+        AbortKind,
+        InRunRecoveryState,
+        StopRequest,
+    )
 
 StopReason: TypeAlias = Literal[
     "final",
@@ -81,7 +85,8 @@ class LoopState:
     tool_call_count: int = 0
     consecutive_model_failures: int = 0
     consecutive_tool_failures: int = 0
-    recovery_mode: bool = False
+    in_run_recovery: InRunRecoveryState | None = None
+    stop_request: StopRequest | None = None
     abort_kind: AbortKind | None = None
     compacted: bool = False
     stop_reason: StopReason | None = None

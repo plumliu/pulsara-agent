@@ -58,6 +58,7 @@ from pulsara_agent.message import (
 from pulsara_agent.runtime import (
     ApprovalResolution,
     AgentRuntime,
+    InRunRecoveryCause,
     LoopBudget,
     LoopState,
     LoopStatus,
@@ -544,11 +545,29 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
     second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
 
     assert result.status is LoopStatus.FINISHED
+    assert result.state.in_run_recovery is not None
+    assert result.state.in_run_recovery.cause is InRunRecoveryCause.TOOL_FAILURE
+    assert result.state.in_run_recovery.consecutive_failures == 1
     assert "Unknown tool: missing_tool" in second_context_text
     assert any(
         isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:missing" and event.state is ToolResultState.ERROR
         for event in agent.runtime_session.event_log.iter()
     )
+
+
+def test_model_failure_sets_typed_in_run_recovery_state(tmp_path) -> None:
+    agent = AgentRuntime(
+        runtime_session=RuntimeSession(tmp_path),
+        llm_runtime=make_llm_runtime(ScriptedTransport([])),
+    )
+    state = agent.new_state()
+
+    should_continue = agent._recover_or_fail_model(state)
+
+    assert should_continue is True
+    assert state.in_run_recovery is not None
+    assert state.in_run_recovery.cause is InRunRecoveryCause.MODEL_FAILURE
+    assert state.in_run_recovery.consecutive_failures == 1
 
 
 def test_agent_runtime_exceeds_max_turns(tmp_path) -> None:

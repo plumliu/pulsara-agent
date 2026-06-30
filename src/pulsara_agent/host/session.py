@@ -36,7 +36,7 @@ from pulsara_agent.runtime.plan import (
     pending_plan_interaction_from_state,
     reduce_plan_workflow_state,
 )
-from pulsara_agent.runtime.recovery import AbortKind
+from pulsara_agent.runtime.recovery import AbortKind, StopRequest
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 
@@ -138,9 +138,10 @@ class HostSession:
                 try:
                     result = await task
                 except asyncio.CancelledError:
-                    if not state.scratchpad.get("stop_requested"):
+                    request = state.stop_request
+                    if request is None:
                         raise
-                    result = await self.wiring.agent_runtime.abort_run(state)
+                    result = await self.wiring.agent_runtime.abort_run(state, reason=request.reason)
                 self._capture_pending_interaction(result.state)
                 self._clear_plan_entry_audit_if_emitted(result.state)
                 return result
@@ -349,7 +350,7 @@ class HostSession:
             if task.done():
                 return None
             self.stopping_run_id = state.run_id
-            state.scratchpad["stop_requested"] = True
+            state.stop_request = StopRequest(reason=reason)
             task.cancel()
             try:
                 return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)

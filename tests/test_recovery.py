@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pulsara_agent.event import (
     EventContext,
     PlanModeEnteredEvent,
@@ -18,6 +20,9 @@ from pulsara_agent.runtime.recovery import (
     GuidanceKind,
     GUIDANCE_TEXT_FOR_PROMPT,
     GUIDANCE_TEXT_FOR_TRANSCRIPT,
+    InRunRecoveryCause,
+    InRunRecoveryState,
+    StopRequest,
     ToolSeverity,
     classify_unfinished_tool_calls,
     project_recovery_from_events,
@@ -110,7 +115,10 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
 
 def test_project_recovery_from_state_uses_in_run_step_failed_guidance() -> None:
     state = LoopState(session_id="runtime:test")
-    state.recovery_mode = True
+    state.in_run_recovery = InRunRecoveryState(
+        cause=InRunRecoveryCause.TOOL_FAILURE,
+        consecutive_failures=1,
+    )
     state.scratchpad["plan_state"] = PlanWorkflowState(active=True)
 
     projection = project_recovery_from_state(state)
@@ -127,7 +135,10 @@ def test_project_recovery_from_state_uses_in_run_step_failed_guidance() -> None:
 
 def test_build_llm_context_appends_prompt_text_from_in_run_projection() -> None:
     state = LoopState(session_id="runtime:test")
-    state.recovery_mode = True
+    state.in_run_recovery = InRunRecoveryState(
+        cause=InRunRecoveryCause.MODEL_FAILURE,
+        consecutive_failures=1,
+    )
 
     context = build_llm_context(
         state=state,
@@ -138,6 +149,22 @@ def test_build_llm_context_appends_prompt_text_from_in_run_projection() -> None:
 
     assert context.messages[-1].role.value == "user"
     assert "Recover by inspecting the latest observation" in "\n".join(context.messages[-1].content)
+
+
+def test_typed_recovery_control_state_rejects_ambiguous_values() -> None:
+    request = StopRequest(reason=AbortKind.USER_STOP)
+    recovery = InRunRecoveryState(
+        cause=InRunRecoveryCause.MODEL_FAILURE,
+        consecutive_failures=2,
+    )
+
+    assert request.reason is AbortKind.USER_STOP
+    assert recovery.cause is InRunRecoveryCause.MODEL_FAILURE
+    with pytest.raises(ValueError, match="consecutive_failures"):
+        InRunRecoveryState(
+            cause=InRunRecoveryCause.TOOL_FAILURE,
+            consecutive_failures=0,
+        )
 
 
 def test_classify_unfinished_tool_calls_omits_completed_terminal_after_late_result() -> None:

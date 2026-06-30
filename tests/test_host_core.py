@@ -2158,6 +2158,9 @@ def test_host_session_stop_active_run_turn_aborts_and_releases_lock(tmp_path, mo
     assert stopped is not None
     assert stopped.status.value == "aborted"
     assert result.status.value == "aborted"
+    assert result.state.stop_request is None
+    assert result.state.abort_kind is not None
+    assert result.state.abort_kind.value == "user_stop"
     assert second.final_text == "continued"
     assert session.active_run_id is None
     assert session.stopping_run_id is None
