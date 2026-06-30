@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,12 @@ from pulsara_agent.memory.candidates.pool import (
 )
 from pulsara_agent.memory.governance.dedupe import candidate_fingerprint
 from pulsara_agent.memory.governance.executor import MemoryGovernanceApplyResult, MemoryGovernanceExecutor
+from pulsara_agent.memory.governance.relatedness import (
+    GovernanceRelatednessService,
+    RelatednessAvailability,
+    RelatednessBatchResult,
+    RelatednessExecutionContext,
+)
 from pulsara_agent.memory.scope import format_scope_list
 from pulsara_agent.ontology import memory
 
@@ -58,6 +65,7 @@ class MemoryGovernanceRunResult:
     governance_batch_id: str
     decisions: list[GovernanceDecision]
     applied: list[MemoryGovernanceApplyResult]
+    relatedness_diagnostics: dict[str, Any] = field(default_factory=dict)
     error_type: str | None = None
     error_message: str | None = None
 
@@ -73,6 +81,7 @@ class MemoryGovernanceEngine:
     llm_runtime: LLMRuntime
     executor: MemoryGovernanceExecutor
     options: MemoryGovernanceOptions = field(default_factory=MemoryGovernanceOptions)
+    relatedness_service: GovernanceRelatednessService | None = None
 
     async def run_pending(
         self,
@@ -90,11 +99,35 @@ class MemoryGovernanceEngine:
         if not pending:
             return MemoryGovernanceRunResult(governance_batch_id=batch_id, decisions=[], applied=[])
 
+        if self.relatedness_service is not None:
+            try:
+                relatedness = await self.relatedness_service.collect_batch(
+                    pending,
+                    graph_id=self.executor.graph_id,
+                )
+            except Exception as exc:
+                relatedness = RelatednessBatchResult.unavailable(
+                    pending,
+                    warning=f"relatedness_service_failed:{type(exc).__name__}",
+                )
+            snapshots = [
+                self._candidate_snapshot(candidate, relatedness=relatedness)
+                for candidate in pending
+            ]
+            execution_context = relatedness.execution_context(batch_id)
+            relatedness_diagnostics = dict(relatedness.diagnostics)
+        else:
+            # Product wiring always supplies the Postgres-backed service.  This
+            # compatibility path keeps in-memory governance useful as a test double.
+            snapshots = [self._candidate_snapshot(candidate) for candidate in pending]
+            execution_context = _legacy_execution_context(batch_id, snapshots)
+            relatedness_diagnostics = {"mode": "in_memory_test_double"}
+
         governance_input = MemoryGovernanceInput(
             runtime_session_id=self.executor.runtime_session_id,
             governance_batch_id=batch_id,
             trigger_reason=trigger_reason,
-            candidates=[self._candidate_snapshot(candidate) for candidate in pending],
+            candidates=snapshots,
             allowed_scopes=sorted(self.executor.allowed_write_scopes),
         )
         try:
@@ -104,6 +137,7 @@ class MemoryGovernanceEngine:
                 governance_batch_id=batch_id,
                 decisions=[],
                 applied=[],
+                relatedness_diagnostics=relatedness_diagnostics,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
             )
@@ -111,12 +145,19 @@ class MemoryGovernanceEngine:
         applied: list[MemoryGovernanceApplyResult] = []
         try:
             for decision in output.decisions:
-                applied.append(self.executor.apply_decision(decision, governance_batch_id=batch_id))
+                applied.append(
+                    self.executor.apply_decision(
+                        decision,
+                        governance_batch_id=batch_id,
+                        relatedness_context=execution_context,
+                    )
+                )
         except Exception as exc:
             return MemoryGovernanceRunResult(
                 governance_batch_id=batch_id,
                 decisions=output.decisions,
                 applied=applied,
+                relatedness_diagnostics=relatedness_diagnostics,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
             )
@@ -124,6 +165,7 @@ class MemoryGovernanceEngine:
             governance_batch_id=batch_id,
             decisions=output.decisions,
             applied=applied,
+            relatedness_diagnostics=relatedness_diagnostics,
         )
 
     async def _call_flash(self, governance_input: MemoryGovernanceInput) -> str:
@@ -153,7 +195,12 @@ class MemoryGovernanceEngine:
                 raise RuntimeError(event.message)
         return "".join(text_parts)
 
-    def _candidate_snapshot(self, candidate: PooledMemoryCandidate) -> dict[str, Any]:
+    def _candidate_snapshot(
+        self,
+        candidate: PooledMemoryCandidate,
+        *,
+        relatedness: RelatednessBatchResult | None = None,
+    ) -> dict[str, Any]:
         source_events = self.executor.event_log.iter(run_id=candidate.source_run_id)
         decisions = [
             decision
@@ -163,11 +210,21 @@ class MemoryGovernanceEngine:
         snapshot = candidate.model_dump(mode="json")
         snapshot["source_events"] = _source_event_summaries(source_events)
         snapshot["prior_governance_decisions"] = _decision_summaries(decisions)
-        snapshot["related_existing_memories"] = _related_existing_memories(
-            candidate,
-            self.executor.graph,
-            graph_id=self.executor.graph_id,
-        )
+        if relatedness is None:
+            snapshot["related_existing_memories"] = _related_existing_memories(
+                candidate,
+                self.executor.graph,
+                graph_id=self.executor.graph_id,
+            )
+            snapshot["relatedness_lifecycle_actions_allowed"] = bool(
+                snapshot["related_existing_memories"]
+            )
+        else:
+            candidate_relatedness = relatedness.for_candidate(candidate.entry_id)
+            snapshot["related_existing_memories"] = candidate_relatedness.prompt_view()
+            snapshot["relatedness_lifecycle_actions_allowed"] = (
+                candidate_relatedness.availability is RelatednessAvailability.FULL
+            )
         if isinstance(candidate.payload, ValidCandidatePayload):
             snapshot["content_key"] = candidate_fingerprint(candidate.payload.candidate)
         return snapshot
@@ -203,7 +260,7 @@ Return this shape:
   "reason": "short summary of the batch decision",
   "decisions": [
     {"kind": "submit_as_is", "target_entry_id": "pool:...", "reason": "..."},
-    {"kind": "supersede_and_submit", "target_entry_id": "pool:...", "candidate": {...}, "superseded_memory_ids": ["preference:..."], "reason": "..."},
+    {"kind": "supersede_and_submit", "target_entry_id": "pool:...", "candidate": {...}, "superseded_memory_ids": ["preference:..."], "replacement_evidence_refs": ["candidate_user_quote"], "reason": "..."},
     {"kind": "contradict_and_submit", "target_entry_id": "pool:...", "candidate": {...}, "contradicted_memory_ids": ["preference:..."], "reason": "..."},
     {"kind": "skip", "target_entry_ids": ["pool:..."], "reason": "...", "skip_reason": "not_durable"}
   ]
@@ -228,6 +285,13 @@ Allowed decision kinds:
   memories active and links a non-destructive contradiction warning.
 
 Rules:
+- First decide durability, validity, and scope. Ordinary canonical submission is
+  the main path. Semantic relatedness is an advisory side path, not a required
+  precondition for submit_as_is, correct_and_submit, merge_and_submit, or skip.
+- Branch into duplicate/coexist/contradiction/supersede reasoning only when the
+  candidate has a credible related_existing_memories target. If none is shown,
+  provider evidence is incomplete, or the relationship is uncertain, continue
+  the ordinary non-destructive governance path.
 - Prefer skip over weak memory.
 - Do not invent missing facts. Correct only when the candidate snapshot provides
   enough information.
@@ -244,6 +308,10 @@ Rules:
   supersede on mere topical similarity. If unsure whether the new memory
   replaces an old one, use submit_as_is/correct_and_submit so both memories can
   coexist.
+- Use supersede_and_submit only when relatedness_lifecycle_actions_allowed is
+  true. Include replacement_evidence_refs. Use "candidate_user_quote" only
+  when the candidate has a direct user_quote that states replacement intent;
+  otherwise cite an evidence/source event id shown in the snapshot.
 - superseded_memory_ids must come from related_existing_memories. Never invent a
   canonical memory id.
 - Never supersede a related_existing_memories entry whose is_exact_duplicate is
@@ -256,6 +324,8 @@ Rules:
   together, such as "likes egg tarts" vs "hates egg tarts".
 - contradicted_memory_ids must come from related_existing_memories. Never invent
   a canonical memory id.
+- Use contradict_and_submit only when relatedness_lifecycle_actions_allowed is
+  true.
 - Never contradict an exact duplicate, a different scope, a temporary mood,
   a story/roleplay context, or a narrower variant where both statements could
   be true. If subject match is uncertain, choose submit_as_is/correct_and_submit
@@ -372,6 +442,7 @@ def _source_event_summaries(events, *, limit: int = 80) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for event in events[:limit]:
         item: dict[str, Any] = {
+            "event_id": event.id,
             "event_type": type(event).__name__,
             "sequence": event.sequence,
             "reply_id": event.reply_id,
@@ -496,6 +567,29 @@ def _overlap_tokens(*texts: Any) -> set[str]:
 
 def _normalize(value: Any) -> str:
     return " ".join(str(value or "").casefold().split())
+
+
+def _legacy_execution_context(
+    governance_batch_id: str,
+    snapshots: list[dict[str, Any]],
+) -> RelatednessExecutionContext:
+    # In-memory test-double path: no semantic relatedness service is wired
+    # (product wiring always supplies the Postgres-backed service). Token
+    # overlap remains advisory *prompt* context — it is already present in each
+    # snapshot's ``related_existing_memories`` for Flash — but it must NEVER
+    # authorize a destructive lifecycle action. Per relatedness design Decision
+    # 7, a prompt-only basis cannot grant ``allows_lifecycle``. Fail closed:
+    # every entry is UNAVAILABLE with an empty allowlist, so the executor blocks
+    # supersede/contradict (``relatedness_evidence_unavailable``) while
+    # submit_as_is / merge / skip / correct continue to work unaffected.
+    entry_ids = [str(snapshot["entry_id"]) for snapshot in snapshots]
+    return RelatednessExecutionContext(
+        governance_batch_id=governance_batch_id,
+        allowlists=MappingProxyType({entry_id: frozenset() for entry_id in entry_ids}),
+        availability=MappingProxyType(
+            {entry_id: RelatednessAvailability.UNAVAILABLE for entry_id in entry_ids}
+        ),
+    )
 
 
 __all__ = [

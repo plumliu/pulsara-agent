@@ -40,6 +40,15 @@ from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceOutput,
     MemoryGovernanceRunResult,
 )
+from pulsara_agent.memory.governance.relatedness import (
+    CandidateRelatedness,
+    GovernanceRelatednessService,
+    MemoryGovernanceRelatednessOptions,
+    RelatedCanonicalMemory,
+    RelatednessAvailability,
+    RelatednessBatchResult,
+    RelatednessExecutionContext,
+)
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
 from pulsara_agent.memory.canonical.oxigraph_materializer import OxigraphMaterializer
@@ -108,6 +117,7 @@ __all__ = [
     "ArtifactStore",
     "ArtifactWriteResult",
     "CandidateOrigin",
+    "CandidateRelatedness",
     "CanonicalNodeView",
     "CandidatePool",
     "CandidatePoolProposal",
@@ -121,6 +131,7 @@ __all__ = [
     "ExplanationClaim",
     "ExecutionEvidencePersistenceHook",
     "GovernanceDecision",
+    "GovernanceRelatednessService",
     "GovernanceWriteOutcome",
     "InMemoryArchiveStore",
     "InMemoryCandidatePool",
@@ -131,6 +142,7 @@ __all__ = [
     "MemoryGovernanceInput",
     "MemoryLifecycle",
     "MemoryGovernanceOptions",
+    "MemoryGovernanceRelatednessOptions",
     "MemoryGovernanceOutput",
     "MemoryGovernanceRunResult",
     "MemoryQuery",
@@ -169,6 +181,10 @@ __all__ = [
     "RecallStatus",
     "RecallTrigger",
     "RecallTraceStore",
+    "RelatedCanonicalMemory",
+    "RelatednessAvailability",
+    "RelatednessBatchResult",
+    "RelatednessExecutionContext",
     "ReconciliationReport",
     "LexicalMemoryRecallService",
     "RuntimeEventReadStore",

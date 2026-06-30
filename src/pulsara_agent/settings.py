@@ -90,6 +90,17 @@ class PulsaraSettings:
                     "min_token_length": self.retrieval.tokenizer.min_token_length,
                     "lowercase": self.retrieval.tokenizer.lowercase,
                 },
+                "governance_relatedness": {
+                    "policy_version": self.retrieval.governance_relatedness.policy_version,
+                    "fixture_version": self.retrieval.governance_relatedness.fixture_version,
+                    "candidate_limit": self.retrieval.governance_relatedness.candidate_limit,
+                    "dense_candidate_min_score": (
+                        self.retrieval.governance_relatedness.dense_candidate_min_score
+                    ),
+                    "max_inline_gap_embeds": (
+                        self.retrieval.governance_relatedness.max_inline_gap_embeds
+                    ),
+                },
             },
         }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from types import MappingProxyType
 from uuid import uuid4
 
 import psycopg
@@ -33,6 +34,10 @@ from pulsara_agent.memory.canonical.query import CanonicalNodeView
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.governance.executor import _CONTRADICTION_DOWNGRADE_SENTINEL
+from pulsara_agent.memory.governance.relatedness import (
+    RelatednessAvailability,
+    RelatednessExecutionContext,
+)
 from pulsara_agent.memory.hooks.durable import _merge_projections
 from pulsara_agent.memory.recall.projection import ProjectionBuilder
 from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
@@ -88,6 +93,7 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
                 reason="Same-scope preference conflict without explicit replacement.",
             ),
             governance_batch_id=batch_id,
+            relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
         )
 
         assert isinstance(result.decision_record.decision, ContradictAndSubmitDecision)
@@ -158,6 +164,9 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
             reason="Same-scope preference conflict without explicit replacement.",
         ),
         governance_batch_id="governance:test:uow-contradiction",
+        relatedness_context=_relatedness_context(
+            "governance:test:uow-contradiction", pooled.entry_id, (old_id,)
+        ),
     )
 
     assert isinstance(result.decision_record.decision, ContradictAndSubmitDecision)
@@ -265,6 +274,9 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
                     reason="Proposed contradiction should downgrade.",
                 ),
                 governance_batch_id=batch_id,
+                relatedness_context=_relatedness_context(
+                    batch_id, pooled.entry_id, contradicted_ids
+                ),
             )
 
             assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -434,6 +446,7 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
                     reason="Inject lifecycle failure after the first edge.",
                 ),
                 governance_batch_id=batch_id,
+                relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
             )
 
         old_doc = store.get_jsonld(old_id, graph_id=graph_id)
@@ -878,6 +891,18 @@ def _source_context(label: str) -> EventContext:
         run_id=f"run:source:{label}:{suffix}",
         turn_id=f"turn:source:{label}:{suffix}",
         reply_id=f"reply:source:{label}:{suffix}",
+    )
+
+
+def _relatedness_context(
+    batch_id: str,
+    entry_id: str,
+    memory_ids: tuple[str, ...],
+) -> RelatednessExecutionContext:
+    return RelatednessExecutionContext(
+        governance_batch_id=batch_id,
+        allowlists=MappingProxyType({entry_id: frozenset(memory_ids)}),
+        availability=MappingProxyType({entry_id: RelatednessAvailability.FULL}),
     )
 
 

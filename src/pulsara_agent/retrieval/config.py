@@ -126,10 +126,60 @@ class TokenizerBackendConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class GovernanceRelatednessConfig:
+    policy_version: str = "governance-relatedness:v1"
+    fixture_version: str = "governance-relatedness-fixture:v1"
+    candidate_limit: int = 5
+    lexical_limit: int = 30
+    vector_limit: int = 30
+    rerank_top_m: int = 20
+    dense_candidate_min_score: float = 0.30
+    rerank_candidate_min_score: float = 0.20
+    max_inline_gap_embeds: int = 20
+    provider_timeout_seconds: float = 20.0
+
+    @classmethod
+    def from_env(cls, prefix: str = "PULSARA") -> "GovernanceRelatednessConfig":
+        return cls(
+            policy_version=(
+                os.getenv(
+                    f"{prefix}_GOVERNANCE_RELATEDNESS_POLICY_VERSION",
+                    "governance-relatedness:v1",
+                ).strip()
+                or "governance-relatedness:v1"
+            ),
+            fixture_version=(
+                os.getenv(
+                    f"{prefix}_GOVERNANCE_RELATEDNESS_FIXTURE_VERSION",
+                    "governance-relatedness-fixture:v1",
+                ).strip()
+                or "governance-relatedness-fixture:v1"
+            ),
+            candidate_limit=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_CANDIDATE_LIMIT", 5),
+            lexical_limit=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_LEXICAL_LIMIT", 30),
+            vector_limit=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_VECTOR_LIMIT", 30),
+            rerank_top_m=_env_int(f"{prefix}_GOVERNANCE_RELATEDNESS_RERANK_TOP_M", 20),
+            dense_candidate_min_score=_env_float(
+                f"{prefix}_GOVERNANCE_RELATEDNESS_DENSE_MIN_SCORE", 0.30
+            ),
+            rerank_candidate_min_score=_env_float(
+                f"{prefix}_GOVERNANCE_RELATEDNESS_RERANK_MIN_SCORE", 0.20
+            ),
+            max_inline_gap_embeds=_env_int(
+                f"{prefix}_GOVERNANCE_RELATEDNESS_MAX_INLINE_GAP_EMBEDS", 20
+            ),
+            provider_timeout_seconds=_env_float(
+                f"{prefix}_GOVERNANCE_RELATEDNESS_TIMEOUT_SECONDS", 20.0
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RetrievalConfig:
     embedding: EmbeddingBackendConfig = EmbeddingBackendConfig()
     rerank: RerankBackendConfig = RerankBackendConfig()
     tokenizer: TokenizerBackendConfig = TokenizerBackendConfig()
+    governance_relatedness: GovernanceRelatednessConfig = GovernanceRelatednessConfig()
 
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "RetrievalConfig":
@@ -137,4 +187,5 @@ class RetrievalConfig:
             embedding=EmbeddingBackendConfig.from_env(prefix=prefix),
             rerank=RerankBackendConfig.from_env(prefix=prefix),
             tokenizer=TokenizerBackendConfig.from_env(prefix=prefix),
+            governance_relatedness=GovernanceRelatednessConfig.from_env(prefix=prefix),
         )

@@ -108,6 +108,7 @@ class SupersedeAndSubmitDecision(BaseModel):
     target_entry_id: str
     candidate: MemoryCandidate
     superseded_memory_ids: tuple[str, ...]
+    replacement_evidence_refs: tuple[str, ...] = ()
     reason: str
 
 

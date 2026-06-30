@@ -41,9 +41,11 @@ from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
 from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
     MemoryGovernanceOptions,
+    _legacy_execution_context,
     _parse_governance_output,
     _related_existing_memories,
 )
+from pulsara_agent.memory.governance.relatedness import RelatednessAvailability
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -513,3 +515,30 @@ def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
     registry = LLMTransportRegistry()
     registry.register(transport)
     return LLMRuntime(config=config, registry=registry)
+
+
+def test_legacy_execution_context_fails_closed_for_lifecycle() -> None:
+    # No relatedness service is wired (in-memory test-double path). Even when a
+    # snapshot carries token-overlap related_existing_memories, the legacy
+    # context must NOT authorize a destructive lifecycle action: every entry is
+    # UNAVAILABLE with an empty allowlist, so supersede/contradict are blocked
+    # while the advisory ids remain visible to Flash via the snapshot itself.
+    snapshots = [
+        {
+            "entry_id": "pool:a",
+            "related_existing_memories": [
+                {"memory_id": "preference:overlap-1"},
+                {"memory_id": "preference:overlap-2"},
+            ],
+        },
+        {"entry_id": "pool:b", "related_existing_memories": []},
+    ]
+
+    context = _legacy_execution_context("governance:test:legacy-fail-closed", snapshots)
+
+    assert context.availability["pool:a"] is RelatednessAvailability.UNAVAILABLE
+    assert context.availability["pool:b"] is RelatednessAvailability.UNAVAILABLE
+    assert context.allowlists["pool:a"] == frozenset()
+    assert context.allowlists["pool:b"] == frozenset()
+    # Token-overlap ids must never grant lifecycle authority on the legacy path.
+    assert not context.allows_lifecycle("pool:a", "preference:overlap-1")

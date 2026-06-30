@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import MappingProxyType
 from uuid import uuid4
 
 import psycopg
@@ -29,6 +30,10 @@ from pulsara_agent.memory.canonical.index_sync import MemorySearchIndexSync
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
+from pulsara_agent.memory.governance.relatedness import (
+    RelatednessAvailability,
+    RelatednessExecutionContext,
+)
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 
@@ -264,9 +269,17 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
                 target_entry_id=candidate.entry_id,
                 candidate=_preference_candidate("candidate:index-sync-supersede-new"),
                 superseded_memory_ids=(old_id,),
+                replacement_evidence_refs=(log.iter(run_id=source_ctx.run_id)[0].id,),
                 reason="Explicitly replace verbose summaries with concise summaries.",
             ),
             governance_batch_id=batch_id,
+            relatedness_context=RelatednessExecutionContext(
+                governance_batch_id=batch_id,
+                allowlists=MappingProxyType({candidate.entry_id: frozenset({old_id})}),
+                availability=MappingProxyType(
+                    {candidate.entry_id: RelatednessAvailability.FULL}
+                ),
+            ),
         )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         assert result.decision_record.write_outcome.superseded_memory_ids == (old_id,)

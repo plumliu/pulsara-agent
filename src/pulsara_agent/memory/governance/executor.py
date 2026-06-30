@@ -29,6 +29,10 @@ from pulsara_agent.memory.candidates.pool import (
     new_governance_batch_id,
 )
 from pulsara_agent.memory.governance.dedupe import already_exists
+from pulsara_agent.memory.governance.relatedness import (
+    RelatednessAvailability,
+    RelatednessExecutionContext,
+)
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
 from pulsara_agent.memory.canonical.mutation_outbox import (
     CanonicalMutationSurface,
@@ -51,6 +55,7 @@ _CONTRADICTION_DOWNGRADE_SENTINEL = "contradiction_downgraded_to_coexist"
 class MemoryGovernanceApplyResult:
     decision_record: MemoryGovernanceDecisionRecord
     events: list[AgentEvent]
+    diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -73,11 +78,16 @@ class MemoryGovernanceExecutor:
         decision: GovernanceDecision,
         *,
         governance_batch_id: str | None = None,
+        relatedness_context: RelatednessExecutionContext | None = None,
     ) -> MemoryGovernanceApplyResult:
         batch_id = governance_batch_id or new_governance_batch_id()
         self._validate_target_entries(decision)
         if self.memory_write_uow_factory is not None:
-            return self._apply_decision_with_uow(decision, governance_batch_id=batch_id)
+            return self._apply_decision_with_uow(
+                decision,
+                governance_batch_id=batch_id,
+                relatedness_context=relatedness_context,
+            )
 
         if isinstance(decision, SkipDecision):
             record = self._append_decision(
@@ -148,6 +158,7 @@ class MemoryGovernanceExecutor:
         decision: GovernanceDecision,
         *,
         governance_batch_id: str,
+        relatedness_context: RelatednessExecutionContext | None,
     ) -> MemoryGovernanceApplyResult:
         if isinstance(decision, SkipDecision):
             record = _decision_record(
@@ -198,11 +209,29 @@ class MemoryGovernanceExecutor:
             valid_old_ids: tuple[str, ...] = ()
             supersede_blocked_reason: str | None = None
             if isinstance(decision, SupersedeAndSubmitDecision):
-                valid_old_ids, supersede_blocked_reason = self._validate_supersede_targets(decision, uow)
+                supersede_blocked_reason = self._relatedness_block_reason(
+                    decision.target_entry_id,
+                    decision.superseded_memory_ids,
+                    governance_batch_id=governance_batch_id,
+                    relatedness_context=relatedness_context,
+                ) or self._replacement_evidence_block_reason(decision)
+                if supersede_blocked_reason is None:
+                    valid_old_ids, supersede_blocked_reason = self._validate_supersede_targets(
+                        decision, uow
+                    )
             valid_contradicted_ids: tuple[str, ...] = ()
             contradiction_blocked_reason: str | None = None
             if isinstance(decision, ContradictAndSubmitDecision):
-                valid_contradicted_ids, contradiction_blocked_reason = self._validate_contradiction_targets(decision, uow)
+                contradiction_blocked_reason = self._relatedness_block_reason(
+                    decision.target_entry_id,
+                    decision.contradicted_memory_ids,
+                    governance_batch_id=governance_batch_id,
+                    relatedness_context=relatedness_context,
+                )
+                if contradiction_blocked_reason is None:
+                    valid_contradicted_ids, contradiction_blocked_reason = (
+                        self._validate_contradiction_targets(decision, uow)
+                    )
 
             context = governance_batch_context(governance_batch_id)
             outcome = uow.memory_write_service.submit(candidate, event_context=context)
@@ -247,12 +276,16 @@ class MemoryGovernanceExecutor:
             if isinstance(decision, SupersedeAndSubmitDecision) and not did_supersede:
                 effective_decision = _downgrade_to_coexist(
                     decision,
-                    supersede_blocked_reason or "write_not_active",
+                    _lifecycle_downgrade_reason(
+                        supersede_blocked_reason or "write_not_active"
+                    ),
                 )
             elif isinstance(decision, ContradictAndSubmitDecision) and not did_contradict:
                 effective_decision = _downgrade_contradiction_to_coexist(
                     decision,
-                    contradiction_blocked_reason or "write_not_active",
+                    _lifecycle_downgrade_reason(
+                        contradiction_blocked_reason or "write_not_active"
+                    ),
                 )
             else:
                 effective_decision = decision
@@ -292,7 +325,17 @@ class MemoryGovernanceExecutor:
             )
 
         stored_events = self.event_log.extend(outcome.events + supersede_events + contradiction_events)
-        return MemoryGovernanceApplyResult(decision_record=record, events=stored_events)
+        diagnostics: list[str] = []
+        blocked_reason = supersede_blocked_reason or contradiction_blocked_reason
+        if blocked_reason is not None:
+            diagnostics.append(blocked_reason)
+            if _is_target_drift(blocked_reason):
+                diagnostics.append("target_drift_requires_regovernance")
+        return MemoryGovernanceApplyResult(
+            decision_record=record,
+            events=stored_events,
+            diagnostics=tuple(diagnostics),
+        )
 
     def submit_pending_as_is(
         self,
@@ -429,6 +472,45 @@ class MemoryGovernanceExecutor:
             valid.append(old_id)
         return tuple(valid), None
 
+    def _relatedness_block_reason(
+        self,
+        entry_id: str,
+        memory_ids: tuple[str, ...],
+        *,
+        governance_batch_id: str,
+        relatedness_context: RelatednessExecutionContext | None,
+    ) -> str | None:
+        if relatedness_context is None:
+            return "relatedness_context_missing"
+        if relatedness_context.governance_batch_id != governance_batch_id:
+            return "relatedness_context_batch_mismatch"
+        availability = relatedness_context.availability.get(entry_id)
+        if availability is not RelatednessAvailability.FULL:
+            return f"relatedness_evidence_{availability.value if availability else 'unavailable'}"
+        allowlist = relatedness_context.allowlists.get(entry_id, frozenset())
+        for memory_id in memory_ids:
+            if memory_id not in allowlist:
+                return f"relatedness_target_not_surfaced:{memory_id}"
+        return None
+
+    def _replacement_evidence_block_reason(
+        self,
+        decision: SupersedeAndSubmitDecision,
+    ) -> str | None:
+        if not decision.replacement_evidence_refs:
+            return "missing_replacement_evidence"
+        pooled = self.candidate_pool.get_candidate(decision.target_entry_id)
+        allowed: set[str] = set()
+        if isinstance(pooled.payload, ValidCandidatePayload):
+            allowed.update(pooled.payload.candidate.evidence_ids)
+        allowed.update(event.id for event in self.event_log.iter(run_id=pooled.source_run_id))
+        if pooled.user_quote:
+            allowed.add("candidate_user_quote")
+        for ref in decision.replacement_evidence_refs:
+            if ref not in allowed:
+                return f"replacement_evidence_not_in_source_context:{ref}"
+        return None
+
     def _validate_contradiction_targets(
         self,
         decision: ContradictAndSubmitDecision,
@@ -544,6 +626,24 @@ def _downgrade_contradiction_to_coexist(
         candidate=decision.candidate,
         reason=f"{_CONTRADICTION_DOWNGRADE_SENTINEL}: {reason}; original: {decision.reason}",
     )
+
+
+def _is_target_drift(reason: str) -> bool:
+    return any(
+        marker in reason
+        for marker in (
+            "target_missing",
+            "target_not_active",
+            "target_scope_mismatch",
+            "target_type_not_",
+        )
+    )
+
+
+def _lifecycle_downgrade_reason(reason: str) -> str:
+    if _is_target_drift(reason):
+        return f"target_drift_requires_regovernance:{reason}"
+    return reason
 
 
 def _active_memory_id(outcome: MemoryWriteOutcome) -> str | None:

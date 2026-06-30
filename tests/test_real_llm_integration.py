@@ -53,6 +53,7 @@ from pulsara_agent.memory import (
     MemoryWriteUnitOfWork,
     PostgresArtifactStore,
     PostgresCandidatePool,
+    PostgresMemoryQuery,
     PostgresWorkingContextStore,
     load_run_timeline,
     summarize_run_timeline,
@@ -62,6 +63,11 @@ from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCa
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.reconcile import PostgresMemoryReconciler
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
+from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
+from pulsara_agent.memory.governance.relatedness import (
+    GovernanceRelatednessService,
+    MemoryGovernanceRelatednessOptions,
+)
 from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint, MemoryReflectionOptions
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -87,6 +93,7 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.retrieval.runtime import build_retrieval_runtime_resources
+from pulsara_agent.retrieval.tokenizer.factory import build_tokenizer
 from pulsara_agent.tools.builtins.memory import RememberPreferenceTool
 
 
@@ -893,6 +900,94 @@ def test_real_flash_memory_governance_weak_update_coexists(tmp_path):
     assert result["superseded_memory_ids"] == []
     assert result["supersedes_edge_present"] is False
     assert result["outbox_applied_count"] >= 1
+
+
+def test_real_flash_semantic_alias_duplicate_skips_existing_memory(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(
+        _run_real_flash_memory_governance_lifecycle_smoke(
+            tmp_path,
+            label="semantic-duplicate",
+            old_statement="The user likes egg tarts.",
+            new_statement="The user likes dan tat.",
+            user_quote="Please remember that I like dan tat, also known as egg tarts.",
+        )
+    )
+
+    print("\nREAL_LLM_GOVERNANCE_SEMANTIC_DUPLICATE=" + json.dumps(result, ensure_ascii=True, indent=2))
+    assert result["error_type"] is None
+    assert result["decision_kinds"] == ["skip"]
+    assert result["recorded_decision_kind"] == "skip"
+    assert result["old_status"] == "active"
+    assert result["new_id"] is None
+    assert result["relatedness_diagnostics"]["per_candidate"]
+
+
+def test_real_flash_semantic_alias_conflict_links_contradiction(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(
+        _run_real_flash_memory_governance_lifecycle_smoke(
+            tmp_path,
+            label="semantic-contradiction",
+            old_statement="The user likes egg tarts.",
+            new_statement="The user hates dan tat.",
+            user_quote="Please remember that I hate dan tat (egg tarts).",
+        )
+    )
+
+    print("\nREAL_LLM_GOVERNANCE_SEMANTIC_CONTRADICTION=" + json.dumps(result, ensure_ascii=True, indent=2))
+    assert result["error_type"] is None
+    assert result["decision_kinds"] == ["contradict_and_submit"]
+    assert result["recorded_decision_kind"] == "contradict_and_submit"
+    assert result["old_status"] == "active"
+    assert result["contradicts_edge_present"] is True
+
+
+def test_real_flash_related_topic_prefers_coexist_over_destructive_action(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(
+        _run_real_flash_memory_governance_lifecycle_smoke(
+            tmp_path,
+            label="semantic-coexist",
+            old_statement="The user likes coffee.",
+            new_statement="The user likes lattes.",
+            user_quote="Please remember that I like lattes.",
+        )
+    )
+
+    assert result["error_type"] is None
+    assert result["decision_kinds"] in (["submit_as_is"], ["correct_and_submit"])
+    assert result["old_status"] == "active"
+    assert result["new_status"] == "active"
+    assert result["superseded_memory_ids"] == []
+    assert result["contradicted_memory_ids"] == []
+
+
+def test_real_flash_temporary_state_is_rejected_by_durability_before_relation(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+
+    result = asyncio.run(
+        _run_real_flash_memory_governance_lifecycle_smoke(
+            tmp_path,
+            label="temporary-state",
+            old_statement="The user usually likes coffee.",
+            new_statement="The user does not want coffee today.",
+            user_quote="I do not want coffee today because I already had two cups.",
+        )
+    )
+
+    assert result["error_type"] is None
+    assert result["decision_kinds"] == ["skip"]
+    assert result["recorded_decision_kind"] == "skip"
+    assert result["old_status"] == "active"
+    assert result["new_id"] is None
 
 
 def test_real_flash_accepts_aborted_unfinished_tool_recovery_context():
@@ -3919,6 +4014,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
     )
     governance_batch_id = f"governance:real-governance-{label}:{uuid4().hex}"
     graph = _build_real_durable_graph(settings)
+    retrieval_resources = build_retrieval_runtime_resources(settings.retrieval)
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
     event_log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta=user_quote))
     candidate_pool = PostgresCandidatePool(dsn=dsn)
@@ -3983,6 +4079,24 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             llm_runtime=build_llm_runtime(settings.llm),
             executor=executor,
             options=MemoryGovernanceOptions(llm_options=LLMOptions(temperature=0, max_output_tokens=900)),
+            relatedness_service=GovernanceRelatednessService(
+                memory_query=PostgresMemoryQuery(dsn=dsn),
+                tokenizer=build_tokenizer(settings.retrieval.tokenizer),
+                embedding=retrieval_resources.embedding,
+                vector_query=(
+                    MemoryVectorQuery(dsn) if retrieval_resources.embedding is not None else None
+                ),
+                reranker=retrieval_resources.rerank,
+                provider_name=settings.retrieval.embedding.provider,
+                options=MemoryGovernanceRelatednessOptions(
+                    dense_candidate_min_score=(
+                        settings.retrieval.governance_relatedness.dense_candidate_min_score
+                    ),
+                    max_inline_gap_embeds=(
+                        settings.retrieval.governance_relatedness.max_inline_gap_embeds
+                    ),
+                ),
+            ),
         )
 
         result = await engine.run_pending(
@@ -4017,8 +4131,10 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
                 1 for candidate in candidate_pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE
             ),
             "outbox_applied_count": outbox_applied_count,
+            "relatedness_diagnostics": result.relatedness_diagnostics,
         }
     finally:
+        await retrieval_resources.aclose()
         graph.delete_graph(graph_id)
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
         _delete_postgres_runtime_session(dsn, runtime_session_id)

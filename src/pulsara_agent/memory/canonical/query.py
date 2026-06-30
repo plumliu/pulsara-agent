@@ -59,6 +59,25 @@ class MemoryQuery(Protocol):
         graph_id: str | None = None,
     ) -> list[tuple[str, float]]: ...
 
+    def exact_candidates(
+        self,
+        *,
+        statement: str,
+        scope: str,
+        memory_type: str,
+        graph_id: str | None = None,
+    ) -> list[str]: ...
+
+    def missing_vector_ids(
+        self,
+        *,
+        embedding_fingerprint: str,
+        scopes: Sequence[str],
+        types: Sequence[str],
+        limit: int,
+        graph_id: str | None = None,
+    ) -> list[str]: ...
+
 
 @dataclass(slots=True)
 class PostgresMemoryQuery:
@@ -200,6 +219,78 @@ class PostgresMemoryQuery:
             )
             rows = cursor.fetchall()
         return [(row["id"], float(row["rank"] or 0.0)) for row in rows]
+
+    def exact_candidates(
+        self,
+        *,
+        statement: str,
+        scope: str,
+        memory_type: str,
+        graph_id: str | None = None,
+    ) -> list[str]:
+        normalized = " ".join(statement.casefold().split())
+        if not normalized:
+            return []
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id
+                FROM memory_nodes
+                WHERE graph_id = %s
+                  AND scope = %s
+                  AND memory_type = %s
+                  AND status = %s
+                  AND lower(regexp_replace(trim(statement), '\\s+', ' ', 'g')) = %s
+                ORDER BY id
+                """,
+                (
+                    _graph_key(graph_id),
+                    scope,
+                    memory_type,
+                    memory.NodeStatus.ACTIVE.value,
+                    normalized,
+                ),
+            )
+            return [row["id"] for row in cursor.fetchall()]
+
+    def missing_vector_ids(
+        self,
+        *,
+        embedding_fingerprint: str,
+        scopes: Sequence[str],
+        types: Sequence[str],
+        limit: int,
+        graph_id: str | None = None,
+    ) -> list[str]:
+        if limit <= 0 or not scopes or not types:
+            return []
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT node.id
+                FROM memory_nodes AS node
+                LEFT JOIN memory_vector_index AS vector
+                  ON vector.graph_id = node.graph_id
+                 AND vector.memory_id = node.id
+                 AND vector.embedding_fingerprint = %s
+                WHERE node.graph_id = %s
+                  AND node.scope = ANY(%s)
+                  AND node.memory_type = ANY(%s)
+                  AND node.status = %s
+                  AND vector.memory_id IS NULL
+                ORDER BY node.updated_at DESC, node.id
+                LIMIT %s
+                """,
+                (
+                    embedding_fingerprint,
+                    _graph_key(graph_id),
+                    list(scopes),
+                    list(types),
+                    memory.NodeStatus.ACTIVE.value,
+                    limit,
+                ),
+            )
+            return [row["id"] for row in cursor.fetchall()]
 
     @contextmanager
     def _cursor(self) -> Iterator:

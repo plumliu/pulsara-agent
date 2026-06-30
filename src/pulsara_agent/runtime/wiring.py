@@ -39,6 +39,10 @@ from pulsara_agent.memory.hooks.run_timeline_persistence import RunTimelinePersi
 from pulsara_agent.memory.hooks.runtime_persistence import ExecutionEvidencePersistenceHook
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
 from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordinator
+from pulsara_agent.memory.governance.relatedness import (
+    GovernanceRelatednessService,
+    MemoryGovernanceRelatednessOptions,
+)
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
 from pulsara_agent.memory.canonical.mutation_outbox import CanonicalMutationSurface, MutationOutboxWriter
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
@@ -72,6 +76,7 @@ class RuntimeWiring:
     working_context_store: PostgresWorkingContextStore | None = None
     retrieval_resources: RetrievalRuntimeResources | None = None
     governance_coordinator: MemoryGovernanceCoordinator | None = None
+    governance_relatedness: GovernanceRelatednessService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +196,7 @@ def build_durable_runtime_wiring(
     graph: GraphStore = DurableGraphFacade(postgres=postgres_graph, oxigraph=oxigraph_graph)
     candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
     memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)
+    tokenizer = build_tokenizer(settings.retrieval.tokenizer)
     working_context_store = (
         PostgresWorkingContextStore(dsn=settings.storage.postgres_dsn)
         if memory_domain is not None
@@ -198,7 +204,7 @@ def build_durable_runtime_wiring(
     )
     sparse_recall = SparseCandidateService(
         memory_query=memory_query,
-        tokenizer=build_tokenizer(settings.retrieval.tokenizer),
+        tokenizer=tokenizer,
     )
     dense_recall = (
         DenseCandidateService(
@@ -213,6 +219,31 @@ def build_durable_runtime_wiring(
         RecallRerankService(provider=retrieval_resources.rerank)
         if retrieval_resources is not None and retrieval_resources.rerank is not None
         else None
+    )
+    relatedness_config = settings.retrieval.governance_relatedness
+    governance_relatedness = GovernanceRelatednessService(
+        memory_query=memory_query,
+        tokenizer=tokenizer,
+        embedding=(retrieval_resources.embedding if retrieval_resources is not None else None),
+        vector_query=(
+            MemoryVectorQuery(settings.storage.postgres_dsn)
+            if retrieval_resources is not None and retrieval_resources.embedding is not None
+            else None
+        ),
+        reranker=(retrieval_resources.rerank if retrieval_resources is not None else None),
+        provider_name=settings.retrieval.embedding.provider,
+        options=MemoryGovernanceRelatednessOptions(
+            policy_version=relatedness_config.policy_version,
+            fixture_version=relatedness_config.fixture_version,
+            candidate_limit=relatedness_config.candidate_limit,
+            lexical_limit=relatedness_config.lexical_limit,
+            vector_limit=relatedness_config.vector_limit,
+            rerank_top_m=relatedness_config.rerank_top_m,
+            dense_candidate_min_score=relatedness_config.dense_candidate_min_score,
+            rerank_candidate_min_score=relatedness_config.rerank_candidate_min_score,
+            max_inline_gap_embeds=relatedness_config.max_inline_gap_embeds,
+            provider_timeout_seconds=relatedness_config.provider_timeout_seconds,
+        ),
     )
     memory_recall_service = HybridMemoryRecallService(
         memory_query=memory_query,
@@ -282,6 +313,7 @@ def build_durable_runtime_wiring(
         working_context_store=working_context_store,
         retrieval_resources=retrieval_resources,
         governance_coordinator=governance_coordinator,
+        governance_relatedness=governance_relatedness,
     )
 
 
@@ -376,10 +408,12 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         working_context_store=runtime_wiring.working_context_store,
         retrieval_resources=runtime_wiring.retrieval_resources,
         governance_coordinator=runtime_wiring.governance_coordinator,
+        governance_relatedness=runtime_wiring.governance_relatedness,
         memory_governance_engine=MemoryGovernanceEngine(
             llm_runtime=llm_runtime,
             executor=runtime_wiring.memory_governance_executor,
             options=MemoryGovernanceOptions(),
+            relatedness_service=runtime_wiring.governance_relatedness,
         ),
     )
 
