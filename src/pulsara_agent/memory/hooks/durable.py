@@ -71,6 +71,14 @@ class DurableMemoryHooks(NoopMemoryHooks):
         latest_user_text = _latest_user_quote(state)
         if latest_user_text is None or _should_skip_recall(latest_user_text):
             return working_context
+        cache_key = "durable_memory_recall_projection_cache"
+        cached = state.scratchpad.get(cache_key)
+        if isinstance(cached, dict) and cached.get("query_text") == latest_user_text:
+            cached_projection = cached.get("projection")
+            return _merge_projections(
+                working_context,
+                cached_projection if isinstance(cached_projection, dict) else None,
+            )
         query = RecallQuery(
             text=latest_user_text,
             scopes=_recall_scopes(self.read_scopes),
@@ -83,9 +91,11 @@ class DurableMemoryHooks(NoopMemoryHooks):
         )
         result = await self.recall.recall(query, graph_id=self.graph_id)
         if result.status is not RecallStatus.OK or not result.items:
+            state.scratchpad[cache_key] = {"query_text": latest_user_text, "projection": None}
             return working_context
         self.projection_ledger.record(state, result.items)
         recalled = self.projector.build(result, token_budget=token_budget)
+        state.scratchpad[cache_key] = {"query_text": latest_user_text, "projection": recalled}
         return _merge_projections(working_context, recalled)
 
     async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]:

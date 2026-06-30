@@ -94,6 +94,13 @@ from pulsara_agent.memory.foundation.run_timeline_query import (
 from pulsara_agent.memory.hooks.runtime_persistence import ExecutionEvidencePersistenceHook
 from pulsara_agent.memory.hooks.run_timeline_persistence import RunTimelinePersistenceHook
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore, RecallTraceStore
+from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
+from pulsara_agent.memory.recall.sparse import SparseCandidateService
+from pulsara_agent.memory.recall.dense import DenseCandidateService
+from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
+from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync, VectorSyncResult, VectorSyncStatus
+from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
+from pulsara_agent.memory.canonical.vector_worker import MemoryVectorIndexWorker
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
 from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, MemoryWriteService
 
@@ -128,6 +135,15 @@ __all__ = [
     "MemoryGovernanceRunResult",
     "MemoryQuery",
     "MemoryRecallService",
+    "HybridMemoryRecallService",
+    "SparseCandidateService",
+    "DenseCandidateService",
+    "RecallRerankService",
+    "MemoryVectorIndexSync",
+    "MemoryVectorIndexWorker",
+    "MemoryVectorQuery",
+    "VectorSyncResult",
+    "VectorSyncStatus",
     "MemoryGovernanceDecisionRecord",
     "MemoryWriteOutcome",
     "MemoryWriteService",

@@ -69,7 +69,7 @@ class HostSessionRegistry:
                 self._by_conversation.pop(session.conversation_id, None)
                 self._idle_with_live_processes.discard(host_session_id)
         if session is not None:
-            session.close()
+            await session.aclose()
 
     async def list_sessions(self) -> list[HostSessionSummary]:
         async with self._lock:

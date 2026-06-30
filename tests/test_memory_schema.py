@@ -31,6 +31,14 @@ def test_memory_search_index_uses_compound_canonical_fk() -> None:
     assert "REFERENCES memory_nodes(graph_id, id) ON DELETE CASCADE" in MEMORY_SUBSTRATE_SCHEMA_SQL
 
 
+def test_memory_vector_index_declares_pgvector_fingerprint_and_hnsw_boundaries() -> None:
+    assert "CREATE EXTENSION IF NOT EXISTS vector" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "embedding_fingerprint TEXT NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "embedding VECTOR(1024) NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "PRIMARY KEY (graph_id, memory_id, embedding_fingerprint)" in MEMORY_SUBSTRATE_SCHEMA_SQL
+    assert "USING hnsw (embedding vector_cosine_ops)" in MEMORY_SUBSTRATE_SCHEMA_SQL
+
+
 def test_recall_trace_tables_are_partitioned_by_graph_and_session() -> None:
     assert "CREATE TABLE IF NOT EXISTS recall_traces" in MEMORY_SUBSTRATE_SCHEMA_SQL
     assert "graph_id TEXT NOT NULL" in MEMORY_SUBSTRATE_SCHEMA_SQL

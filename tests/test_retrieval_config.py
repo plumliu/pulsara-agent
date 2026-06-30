@@ -42,6 +42,7 @@ def test_embedding_factory_builds_openai_compatible_provider() -> None:
     )
 
     assert isinstance(provider, OpenAICompatibleEmbeddingProvider)
+    assert provider.model_id == "text-embedding-v4"
     assert provider.dimensions == 768
 
 
@@ -55,6 +56,15 @@ def test_rerank_factory_builds_dashscope_provider() -> None:
     )
 
     assert isinstance(provider, DashScopeRerankProvider)
+    assert provider.model_id == "qwen3-rerank"
+
+
+def test_retrieval_backend_config_repr_redacts_api_keys() -> None:
+    embedding = EmbeddingBackendConfig(api_key="secret-embedding-key")
+    rerank = RerankBackendConfig(api_key="secret-rerank-key")
+
+    assert "secret-embedding-key" not in repr(embedding)
+    assert "secret-rerank-key" not in repr(rerank)
 
 
 def test_tokenizer_factory_builds_jieba_search_provider() -> None:

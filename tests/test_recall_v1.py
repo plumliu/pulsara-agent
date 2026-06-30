@@ -8,6 +8,7 @@ import psycopg
 import pytest
 
 from pulsara_agent.entities.memory import Preference
+from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.jsonld import utc_now
@@ -29,6 +30,8 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.tools.base import ToolCall
+from pulsara_agent.tools.executor import ToolExecutor
+from pulsara_agent.tools.registry import ToolRegistry
 from pulsara_agent.tools.builtins.memory_query import (
     MemoryExplainTool,
     MemoryGetTool,
@@ -102,6 +105,48 @@ def test_durable_memory_project_builds_recalled_memory_projection() -> None:
         assert projection["included_memory_ids"] == ["preference:project-concise"]
         assert "<recalled-memory-projection" in projection["summary"]
         assert "memory_get preference:project-concise" in projection["summary"]
+    finally:
+        store.delete_graph(graph_id)
+
+
+def test_durable_memory_project_reuses_same_run_projection_across_tool_loop_turns() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    store = PostgresGraphStore(dsn=dsn)
+    delegate = LexicalMemoryRecallService(PostgresMemoryQuery(dsn=dsn))
+
+    class CountingRecall:
+        calls = 0
+
+        async def recall(self, query, *, graph_id=None):
+            self.calls += 1
+            return await delegate.recall(query, graph_id=graph_id)
+
+    recall = CountingRecall()
+    try:
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id="preference:tool-loop-cache",
+            statement="The user prefers concise summaries.",
+            status=memory.NodeStatus.ACTIVE,
+        )
+        hooks = DurableMemoryHooks(
+            candidate_pool=InMemoryCandidatePool(),
+            sink=MemoryProposalSink(),
+            recall=recall,
+            graph_id=graph_id,
+        )
+        state = LoopState(session_id="runtime:tool-loop-cache")
+        state.messages.append(UserMsg(name="user", content="Can you keep this concise?"))
+
+        first = asyncio.run(hooks.project(state, token_budget=200))
+        second = asyncio.run(hooks.project(state, token_budget=200))
+
+        assert recall.calls == 1
+        assert first == second
+        assert first["included_memory_ids"] == ["preference:tool-loop-cache"]
     finally:
         store.delete_graph(graph_id)
 
@@ -567,6 +612,77 @@ def test_recall_trace_records_usage_and_suppresses_recent_auto_injection() -> No
                     DELETE FROM recall_traces
                     WHERE graph_id = %s AND session_id = %s
                     """,
+                    (graph_id, session_id),
+                )
+        store.delete_graph(graph_id)
+
+
+def test_memory_search_tool_executor_records_explicit_trace_coordinates() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    graph_id = f"graph:test/{uuid4().hex}"
+    session_id = f"runtime:test:{uuid4().hex}"
+    store = PostgresGraphStore(dsn=dsn)
+    trace_store = PostgresRecallTraceStore(dsn=dsn)
+    service = LexicalMemoryRecallService(
+        PostgresMemoryQuery(dsn=dsn),
+        trace_store=trace_store,
+    )
+    registry = ToolRegistry()
+    registry.register(MemorySearchTool(recall=service, graph_id=graph_id))
+    executor = ToolExecutor(registry=registry, runtime_session_id=session_id)
+    context = EventContext(
+        run_id="run:trace:tool",
+        turn_id="turn:trace:tool",
+        reply_id="reply:trace:tool",
+    )
+    try:
+        _put_preference(
+            store,
+            graph_id=graph_id,
+            memory_id="preference:trace-tool-concise",
+            statement="The user prefers concise summaries.",
+            status=memory.NodeStatus.ACTIVE,
+        )
+        MemorySearchIndexSync(dsn=dsn).sync_memory(
+            "preference:trace-tool-concise",
+            graph_id=graph_id,
+        )
+
+        result = asyncio.run(
+            executor.execute_async(
+                ToolCall(
+                    id="call:trace-tool",
+                    name="memory_search",
+                    arguments={"query": "concise summaries", "scope": "ctx:user"},
+                ),
+                event_context=context,
+            )
+        )
+
+        assert result.status.value == "success"
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT session_id, run_id, turn_id, reply_id, trigger_kind
+                    FROM recall_traces
+                    WHERE graph_id = %s AND session_id = %s
+                    """,
+                    (graph_id, session_id),
+                )
+                assert cursor.fetchone() == (
+                    session_id,
+                    context.run_id,
+                    context.turn_id,
+                    context.reply_id,
+                    RecallTrigger.EXPLICIT_SEARCH.value,
+                )
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM recall_traces WHERE graph_id = %s AND session_id = %s",
                     (graph_id, session_id),
                 )
         store.delete_graph(graph_id)

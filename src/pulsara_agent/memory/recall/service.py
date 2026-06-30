@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
 from pulsara_agent.memory.recall.trace import RecallTraceStore
@@ -51,6 +51,7 @@ class RecallItem:
     why: tuple[str, ...]
     deep_recall: str
     conflicts_with: tuple[str, ...] = ()
+    channel_scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,7 @@ class RecallResult:
     filtered_ids: tuple[str, ...] = ()
     guidance: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class MemoryRecallService(Protocol):
@@ -348,6 +350,7 @@ class LexicalMemoryRecallService(MemoryRecallService):
                 latency_ms=latency_ms,
                 injected=query.trigger is RecallTrigger.CHEAP_AUTO,
                 selected_by_tool=query.trigger is RecallTrigger.EXPLICIT_SEARCH,
+                metadata=result.metadata,
             )
         except Exception:
             return

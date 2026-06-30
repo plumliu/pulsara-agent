@@ -5,6 +5,7 @@ description = "Pulsara backend runtime for a JSON-LD grounded agent memory MVP."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
     "jieba>=0.42.1",
     "openai>=2.43.0",
     "psycopg[binary]>=3.3.4",

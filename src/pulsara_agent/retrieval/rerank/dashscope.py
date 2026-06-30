@@ -29,13 +29,23 @@ class DashScopeRerankProvider:
         batch_size: int = 50,
         max_concurrent: int = 4,
     ) -> None:
+        self.model_id = model
         self._model = model
-        self._api_key = api_key
         self._url = f"{base_url.rstrip('/')}{self._PATH}"
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._batch_size = batch_size
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        self._client: httpx.AsyncClient | None = None
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def rerank(
         self,
@@ -91,21 +101,17 @@ class DashScopeRerankProvider:
             payload["top_n"] = top_n
         if instruction:
             payload["instruct"] = instruction
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
 
         async with self._semaphore:
             for attempt in range(self._max_retries + 1):
                 try:
-                    async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                        response = await client.post(self._url, json=payload, headers=headers)
+                    response = await self._http_client().post(self._url, json=payload)
                 except httpx.HTTPError as exc:
                     if attempt == self._max_retries:
                         raise RerankServiceError(
                             f"DashScope rerank transport failure: {exc}"
                         ) from exc
+                    await asyncio.sleep(_retry_delay_seconds(None, attempt))
                     continue
 
                 if response.status_code == 200:
@@ -115,6 +121,7 @@ class DashScopeRerankProvider:
                         raise RerankServiceError(
                             f"DashScope rerank HTTP {response.status_code}: {response.text[:200]}"
                         )
+                    await asyncio.sleep(_retry_delay_seconds(response, attempt))
                     continue
                 raise RerankServiceError(
                     f"DashScope rerank HTTP {response.status_code}: {response.text[:200]}"
@@ -123,6 +130,14 @@ class DashScopeRerankProvider:
         raise RerankServiceError(
             f"DashScope rerank exhausted retries ({self._max_retries})"
         )
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                headers=self._headers,
+            )
+        return self._client
 
 
 def _parse_qwen3_rerank_response(payload: dict[str, Any]) -> list[RerankResult]:
@@ -142,3 +157,14 @@ def _parse_qwen3_rerank_response(payload: dict[str, Any]) -> list[RerankResult]:
             raise RerankServiceError(f"Malformed rerank result row: {row!r}") from exc
     parsed.sort(key=lambda item: item.score, reverse=True)
     return parsed
+
+
+def _retry_delay_seconds(response: httpx.Response | None, attempt: int) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return min(float(retry_after), 5.0)
+            except ValueError:
+                pass
+    return min(0.25 * (2**attempt), 5.0)

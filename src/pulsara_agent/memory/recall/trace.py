@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
 import psycopg
@@ -35,6 +35,7 @@ class RecallTraceStore(Protocol):
         latency_ms: int,
         injected: bool,
         selected_by_tool: bool,
+        metadata: Mapping[str, Any] | None = None,
     ) -> str: ...
 
     def recent_injected_ids(
@@ -77,6 +78,7 @@ class PostgresRecallTraceStore:
         latency_ms: int,
         injected: bool,
         selected_by_tool: bool,
+        metadata: Mapping[str, Any] | None = None,
     ) -> str:
         trace_id = f"recall:{uuid4().hex}"
         graph = _graph_key(graph_id)
@@ -96,9 +98,10 @@ class PostgresRecallTraceStore:
                     included_ids,
                     filtered_ids,
                     warnings,
+                    metadata,
                     latency_ms
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     trace_id,
@@ -113,6 +116,7 @@ class PostgresRecallTraceStore:
                     Jsonb(list(included_ids)),
                     Jsonb(list(filtered_ids)),
                     Jsonb(list(warnings)),
+                    Jsonb(dict(metadata or {})),
                     latency_ms,
                 ),
             )

@@ -20,6 +20,10 @@ from typing import Any
 from pulsara_agent.memory.recall.explain import explain_memory
 from pulsara_agent.memory.canonical.query import CanonicalNodeView
 from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery
+from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
+from pulsara_agent.memory.recall.sparse import SparseCandidateService
+from pulsara_agent.memory.recall.candidates import CandidateBatch, ChannelCandidate
+from pulsara_agent.retrieval.tokenizer.regex_word_split import RegexWordSplitTokenizer
 from pulsara_agent.ontology import memory
 
 
@@ -37,6 +41,31 @@ class RecallEvalCase:
     latency_budget_ms: int
     projection_char_budget: int
     must_have_warning: bool = False
+    semantic_candidate_ids: tuple[str, ...] = ()
+
+
+class FixtureDenseCandidateService:
+    def __init__(self, memory_ids: tuple[str, ...]) -> None:
+        self.memory_ids = memory_ids
+
+    async def collect(self, query, *, graph_id=None) -> CandidateBatch:
+        return CandidateBatch(
+            candidates=tuple(
+                ChannelCandidate(
+                    memory_id=memory_id,
+                    channel="vector",
+                    raw_score=1.0 - rank * 0.01,
+                    rank=rank,
+                    embedding_fingerprint="fixture:semantic-v2:1024",
+                )
+                for rank, memory_id in enumerate(self.memory_ids, start=1)
+            ),
+            metadata={
+                "embedding_fingerprint": "fixture:semantic-v2:1024",
+                "vector_candidate_ids": list(self.memory_ids),
+                "dense_query": "fixture",
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +157,21 @@ def run_eval(cases: list[RecallEvalCase], *, floor: dict[str, Any] | None = None
     informational: list[str] = []
 
     for case in cases:
-        service = LexicalMemoryRecallService(FixtureMemoryQuery(list(case.seed_memory)))
+        memory_query = FixtureMemoryQuery(list(case.seed_memory))
+        service = (
+            HybridMemoryRecallService(
+                memory_query=memory_query,
+                sparse=SparseCandidateService(
+                    memory_query,
+                    RegexWordSplitTokenizer(min_token_length=2),
+                ),
+                dense=FixtureDenseCandidateService(case.semantic_candidate_ids),  # type: ignore[arg-type]
+                reranker=None,
+                enable_graph_rerank=False,
+            )
+            if case.semantic_candidate_ids
+            else LexicalMemoryRecallService(memory_query)
+        )
         started = time.perf_counter()
         result = asyncio.run(
             service.recall(
@@ -236,6 +279,7 @@ def load_cases(path: Path) -> list[RecallEvalCase]:
                     latency_budget_ms=int(payload.get("latency_budget_ms", 500)),
                     projection_char_budget=int(payload.get("projection_char_budget", 1200)),
                     must_have_warning=bool(payload.get("must_have_warning", False)),
+                    semantic_candidate_ids=tuple(payload.get("semantic_candidate_ids", ())),
                 )
             )
         except KeyError as exc:

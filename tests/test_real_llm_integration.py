@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import psycopg
 
 from pulsara_agent.event import (
     EventContext,
@@ -60,19 +61,18 @@ from pulsara_agent.memory import (
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.reconcile import PostgresMemoryReconciler
+from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
 from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint, MemoryReflectionOptions
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserMsg
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
-    AgentRuntime,
     ApprovalResolution,
     LoopBudget,
     LoopState,
     PendingPlanInteraction,
     PlanExitResolution,
-    RuntimeSession,
     ToolApprovalDecision,
     build_agent_runtime_wiring,
 )
@@ -86,6 +86,7 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.retrieval.runtime import build_retrieval_runtime_resources
 from pulsara_agent.tools.builtins.memory import RememberPreferenceTool
 
 
@@ -608,6 +609,21 @@ def test_real_agent_runtime_can_call_memory_search_tool_with_responses_api(tmp_p
     assert "memory_search" in result["tool_names"]
     assert any("preference:real-search-concise" in text for text in result["tool_result_texts"])
     assert "PULSARA_MEMORY_SEARCH_OK" in result["final_text"]
+
+
+def test_real_llm_semantic_only_memory_search_uses_embedding_and_reranker(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call real LLM/retrieval providers.")
+
+    result = asyncio.run(_run_real_semantic_only_memory_search(tmp_path))
+
+    assert result["status"] == "finished"
+    assert "memory_search" in result["tool_names"]
+    assert result["memory_id"] in "".join(result["tool_result_texts"])
+    assert "PULSARA_SEMANTIC_RECALL_OK" in result["final_text"]
+    assert result["trace_metadata"]["vector_candidate_ids"] == [result["memory_id"]]
+    assert result["trace_metadata"]["reranker_model"]
+    assert result["usage_count"] == 1
 
 
 def test_real_agent_runtime_memory_domain_search_is_scope_aware_with_responses_api(tmp_path):
@@ -2491,6 +2507,106 @@ async def _run_real_agent_memory_search_tool_smoke(tmp_path: Path) -> dict:
             _delete_postgres_artifacts_with_prefix(
                 settings.storage.postgres_dsn,
                 f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{result.state.run_id}:",
+            )
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
+async def _run_real_semantic_only_memory_search(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    resources = build_retrieval_runtime_resources(settings.retrieval)
+    if resources.embedding is None or resources.rerank is None:
+        pytest.skip("Real embedding and rerank API keys are required for semantic recall smoke.")
+    resources.start()
+    graph_id = f"graph:real-semantic-search/{uuid4().hex}"
+    memory_id = f"preference:semantic-terse-{uuid4().hex}"
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=160),
+        system_prompt=(
+            "You are validating semantic memory search. Before answering, call memory_search exactly once "
+            "with query 'desired answer granularity', scope 'ctx:user', and kind 'Preference'. "
+            f"If the tool returns {memory_id}, answer exactly PULSARA_SEMANTIC_RECALL_OK. "
+            "Otherwise answer exactly PULSARA_SEMANTIC_RECALL_MISSING."
+        ),
+        graph_id=graph_id,
+        retrieval_resources=resources,
+        memory_reflection=False,
+    )
+    now = utc_now()
+    wiring.runtime_wiring.graph.put_jsonld(
+        Preference(
+            id=memory_id,
+            statement="Keep replies terse and compact unless elaboration is requested.",
+            scope="ctx:user",
+            status=memory.NodeStatus.ACTIVE,
+            confidence_level=memory.ConfidenceLevel.HIGH,
+            verification_status=memory.VerificationStatus.USER_CONFIRMED,
+            source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+            created_at=now,
+            updated_at=now,
+            gate_reason="real semantic-only recall seed",
+        ).to_jsonld(),
+        graph_id=graph_id,
+    )
+    vector_sync = MemoryVectorIndexSync(
+        dsn=settings.storage.postgres_dsn,
+        provider=resources.embedding,
+        provider_name=settings.retrieval.embedding.provider,
+    )
+    await vector_sync.sync_memory(memory_id, graph_id=graph_id)
+    run_result = None
+    try:
+        run_result = await wiring.agent_runtime.run_task(
+            "Perform the required semantic memory search, then return only the sentinel."
+        )
+        events = wiring.runtime_wiring.event_log.iter(run_id=run_result.state.run_id)
+        tool_calls = [event for event in events if isinstance(event, ToolCallStartEvent)]
+        tool_text = [event.delta for event in events if isinstance(event, ToolResultTextDeltaEvent)]
+        with psycopg.connect(settings.storage.postgres_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT trace_id, metadata
+                    FROM recall_traces
+                    WHERE graph_id = %s AND session_id = %s AND run_id = %s
+                      AND trigger_kind = 'explicit_search'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (graph_id, wiring.runtime_wiring.runtime_session.runtime_session_id, run_result.state.run_id),
+                )
+                trace_id, trace_metadata = cursor.fetchone()
+                cursor.execute(
+                    "SELECT count(*) FROM recall_usages WHERE trace_id = %s AND memory_id = %s AND selected_by_tool",
+                    (trace_id, memory_id),
+                )
+                usage_count = cursor.fetchone()[0]
+        return {
+            "status": run_result.status.value,
+            "final_text": run_result.final_text.strip(),
+            "memory_id": memory_id,
+            "tool_names": [event.tool_call_name for event in tool_calls],
+            "tool_result_texts": tool_text,
+            "trace_metadata": trace_metadata,
+            "usage_count": usage_count,
+        }
+    finally:
+        wiring.agent_runtime.close()
+        await resources.aclose()
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        with psycopg.connect(settings.storage.postgres_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM recall_traces WHERE graph_id = %s", (graph_id,))
+        if run_result is not None:
+            _delete_postgres_artifacts_with_prefix(
+                settings.storage.postgres_dsn,
+                f"timeline:{wiring.runtime_wiring.runtime_session.runtime_session_id}:{run_result.state.run_id}:",
             )
         _delete_postgres_runtime_session(
             settings.storage.postgres_dsn,

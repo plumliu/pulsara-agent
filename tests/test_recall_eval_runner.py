@@ -35,6 +35,17 @@ def test_recall_eval_runner_reports_expected_hit_rate_for_fixture() -> None:
     assert report.gate_passed
 
 
+def test_recall_eval_runner_measures_versioned_semantic_only_fixture() -> None:
+    cases = runner.load_cases(Path("evals/recall/fixtures/v2_semantic.jsonl"))
+    report = runner.run_eval(cases)
+
+    assert cases[0].semantic_candidate_ids == ("preference:fixture-terse",)
+    assert report.case_count == 1
+    assert report.included_hit_rate == 1.0
+    assert report.excluded_leak_count == 0
+    assert report.gate_passed
+
+
 def test_recall_eval_runner_gate_entrypoint_exits_cleanly_without_blocking_floor() -> None:
     exit_code = runner.main(["--fixture", "evals/recall/fixtures/v1_golden.jsonl", "--gate", "--json"])
 

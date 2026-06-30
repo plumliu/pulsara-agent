@@ -41,6 +41,11 @@ from pulsara_agent.retrieval.tokenizer import (
     Tokenizer,
     build_tokenizer,
 )
+from pulsara_agent.retrieval.runtime import (
+    RetrievalRuntimeResources,
+    RetrievalWorker,
+    build_retrieval_runtime_resources,
+)
 
 __all__ = [
     "DEFAULT_DASHSCOPE_EMBEDDING_BASE_URL",
@@ -51,7 +56,9 @@ __all__ = [
     "EmbeddingServiceError",
     "OpenAICompatibleEmbeddingProvider",
     "RetrievalConfig",
+    "RetrievalRuntimeResources",
     "RetrievalServiceError",
+    "RetrievalWorker",
     "RerankBackendConfig",
     "RerankProvider",
     "RerankResult",
@@ -62,5 +69,6 @@ __all__ = [
     "RegexWordSplitTokenizer",
     "build_embedding_provider",
     "build_rerank_provider",
+    "build_retrieval_runtime_resources",
     "build_tokenizer",
 ]

@@ -13,7 +13,7 @@ This package intentionally stays separate from ``llm/``:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 DEFAULT_DASHSCOPE_EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -41,7 +41,7 @@ def _env_float(name: str, default: float) -> float:
 @dataclass(frozen=True, slots=True)
 class EmbeddingBackendConfig:
     provider: str = "openai_compatible"
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     base_url: str = DEFAULT_DASHSCOPE_EMBEDDING_BASE_URL
     model: str = "text-embedding-v4"
     dimensions: int = 1024
@@ -76,7 +76,7 @@ class EmbeddingBackendConfig:
 @dataclass(frozen=True, slots=True)
 class RerankBackendConfig:
     provider: str = "dashscope"
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     base_url: str = DEFAULT_DASHSCOPE_RERANK_BASE_URL
     model: str = "qwen3-rerank"
     timeout_seconds: float = 30.0

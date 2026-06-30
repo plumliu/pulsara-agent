@@ -1,9 +1,12 @@
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph.jsonld_codec import normalize_jsonld_document
-from pulsara_agent.graph.postgres import _memory_node_projection, _relation_rows
 from pulsara_agent.jsonld import NodeRef, utc_now
 from pulsara_agent.ontology import memory
 from pulsara_agent.ontology.registry import CORE_CONTEXT
+from pulsara_agent.storage.postgres_memory_projection import (
+    iter_relation_rows,
+    memory_node_projection,
+)
 
 
 def test_memory_node_projection_extracts_complete_canonical_memory_fields() -> None:
@@ -25,7 +28,7 @@ def test_memory_node_projection_extracts_complete_canonical_memory_fields() -> N
         CORE_CONTEXT,
     )
 
-    projection = _memory_node_projection(document)
+    projection = memory_node_projection(document)
 
     assert projection == {
         "memory_type": "Preference",
@@ -56,7 +59,7 @@ def test_memory_node_projection_skips_incomplete_memory_documents() -> None:
         CORE_CONTEXT,
     )
 
-    assert _memory_node_projection(document) is None
+    assert memory_node_projection(document) is None
 
 
 def test_relation_projection_extracts_edges_from_any_source_document() -> None:
@@ -71,7 +74,7 @@ def test_relation_projection_extracts_edges_from_any_source_document() -> None:
         CORE_CONTEXT,
     )
 
-    assert set(_relation_rows(document)) == {
+    assert set(iter_relation_rows(document)) == {
         ("supports", "preference:test"),
         ("rt:provides", "evidence:other"),
     }
@@ -89,6 +92,6 @@ def test_relation_projection_excludes_non_allowlisted_id_fields() -> None:
         CORE_CONTEXT,
     )
 
-    assert set(_relation_rows(document)) == {
+    assert set(iter_relation_rows(document)) == {
         ("supports", "evidence:keep"),
     }

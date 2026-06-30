@@ -9,12 +9,15 @@ MEMORY_SUBSTRATE_TABLES = (
     "memory_relations",
     "memory_write_outbox",
     "memory_search_index",
+    "memory_vector_index",
     "recall_traces",
     "recall_usages",
 )
 
 
 MEMORY_SUBSTRATE_SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE OR REPLACE FUNCTION pulsara_jsonb_text_array(value JSONB)
 RETURNS JSONB
 LANGUAGE SQL
@@ -69,6 +72,25 @@ CREATE INDEX IF NOT EXISTS idx_memory_nodes_status
 CREATE INDEX IF NOT EXISTS idx_memory_nodes_updated_at
     ON memory_nodes(graph_id, updated_at);
 
+CREATE TABLE IF NOT EXISTS memory_vector_index (
+    graph_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    embedding_fingerprint TEXT NOT NULL,
+    embedded_text_hash TEXT NOT NULL,
+    builder_version TEXT NOT NULL,
+    embedding VECTOR(1024) NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (graph_id, memory_id, embedding_fingerprint),
+    FOREIGN KEY (graph_id, memory_id)
+        REFERENCES memory_nodes(graph_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mvi_embedding_hnsw
+    ON memory_vector_index USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS idx_mvi_graph_fingerprint
+    ON memory_vector_index(graph_id, embedding_fingerprint);
+
 CREATE TABLE IF NOT EXISTS memory_relations (
     graph_id TEXT NOT NULL,
     source_id TEXT NOT NULL,
@@ -100,6 +122,12 @@ CREATE TABLE IF NOT EXISTS memory_write_outbox (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     applied_at TIMESTAMPTZ
 );
+
+ALTER TABLE memory_write_outbox
+    ADD COLUMN IF NOT EXISTS vector_claim_token TEXT;
+
+ALTER TABLE memory_write_outbox
+    ADD COLUMN IF NOT EXISTS vector_claimed_until TIMESTAMPTZ;
 
 ALTER TABLE memory_write_outbox
     ADD COLUMN IF NOT EXISTS mutation_lane TEXT NOT NULL DEFAULT 'governed_memory';
@@ -169,9 +197,13 @@ CREATE TABLE IF NOT EXISTS recall_traces (
     included_ids JSONB NOT NULL,
     filtered_ids JSONB NOT NULL,
     warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     latency_ms INTEGER NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE recall_traces
+    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_recall_traces_scope
     ON recall_traces(graph_id, session_id, created_at);

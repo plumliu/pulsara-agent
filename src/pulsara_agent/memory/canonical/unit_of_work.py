@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from uuid import uuid4
 
 import psycopg
 from psycopg import Connection
@@ -31,13 +30,7 @@ from pulsara_agent.memory.candidates.pool import (
 )
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
-from pulsara_agent.memory.canonical.mutation_outbox import (
-    CanonicalMutationLane,
-    CanonicalMutationSurface,
-    CanonicalMutationPayload,
-    MutationOutboxWriter,
-    governed_memory_mutation_payload,
-)
+from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService

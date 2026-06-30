@@ -26,8 +26,11 @@ def test_live_bailian_embedding_api_smoke() -> None:
 
     async def _run() -> tuple[int, list[float]]:
         provider = build_embedding_provider(settings.retrieval.embedding)
-        vector = await provider.embed("Pulsara live embedding smoke test")
-        return len(vector), vector[:5]
+        try:
+            vector = await provider.embed("Pulsara live embedding smoke test")
+            return len(vector), vector[:5]
+        finally:
+            await provider.aclose()
 
     dimensions, head = asyncio.run(_run())
 
@@ -42,14 +45,17 @@ def test_live_bailian_rerank_api_smoke() -> None:
 
     async def _run():
         provider = build_rerank_provider(settings.retrieval.rerank)
-        return await provider.rerank(
-            "Which passage is about memory recall?",
-            [
-                "This document explains terminal output buffering and PTY behavior.",
-                "This note discusses memory recall, retrieval, and reranking in long-horizon agents.",
-                "This page is about CSS layout and responsive design.",
-            ],
-        )
+        try:
+            return await provider.rerank(
+                "Which passage is about memory recall?",
+                [
+                    "This document explains terminal output buffering and PTY behavior.",
+                    "This note discusses memory recall, retrieval, and reranking in long-horizon agents.",
+                    "This page is about CSS layout and responsive design.",
+                ],
+            )
+        finally:
+            await provider.aclose()
 
     results = asyncio.run(_run())
 

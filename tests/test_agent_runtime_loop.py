@@ -36,6 +36,7 @@ from pulsara_agent.capability import (
 )
 from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile
 from pulsara_agent.memory.scope import MemoryDomainContext
+from pulsara_agent.memory.recall.service import RecallResult, RecallStatus
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.graph import InMemoryGraphStore
@@ -80,8 +81,9 @@ from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
 from pulsara_agent.tools.registry import ToolRegistry
+from pulsara_agent.tools.builtins.memory_query import MemorySearchTool
 
 
 class ScriptedTransport:
@@ -1602,6 +1604,55 @@ class SleepTool:
 
 
 @dataclass(slots=True)
+class AsyncConcurrencyProbeTool:
+    name: str
+    shared: dict[str, object]
+    delay: float = 0.05
+    is_read_only: bool = True
+    is_concurrency_safe: bool = True
+    description: str = "Probe native async tool concurrency."
+    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+
+    async def execute_async(
+        self,
+        call: ToolCall,
+        *,
+        runtime_context: ToolRuntimeContext,
+    ) -> ToolExecutionResult:
+        active = int(self.shared.get("active", 0)) + 1
+        self.shared["active"] = active
+        self.shared["max_active"] = max(int(self.shared.get("max_active", 0)), active)
+        self.shared.setdefault("contexts", []).append(runtime_context)  # type: ignore[union-attr]
+        try:
+            await asyncio.sleep(self.delay)
+        finally:
+            self.shared["active"] = int(self.shared["active"]) - 1
+        return ToolExecutionResult(
+            call_id=call.id,
+            tool_name=call.name,
+            status=ToolResultState.SUCCESS,
+            output=call.name,
+        )
+
+
+class _ConcurrentRecallService:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+        self.queries = []
+
+    async def recall(self, query, *, graph_id=None):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self.queries.append(query)
+        try:
+            await asyncio.sleep(0.05)
+            return RecallResult(status=RecallStatus.EMPTY)
+        finally:
+            self.active -= 1
+
+
+@dataclass(slots=True)
 class RecordingTool:
     name: str
     calls: list[str]
@@ -1841,6 +1892,72 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
 
     assert elapsed < 0.35
     assert sequences == sorted(sequences)
+
+
+def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurrently(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:a", "name": "async_a", "arguments": "{}"},
+                    {"id": "call:b", "name": "async_b", "arguments": "{}"},
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    runtime_session = RuntimeSession(tmp_path)
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    shared: dict[str, object] = {}
+    registry = ToolRegistry()
+    registry.register(AsyncConcurrencyProbeTool("async_a", shared))
+    registry.register(AsyncConcurrencyProbeTool("async_b", shared))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("run both async tools"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert shared["max_active"] == 2
+    contexts = shared["contexts"]
+    assert len(contexts) == 2  # type: ignore[arg-type]
+    assert all(
+        context.runtime_session_id == runtime_session.runtime_session_id
+        and context.event_context.run_id == result.state.run_id
+        for context in contexts  # type: ignore[union-attr]
+    )
+
+
+def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_context(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:memory-a", "name": "memory_search", "arguments": '{"query":"alpha"}'},
+                    {"id": "call:memory-b", "name": "memory_search", "arguments": '{"query":"beta"}'},
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    runtime_session = RuntimeSession(tmp_path)
+    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    recall = _ConcurrentRecallService()
+    registry = ToolRegistry()
+    registry.register(MemorySearchTool(recall=recall))  # type: ignore[arg-type]
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("search twice"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert recall.max_active == 2
+    assert {query.text for query in recall.queries} == {"alpha", "beta"}
+    assert all(
+        query.session_id == runtime_session.runtime_session_id
+        and query.run_id == result.state.run_id
+        and query.turn_id is not None
+        and query.reply_id is not None
+        for query in recall.queries
+    )
 
 
 def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -> None:

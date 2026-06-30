@@ -91,7 +91,7 @@ from pulsara_agent.runtime.tool_loop import (
     _tool_result_from_event_slice,
     build_tool_result_error_events,
 )
-from pulsara_agent.tools import ToolCall, ToolExecutor
+from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutor
 
 WorkspaceKind = Literal["project", "transient"]
 
@@ -1524,17 +1524,18 @@ class AgentRuntime:
             registry=self.tool_executor.registry,
             record_event=self.runtime_session.make_thread_recorder(state=state),
             artifact_service=self.tool_executor.artifact_service,
+            runtime_session_id=self.runtime_session.runtime_session_id,
         )
-        tasks = [
-            asyncio.create_task(
-                asyncio.to_thread(
-                    executor.execute,
-                    call,
-                    event_context=self._event_context(state),
-                )
+        async def execute_call(call: ToolCall) -> ToolExecutionResult:
+            if executor.is_async(call):
+                return await executor.execute_async(call, event_context=self._event_context(state))
+            return await asyncio.to_thread(
+                executor.execute,
+                call,
+                event_context=self._event_context(state),
             )
-            for call in batch
-        ]
+
+        tasks = [asyncio.create_task(execute_call(call)) for call in batch]
         pending = set(tasks)
         completed_tool_calls: set[str] = set()
 

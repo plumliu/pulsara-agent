@@ -145,6 +145,7 @@ class HostSession:
                 self._clear_plan_entry_audit_if_emitted(result.state)
                 return result
             finally:
+                self._notify_governance()
                 self._active_task = None
                 self._active_state = None
                 self.active_run_id = None
@@ -181,6 +182,7 @@ class HostSession:
                 ):
                     yield event
             finally:
+                self._notify_governance()
                 self._capture_pending_interaction(state)
                 self._clear_plan_entry_audit_if_emitted(state)
                 self.active_run_id = None
@@ -372,6 +374,23 @@ class HostSession:
         self.wiring.agent_runtime.close()
         self._cleanup_workspace_root()
 
+    async def aclose(self, *, drain_timeout_seconds: float = 5.0) -> None:
+        """Boundedly cancel an active run before releasing session resources."""
+
+        await self.drain_active_run(timeout_seconds=drain_timeout_seconds)
+        self.close()
+
+    async def drain_active_run(self, *, timeout_seconds: float = 5.0) -> None:
+        """Stop an in-flight provider borrower without releasing terminal resources."""
+
+        task = self._active_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
     def summary(self) -> dict[str, object]:
         return {
             "host_session_id": self.host_session_id,
@@ -409,6 +428,12 @@ class HostSession:
         self.pending_interaction = None
         self._suspended_state = None
         self.suspended_run_id = None
+
+    def _notify_governance(self) -> None:
+        coordinator = self.wiring.runtime_wiring.governance_coordinator
+        engine = self.wiring.runtime_wiring.memory_governance_engine
+        if coordinator is not None and engine is not None:
+            coordinator.notify(engine)
 
     def _require_pending_approval(self, approval_id: str) -> PendingApproval:
         pending = self.get_pending_approval()

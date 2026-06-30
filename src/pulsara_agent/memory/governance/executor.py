@@ -63,6 +63,10 @@ class MemoryGovernanceExecutor:
     graph_id: str | None = None
     memory_write_uow_factory: Callable[[], MemoryWriteUnitOfWork] | None = None
     allowed_write_scopes: frozenset[str] = frozenset({CTX_USER})
+    async_surfaces: tuple[str, ...] = (
+        CanonicalMutationSurface.SEARCH_INDEX.value,
+        CanonicalMutationSurface.OXIGRAPH.value,
+    )
 
     def apply_decision(
         self,
@@ -279,10 +283,7 @@ class MemoryGovernanceExecutor:
                 record=record,
                 graph=uow.graph,
                 graph_id=uow.resolved_graph_id,
-                async_surfaces=(
-                    CanonicalMutationSurface.SEARCH_INDEX.value,
-                    CanonicalMutationSurface.OXIGRAPH.value,
-                ),
+                async_surfaces=self.async_surfaces,
             )
             uow.outbox.append_decision(
                 record,

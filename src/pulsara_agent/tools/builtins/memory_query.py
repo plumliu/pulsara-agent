@@ -11,7 +11,7 @@ from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
 from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
 from pulsara_agent.memory.scope import CTX_USER, format_scope_list, is_valid_scope
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
 from pulsara_agent.tools.builtins.schemas import bounded_int_arg, json_text, object_schema, required_str_arg, str_arg
 
 
@@ -23,7 +23,10 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         },
         "scope": {
             "type": "string",
-            "description": "Optional exact visible memory scope, e.g. ctx:user or the current ctx:workspace/<id>.",
+            "description": (
+                "Optional exact visible memory scope. Omit this field to search all visible scopes. "
+                "Only set it when the user explicitly names a scope; do not infer the current workspace."
+            ),
         },
         "kind": {
             "type": "string",
@@ -85,6 +88,14 @@ class MemorySearchTool:
     is_concurrency_safe: ClassVar[bool] = True
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
+        return asyncio.run(self.execute_async(call, runtime_context=None))
+
+    async def execute_async(
+        self,
+        call: ToolCall,
+        *,
+        runtime_context: ToolRuntimeContext | None,
+    ) -> ToolExecutionResult:
         query_text = required_str_arg(call.arguments, "query")
         scope = str_arg(call.arguments, "scope")
         scope = scope.strip() if scope is not None else None
@@ -96,17 +107,20 @@ class MemorySearchTool:
         if scope_error is not None:
             return _tool_success(call, scope_error)
         scopes = (scope,) if scope else _default_scopes(self.read_scopes)
-        result = asyncio.run(
-            self.recall.recall(
-                RecallQuery(
-                    text=query_text,
-                    scopes=scopes,
-                    types=(kind,) if kind else (),
-                    limit=limit,
-                    trigger=RecallTrigger.EXPLICIT_SEARCH,
-                ),
-                graph_id=self.graph_id,
-            )
+        event_context = runtime_context.event_context if runtime_context is not None else None
+        result = await self.recall.recall(
+            RecallQuery(
+                text=query_text,
+                scopes=scopes,
+                types=(kind,) if kind else (),
+                limit=limit,
+                trigger=RecallTrigger.EXPLICIT_SEARCH,
+                session_id=runtime_context.runtime_session_id if runtime_context is not None else None,
+                run_id=event_context.run_id if event_context is not None else None,
+                turn_id=event_context.turn_id if event_context is not None else None,
+                reply_id=event_context.reply_id if event_context is not None else None,
+            ),
+            graph_id=self.graph_id,
         )
         if result.status is RecallStatus.UNAVAILABLE:
             payload = {
@@ -135,6 +149,7 @@ class MemorySearchTool:
                         "score": item.score,
                         "why": list(item.why),
                         "deep_recall": item.deep_recall,
+                        "channel_scores": item.channel_scores,
                     }
                     for item in result.items
                 ],

@@ -15,6 +15,8 @@ class RerankResult(NamedTuple):
 class RerankProvider(Protocol):
     """Async rerank provider contract."""
 
+    model_id: str
+
     async def rerank(
         self,
         query: str,
@@ -24,3 +26,6 @@ class RerankProvider(Protocol):
         top_n: int | None = None,
     ) -> list[RerankResult]:
         """Score and reorder documents against a query."""
+
+    async def aclose(self) -> None:
+        """Close provider-owned async resources."""

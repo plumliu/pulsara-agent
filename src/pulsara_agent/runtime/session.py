@@ -149,4 +149,5 @@ class RuntimeSession:
             ),
             record_event=record_event,
             artifact_service=self.artifact_service,
+            runtime_session_id=self.runtime_session_id,
         )

@@ -2,6 +2,7 @@
 
 _Created: 2026-06-27_
 _Rewritten: 2026-06-28_
+_Amended: 2026-06-30 — freeze semantic relatedness v1 same-batch boundary_
 
 这份文档定义 Pulsara memory surfaces 的长期硬契约。它不是实现计划，而是用来冻结三类边界：
 
@@ -111,15 +112,19 @@ _Rewritten: 2026-06-28_
 - **同步面**
   - `memory_nodes`
   - `memory_relations`
-  - transaction-local staged docs / projection rows
+  - 已在当前或更早事务中提交的 canonical projection rows
 - **异步 recall 读面**
   - `memory_search_index`
+  - `memory_vector_index`
 
 冻结口径如下：
 
-- recall 可以读同步面，也可以读 `memory_search_index`
-- governance relatedness / same-batch dedupe / lifecycle validation 只读同步面
-- `memory_search_index` 不提升为 governance validation truth source
+- recall 可以读同步面，也可以读 `memory_search_index` / `memory_vector_index`
+- governance relatedness 可以用异步 search/vector index 加速 candidate generation，但必须回到同步面复核 canonical target
+- lifecycle validation 只认同步面；异步 index 不提升为 governance validation truth source
+- same-batch candidate dedupe/merge 依赖 whole-batch planner input 与 `merge_and_submit`，不把 pending candidate 伪装成 canonical truth
+- v1 不承诺 transaction-local staged candidate 已具有 canonical id；尚未 apply 的 siblings 之间的 canonical contradiction/supersede edge 是显式 deferred gap
+- deferred gap 不会在下一 batch 自动补回；若产品要求补回，必须新增 two-phase governance 或 maintenance/reconciliation
 
 ### 1.5 投影 surface 永不升级成 governed memory
 
@@ -365,19 +370,34 @@ governed canonical memory graph 的唯一写入口是：
 - 它只能辅助模型选择 supersede / contradict target
 - 它绝不能机械决定 target
 - target 的最终合法性由 executor 复核
+- 精确 embedding/rerank score 只用于内部排序、截断与诊断，不进入 Flash prompt
+- lifecycle target 必须属于该 candidate 在当前 governance batch 的 executor-side allowlist；prompt 规则不能替代该校验
+- partial-channel degradation 仍应产出 allowlist 和诊断，但 v1 不在证据链不完整时执行 contradiction/supersede
+- `full` 相对于当前 deployment 已配置且本轮计划执行的通道定义；未配置 reranker 不得让部署永久处于 `partial`
+- canonical allowlist 只约束 contradiction/supersede 使用的 canonical memory IDs；`merge_and_submit.target_entry_ids` 属于 whole-batch candidate entry ID 空间，不受该 allowlist 约束
+- dense candidate threshold 必须属于可版本化 relatedness options，并与 embedding fingerprint、fixture version 一起校准；不得以提高 threshold、牺牲 recall 的方式换取表面 precision
 
 ### 9.3 substrate 口径
 
-迁移后，它应读：
+迁移后，它的 canonical target 应读：
 
-- Postgres projection
-- transaction-local staged docs
+- 已提交的 Postgres `memory_nodes` / `memory_relations` 同步 projection
+- 可选的 async search/vector candidate IDs，但这些 ID 必须回到同步面复核
 
 而不是 Oxigraph。
 
-原因不是“当前实现恰好这样写”，而是更稳定的那条：
+原因不是“当前实现恰好这样写”，而是更稳定的两条：
 
-> 它是 hot-path advisory read，需要 same-batch freshness；因此它必须依赖同步面，而不能依赖异步 materialization。
+> async materialization 不能作为 target validation truth；已经提交的 canonical target 必须在同步 Postgres 面复核。
+
+> v1 的 whole-batch candidate visibility 与 canonical visibility 是两回事：Flash 可以同时看到 pending siblings 并用 `merge_and_submit` 去重/合并，但尚未 apply 的 sibling 没有 provisional canonical id，不能成为另一个 sibling 的 contradiction/supersede target。
+
+因此必须区分：
+
+- `committed-but-unindexed`：可由同步面读取、vector candidate union 与 bounded inline embed 做 best-effort 修补；超出预算的余量由 async worker 回填；
+- `staged-but-uncommitted`：v1 对 canonical lifecycle edge 明确 defer，并记录 `same_batch_lifecycle_deferred`。
+
+不得声称 deferred edge 会在下一 batch 自动补回。若未来需要该保证，必须显式引入 two-phase plan/apply 或 maintenance/reconciliation。
 
 ### 9.4 为什么不复用 FTS 当 target truth
 
@@ -440,10 +460,12 @@ governed canonical memory graph 的唯一写入口是：
 1. governed memory 只由 governance 写入
 2. Postgres-intent-first
 3. unified outbox 是唯一异步驱动
-4. `memory_nodes` / `memory_relations` 是事务内同步面
+4. `memory_nodes` / `memory_relations` 是 committed canonical memory 的事务内同步面
 5. `memory_search_index` / `memory_vector_index` / Oxigraph 是异步面
 6. recall / relatedness / dedupe / lifecycle validation 这些 hot-path 不读 Oxigraph
 7. graph delete 的 mirror 清理也属于异步面；authoritative Postgres cleanup 不得被 Oxigraph 可用性反向阻断
+8. whole-batch pending candidates 可用于 candidate-level merge，但 v1 不为 staged siblings 创建 provisional canonical id；它们之间的 canonical contradiction/supersede edge 明确 defer
+9. contradiction/supersede 的 canonical lifecycle target 必须来自当前 candidate 的 relatedness allowlist，并在 apply 的同一 UoW 中从同步面重新验证；candidate-entry merge 不在该 canonical allowlist 约束内
 
 ### 11.3 合法停点
 
@@ -471,6 +493,8 @@ governed canonical memory graph 的唯一写入口是：
 - 不得先写 Oxigraph 再补 Postgres provenance
 - 不得因为 Oxigraph named-graph delete 失败而保留 Postgres truth；mirror delete 失败时必须留下可 replay 的 repair 事实
 - hot-path 不得直接读 Oxigraph，除非单独立项并通过性能 gate
+- 不得把 async search/vector candidate 命中直接当成 lifecycle target validation
+- 不得把 same-batch pending candidate 当成已有 canonical target，或声称 deferred lifecycle edge 会由下一 batch 自动补回
 
 ---
 
@@ -483,6 +507,17 @@ governed canonical memory graph 的唯一写入口是：
 - recall unavailable payload 形状
 - recall echo guard
 - `related_existing_memories` 的 advisory 形状
+
+semantic relatedness 落地后必须新增：
+
+- allowlist 强制：真实存在且合法、但未被该 candidate advisory surface 的 ID 必须被 executor 拒绝；这与不存在/编造 ID 分开测试
+- transaction-local re-read：snapshot 后 target 状态漂移，apply 时必须在同一 UoW 中重读并拒绝 lifecycle action
+- partial-channel degradation：rerank 失败但 dense 可用（或反向的可用 semantic channel）时仍产生 allowlist，不把整个 relatedness batch 判为失败
+- same-batch boundary：candidate-level duplicate 可 merge；staged siblings 之间的 canonical contradiction/supersede edge deferred，并留下结构化诊断
+- candidate recall：versioned cross-lingual/alias/paraphrase fixture 必须有 recall@k 与 miss-rate gate，且与 destructive-action precision 分开报告
+- deployment-relative status：未配置 reranker时，全部已配置通道成功必须得到 `full`；只有已配置/计划通道失败才得到 `partial`
+- ID-space carve-out：canonical allowlist enforcement 不得阻断 whole-batch `merge_and_submit.target_entry_ids`
+- target drift：snapshot 后 target 漂移必须留下需要 re-governance/maintenance 的诊断，不能把安全 downgrade 当成 lifecycle 终态正确
 
 ### 13.2 substrate / migration 不变量由独立测试守住
 

@@ -26,6 +26,22 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.capability import LocalSkillResolver
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
+from pulsara_agent.memory.canonical.mutation_outbox import CanonicalMutationSurface
+
+
+class _WiringEmbeddingProvider:
+    model_id = "wiring-fake"
+    dimensions = 1024
+
+    async def embed(self, text):
+        return [0.0] * 1024
+
+    async def embed_batch(self, texts):
+        return [[0.0] * 1024 for _ in texts]
+
+    async def aclose(self):
+        return None
 
 
 def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
@@ -47,6 +63,24 @@ def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
     assert wiring.graph_id is None
     assert summary.assistant_text == "hello wiring"
     assert summary.status == "completed"
+
+
+def test_vector_enabled_durable_wiring_explicitly_registers_vector_outbox_surface(tmp_path) -> None:
+    storage = StorageConfig.from_env()
+    _connect_or_skip(storage.postgres_dsn).close()
+    resources = RetrievalRuntimeResources(embedding=_WiringEmbeddingProvider())
+    wiring = build_durable_runtime_wiring(
+        _settings_for_storage(storage),
+        tmp_path,
+        graph_id=f"graph:test/{uuid4().hex}",
+        retrieval_resources=resources,
+    )
+
+    assert wiring.memory_governance_executor.async_surfaces == (
+        CanonicalMutationSurface.SEARCH_INDEX.value,
+        CanonicalMutationSurface.OXIGRAPH.value,
+        CanonicalMutationSurface.VECTOR_INDEX.value,
+    )
 
 
 def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_services(tmp_path) -> None:

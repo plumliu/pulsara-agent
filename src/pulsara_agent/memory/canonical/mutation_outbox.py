@@ -32,6 +32,7 @@ class CanonicalMutationLane(StrEnum):
 
 class CanonicalMutationSurface(StrEnum):
     SEARCH_INDEX = "search_index"
+    VECTOR_INDEX = "vector_index"
     OXIGRAPH = "oxigraph"
 
 

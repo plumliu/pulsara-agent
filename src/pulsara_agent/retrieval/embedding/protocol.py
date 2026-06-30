@@ -10,6 +10,7 @@ from typing import Protocol, runtime_checkable
 class EmbeddingProvider(Protocol):
     """Async embedding provider contract."""
 
+    model_id: str
     dimensions: int
 
     async def embed(self, text: str) -> list[float]:
@@ -17,3 +18,6 @@ class EmbeddingProvider(Protocol):
 
     async def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed a batch of strings preserving input order."""
+
+    async def aclose(self) -> None:
+        """Close provider-owned async resources."""

@@ -29,6 +29,7 @@ class OpenAICompatibleEmbeddingProvider:
         batch_size: int = 10,
         max_concurrent: int = 5,
     ) -> None:
+        self.model_id = model
         self.dimensions = dimensions
         self._model = model
         self._batch_size = batch_size
@@ -39,6 +40,9 @@ class OpenAICompatibleEmbeddingProvider:
             timeout=timeout_seconds,
             max_retries=max_retries,
         )
+
+    async def aclose(self) -> None:
+        await self._client.close()
 
     async def embed(self, text: str) -> list[float]:
         vectors = await self._embed_chunk([text])
@@ -65,4 +69,17 @@ class OpenAICompatibleEmbeddingProvider:
                 )
             except openai.OpenAIError as exc:
                 raise EmbeddingServiceError(str(exc)) from exc
-        return [list(item.embedding) for item in response.data]
+        vectors: list[list[float] | None] = [None] * len(texts)
+        for item in response.data:
+            try:
+                index = int(item.index)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise EmbeddingServiceError("Embedding response item missing index.") from exc
+            if index < 0 or index >= len(texts):
+                raise EmbeddingServiceError(f"Embedding response index out of range: {index}")
+            if vectors[index] is not None:
+                raise EmbeddingServiceError(f"Duplicate embedding response index: {index}")
+            vectors[index] = list(item.embedding)
+        if any(vector is None for vector in vectors):
+            raise EmbeddingServiceError("Embedding response missing one or more vectors.")
+        return [vector for vector in vectors if vector is not None]

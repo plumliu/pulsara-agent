@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 import time
@@ -22,7 +23,13 @@ from pulsara_agent.runtime.tool_artifacts import (
     ToolResultArtifactRecord,
 )
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
-from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutor, build_core_tool_registry
+from pulsara_agent.tools import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolExecutor,
+    ToolRuntimeContext,
+    build_core_tool_registry,
+)
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
@@ -30,6 +37,33 @@ from pulsara_agent.tools.registry import ToolRegistry
 
 
 CTX = EventContext(run_id="run:tools", turn_id="turn:tools", reply_id="reply:tools")
+
+
+class _AsyncContextProbeTool:
+    name = "async_context_probe"
+    description = "Capture async tool runtime context for a dispatch regression test."
+    parameters = {"type": "object", "properties": {}}
+    is_read_only = True
+    is_concurrency_safe = True
+
+    def __init__(self) -> None:
+        self.loop = None
+        self.runtime_context: ToolRuntimeContext | None = None
+
+    async def execute_async(
+        self,
+        call: ToolCall,
+        *,
+        runtime_context: ToolRuntimeContext,
+    ) -> ToolExecutionResult:
+        self.loop = asyncio.get_running_loop()
+        self.runtime_context = runtime_context
+        return ToolExecutionResult(
+            call_id=call.id,
+            tool_name=call.name,
+            status=ToolResultState.SUCCESS,
+            output="ok",
+        )
 
 
 def make_registry(tmp_path):
@@ -51,6 +85,30 @@ def execute_tool(tmp_path, name: str, arguments: dict) -> tuple[ToolExecutor, ob
         event_context=CTX,
     )
     return executor, result
+
+
+def test_async_tool_runs_on_calling_loop_with_runtime_context() -> None:
+    probe = _AsyncContextProbeTool()
+    registry = ToolRegistry()
+    registry.register(probe)
+    executor = ToolExecutor(registry=registry, runtime_session_id="runtime:async-probe")
+
+    async def run_probe() -> tuple[object, ToolExecutionResult]:
+        loop = asyncio.get_running_loop()
+        result = await executor.execute_async(
+            ToolCall(id="call:async-probe", name=probe.name),
+            event_context=CTX,
+        )
+        return loop, result
+
+    calling_loop, result = asyncio.run(run_probe())
+
+    assert result.status is ToolResultState.SUCCESS
+    assert probe.loop is calling_loop
+    assert probe.runtime_context == ToolRuntimeContext(
+        runtime_session_id="runtime:async-probe",
+        event_context=CTX,
+    )
 
 
 def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:

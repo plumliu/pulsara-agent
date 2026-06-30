@@ -284,6 +284,7 @@ name = "pulsara-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "jieba" },
     { name = "openai" },
     { name = "psycopg", extra = ["binary"] },
@@ -299,6 +300,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "jieba", specifier = ">=0.42.1" },
     { name = "openai", specifier = ">=2.43.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },

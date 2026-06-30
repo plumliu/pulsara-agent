@@ -19,6 +19,10 @@ from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.plan import PendingInteraction, PlanInteractionResolution
 from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
+from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources, build_retrieval_runtime_resources
+from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
+from pulsara_agent.memory.canonical.vector_worker import MemoryVectorIndexWorker
+from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordinator
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -31,6 +35,10 @@ class HostCore:
     use_workspace_supervisor: bool = True
     _supervisors: dict[str, WorkspaceTerminalSupervisor] = field(default_factory=dict, init=False, repr=False)
     _supervisor_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _retrieval_resources: RetrievalRuntimeResources | None = field(default=None, init=False, repr=False)
+    _retrieval_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _governance_coordinator: MemoryGovernanceCoordinator | None = field(default=None, init=False, repr=False)
+    _shutting_down: bool = field(default=False, init=False, repr=False)
 
     async def open_session(
         self,
@@ -44,6 +52,8 @@ class HostCore:
         memory_reflection: bool = True,
         permission_policy: EffectivePermissionPolicy | None = None,
     ) -> HostSession:
+        if self._shutting_down:
+            raise RuntimeError("HostCore is shutting down")
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root)
         host_session_id = host_session_id or f"host:{uuid4().hex}"
         conversation_id = conversation_id or f"conversation:{uuid4().hex}"
@@ -61,6 +71,8 @@ class HostCore:
             terminal_owner_host_session_id=host_session_id,
             owns_terminal_session_manager=supervisor is None,
             permission_policy=permission_policy,
+            retrieval_resources=await self._get_retrieval_resources() if self.durable else None,
+            governance_coordinator=self._governance_coordinator if self.durable else None,
         )
         session = HostSession(
             host_session_id=host_session_id,
@@ -164,7 +176,19 @@ class HostCore:
             supervisor.shutdown()
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
         summaries = await self.list_sessions()
+        for summary in summaries:
+            session = await self.get_session(summary.host_session_id)
+            await session.drain_active_run()
+
+        async with self._retrieval_lock:
+            resources = self._retrieval_resources
+            self._retrieval_resources = None
+            self._governance_coordinator = None
+        if resources is not None:
+            await resources.aclose()
+
         for summary in summaries:
             await self.close_session(summary.host_session_id)
         async with self._supervisor_lock:
@@ -172,6 +196,25 @@ class HostCore:
             self._supervisors.clear()
         for supervisor in supervisors:
             supervisor.shutdown()
+
+    async def _get_retrieval_resources(self) -> RetrievalRuntimeResources:
+        async with self._retrieval_lock:
+            if self._retrieval_resources is None:
+                self._retrieval_resources = build_retrieval_runtime_resources(self.settings.retrieval)
+                self._governance_coordinator = MemoryGovernanceCoordinator()
+                self._retrieval_resources.attach_worker(self._governance_coordinator)
+                if self._retrieval_resources.embedding is not None:
+                    vector_worker = MemoryVectorIndexWorker(
+                        MemoryVectorIndexSync(
+                            dsn=self.settings.storage.postgres_dsn,
+                            provider=self._retrieval_resources.embedding,
+                            provider_name=self.settings.retrieval.embedding.provider,
+                        )
+                    )
+                    self._governance_coordinator.on_commit = vector_worker.wake
+                    self._retrieval_resources.attach_worker(vector_worker)
+                self._retrieval_resources.start()
+            return self._retrieval_resources
 
     async def _attach_supervisor(
         self,

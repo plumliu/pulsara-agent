@@ -18,7 +18,6 @@ from pulsara_agent.memory import (
     CandidatePool,
     InMemoryArchiveStore,
     InMemoryCandidatePool,
-    LexicalMemoryRecallService,
     MemoryGovernanceEngine,
     MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
@@ -27,6 +26,11 @@ from pulsara_agent.memory import (
     PostgresArtifactStore,
     PostgresCandidatePool,
 )
+from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
+from pulsara_agent.memory.recall.sparse import SparseCandidateService
+from pulsara_agent.memory.recall.dense import DenseCandidateService
+from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
+from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
 from pulsara_agent.memory.canonical.outbox_replay_hook import CanonicalMutationOutboxReplayHook
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks, ReflectiveMemoryHooks
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
@@ -34,8 +38,9 @@ from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, Memor
 from pulsara_agent.memory.hooks.run_timeline_persistence import RunTimelinePersistenceHook
 from pulsara_agent.memory.hooks.runtime_persistence import ExecutionEvidencePersistenceHook
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore
+from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordinator
 from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
-from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
+from pulsara_agent.memory.canonical.mutation_outbox import CanonicalMutationSurface, MutationOutboxWriter
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
@@ -45,6 +50,8 @@ from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal import TerminalSessionManager
 from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex, PostgresToolResultArtifactIndex
+from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
+from pulsara_agent.retrieval.tokenizer.factory import build_tokenizer
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -63,6 +70,8 @@ class RuntimeWiring:
     memory_governance_engine: MemoryGovernanceEngine | None = None
     memory_domain: MemoryDomainContext | None = None
     working_context_store: PostgresWorkingContextStore | None = None
+    retrieval_resources: RetrievalRuntimeResources | None = None
+    governance_coordinator: MemoryGovernanceCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +155,8 @@ def build_durable_runtime_wiring(
     terminal_session_manager: TerminalSessionManager | None = None,
     terminal_owner_host_session_id: str | None = None,
     owns_terminal_session_manager: bool = True,
+    retrieval_resources: RetrievalRuntimeResources | None = None,
+    governance_coordinator: MemoryGovernanceCoordinator | None = None,
 ) -> RuntimeWiring:
     runtime_session_id = runtime_session_id or _new_runtime_session_id()
     event_log = PostgresEventLog(
@@ -185,8 +196,29 @@ def build_durable_runtime_wiring(
         if memory_domain is not None
         else None
     )
-    memory_recall_service = LexicalMemoryRecallService(
+    sparse_recall = SparseCandidateService(
         memory_query=memory_query,
+        tokenizer=build_tokenizer(settings.retrieval.tokenizer),
+    )
+    dense_recall = (
+        DenseCandidateService(
+            provider=retrieval_resources.embedding,
+            vector_query=MemoryVectorQuery(settings.storage.postgres_dsn),
+            provider_name=settings.retrieval.embedding.provider,
+        )
+        if retrieval_resources is not None and retrieval_resources.embedding is not None
+        else None
+    )
+    semantic_reranker = (
+        RecallRerankService(provider=retrieval_resources.rerank)
+        if retrieval_resources is not None and retrieval_resources.rerank is not None
+        else None
+    )
+    memory_recall_service = HybridMemoryRecallService(
+        memory_query=memory_query,
+        sparse=sparse_recall,
+        dense=dense_recall,
+        reranker=semantic_reranker,
         trace_store=PostgresRecallTraceStore(dsn=settings.storage.postgres_dsn),
     )
     _register_timeline_hook(
@@ -225,6 +257,15 @@ def build_durable_runtime_wiring(
             workspace_root=workspace_root,
         ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
+        async_surfaces=(
+            CanonicalMutationSurface.SEARCH_INDEX.value,
+            CanonicalMutationSurface.OXIGRAPH.value,
+            *(
+                (CanonicalMutationSurface.VECTOR_INDEX.value,)
+                if retrieval_resources is not None and retrieval_resources.embedding is not None
+                else ()
+            ),
+        ),
     )
     return RuntimeWiring(
         runtime_session=runtime_session,
@@ -239,6 +280,8 @@ def build_durable_runtime_wiring(
         memory_query=memory_query,
         memory_domain=memory_domain,
         working_context_store=working_context_store,
+        retrieval_resources=retrieval_resources,
+        governance_coordinator=governance_coordinator,
     )
 
 
@@ -261,6 +304,8 @@ def build_agent_runtime_wiring(
     capability_resolver: CapabilityResolver | None = None,
     enable_workspace_skills: bool = True,
     permission_policy: EffectivePermissionPolicy | None = None,
+    retrieval_resources: RetrievalRuntimeResources | None = None,
+    governance_coordinator: MemoryGovernanceCoordinator | None = None,
 ) -> AgentRuntimeWiring:
     runtime_wiring = (
         build_durable_runtime_wiring(
@@ -272,6 +317,8 @@ def build_agent_runtime_wiring(
             terminal_session_manager=terminal_session_manager,
             terminal_owner_host_session_id=terminal_owner_host_session_id,
             owns_terminal_session_manager=owns_terminal_session_manager,
+            retrieval_resources=retrieval_resources,
+            governance_coordinator=governance_coordinator,
         )
         if durable
         else build_in_memory_runtime_wiring(
@@ -327,6 +374,8 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         memory_query=runtime_wiring.memory_query,
         memory_domain=runtime_wiring.memory_domain,
         working_context_store=runtime_wiring.working_context_store,
+        retrieval_resources=runtime_wiring.retrieval_resources,
+        governance_coordinator=runtime_wiring.governance_coordinator,
         memory_governance_engine=MemoryGovernanceEngine(
             llm_runtime=llm_runtime,
             executor=runtime_wiring.memory_governance_executor,
@@ -402,6 +451,10 @@ def _build_memory_governance_executor(
     runtime_session_id: str,
     memory_write_uow_factory=None,
     allowed_write_scopes: frozenset[str],
+    async_surfaces: tuple[str, ...] = (
+        CanonicalMutationSurface.SEARCH_INDEX.value,
+        CanonicalMutationSurface.OXIGRAPH.value,
+    ),
 ) -> MemoryGovernanceExecutor:
     return MemoryGovernanceExecutor(
         candidate_pool=candidate_pool,
@@ -412,6 +465,7 @@ def _build_memory_governance_executor(
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=memory_write_uow_factory,
         allowed_write_scopes=allowed_write_scopes,
+        async_surfaces=async_surfaces,
     )
 
 

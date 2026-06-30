@@ -127,6 +127,68 @@ def test_memory_governance_engine_submits_pending_candidate_with_synthetic_conte
     assert "Memory Governance Agent" in transport.contexts[0].system_prompt
 
 
+def test_memory_governance_engine_exposes_whole_batch_and_merges_before_apply() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    first = pool.append_candidate(
+        _pooled_preference(statement="The user prefers concise summaries.")
+    )
+    second = pool.append_candidate(
+        _pooled_preference(statement="The user prefers brief summaries.")
+    )
+    transport = _ScriptedTransport(
+        [
+            json.dumps(
+                {
+                    "reason": "The two pending candidates express one preference.",
+                    "decisions": [
+                        {
+                            "kind": "merge_and_submit",
+                            "target_entry_ids": [first.entry_id, second.entry_id],
+                            "candidate": {
+                                "kind": "Preference",
+                                "candidate_id": "candidate:merged-concise-summary",
+                                "statement": "The user prefers concise summaries.",
+                                "scope": "ctx:user",
+                                "source_authority": "explicit_user_instruction",
+                                "verification_status": "user_confirmed",
+                                "evidence_ids": [],
+                            },
+                            "reason": "Merge equivalent wording before either candidate is applied.",
+                        }
+                    ],
+                }
+            )
+        ]
+    )
+    engine = MemoryGovernanceEngine(
+        llm_runtime=_llm_runtime(transport),
+        executor=_executor(pool=pool, graph=graph, log=log),
+    )
+
+    result = asyncio.run(
+        engine.run_pending(
+            trigger_reason="test",
+            governance_batch_id="governance:test:whole-batch-merge",
+        )
+    )
+
+    planner_payload = json.loads(
+        transport.contexts[0].messages[0].content[0].split("\n", 1)[1]
+    )
+    assert [item["entry_id"] for item in planner_payload["candidates"]] == [
+        first.entry_id,
+        second.entry_id,
+    ]
+    assert [decision.kind for decision in result.decisions] == ["merge_and_submit"]
+    assert result.error_type is None
+    assert pool.list_pending() == []
+    memories = graph.find_by_type(memory.PREFERENCE)
+    assert len(memories) == 1
+    assert memories[0][memory.STATEMENT.name] == "The user prefers concise summaries."
+
+
 def test_memory_governance_engine_invalid_json_does_not_write_or_decide() -> None:
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
@@ -410,13 +472,22 @@ def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
     )
 
 
-def _pooled_preference(*, source_run_id: str | None = None) -> PooledMemoryCandidate:
+def _pooled_preference(
+    *,
+    source_run_id: str | None = None,
+    statement: str = "The user prefers concise summaries.",
+) -> PooledMemoryCandidate:
+    user_quote = (
+        "Please remember that I prefer concise summaries."
+        if statement == "The user prefers concise summaries."
+        else f"Please remember: {statement}"
+    )
     return PooledMemoryCandidate(
         entry_id=f"pool:test:{uuid4().hex}",
         payload=ValidCandidatePayload(
             candidate=PreferenceCandidate(
                 candidate_id=f"candidate:test:{uuid4().hex}",
-                statement="The user prefers concise summaries.",
+                statement=statement,
                 scope="ctx:user",
                 source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
                 verification_status=memory.VerificationStatus.USER_CONFIRMED,
@@ -427,7 +498,7 @@ def _pooled_preference(*, source_run_id: str | None = None) -> PooledMemoryCandi
         source_run_id=source_run_id or f"run:source:{uuid4().hex}",
         source_turn_id=f"turn:source:{uuid4().hex}",
         source_reply_id=f"reply:source:{uuid4().hex}",
-        user_quote="Please remember that I prefer concise summaries.",
+        user_quote=user_quote,
     )
 
 

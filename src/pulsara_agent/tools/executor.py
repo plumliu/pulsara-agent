@@ -14,7 +14,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactService
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
 from pulsara_agent.tools.registry import ToolRegistry
 
 
@@ -23,6 +23,14 @@ class ToolExecutor:
     registry: ToolRegistry
     record_event: Callable[[AgentEvent], AgentEvent] | None = None
     artifact_service: ToolResultArtifactService | None = None
+    runtime_session_id: str | None = None
+
+    def is_async(self, call: ToolCall) -> bool:
+        try:
+            tool = self.registry.get(call.name)
+        except KeyError:
+            return False
+        return hasattr(tool, "execute_async")
 
     def execute(self, call: ToolCall, *, event_context: EventContext) -> ToolExecutionResult:
         self._append(
@@ -58,6 +66,51 @@ class ToolExecutor:
                 status=ToolResultState.ERROR,
                 output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
             )
+        return self._finalize_result(call, event_context=event_context, result=result)
+
+    async def execute_async(
+        self,
+        call: ToolCall,
+        *,
+        event_context: EventContext,
+    ) -> ToolExecutionResult:
+        self._append(
+            ToolResultStartEvent(
+                **event_context.event_fields(),
+                tool_call_id=call.id,
+                tool_call_name=call.name,
+            )
+        )
+        try:
+            tool = self.registry.get(call.name)
+            execute_async = getattr(tool, "execute_async", None)
+            if execute_async is None:
+                raise TypeError(f"Tool {call.name!r} does not implement execute_async")
+            if self.runtime_session_id is None:
+                raise RuntimeError("Async tool execution requires runtime_session_id")
+            result = await execute_async(
+                call,
+                runtime_context=ToolRuntimeContext(
+                    runtime_session_id=self.runtime_session_id,
+                    event_context=event_context,
+                ),
+            )
+        except Exception as exc:
+            result = ToolExecutionResult(
+                call_id=call.id,
+                tool_name=call.name,
+                status=ToolResultState.ERROR,
+                output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
+            )
+        return self._finalize_result(call, event_context=event_context, result=result)
+
+    def _finalize_result(
+        self,
+        call: ToolCall,
+        *,
+        event_context: EventContext,
+        result: ToolExecutionResult,
+    ) -> ToolExecutionResult:
         artifact_refs = ()
         if self.artifact_service is not None:
             result, artifact_refs = self.artifact_service.process_result(
