@@ -346,6 +346,8 @@ def test_agent_runtime_wiring_uses_durable_runtime_wiring(tmp_path) -> None:
         assert wiring.agent_runtime.runtime_session is wiring.runtime_wiring.runtime_session
         assert "memory_search" in wiring.agent_runtime.tool_executor.registry.names()
         assert "memory_get" in wiring.agent_runtime.tool_executor.registry.names()
+        assert "memory_related" not in wiring.agent_runtime.tool_executor.registry.names()
+        assert "memory_get" in wiring.agent_runtime.tool_executor.registry.names()
         assert [event.sequence for event in events] == [1, 2]
         assert len(records) == 1
         assert records[0][rt.SOURCE_SESSION.name] == runtime_session_id

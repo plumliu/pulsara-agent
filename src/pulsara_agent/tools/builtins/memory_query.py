@@ -7,12 +7,20 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from pulsara_agent.memory.recall.explain import explain_memory, explanation_to_payload
+from pulsara_agent.memory.recall.graph import RecallPath
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
 from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
 from pulsara_agent.memory.scope import CTX_USER, format_scope_list, is_valid_scope
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
-from pulsara_agent.tools.builtins.schemas import bounded_int_arg, json_text, object_schema, required_str_arg, str_arg
+from pulsara_agent.tools.builtins.schemas import (
+    bounded_int_arg,
+    int_arg,
+    json_text,
+    object_schema,
+    required_str_arg,
+    str_arg,
+)
 
 
 _MEMORY_SEARCH_PARAMETERS = object_schema(
@@ -37,6 +45,14 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
             "default": 5,
             "description": "Maximum results to return.",
         },
+        "max_hops": {
+            "type": "integer",
+            "default": 0,
+            "description": (
+                "Graph expansion depth: 0 for direct retrieval only, 1 for direct relations, "
+                "or 2 for bounded typed multi-hop paths. Choose explicitly from task complexity."
+            ),
+        },
     },
     required=["query"],
 )
@@ -46,16 +62,6 @@ _MEMORY_GET_PARAMETERS = object_schema(
         "memory_id": {
             "type": "string",
             "description": "Canonical memory node id, e.g. preference:abc.",
-        }
-    },
-    required=["memory_id"],
-)
-
-_MEMORY_RELATED_PARAMETERS = object_schema(
-    properties={
-        "memory_id": {
-            "type": "string",
-            "description": "Canonical memory node id to inspect for direct graph relations.",
         }
     },
     required=["memory_id"],
@@ -103,6 +109,9 @@ class MemorySearchTool:
             scope = None
         kind = str_arg(call.arguments, "kind")
         limit = bounded_int_arg(call.arguments, "limit", default=5, minimum=1, maximum=20)
+        max_hops = int_arg(call.arguments, "max_hops", 0)
+        if max_hops not in {0, 1, 2}:
+            raise ValueError("max_hops must be 0, 1, or 2")
         scope_error = _scope_error_payload(scope, self.read_scopes)
         if scope_error is not None:
             return _tool_success(call, scope_error)
@@ -114,6 +123,7 @@ class MemorySearchTool:
                 scopes=scopes,
                 types=(kind,) if kind else (),
                 limit=limit,
+                max_hops=max_hops,
                 trigger=RecallTrigger.EXPLICIT_SEARCH,
                 session_id=runtime_context.runtime_session_id if runtime_context is not None else None,
                 run_id=event_context.run_id if event_context is not None else None,
@@ -150,6 +160,10 @@ class MemorySearchTool:
                         "why": list(item.why),
                         "deep_recall": item.deep_recall,
                         "channel_scores": item.channel_scores,
+                        "conflicts_with": list(item.conflicts_with),
+                        "direct_match": item.direct_match,
+                        "hop_count": item.hop_count,
+                        "paths": [_path_payload(path) for path in item.paths],
                     }
                     for item in result.items
                 ],
@@ -198,54 +212,6 @@ class MemoryGetTool:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryRelatedTool:
-    memory_query: MemoryQuery
-    graph_id: str | None = None
-    read_scopes: frozenset[str] | None = None
-
-    name: ClassVar[str] = "memory_related"
-    description: ClassVar[str] = (
-        "Return direct materialized graph relations for one canonical durable memory. "
-        "This is read-only and never infers missing relations."
-    )
-    parameters: ClassVar[dict[str, Any]] = _MEMORY_RELATED_PARAMETERS
-    is_read_only: ClassVar[bool] = True
-    is_concurrency_safe: ClassVar[bool] = True
-
-    def execute(self, call: ToolCall) -> ToolExecutionResult:
-        memory_id = required_str_arg(call.arguments, "memory_id")
-        try:
-            views = self.memory_query.fetch_nodes([memory_id], graph_id=self.graph_id)
-        except Exception as exc:
-            payload = _unavailable_payload(exc)
-        else:
-            if not views:
-                payload = {
-                    "status": "empty",
-                    "memory_id": memory_id,
-                    "relations": [],
-                    "guidance": ["No canonical memory with this id was found."],
-                }
-            elif not _is_view_visible(views[0], self.read_scopes):
-                payload = _forbidden_memory_payload(memory_id) | {"relations": []}
-            else:
-                view = views[0]
-                payload = {
-                    "status": "ok",
-                    "memory_id": view.id,
-                    "incoming": [
-                        {"predicate": predicate, "source_id": source_id}
-                        for predicate, source_id in view.incoming
-                    ],
-                    "outgoing": [
-                        {"predicate": predicate, "target_id": target_id}
-                        for predicate, target_id in view.outgoing
-                    ],
-                }
-        return _tool_success(call, payload)
-
-
-@dataclass(frozen=True, slots=True)
 class MemoryExplainTool:
     memory_query: MemoryQuery
     graph_id: str | None = None
@@ -290,6 +256,24 @@ def _tool_success(call: ToolCall, payload: dict[str, Any]) -> ToolExecutionResul
         status=ToolResultState.SUCCESS,
         output=json_text(payload),
     )
+
+
+def _path_payload(path: RecallPath) -> dict[str, Any]:
+    return {
+        "seed_memory_id": path.seed_memory_id,
+        "target_memory_id": path.target_memory_id,
+        "steps": [
+            {
+                "from_id": step.from_id,
+                "to_id": step.to_id,
+                "predicate": step.predicate,
+                "edge_source_id": step.edge_source_id,
+                "edge_target_id": step.edge_target_id,
+                "traversal": step.traversal,
+            }
+            for step in path.steps
+        ],
+    }
 
 
 def _default_scopes(read_scopes: frozenset[str] | None) -> tuple[str, ...]:

@@ -5,18 +5,15 @@ import json
 import os
 import re
 import tempfile
-import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 import pytest
 
 from pulsara_agent.event import (
     AgentEvent,
-    ModelCallEndEvent,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,

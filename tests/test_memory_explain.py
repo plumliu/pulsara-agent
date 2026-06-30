@@ -16,7 +16,7 @@ from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, Reca
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.tools.base import ToolCall
-from pulsara_agent.tools.builtins.memory_query import MemoryExplainTool, MemoryRelatedTool
+from pulsara_agent.tools.builtins.memory_query import MemoryExplainTool, MemoryGetTool
 
 
 def test_explainer_only_claims_superseded_when_materialized_edge_exists() -> None:
@@ -80,7 +80,7 @@ def test_explanation_validator_rejects_ungrounded_claim() -> None:
         store.delete_graph(graph_id)
 
 
-def test_memory_related_and_explain_tools_return_grounded_payloads() -> None:
+def test_memory_explain_tool_returns_grounded_payload() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
@@ -96,13 +96,6 @@ def test_memory_related_and_explain_tools_return_grounded_payloads() -> None:
             governance_batch_id="governance:test:tools",
             graph_id=graph_id,
         )
-        related = MemoryRelatedTool(memory_query=query, graph_id=graph_id).execute(
-            ToolCall(
-                id="call:related",
-                name="memory_related",
-                arguments={"memory_id": "preference:new"},
-            )
-        )
         explained = MemoryExplainTool(memory_query=query, graph_id=graph_id).execute(
             ToolCall(
                 id="call:explain",
@@ -111,16 +104,26 @@ def test_memory_related_and_explain_tools_return_grounded_payloads() -> None:
             )
         )
 
-        related_payload = json.loads(related.output)
         explained_payload = json.loads(explained.output)
-        assert related_payload["status"] == "ok"
-        assert related_payload["outgoing"] == [
-            {"predicate": memory.SUPERSEDES.name, "target_id": "preference:old"}
-        ]
         assert explained_payload["status"] == "ok"
         claims = explained_payload["explanation"]["claims"]
         assert any(claim["kind"] == "superseded_by" for claim in claims)
         assert all(claim["grounded_on"] for claim in claims)
+
+        # memory_get absorbs the direct-edge discovery duty from the deleted
+        # memory_related tool: it must still surface materialized graph edges.
+        got = MemoryGetTool(memory_query=query, graph_id=graph_id).execute(
+            ToolCall(
+                id="call:get",
+                name="memory_get",
+                arguments={"memory_id": "preference:new"},
+            )
+        )
+        got_payload = json.loads(got.output)
+        assert got_payload["status"] == "ok"
+        assert got_payload["memory"]["outgoing"] == [
+            {"predicate": memory.SUPERSEDES.name, "target_id": "preference:old"}
+        ]
     finally:
         store.delete_graph(graph_id)
 

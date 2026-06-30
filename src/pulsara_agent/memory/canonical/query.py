@@ -36,6 +36,13 @@ class CanonicalNodeView:
     incoming: tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryRelationEdge:
+    source_id: str
+    predicate: str
+    target_id: str
+
+
 class MemoryQuery(Protocol):
     def fetch_nodes(self, ids: Sequence[str], *, graph_id: str | None = None) -> list[CanonicalNodeView]: ...
 
@@ -77,6 +84,14 @@ class MemoryQuery(Protocol):
         limit: int,
         graph_id: str | None = None,
     ) -> list[str]: ...
+
+    def relation_edges(
+        self,
+        node_ids: Sequence[str],
+        *,
+        graph_id: str | None = None,
+        max_per_source: int | None = None,
+    ) -> list[MemoryRelationEdge]: ...
 
 
 @dataclass(slots=True)
@@ -142,6 +157,76 @@ class PostgresMemoryQuery:
             for row in node_rows
         }
         return [by_id[node_id] for node_id in ordered_ids if node_id in by_id]
+
+    def relation_edges(
+        self,
+        node_ids: Sequence[str],
+        *,
+        graph_id: str | None = None,
+        max_per_source: int | None = None,
+    ) -> list[MemoryRelationEdge]:
+        ordered_ids = _dedupe_preserving_order(node_ids)
+        if not ordered_ids:
+            return []
+        with self._cursor() as cursor:
+            if max_per_source is not None and max_per_source > 0:
+                # Bound rows per matched frontier endpoint in SQL so a single
+                # high-degree supernode cannot pull thousands of edges onto the
+                # hot path before the Python-side fanout cap applies. Each edge
+                # is attributed to whichever endpoint(s) sit in the frontier;
+                # the per-endpoint ROW_NUMBER cap mirrors graph fanout_per_node.
+                cursor.execute(
+                    """
+                    WITH matched AS (
+                        SELECT source_id, predicate, target_id, source_id AS endpoint
+                        FROM memory_relations
+                        WHERE graph_id = %s AND source_id = ANY(%s)
+                        UNION
+                        SELECT source_id, predicate, target_id, target_id AS endpoint
+                        FROM memory_relations
+                        WHERE graph_id = %s AND target_id = ANY(%s)
+                    ),
+                    ranked AS (
+                        SELECT
+                            source_id, predicate, target_id, endpoint,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY endpoint
+                                ORDER BY predicate, source_id, target_id
+                            ) AS rn
+                        FROM matched
+                    )
+                    SELECT DISTINCT source_id, predicate, target_id
+                    FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY predicate, source_id, target_id
+                    """,
+                    (
+                        _graph_key(graph_id),
+                        ordered_ids,
+                        _graph_key(graph_id),
+                        ordered_ids,
+                        max_per_source,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT source_id, predicate, target_id
+                    FROM memory_relations
+                    WHERE graph_id = %s
+                      AND (source_id = ANY(%s) OR target_id = ANY(%s))
+                    ORDER BY predicate, source_id, target_id
+                    """,
+                    (_graph_key(graph_id), ordered_ids, ordered_ids),
+                )
+            return [
+                MemoryRelationEdge(
+                    source_id=row["source_id"],
+                    predicate=row["predicate"],
+                    target_id=row["target_id"],
+                )
+                for row in cursor.fetchall()
+            ]
 
     def lexical_candidates(
         self,

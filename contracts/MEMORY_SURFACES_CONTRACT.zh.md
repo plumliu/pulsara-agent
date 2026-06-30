@@ -210,6 +210,29 @@ recall 绝不能把被召回内容再回写成新 memory candidate 或 governed 
 1. `ProjectionLedger` 把本轮 surfaced 的 `memory_id` + snippet 指纹记录进 scratchpad
 2. recall projection block 带 `do_not_write_back="true"`
 
+### 4.5 显式多跳搜索边界
+
+- `memory_search.max_hops` 只允许 `0 | 1 | 2`,默认 `0`;automatic recall 强制按 0 跳执行。
+- 多跳以基础 recall 命中的、已通过 canonical filter 的节点为 seed,并从同步 `memory_relations` 分层批量读取 typed edges。
+- 1 跳只允许 canonical lifecycle/dependency neighbor;2 跳只允许共享 evidence、共享 basis、supersede lineage 三类冻结 motif,不得退化为无类型 BFS。
+- path 必须携带 materialized edge 的原始 source / predicate / target 和 traversal direction,不得把逆向遍历伪装成正向事实。
+- scope / type / status / suppression filter 必须覆盖 result 与 canonical intermediate;不可见 canonical node 不得成为跳板。
+- graph channel 故障只允许结构化降级并保留可用的基础 recall 结果。
+- 关系发现统一进入 `memory_search`;不再提供独立 `memory_related` 工具。单节点详情与 direct edges 由 `memory_get` 返回。
+
+### 4.6 contradiction companion 是 0 跳特例
+
+§4.5 把 typed 关系展开放在 `max_hops>=1`,但 **`CONTRADICTS` 是唯一的例外,在 0 跳(含 automatic recall)就必须展开**:
+
+- 任何被基础通道命中的 memory,其 **active、同 scope、同 type** 的 `CONTRADICTS` 邻居即使未被直接命中,也必须作为 contradiction companion 补出,使模型不会只看到一个已知冲突的一半。
+- 理由:对冲突只见一面是**正确性风险**,而非信息完整性问题;这与其它 typed 关系(shared-evidence / basis / supersede-lineage,纯属"更多上下文")在风险等级上不同,故单独前置到 0 跳。
+- companion 受与任何召回节点**相同的 scope / type / status / suppression 过滤**约束:hidden-scope 或非-active 的对立面绝不泄漏。
+- companion **不受 `limit` 约束**(它是安全补充,不是排序竞争者),但**不附 grounded path**(path 仍只在 `max_hops>=1` 出现)。
+- companion 与被命中方都标 `contradiction_warning`;companion 额外标 `contradiction_companion`。
+- **只展开一轮直接伙伴,不做传递闭包**:companion 仅从**基础通道命中的 seed**(lexical/FTS/dense 直接命中、已过 canonical filter 的节点)的 `CONTRADICTS` 边补出;companion 自身的 `CONTRADICTS` 边**不再触发二次展开**。理由:contradiction **不可传递** —— A↔B、B↔C 不蕴含 A↔C(A 与 C 可能恰好一致),对 A 展开整个 contradiction component 会把与 A 不冲突的 C 当成 A 的冲突伙伴,既语义错误又重新引入 top-k 收紧时要避免的噪声。C 是 B 的冲突;只有当 B 自己也是基础通道命中的 seed 时,C 才会作为 B 的 companion 出现。
+- v1 不对 automatic 路径的 companion 数量做预算/上限:多重 contradiction 是治理副路径中的小概率事件,蓄意构造场景暂不在 v1 防护范围。
+- **projection 自述必须诚实**:`ProjectionBuilder` 的冲突对必须作为**不可拆分单元**优先渲染,同时保留双方 id、短摘要与 `CONTRADICTS` 关系;普通条目再按剩余预算逐条完整 packing,不得做可能留下半行/半个冲突对的整体字符截断。`included_memory_ids` / `conflict_groups` / `items` 只能反映实际进入 summary 的完整单元。若最小冲突单元本身超过 nominal `token_budget`,正确性优先于 soft budget:保留完整冲突安全单元并丢弃普通尾部,不得重新制造 half-conflict。
+
 ---
 
 ## 5. reflection

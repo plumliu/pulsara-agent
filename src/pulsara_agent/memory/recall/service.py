@@ -12,6 +12,7 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
+from pulsara_agent.memory.recall.graph import GraphCandidateService, RecallPath
 from pulsara_agent.memory.recall.trace import RecallTraceStore
 from pulsara_agent.ontology import memory
 
@@ -33,6 +34,7 @@ class RecallQuery:
     scopes: tuple[str, ...] = ()
     types: tuple[str, ...] = ()
     limit: int = 5
+    max_hops: int = 0
     trigger: RecallTrigger = RecallTrigger.CHEAP_AUTO
     session_id: str | None = None
     run_id: str | None = None
@@ -52,6 +54,9 @@ class RecallItem:
     deep_recall: str
     conflicts_with: tuple[str, ...] = ()
     channel_scores: dict[str, float] = field(default_factory=dict)
+    direct_match: bool = True
+    hop_count: int = 0
+    paths: tuple[RecallPath, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +84,7 @@ class LexicalMemoryRecallService(MemoryRecallService):
     enable_graph_rerank: bool = True
     recent_suppression_limit: int = 10
     unavailable_cooldown_seconds: float = 2.0
+    graph_candidates: GraphCandidateService | None = None
     _cooldown_until: float = field(default=0.0, init=False, repr=False)
 
     async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
@@ -129,6 +135,9 @@ class LexicalMemoryRecallService(MemoryRecallService):
         scopes = query.scopes or None
         types = query.types or None
         warnings: list[str] = []
+        metadata: dict[str, Any] = {
+            "graph_max_hops": query.max_hops if query.trigger is RecallTrigger.EXPLICIT_SEARCH else 0,
+        }
         suppressed_ids = self._recent_suppressed_ids(query, graph_id=graph_id, warnings=warnings)
         lexical = self.memory_query.lexical_candidates(
             terms=terms,
@@ -144,24 +153,47 @@ class LexicalMemoryRecallService(MemoryRecallService):
             limit=self.fts_limit,
             graph_id=graph_id,
         )
-        ranked_ids, why_by_id = _rrf_ranked_ids(
-            channels=(
-                ("lexical", lexical),
-                ("fts", fts),
-            ),
-            k=self.rrf_k,
-        )
+        direct_channels = (("lexical", lexical), ("fts", fts))
+        direct_ranked_ids, _ = _rrf_ranked_ids(channels=direct_channels, k=self.rrf_k)
+        graph_paths: dict[str, tuple[RecallPath, ...]] = {}
+        graph_rows: list[tuple[str, float]] = []
+        if (
+            query.trigger is RecallTrigger.EXPLICIT_SEARCH
+            and query.max_hops > 0
+            and self.graph_candidates is not None
+            and direct_ranked_ids
+        ):
+            try:
+                graph_outcome = self.graph_candidates.collect(
+                    seed_ids=direct_ranked_ids,
+                    scopes=query.scopes,
+                    types=query.types,
+                    max_hops=query.max_hops,
+                    graph_id=graph_id,
+                    suppressed_ids=suppressed_ids,
+                )
+                graph_rows = list(graph_outcome.batch.channel_rows()[0][1]) if graph_outcome.batch.candidates else []
+                graph_paths = graph_outcome.paths_by_id
+                warnings.extend(graph_outcome.batch.warnings)
+                metadata.update(graph_outcome.batch.metadata)
+            except Exception as exc:
+                warnings.append(f"graph_expand_degraded:{type(exc).__name__}: {exc}")
+                metadata["graph_query"] = "degraded"
+        channels = (*direct_channels, ("graph", graph_rows)) if graph_rows else direct_channels
+        ranked_ids, why_by_id = _rrf_ranked_ids(channels=channels, k=self.rrf_k)
         candidate_ids = tuple(ranked_ids)
         if not ranked_ids:
             return RecallResult(
                 status=RecallStatus.EMPTY,
                 guidance=_empty_guidance(),
                 warnings=tuple(warnings),
+                metadata=metadata,
             ), candidate_ids
 
         views = {view.id: view for view in self.memory_query.fetch_nodes(ranked_ids, graph_id=graph_id)}
         items: list[RecallItem] = []
         filtered_ids: list[str] = []
+        candidate_limit = max(query.limit * 4, query.limit)
         for memory_id in ranked_ids:
             if memory_id in suppressed_ids:
                 _append_filtered_id(filtered_ids, memory_id)
@@ -180,29 +212,31 @@ class LexicalMemoryRecallService(MemoryRecallService):
                     scope=view.scope,
                     status=view.status,
                     snippet=_snippet(view),
-                    score=_score_for(memory_id, lexical=lexical, fts=fts, k=self.rrf_k),
+                    score=_score_for(memory_id, channels=channels, k=self.rrf_k),
                     why=tuple(why_by_id.get(memory_id, ())),
                     deep_recall=f"memory_get {view.id}",
+                    direct_match=memory_id in direct_ranked_ids,
+                    hop_count=0 if memory_id in direct_ranked_ids else _minimum_hops(graph_paths.get(memory_id, ())),
+                    paths=graph_paths.get(memory_id, ()),
                 )
             )
-            if len(items) >= query.limit:
+            if len(items) >= candidate_limit:
                 break
-
-        if items:
-            items, views = self._expand_contradiction_companions(
-                items,
-                views,
-                query,
-                graph_id=graph_id,
-                suppressed_ids=suppressed_ids,
-                filtered_ids=filtered_ids,
-            )
 
         if self.enable_graph_rerank and items:
             from pulsara_agent.memory.recall.rerank import direct_relation_rerank
 
             items = direct_relation_rerank(items, views)
-        items = _stabilize_visible_conflicts(_trim_recall_items(items, query.limit))
+        items = _trim_recall_items(items, query.limit)
+        items = _expand_contradiction_companions(
+            items,
+            memory_query=self.memory_query,
+            graph_id=graph_id,
+            suppressed_ids=suppressed_ids,
+            passes_filter=self._passes_canonical_filter,
+            query=query,
+        )
+        items = _mark_visible_conflicts(items, views, {item.memory_id for item in items})
 
         if not items:
             return RecallResult(
@@ -210,80 +244,15 @@ class LexicalMemoryRecallService(MemoryRecallService):
                 filtered_ids=_dedupe_ids(filtered_ids),
                 guidance=_empty_guidance(),
                 warnings=tuple(warnings),
+                metadata=metadata,
             ), candidate_ids
         return RecallResult(
             status=RecallStatus.OK,
             items=tuple(items),
             filtered_ids=_dedupe_ids(filtered_ids),
             warnings=tuple(warnings),
+            metadata=metadata,
         ), candidate_ids
-
-    def _expand_contradiction_companions(
-        self,
-        items: list[RecallItem],
-        views: dict[str, CanonicalNodeView],
-        query: RecallQuery,
-        *,
-        graph_id: str | None,
-        suppressed_ids: set[str],
-        filtered_ids: list[str],
-    ) -> tuple[list[RecallItem], dict[str, CanonicalNodeView]]:
-        selected_ids = {item.memory_id for item in items}
-        companion_sources: defaultdict[str, list[str]] = defaultdict(list)
-        for item in items:
-            view = views.get(item.memory_id)
-            if view is None:
-                continue
-            for counterpart_id in _contradiction_ids(view):
-                if counterpart_id == item.memory_id:
-                    continue
-                companion_sources[counterpart_id].append(item.memory_id)
-
-        fetch_ids = sorted(
-            memory_id
-            for memory_id in companion_sources
-            if memory_id not in selected_ids and memory_id not in suppressed_ids
-        )
-        if not fetch_ids:
-            return _mark_visible_conflicts(items, views, selected_ids), views
-
-        companion_views = {
-            view.id: view for view in self.memory_query.fetch_nodes(fetch_ids, graph_id=graph_id)
-        }
-        views = {**views, **companion_views}
-        companion_items: list[RecallItem] = []
-        visible_ids = set(selected_ids)
-        scores_by_id = _score_by_id(items)
-        for memory_id in fetch_ids:
-            view = companion_views.get(memory_id)
-            if view is None:
-                _append_filtered_id(filtered_ids, memory_id)
-                continue
-            if not self._passes_canonical_filter(view, query):
-                _append_filtered_id(filtered_ids, memory_id)
-                continue
-            source_ids = tuple(
-                source_id for source_id in dict.fromkeys(companion_sources[memory_id]) if source_id in selected_ids
-            )
-            if not source_ids:
-                continue
-            companion_items.append(
-                RecallItem(
-                    memory_id=view.id,
-                    memory_type=view.memory_type,
-                    scope=view.scope,
-                    status=view.status,
-                    snippet=_snippet(view),
-                    score=max((scores_by_id.get(source_id, 0.0) for source_id in source_ids), default=0.0),
-                    why=("contradiction_companion", "contradiction_warning"),
-                    deep_recall=f"memory_get {view.id}",
-                    conflicts_with=source_ids,
-                )
-            )
-            visible_ids.add(view.id)
-
-        marked_items = _mark_visible_conflicts(items, views, visible_ids)
-        return [*marked_items, *companion_items], views
 
     def _passes_canonical_filter(self, view: CanonicalNodeView, query: RecallQuery) -> bool:
         if view.status is memory.NodeStatus.REJECTED:
@@ -371,9 +340,14 @@ def _rrf_ranked_ids(
     return ranked, dict(why_by_id)
 
 
-def _score_for(memory_id: str, *, lexical: Sequence[tuple[str, float]], fts: Sequence[tuple[str, float]], k: int) -> float:
+def _score_for(
+    memory_id: str,
+    *,
+    channels: Sequence[tuple[str, Sequence[tuple[str, float]]]],
+    k: int,
+) -> float:
     score = 0.0
-    for rows in (lexical, fts):
+    for _channel, rows in channels:
         for rank, (candidate_id, _raw_score) in enumerate(rows, start=1):
             if candidate_id == memory_id:
                 score += 1.0 / (k + rank)
@@ -425,6 +399,72 @@ def _contradiction_ids(view: CanonicalNodeView) -> tuple[str, ...]:
     return tuple(ids)
 
 
+def _expand_contradiction_companions(
+    items: list[RecallItem],
+    *,
+    memory_query: MemoryQuery,
+    graph_id: str | None,
+    suppressed_ids: set[str],
+    passes_filter,
+    query: RecallQuery,
+) -> list[RecallItem]:
+    """Surface the active contradiction partner of any recalled memory.
+
+    Governance keeps two conflicting memories ACTIVE and links them with a
+    non-destructive ``CONTRADICTS`` edge; that edge is only useful at recall
+    time if BOTH sides reach the model. Plain recall may surface only one side,
+    so we always (including the 0-hop automatic path) pull in the missing
+    partner. This is the one relation where leaving the neighbor unexpanded is a
+    correctness hazard, not just incomplete context — every other typed-graph
+    relation stays behind ``max_hops>=1``.
+
+    Companions are appended beyond ``limit`` (they are safety additions, not
+    ranking competitors) and are subject to the SAME scope/type/status
+    visibility and suppression rules as any recalled node, so a hidden- or
+    out-of-scope partner is never leaked.
+    """
+    surfaced = {item.memory_id for item in items}
+    wanted: dict[str, list[str]] = {}
+    # Collect contradiction partners from each surfaced item's view edges.
+    views = {view.id: view for view in memory_query.fetch_nodes(list(surfaced), graph_id=graph_id)}
+    for item in items:
+        view = views.get(item.memory_id)
+        if view is None:
+            continue
+        for counterpart_id in _contradiction_ids(view):
+            if counterpart_id in surfaced or counterpart_id in suppressed_ids:
+                continue
+            wanted.setdefault(counterpart_id, []).append(item.memory_id)
+    if not wanted:
+        return items
+    companion_views = {
+        view.id: view
+        for view in memory_query.fetch_nodes(sorted(wanted), graph_id=graph_id)
+    }
+    companions: list[RecallItem] = []
+    for counterpart_id in sorted(wanted):
+        view = companion_views.get(counterpart_id)
+        if view is None or not passes_filter(view, query):
+            continue
+        sources = tuple(dict.fromkeys(wanted[counterpart_id]))
+        companions.append(
+            RecallItem(
+                memory_id=view.id,
+                memory_type=view.memory_type,
+                scope=view.scope,
+                status=view.status,
+                snippet=_snippet(view),
+                score=0.0,
+                why=("contradiction_companion", "contradiction_warning"),
+                deep_recall=f"memory_get {view.id}",
+                conflicts_with=sources,
+                direct_match=False,
+                hop_count=1,
+            )
+        )
+    return [*items, *companions]
+
+
 def _mark_visible_conflicts(
     items: list[RecallItem],
     views: dict[str, CanonicalNodeView],
@@ -445,10 +485,6 @@ def _mark_visible_conflicts(
     return marked
 
 
-def _score_by_id(items: Sequence[RecallItem]) -> dict[str, float]:
-    return {item.memory_id: item.score for item in items}
-
-
 def _append_filtered_id(filtered_ids: list[str], memory_id: str) -> None:
     if memory_id not in filtered_ids:
         filtered_ids.append(memory_id)
@@ -461,48 +497,8 @@ def _dedupe_ids(memory_ids: Sequence[str]) -> tuple[str, ...]:
 def _trim_recall_items(items: list[RecallItem], limit: int) -> list[RecallItem]:
     if limit <= 0:
         return []
-    if len(items) <= limit:
-        return items
-
-    trimmed = list(items)
-    while len(trimmed) > limit:
-        companion_source_ids = {
-            source_id
-            for item in trimmed
-            if "contradiction_companion" in item.why
-            for source_id in item.conflicts_with
-        }
-        removable_indexes = [
-            index
-            for index, item in enumerate(trimmed)
-            if "contradiction_companion" not in item.why and item.memory_id not in companion_source_ids
-        ]
-        if not removable_indexes:
-            non_companions = [item for item in trimmed if "contradiction_companion" not in item.why]
-            return (non_companions or trimmed)[:limit]
-        trimmed.pop(removable_indexes[-1])
-    return trimmed
+    return items[:limit]
 
 
-def _stabilize_visible_conflicts(items: list[RecallItem]) -> list[RecallItem]:
-    visible_ids = {item.memory_id for item in items}
-    stabilized: list[RecallItem] = []
-    for item in items:
-        conflicts = tuple(memory_id for memory_id in item.conflicts_with if memory_id in visible_ids)
-        why_base = tuple(
-            reason
-            for reason in item.why
-            if reason not in {"contradiction_companion", "contradiction_warning"}
-        )
-        if not conflicts:
-            if "contradiction_companion" in item.why:
-                continue
-            stabilized.append(replace(item, why=why_base, conflicts_with=()))
-            continue
-        why = (
-            (*why_base, "contradiction_companion", "contradiction_warning")
-            if "contradiction_companion" in item.why
-            else (*why_base, "contradiction_warning")
-        )
-        stabilized.append(replace(item, why=tuple(dict.fromkeys(why)), conflicts_with=conflicts))
-    return stabilized
+def _minimum_hops(paths: Sequence[RecallPath]) -> int:
+    return min((len(path.steps) for path in paths), default=0)

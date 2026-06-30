@@ -27,6 +27,7 @@ from pulsara_agent.memory import (
     PostgresCandidatePool,
 )
 from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
+from pulsara_agent.memory.recall.graph import GraphCandidateService
 from pulsara_agent.memory.recall.sparse import SparseCandidateService
 from pulsara_agent.memory.recall.dense import DenseCandidateService
 from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
@@ -251,6 +252,7 @@ def build_durable_runtime_wiring(
         dense=dense_recall,
         reranker=semantic_reranker,
         trace_store=PostgresRecallTraceStore(dsn=settings.storage.postgres_dsn),
+        graph_candidates=GraphCandidateService(memory_query=memory_query),
     )
     _register_timeline_hook(
         runtime_session=runtime_session,

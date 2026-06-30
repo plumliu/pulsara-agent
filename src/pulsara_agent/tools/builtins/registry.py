@@ -25,7 +25,6 @@ from pulsara_agent.tools.builtins.memory import (
 from pulsara_agent.tools.builtins.memory_query import (
     MemoryExplainTool,
     MemoryGetTool,
-    MemoryRelatedTool,
     MemorySearchTool,
 )
 from pulsara_agent.tools.builtins.plan import AskPlanQuestionTool, EnterPlanTool, ExitPlanTool
@@ -90,13 +89,6 @@ def build_core_tool_registry(
     if memory_query is not None:
         registry.register(
             MemoryGetTool(
-                memory_query=memory_query,
-                graph_id=graph_id,
-                read_scopes=memory_read_scopes,
-            )
-        )
-        registry.register(
-            MemoryRelatedTool(
                 memory_query=memory_query,
                 graph_id=graph_id,
                 read_scopes=memory_read_scopes,

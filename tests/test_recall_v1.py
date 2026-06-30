@@ -35,7 +35,6 @@ from pulsara_agent.tools.registry import ToolRegistry
 from pulsara_agent.tools.builtins.memory_query import (
     MemoryExplainTool,
     MemoryGetTool,
-    MemoryRelatedTool,
     MemorySearchTool,
 )
 
@@ -438,7 +437,6 @@ def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
         read_scopes = frozenset({"ctx:user", "ctx:workspace/test_project"})
         search = MemorySearchTool(recall=recall, graph_id=graph_id, read_scopes=read_scopes)
         get = MemoryGetTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
-        related = MemoryRelatedTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
         explain = MemoryExplainTool(memory_query=query, graph_id=graph_id, read_scopes=read_scopes)
 
         default_payload = json.loads(
@@ -477,15 +475,6 @@ def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
                 )
             ).output
         )
-        hidden_related_payload = json.loads(
-            related.execute(
-                ToolCall(
-                    id="call:memory-related-hidden",
-                    name="memory_related",
-                    arguments={"memory_id": "preference:hidden-concise"},
-                )
-            ).output
-        )
         hidden_explain_payload = json.loads(
             explain.execute(
                 ToolCall(
@@ -504,12 +493,9 @@ def test_memory_search_and_id_tools_are_read_scope_aware() -> None:
         assert hidden_scope_payload["reason"] == "scope_not_visible"
         assert hidden_get_payload["status"] == "empty"
         assert hidden_get_payload["reason"] == "scope_not_visible"
-        assert hidden_related_payload["status"] == "empty"
-        assert hidden_related_payload["reason"] == "scope_not_visible"
         assert hidden_explain_payload["status"] == "empty"
         assert hidden_explain_payload["reason"] == "scope_not_visible"
         assert "hidden workspace" not in json.dumps(hidden_get_payload).lower()
-        assert "hidden workspace" not in json.dumps(hidden_related_payload).lower()
         assert "hidden workspace" not in json.dumps(hidden_explain_payload).lower()
     finally:
         store.delete_graph(graph_id)

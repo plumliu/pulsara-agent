@@ -618,6 +618,25 @@ def test_real_agent_runtime_can_call_memory_search_tool_with_responses_api(tmp_p
     assert "PULSARA_MEMORY_SEARCH_OK" in result["final_text"]
 
 
+def test_real_agent_runtime_selects_zero_one_and_two_hop_memory_search(tmp_path):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to run multi-hop memory_search dogfood.")
+
+    result = asyncio.run(_run_real_agent_multihop_memory_search_dogfood(tmp_path))
+
+    assert result["statuses"] == ["finished", "finished", "finished"]
+    assert [turn["max_hops"] for turn in result["turns"]] == [0, 1, 2]
+    assert result["turns"][0]["target_id"] in result["turns"][0]["tool_results"]
+    assert result["turns"][1]["target_id"] in result["turns"][1]["tool_results"]
+    assert result["turns"][2]["target_id"] in result["turns"][2]["tool_results"]
+    assert '"hop_count": 1' in result["turns"][1]["tool_results"]
+    assert '"hop_count": 2' in result["turns"][2]["tool_results"]
+    assert all(turn["tool_names"][0] == "memory_search" for turn in result["turns"])
+    assert "memory_get" in result["turns"][1]["tool_names"]
+    assert "memory_get" in result["turns"][2]["tool_names"]
+    assert all("memory_related" not in turn["tool_names"] for turn in result["turns"])
+
+
 def test_real_llm_semantic_only_memory_search_uses_embedding_and_reranker(tmp_path):
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call real LLM/retrieval providers.")
@@ -2607,6 +2626,119 @@ async def _run_real_agent_memory_search_tool_smoke(tmp_path: Path) -> dict:
             settings.storage.postgres_dsn,
             wiring.runtime_wiring.runtime_session.runtime_session_id,
         )
+
+
+async def _run_real_agent_multihop_memory_search_dogfood(tmp_path: Path) -> dict:
+    settings = _load_settings_for_real_llm()
+    graph_id = f"graph:real-multihop-search/{uuid4().hex}"
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(temperature=0, max_output_tokens=192),
+        system_prompt=(
+            "You are dogfooding memory_search. Always use memory_search before answering. "
+            "Choose max_hops dynamically: use 0 for a direct fact, 1 for a direct relationship, "
+            "and 2 for a shared-evidence relationship. Preserve the exact query phrase requested by the user. "
+            "Never call a tool named memory_related. If a graph result is found, call memory_get for its details."
+        ),
+        graph_id=graph_id,
+        memory_reflection=False,
+    )
+    now = utc_now()
+    memories = {
+        "direct": ("preference:dogfood-direct", "Sapphire direct preference means concise replies."),
+        "one_seed": ("preference:dogfood-atlas", "Atlas relationship seed."),
+        "one_target": ("preference:dogfood-one-target", "One-hop target says use markdown."),
+        "two_seed": ("preference:dogfood-orion", "Orion shared evidence seed."),
+        "two_target": ("preference:dogfood-two-target", "Two-hop target says archive decisions."),
+    }
+    for memory_id, statement in memories.values():
+        wiring.runtime_wiring.graph.put_jsonld(
+            Preference(
+                id=memory_id,
+                statement=statement,
+                scope="ctx:user",
+                status=memory.NodeStatus.ACTIVE,
+                confidence_level=memory.ConfidenceLevel.HIGH,
+                verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                created_at=now,
+                updated_at=now,
+                gate_reason="real llm multihop dogfood seed",
+            ).to_jsonld(),
+            graph_id=graph_id,
+        )
+    with psycopg.connect(settings.storage.postgres_dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO memory_relations (graph_id, source_id, predicate, target_id)
+                VALUES (%s, %s, %s, %s)
+                """,
+                [
+                    (
+                        graph_id,
+                        memories["one_seed"][0],
+                        memory.BASED_ON.name,
+                        memories["one_target"][0],
+                    ),
+                    (graph_id, "evidence:dogfood-shared", memory.SUPPORTS.name, memories["two_seed"][0]),
+                    (graph_id, "evidence:dogfood-shared", memory.SUPPORTS.name, memories["two_target"][0]),
+                ],
+            )
+    prompts = [
+        ("Sapphire direct preference", 0, memories["direct"][0]),
+        ("Atlas relationship seed", 1, memories["one_target"][0]),
+        ("Orion shared evidence seed", 2, memories["two_target"][0]),
+    ]
+    runs = []
+    try:
+        for query_text, expected_hops, target_id in prompts:
+            run = await wiring.agent_runtime.run_task(
+                f"Search for '{query_text}'. This is a "
+                f"{'direct fact' if expected_hops == 0 else 'direct relationship' if expected_hops == 1 else 'shared-evidence relationship'}. "
+                "Answer briefly from the tool result."
+            )
+            events = list(wiring.runtime_wiring.event_log.iter(run_id=run.state.run_id))
+            calls = _tool_calls_from_stream_events(events)
+            search_call = next(call for call in calls if call["name"] == "memory_search")
+            tool_results = "\n".join(
+                event.delta for event in events if isinstance(event, ToolResultTextDeltaEvent)
+            )
+            runs.append(
+                {
+                    "status": run.status.value,
+                    "max_hops": search_call["arguments"].get("max_hops", 0),
+                    "target_id": target_id,
+                    "tool_names": [call["name"] for call in calls],
+                    "tool_results": tool_results,
+                }
+            )
+        return {"statuses": [run["status"] for run in runs], "turns": runs}
+    finally:
+        wiring.agent_runtime.close()
+        wiring.runtime_wiring.graph.delete_graph(graph_id)
+        _delete_postgres_runtime_session(
+            settings.storage.postgres_dsn,
+            wiring.runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+
+def _tool_calls_from_stream_events(events) -> list[dict]:
+    calls: list[dict] = []
+    current: dict | None = None
+    for event in events:
+        if isinstance(event, ToolCallStartEvent):
+            current = {"name": event.tool_call_name, "arguments_text": ""}
+            calls.append(current)
+        elif isinstance(event, ToolCallDeltaEvent) and current is not None:
+            current["arguments_text"] += event.delta
+    for call in calls:
+        text = call.pop("arguments_text")
+        call["arguments"] = json.loads(text) if text else {}
+    return calls
 
 
 async def _run_real_semantic_only_memory_search(tmp_path: Path) -> dict:

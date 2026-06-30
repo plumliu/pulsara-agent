@@ -767,7 +767,7 @@ def test_read_only_denies_remember_tools(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["read_file", "search_files", "artifact_read", "memory_search", "memory_get", "memory_related", "memory_explain", "todo"],
+    ["read_file", "search_files", "artifact_read", "memory_search", "memory_get", "memory_explain", "todo"],
 )
 def test_read_only_allows_allowlist_tools(name: str) -> None:
     assert _read_only_decision(name).kind is PermissionDecisionKind.ALLOW

@@ -39,8 +39,16 @@ from pulsara_agent.memory.governance.relatedness import (
     RelatednessExecutionContext,
 )
 from pulsara_agent.memory.hooks.durable import _merge_projections
+from pulsara_agent.memory.recall.graph import GraphCandidateService
 from pulsara_agent.memory.recall.projection import ProjectionBuilder
-from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
+from pulsara_agent.memory.recall.service import (
+    LexicalMemoryRecallService,
+    RecallItem,
+    RecallQuery,
+    RecallResult,
+    RecallStatus,
+    RecallTrigger,
+)
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 
@@ -504,7 +512,7 @@ def test_legacy_contradiction_downgrades_to_coexist_without_audit_candidate() ->
     assert _governance_candidate_count(pool) == 0
 
 
-def test_recall_adds_visible_contradiction_companion_and_projection_conflict_group() -> None:
+def test_recall_surfaces_contradiction_companion_at_zero_hop_and_grounds_path_at_one_hop() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
     graph_id = f"graph:test/{uuid4().hex}"
@@ -524,21 +532,49 @@ def test_recall_adds_visible_contradiction_companion_and_projection_conflict_gro
         )
         MemorySearchIndexSync(dsn=dsn).rebuild(graph_id=graph_id)
 
+        service = LexicalMemoryRecallService(query, graph_candidates=GraphCandidateService(query))
+        zero_hop = asyncio.run(
+            service.recall(
+                RecallQuery(
+                    text="likes egg",
+                    scopes=("ctx:user",),
+                    limit=2,
+                    trigger=RecallTrigger.EXPLICIT_SEARCH,
+                ),
+                graph_id=graph_id,
+            )
+        )
         result = asyncio.run(
-            LexicalMemoryRecallService(query).recall(
-                RecallQuery(text="likes egg", scopes=("ctx:user",), limit=2),
+            service.recall(
+                RecallQuery(
+                    text="likes egg",
+                    scopes=("ctx:user",),
+                    limit=2,
+                    max_hops=1,
+                    trigger=RecallTrigger.EXPLICIT_SEARCH,
+                ),
                 graph_id=graph_id,
             )
         )
         projection = ProjectionBuilder().build(result, token_budget=300)
 
+        # 0-hop already surfaces the contradiction companion (special case), but
+        # without a grounded graph path — that trail only appears at hops>=1.
+        zero_by_id = {item.memory_id: item for item in zero_hop.items}
+        assert set(zero_by_id) == {old_id, new_id}
+        assert zero_by_id[new_id].direct_match is False
+        assert zero_by_id[new_id].paths == ()
+        assert "contradiction_companion" in zero_by_id[new_id].why
+        assert zero_by_id[old_id].conflicts_with == (new_id,)
         assert result.status is RecallStatus.OK
         by_id = {item.memory_id: item for item in result.items}
         assert set(by_id) == {old_id, new_id}
         assert by_id[old_id].conflicts_with == (new_id,)
         assert by_id[new_id].conflicts_with == (old_id,)
         assert "contradiction_warning" in by_id[old_id].why
-        assert "contradiction_companion" in by_id[new_id].why
+        assert by_id[new_id].direct_match is False
+        assert by_id[new_id].hop_count == 1
+        assert by_id[new_id].paths[0].steps[0].predicate == memory.CONTRADICTS.name
         assert projection["conflict_groups"] == [
             {"kind": "contradiction", "memory_ids": sorted([old_id, new_id])}
         ]
@@ -547,7 +583,7 @@ def test_recall_adds_visible_contradiction_companion_and_projection_conflict_gro
         store.delete_graph(graph_id)
 
 
-def test_recall_contradiction_companion_respects_scope_and_status_filters() -> None:
+def test_zero_hop_recall_does_not_follow_hidden_contradiction_edges() -> None:
     matched_id = "preference:visible-like-egg"
     cross_scope_id = "preference:hidden-workspace-egg"
     inactive_id = "preference:hidden-superseded-egg"
@@ -580,12 +616,15 @@ def test_recall_contradiction_companion_respects_scope_and_status_filters() -> N
 
     assert result.status is RecallStatus.OK
     assert [item.memory_id for item in result.items] == [matched_id]
-    assert set(result.filtered_ids) == {cross_scope_id, inactive_id}
+    assert result.filtered_ids == ()
     assert result.items[0].conflicts_with == ()
     assert "contradiction_warning" not in result.items[0].why
 
 
-def test_recall_limit_does_not_render_orphaned_contradiction_warning() -> None:
+def test_recall_surfaces_contradiction_companion_beyond_limit() -> None:
+    # Contradiction is a 0-hop special case: even when limit=1 is filled by the
+    # matched memory, the active CONTRADICTS partner is surfaced as a companion
+    # (exempt from limit) so the model never acts on half a known conflict.
     matched_id = "preference:visible-like-egg"
     companion_id = "preference:visible-hate-egg"
     views = {
@@ -609,12 +648,132 @@ def test_recall_limit_does_not_render_orphaned_contradiction_warning() -> None:
     projection = ProjectionBuilder().build(result, token_budget=200)
 
     assert result.status is RecallStatus.OK
-    assert [item.memory_id for item in result.items] == [matched_id]
-    assert result.items[0].conflicts_with == ()
-    assert "contradiction_warning" not in result.items[0].why
-    assert "contradiction_companion" not in result.items[0].why
-    assert projection["conflict_groups"] == []
-    assert companion_id not in projection["summary"]
+    by_id = {item.memory_id: item for item in result.items}
+    assert set(by_id) == {matched_id, companion_id}
+    assert by_id[matched_id].conflicts_with == (companion_id,)
+    assert "contradiction_warning" in by_id[matched_id].why
+    assert by_id[companion_id].direct_match is False
+    assert "contradiction_companion" in by_id[companion_id].why
+    assert projection["conflict_groups"] == [
+        {"kind": "contradiction", "memory_ids": sorted([matched_id, companion_id])}
+    ]
+
+
+def _recall_item(memory_id: str, *, snippet: str, conflicts_with: tuple[str, ...] = ()) -> RecallItem:
+    why = ("contradiction_warning",) if conflicts_with else ("recall_match",)
+    return RecallItem(
+        memory_id=memory_id,
+        memory_type=memory.PREFERENCE.name,
+        scope="ctx:user",
+        status=memory.NodeStatus.ACTIVE,
+        snippet=snippet,
+        score=0.5,
+        why=why,
+        deep_recall=f"memory_get {memory_id}",
+        conflicts_with=conflicts_with,
+        direct_match=not conflicts_with,
+    )
+
+
+def test_projection_truncation_does_not_overclaim_included_or_conflicts() -> None:
+    # Tight token_budget must clip the tail; the metadata (included_memory_ids /
+    # conflict_groups) must reflect ONLY what survived in the summary text. The
+    # contradiction pair has SMALL snippets and renders first, so it (and the
+    # conflict block) survives while the large non-conflict tail is dropped.
+    result = RecallResult(
+        status=RecallStatus.OK,
+        items=(
+            _recall_item("preference:left", snippet="likes tabs", conflicts_with=("preference:right",)),
+            _recall_item("preference:right", snippet="likes spaces", conflicts_with=("preference:left",)),
+            _recall_item("preference:c", snippet="c " + "x" * 400),
+            _recall_item("preference:d", snippet="d " + "x" * 400),
+            _recall_item("preference:e", snippet="e " + "x" * 400),
+        ),
+    )
+
+    projection = ProjectionBuilder().build(result, token_budget=150)
+
+    included = projection["included_memory_ids"]
+    # Honesty invariant: every claimed id actually appears in the summary text.
+    assert all(f"[{mid}]" in projection["summary"] for mid in included)
+    # Truncation actually happened (not all 5 items fit).
+    assert len(included) < len(result.items)
+    # The contradiction pair is the safety signal — it must survive the clip.
+    assert "preference:left" in included
+    assert "preference:right" in included
+    # A large non-conflict tail item was dropped (the over-claim guard).
+    assert "preference:e" not in included
+    # conflict_groups must never reference an id absent from included_memory_ids.
+    for group in projection["conflict_groups"]:
+        assert set(group["memory_ids"]) <= set(included)
+    assert projection["conflict_groups"] == [
+        {"kind": "contradiction", "memory_ids": ["preference:left", "preference:right"]}
+    ]
+
+
+def test_projection_generous_budget_includes_all_items_and_conflict() -> None:
+    result = RecallResult(
+        status=RecallStatus.OK,
+        items=(
+            _recall_item("preference:left", snippet="likes tabs", conflicts_with=("preference:right",)),
+            _recall_item("preference:right", snippet="likes spaces", conflicts_with=("preference:left",)),
+            _recall_item("preference:c", snippet="unrelated"),
+        ),
+    )
+
+    projection = ProjectionBuilder().build(result, token_budget=500)
+
+    assert set(projection["included_memory_ids"]) == {
+        "preference:left",
+        "preference:right",
+        "preference:c",
+    }
+    assert projection["conflict_groups"] == [
+        {"kind": "contradiction", "memory_ids": ["preference:left", "preference:right"]}
+    ]
+
+
+def test_projection_minimum_budget_keeps_long_conflict_pair_atomic() -> None:
+    result = RecallResult(
+        status=RecallStatus.OK,
+        items=(
+            _recall_item(
+                "preference:left-with-long-id",
+                snippet="left " + "x" * 500,
+                conflicts_with=("preference:right-with-long-id",),
+            ),
+            _recall_item(
+                "preference:right-with-long-id",
+                snippet="right " + "y" * 500,
+                conflicts_with=("preference:left-with-long-id",),
+            ),
+            _recall_item("preference:ordinary-tail", snippet="ordinary tail"),
+        ),
+    )
+
+    projection = ProjectionBuilder().build(result, token_budget=1)
+
+    assert projection["included_memory_ids"] == [
+        "preference:left-with-long-id",
+        "preference:right-with-long-id",
+    ]
+    assert "[preference:left-with-long-id]" in projection["summary"]
+    assert "[preference:right-with-long-id]" in projection["summary"]
+    assert " <-> " in projection["summary"]
+    assert "left=" in projection["summary"]
+    assert "right=" in projection["summary"]
+    assert "preference:ordinary-tail" not in projection["summary"]
+    assert projection["summary"].endswith("</recalled-memory-projection>")
+    assert all(f"- {unit}" in projection["summary"] for unit in projection["items"])
+    assert projection["conflict_groups"] == [
+        {
+            "kind": "contradiction",
+            "memory_ids": [
+                "preference:left-with-long-id",
+                "preference:right-with-long-id",
+            ],
+        }
+    ]
 
 
 def test_merge_projection_preserves_conflict_groups() -> None:

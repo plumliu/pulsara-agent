@@ -67,12 +67,24 @@ Pulsara 的长期记忆不是单表文本库,而是几层 surface:
 
 显式搜索由 `memory_search` 工具触发,入口在 [memory_query.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/tools/builtins/memory_query.py)。它构造 `RecallQuery(trigger=RecallTrigger.EXPLICIT_SEARCH)` 并调用同一套 recall service。
 
-显式搜索是 Agentic RAG 的基础:模型可根据任务需要主动调用 `memory_search`、`memory_get`、`memory_related`、`memory_explain`。
+显式搜索是 Agentic RAG 的基础:模型可根据任务需要主动调用 `memory_search(max_hops=0|1|2)`、`memory_get`、`memory_explain`。`memory_search` 默认 0 跳；模型只在任务需要关系探索时主动选择 1 或 2 跳，并获得 grounded path。`memory_get` 负责单节点完整详情和直接关系。
 
 显式 recall 与自动 recall 的差异应保留在 `trigger` / options 上,而不是做两套 recall 系统:
 
 - `CHEAP_AUTO`:短预算、近期抑制开、projection 注入、可跳过昂贵 reranker。
-- `EXPLICIT_SEARCH`:模型主动给 query、结果可以更多、更详细、可启用 reranker、可允许 `needs_review`。
+- `EXPLICIT_SEARCH`:模型主动给 query、结果可以更多、更详细、可启用 reranker、可允许 `needs_review`,并可显式选择 `max_hops=0|1|2`。
+
+`max_hops` 默认值固定为 `0`:基础检索只返回 lexical / FTS / dense 命中的 canonical nodes。主 agent 只有在问题要求关系探索时才升级到 1 或 2 跳。automatic recall 即使内部 query 误带非零值也不得执行图扩展。
+
+多跳搜索读取同步 Postgres `memory_relations`,以基础召回结果为 seed,通过独立 `graph` candidate channel 参与 RRF 和 rerank。它不是通用 BFS:
+
+- 1 跳只发现 `contradicts` / `supersedes` / `basedOn` / `derivedFrom` canonical neighbor。
+- 2 跳只允许共享 evidence、共享 basis、连续 supersede lineage 三类 motif。
+- 每条返回 path 同时记录 traversal direction 与 materialized edge 的原始 source / predicate / target。
+- scope / type / status 过滤适用于 endpoint 和 canonical intermediate;隐藏 canonical node 不得成为跳板。
+- 图通道失败时保留基础结果并记录 `graph_expand_degraded`,不得把整个 recall 判为 unavailable。
+
+`memory_related` 已删除。关系发现统一由 `memory_search(max_hops=1|2)` 完成；`memory_get(memory_id)` 保留为单节点完整字段、evidence 和 direct edges 的详情入口。
 
 ### 1.4 当前检索流水线
 
@@ -86,8 +98,8 @@ Pulsara 的长期记忆不是单表文本库,而是几层 surface:
 6. RRF fusion: `_rrf_ranked_ids(("lexical", lexical), ("fts", fts))`。
 7. fetch canonical nodes:`fetch_nodes(ranked_ids)`。
 8. canonical filter:status / scope / type / needs_review 等。
-9. contradiction expansion:如果召回到一侧矛盾记忆,尝试把另一侧 contradiction companion 带出来。
-10. graph-aware rerank: `direct_relation_rerank()` 给 support/supersede 等直接关系一点 grounded bonus,并标 contradiction warning。
+9. explicit graph expansion:仅当 `memory_search.max_hops > 0` 时,从已过滤 seed 做 typed graph candidate expansion。
+10. graph-aware rerank: `direct_relation_rerank()` 给 support/supersede 等直接关系一点 grounded bonus;只有矛盾双方都进入最终结果时才标 contradiction warning。
 11. trim / stabilize conflict groups。
 12. 写 recall trace / usages。
 
@@ -97,7 +109,7 @@ Pulsara 的长期记忆不是单表文本库,而是几层 surface:
 
 - **治理边界清楚**:recall 只读,不写 canonical。
 - **scope 清楚**:`ctx:user` / workspace / domain 可以隔离。
-- **冲突不被揉掉**:contradiction companion 和 warning 会把矛盾作为结构化事实暴露给模型。
+- **冲突不被揉掉**:contradiction 是 0 跳特例 —— 任何被基础通道命中的 memory,其 active、同 scope/type 的 `CONTRADICTS` 邻居即使未被直接命中,也会作为 contradiction companion 补出(不受 `limit` 约束、不附 grounded path),确保模型不会只看到冲突的一半。这是唯一在 0 跳就展开的关系边,因为对冲突只见一面是正确性风险,而非信息完整性问题。其余 typed 关系(shared-evidence / shared-basis / supersede-lineage)仍只在 `max_hops>=1` 展开;当模型显式选 1|2 跳时,contradiction 会额外带上 grounded path。companion 与被命中方都标注 `contradiction_warning` 作为结构化事实。
 - **可审计**:recall trace 与 usage 可持久化。
 - **自动/显式共用核心**:naive RAG 和 Agentic RAG 已经不是两套系统。
 - **防 echo 污染**:ProjectionLedger + `do_not_write_back`。

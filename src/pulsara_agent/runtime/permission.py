@@ -110,7 +110,6 @@ READ_ONLY_ALLOWED_TOOL_NAMES = frozenset(
         "artifact_read",
         "memory_search",
         "memory_get",
-        "memory_related",
         "memory_explain",
         "todo",
     }

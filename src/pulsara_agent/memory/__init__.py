@@ -57,7 +57,12 @@ from pulsara_agent.memory.recall.projection import ProjectionBuilder
 from pulsara_agent.memory.recall.projection_ledger import ProjectionLedger
 from pulsara_agent.memory.foundation.protocols import ArtifactStore, RuntimeEventReadStore
 from pulsara_agent.memory.foundation.provenance import RuntimeEventRef, RuntimeEventSpan, runtime_event_span_from_events
-from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery, PostgresMemoryQuery
+from pulsara_agent.memory.canonical.query import (
+    CanonicalNodeView,
+    MemoryQuery,
+    MemoryRelationEdge,
+    PostgresMemoryQuery,
+)
 from pulsara_agent.memory.canonical.reconcile import DamagedMemoryNode, PostgresMemoryReconciler, ReconciliationReport
 from pulsara_agent.memory.recall.service import (
     LexicalMemoryRecallService,
@@ -104,6 +109,11 @@ from pulsara_agent.memory.hooks.runtime_persistence import ExecutionEvidencePers
 from pulsara_agent.memory.hooks.run_timeline_persistence import RunTimelinePersistenceHook
 from pulsara_agent.memory.recall.trace import PostgresRecallTraceStore, RecallTraceStore
 from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
+from pulsara_agent.memory.recall.graph import (
+    GraphCandidateService,
+    RecallPath,
+    RecallPathStep,
+)
 from pulsara_agent.memory.recall.sparse import SparseCandidateService
 from pulsara_agent.memory.recall.dense import DenseCandidateService
 from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
@@ -146,8 +156,10 @@ __all__ = [
     "MemoryGovernanceOutput",
     "MemoryGovernanceRunResult",
     "MemoryQuery",
+    "MemoryRelationEdge",
     "MemoryRecallService",
     "HybridMemoryRecallService",
+    "GraphCandidateService",
     "SparseCandidateService",
     "DenseCandidateService",
     "RecallRerankService",
@@ -176,6 +188,8 @@ __all__ = [
     "ProjectionBuilder",
     "ProjectionLedger",
     "RecallItem",
+    "RecallPath",
+    "RecallPathStep",
     "RecallQuery",
     "RecallResult",
     "RecallStatus",

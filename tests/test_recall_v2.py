@@ -12,6 +12,7 @@ from pulsara_agent.memory.canonical.query import PostgresMemoryQuery
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
 from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
 from pulsara_agent.memory.recall.dense import DenseCandidateService
+from pulsara_agent.memory.recall.graph import GraphCandidateService
 from pulsara_agent.memory.recall.hybrid import HybridMemoryRecallService
 from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
 from pulsara_agent.memory.recall.service import RecallQuery, RecallStatus, RecallTrigger
@@ -81,6 +82,75 @@ class _SlowSparseService:
     async def collect(self, query, *, graph_id=None):
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
+
+
+def test_postgres_hybrid_recall_discovers_two_hop_shared_evidence_with_grounded_path() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    graph_id = f"graph:test/recall-v2/{uuid4().hex}"
+    seed_id = _seed_memory(dsn, graph_id, "Blue launch checklist alpha.")
+    target_id = _seed_memory(dsn, graph_id, "Emergency rollback protocol omega.")
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO memory_relations (graph_id, source_id, predicate, target_id)
+                VALUES (%s, 'evidence:shared-path', 'supports', %s)
+                """,
+                [(graph_id, seed_id), (graph_id, target_id)],
+            )
+    query = PostgresMemoryQuery(dsn=dsn)
+    service = HybridMemoryRecallService(
+        memory_query=query,
+        sparse=SparseCandidateService(query, RegexWordSplitTokenizer(min_token_length=2)),
+        dense=None,
+        reranker=None,
+        enable_graph_rerank=False,
+        graph_candidates=GraphCandidateService(query),
+        trace_store=PostgresRecallTraceStore(dsn=dsn),
+    )
+    try:
+        result = asyncio.run(
+            service.recall(
+                RecallQuery(
+                    text="Blue launch checklist alpha",
+                    scopes=("ctx:user",),
+                    limit=5,
+                    max_hops=2,
+                    trigger=RecallTrigger.EXPLICIT_SEARCH,
+                    session_id="session:graph-path",
+                    run_id="run:graph-path",
+                    turn_id="turn:graph-path",
+                    reply_id="reply:graph-path",
+                ),
+                graph_id=graph_id,
+            )
+        )
+
+        by_id = {item.memory_id: item for item in result.items}
+        assert by_id[seed_id].direct_match is True
+        assert by_id[target_id].direct_match is False
+        assert by_id[target_id].hop_count == 2
+        assert [step.traversal for step in by_id[target_id].paths[0].steps] == [
+            "reverse",
+            "forward",
+        ]
+        assert result.metadata["graph_path_count"] == 1
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT metadata
+                    FROM recall_traces
+                    WHERE graph_id = %s AND run_id = 'run:graph-path'
+                    """,
+                    (graph_id,),
+                )
+                trace_metadata = cursor.fetchone()[0]
+        assert trace_metadata["graph_max_hops"] == 2
+        assert trace_metadata["graph_path_count"] == 1
+        assert trace_metadata["graph_candidate_ids"] == [target_id]
+    finally:
+        _delete_graph(dsn, graph_id)
 
 
 def test_hybrid_recall_finds_semantic_only_hit_and_caches_auto_query_embedding() -> None:
@@ -302,11 +372,18 @@ def test_hybrid_preserves_canonical_filter_and_visible_contradiction_pair() -> N
         dense=None,
         reranker=None,
         enable_graph_rerank=True,
+        graph_candidates=GraphCandidateService(query),
     )
     try:
         result = asyncio.run(
             service.recall(
-                RecallQuery(text="concise summaries", scopes=("ctx:user",), limit=2),
+                RecallQuery(
+                    text="concise summaries",
+                    scopes=("ctx:user",),
+                    limit=2,
+                    max_hops=1,
+                    trigger=RecallTrigger.EXPLICIT_SEARCH,
+                ),
                 graph_id=graph_id,
             )
         )

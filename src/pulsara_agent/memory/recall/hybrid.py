@@ -8,6 +8,7 @@ import time
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
 from pulsara_agent.memory.recall.candidates import CandidateBatch
 from pulsara_agent.memory.recall.dense import DenseCandidateService
+from pulsara_agent.memory.recall.graph import GraphCandidateService, RecallPath
 from pulsara_agent.memory.recall.rerank import direct_relation_rerank
 from pulsara_agent.memory.recall.semantic_rerank import RecallRerankService
 from pulsara_agent.memory.recall.service import (
@@ -20,9 +21,10 @@ from pulsara_agent.memory.recall.service import (
     _dedupe_ids,
     _elapsed_ms,
     _empty_guidance,
+    _expand_contradiction_companions,
     _rrf_ranked_ids,
     _snippet,
-    _stabilize_visible_conflicts,
+    _mark_visible_conflicts,
     _trim_recall_items,
 )
 from pulsara_agent.memory.recall.sparse import SparseCandidateService
@@ -46,6 +48,7 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
         explicit_dense_timeout_seconds: float = 4.0,
         explicit_rerank_timeout_seconds: float = 4.0,
         explicit_total_deadline_seconds: float = 8.0,
+        graph_candidates: GraphCandidateService | None = None,
     ) -> None:
         super().__init__(
             memory_query=memory_query,
@@ -62,6 +65,7 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
         self.explicit_dense_timeout_seconds = explicit_dense_timeout_seconds
         self.explicit_rerank_timeout_seconds = explicit_rerank_timeout_seconds
         self.explicit_total_deadline_seconds = explicit_total_deadline_seconds
+        self.graph_candidates = graph_candidates
 
     async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
         if query.trigger is not RecallTrigger.EXPLICIT_SEARCH:
@@ -99,7 +103,11 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
             else None
         )
         warnings: list[str] = []
-        metadata: dict[str, object] = {"fusion": "rrf", "rrf_k": self.rrf_k}
+        metadata: dict[str, object] = {
+            "fusion": "rrf",
+            "rrf_k": self.rrf_k,
+            "graph_max_hops": query.max_hops if query.trigger is RecallTrigger.EXPLICIT_SEARCH else 0,
+        }
 
         sparse_task = asyncio.create_task(self.sparse.collect(query, graph_id=graph_id))
         dense_task = (
@@ -137,7 +145,42 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
         else:
             metadata["dense_query"] = "disabled"
 
-        channels = tuple(channel for batch in batches for channel in batch.channel_rows())
+        direct_channels = tuple(channel for batch in batches for channel in batch.channel_rows())
+        direct_ranked_ids, _ = _rrf_ranked_ids(channels=direct_channels, k=self.rrf_k)
+        # recent_injected_ids is a synchronous Postgres SELECT; keep it off the
+        # event loop so the frequently-run CHEAP_AUTO auto-inject path does not
+        # block (EXPLICIT_SEARCH short-circuits to an empty set internally).
+        suppressed_ids = await asyncio.to_thread(
+            self._recent_suppressed_ids, query, graph_id=graph_id, warnings=warnings
+        )
+        graph_paths: dict[str, tuple[RecallPath, ...]] = {}
+        graph_channels: tuple[tuple[str, list[tuple[str, float]]], ...] = ()
+        if (
+            query.trigger is RecallTrigger.EXPLICIT_SEARCH
+            and query.max_hops > 0
+            and self.graph_candidates is not None
+            and direct_ranked_ids
+        ):
+            try:
+                graph_outcome = await asyncio.to_thread(
+                    self.graph_candidates.collect,
+                    seed_ids=direct_ranked_ids,
+                    scopes=query.scopes,
+                    types=query.types,
+                    max_hops=query.max_hops,
+                    graph_id=graph_id,
+                    suppressed_ids=suppressed_ids,
+                )
+                graph_channels = graph_outcome.batch.channel_rows()
+                graph_paths = graph_outcome.paths_by_id
+                warnings.extend(graph_outcome.batch.warnings)
+                metadata.update(graph_outcome.batch.metadata)
+            except Exception as exc:
+                warnings.append(f"graph_expand_degraded:{type(exc).__name__}: {exc}")
+                metadata["graph_query"] = "degraded"
+        elif query.trigger is RecallTrigger.EXPLICIT_SEARCH and query.max_hops > 0:
+            metadata["graph_query"] = "disabled"
+        channels = (*direct_channels, *graph_channels)
         ranked_ids, why_by_id = _rrf_ranked_ids(channels=channels, k=self.rrf_k)
         candidate_ids = tuple(ranked_ids)
         metadata["candidate_channels"] = {
@@ -168,6 +211,9 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
             channel_scores,
             fused_scores,
             warnings,
+            suppressed_ids,
+            set(direct_ranked_ids),
+            graph_paths,
         )
 
         if query.trigger is RecallTrigger.EXPLICIT_SEARCH and self.reranker is not None and items:
@@ -192,7 +238,19 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
 
         if self.enable_graph_rerank and items:
             items = direct_relation_rerank(items, views)
-        items = _stabilize_visible_conflicts(_trim_recall_items(items, query.limit))
+        items = _trim_recall_items(items, query.limit)
+        # Contradiction-companion expansion does synchronous Postgres fetch_nodes
+        # calls; keep them off the event loop (same discipline as suppression).
+        items = await asyncio.to_thread(
+            _expand_contradiction_companions,
+            items,
+            memory_query=self.memory_query,
+            graph_id=graph_id,
+            suppressed_ids=suppressed_ids,
+            passes_filter=self._passes_canonical_filter,
+            query=query,
+        )
+        items = _mark_visible_conflicts(items, views, {item.memory_id for item in items})
         result = RecallResult(
             status=RecallStatus.OK if items else RecallStatus.EMPTY,
             items=tuple(items),
@@ -215,8 +273,10 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
         channel_scores: dict[str, dict[str, float]],
         fused_scores: dict[str, float],
         warnings: list[str],
+        suppressed_ids: set[str],
+        direct_ids: set[str],
+        graph_paths: dict[str, tuple[RecallPath, ...]],
     ) -> tuple[list[RecallItem], dict[str, CanonicalNodeView], list[str]]:
-        suppressed_ids = self._recent_suppressed_ids(query, graph_id=graph_id, warnings=warnings)
         views = {view.id: view for view in self.memory_query.fetch_nodes(ranked_ids, graph_id=graph_id)}
         filtered_ids: list[str] = []
         items: list[RecallItem] = []
@@ -239,19 +299,13 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
                     why=tuple(why_by_id.get(memory_id, ())),
                     deep_recall=f"memory_get {view.id}",
                     channel_scores=dict(per_channel),
+                    direct_match=memory_id in direct_ids,
+                    hop_count=0 if memory_id in direct_ids else _minimum_hops(graph_paths.get(memory_id, ())),
+                    paths=graph_paths.get(memory_id, ()),
                 )
             )
             if len(items) >= candidate_limit:
                 break
-        if items:
-            items, views = self._expand_contradiction_companions(
-                items,
-                views,
-                query,
-                graph_id=graph_id,
-                suppressed_ids=suppressed_ids,
-                filtered_ids=filtered_ids,
-            )
         return items, views, filtered_ids
 
 
@@ -280,3 +334,7 @@ def _remaining(deadline: float | None) -> float:
     if deadline is None:
         return 3600.0
     return max(0.0, deadline - time.monotonic())
+
+
+def _minimum_hops(paths: tuple[RecallPath, ...]) -> int:
+    return min((len(path.steps) for path in paths), default=0)
