@@ -18,7 +18,6 @@ from pulsara_agent.capability import (
     reset_bundled_skill,
     sync_bundled_skills,
 )
-from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.host import (
     HostCore,
     HostSessionBusyError,
@@ -29,17 +28,13 @@ from pulsara_agent.host import (
     resolve_workspace,
 )
 from pulsara_agent.llm import ModelRole
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
     ApprovalResolution,
     PendingPlanInteraction,
     PlanExitResolution,
     PlanQuestionResolution,
-    RuntimeSession,
     ToolApprovalDecision,
+    build_durable_runtime_wiring,
 )
 from pulsara_agent.runtime.permission import (
     PermissionMode,
@@ -58,7 +53,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true", help="Print Pulsara version.")
 
     subcommands = parser.add_subparsers(dest="command")
-    subcommands.add_parser("demo-ledger", help="Create and print a demo evidence ledger.")
     host = subcommands.add_parser("host", help="Run the thin HostCore smoke driver.")
     host_subcommands = host.add_subparsers(dest="host_command")
     _add_host_common_args(
@@ -119,16 +113,6 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         default=[],
         help="Activate a workspace skill by name for this turn. May be repeated.",
     )
-    parser.add_argument(
-        "--in-memory",
-        action="store_true",
-        help="Use the in-memory test-double runtime wiring instead of durable Postgres wiring.",
-    )
-    parser.add_argument(
-        "--durable",
-        action="store_true",
-        help="Explicitly confirm durable runtime wiring. Durable is the default.",
-    )
     parser.add_argument("--env-file", default=None, help="Load settings from a .env file before running.")
     parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
     parser.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
@@ -139,14 +123,6 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         help="Model role to use.",
     )
     return parser
-
-
-def _host_runtime_durable(args) -> bool:
-    if getattr(args, "in_memory", False) and getattr(args, "durable", False):
-        raise ValueError("--in-memory and --durable cannot be combined")
-    if getattr(args, "in_memory", False):
-        return False
-    return True
 
 
 def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -207,34 +183,6 @@ def main() -> None:
 
     if args.version:
         print(__version__)
-        return
-
-    if args.command == "demo-ledger":
-        graph = InMemoryGraphStore()
-        archive = InMemoryArchiveStore()
-        gate = MemoryWriteGate()
-        ledger = ExecutionEvidenceLedger(graph=graph, archive=archive, gate=gate)
-        result = ledger.record_tool_result(
-            turn_id="turn:demo/001",
-            tool_name="search_files",
-            status=rt.ToolExecutionStatus.SUCCESS,
-            input_summary="Search for JSON-LD flattening",
-            output="Found JSON-LD flattening in memory graph conversion.",
-            scope="ctx:demo",
-        )
-        evidence = ledger.create_evidence_from_tool_result(
-            result.tool_result_id,
-            statement="The tool result found a JSON-LD flattening concern.",
-            scope="ctx:demo",
-        )
-        claim = ledger.submit_claim(
-            statement="Pulsara should preserve JSON-LD semantics before optimizing recall.",
-            scope="ctx:demo",
-            evidence_ids=[evidence.evidence_id],
-            source_authority=memory.SourceAuthority.TOOL_RESULT,
-            verification_status=memory.VerificationStatus.TOOL_VERIFIED,
-        )
-        print(json.dumps({"tool_result": result.to_dict(), "evidence": evidence.to_dict(), "claim": claim.to_dict()}, indent=2))
         return
 
     if args.command == "config-check":
@@ -302,13 +250,13 @@ async def _host_run(args) -> object:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
-    core = HostCore(settings=settings, durable=_host_runtime_durable(args))
-    session = await core.open_session(
-        _workspace_input_from_args(args),
-        model_role=ModelRole(args.model_role),
-        permission_policy=permission_policy,
-    )
+    core = HostCore(settings=settings)
     try:
+        session = await core.open_session(
+            _workspace_input_from_args(args),
+            model_role=ModelRole(args.model_role),
+            permission_policy=permission_policy,
+        )
         result = await session.run_turn(args.prompt, active_skill_names=_active_skill_names_from_args(args))
         pending = session.get_pending_approval()
         if pending is not None:
@@ -326,20 +274,20 @@ async def _host_run(args) -> object:
             }
         return result
     finally:
-        await core.close_session(session.host_session_id)
+        await core.shutdown()
 
 
 async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
-    core = HostCore(settings=settings, durable=_host_runtime_durable(args))
-    session = await core.open_session(
-        _workspace_input_from_args(args),
-        model_role=ModelRole(args.model_role),
-        permission_policy=permission_policy,
-    )
+    core = HostCore(settings=settings)
     try:
+        session = await core.open_session(
+            _workspace_input_from_args(args),
+            model_role=ModelRole(args.model_role),
+            permission_policy=permission_policy,
+        )
         while True:
             try:
                 prompt = input("> ")
@@ -487,14 +435,19 @@ async def _host_repl(args) -> None:
             if pending_interaction is not None:
                 print(json.dumps({"pending_interaction": pending_interaction.to_dict()}, indent=2))
     finally:
-        await core.close_session(session.host_session_id)
+        await core.shutdown()
 
 
 async def _host_inspect(args) -> dict[str, object]:
-    _load_env_file_from_args(args)
+    settings = _settings_from_host_args(args)
     workspace = resolve_workspace(_workspace_input_from_args(args))
     permission_policy = _permission_policy_from_host_args(args, intent="inspect")
-    runtime_session = RuntimeSession(workspace.workspace_root)
+    wiring = build_durable_runtime_wiring(
+        settings,
+        workspace.workspace_root,
+        memory_domain=workspace.memory_domain,
+    )
+    runtime_session = wiring.runtime_session
     try:
         registry = build_core_tool_registry(
             runtime_session,

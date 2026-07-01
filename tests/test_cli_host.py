@@ -1,4 +1,6 @@
 import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 from pulsara_agent import cli
@@ -13,6 +15,7 @@ from pulsara_agent.runtime import PendingApproval, PendingPlanInteraction
 from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus
+from tests.support.runtime_session import in_memory_runtime_session
 
 
 class FakeResult:
@@ -120,12 +123,12 @@ class PendingPlanFakeSession(FakeSession):
 class FakeCore:
     instances: list["FakeCore"] = []
 
-    def __init__(self, *, settings, durable: bool = False):
+    def __init__(self, *, settings):
         self.settings = settings
-        self.durable = durable
         self.session = FakeSession()
         self.workspace_input: HostWorkspaceInput | None = None
         self.closed: list[str] = []
+        self.shutdown_called = False
         self.__class__.instances.append(self)
 
     async def open_session(self, workspace_input, *, model_role, permission_policy=None):
@@ -145,6 +148,22 @@ class FakeCore:
 
     async def shutdown(self):
         self.shutdown_called = True
+        if self.session.host_session_id not in self.closed:
+            await self.close_session(self.session.host_session_id)
+
+
+@pytest.fixture
+def inspect_wiring(monkeypatch):
+    monkeypatch.setattr(
+        cli.PulsaraSettings,
+        "from_env",
+        classmethod(lambda cls, prefix="PULSARA": object()),
+    )
+
+    def _build(_settings, workspace_root, **_kwargs):
+        return SimpleNamespace(runtime_session=in_memory_runtime_session(workspace_root))
+
+    monkeypatch.setattr(cli, "build_durable_runtime_wiring", _build)
 
 
 def test_cli_host_run_uses_host_core_with_transient_workspace(monkeypatch, tmp_path) -> None:
@@ -180,6 +199,7 @@ def test_cli_host_run_uses_host_core_with_transient_workspace(monkeypatch, tmp_p
     assert core.session.prompts == ["say hi"]
     assert core.session.active_skill_names == [frozenset({"review-pr"})]
     assert core.closed == ["host:fake"]
+    assert core.shutdown_called is True
     assert sync_calls == ["sync"]
 
 
@@ -192,7 +212,13 @@ def test_cli_host_run_rejects_removed_ephemeral_workspace_kind() -> None:
         )
 
 
-def test_cli_host_run_defaults_to_durable_runtime(monkeypatch, tmp_path) -> None:
+def test_cli_rejects_removed_demo_ledger_command() -> None:
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["demo-ledger"])
+
+
+def test_cli_host_run_uses_production_host_core_without_backend_switch(monkeypatch, tmp_path) -> None:
     FakeCore.instances.clear()
     monkeypatch.setattr(cli, "HostCore", FakeCore)
     monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
@@ -212,51 +238,23 @@ def test_cli_host_run_defaults_to_durable_runtime(monkeypatch, tmp_path) -> None
 
     asyncio.run(cli._host_run(args))
 
-    assert FakeCore.instances[0].durable is True
+    assert len(FakeCore.instances) == 1
 
 
-def test_cli_host_run_can_opt_out_to_in_memory(monkeypatch, tmp_path) -> None:
-    FakeCore.instances.clear()
-    monkeypatch.setattr(cli, "HostCore", FakeCore)
-    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
-    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+@pytest.mark.parametrize("removed_flag", ["--in-memory", "--durable"])
+def test_cli_host_run_rejects_removed_runtime_backend_flags(tmp_path, removed_flag) -> None:
     parser = cli.build_parser()
-    args = parser.parse_args(
-        [
-            "host",
-            "run",
-            "--in-memory",
-            "--workspace",
-            str(tmp_path),
-            "--model-role",
-            "flash",
-            "say hi",
-        ]
-    )
-
-    asyncio.run(cli._host_run(args))
-
-    assert FakeCore.instances[0].durable is False
-
-
-def test_cli_host_runtime_mode_flags_are_mutually_exclusive(tmp_path) -> None:
-    parser = cli.build_parser()
-    args = parser.parse_args(
-        [
-            "host",
-            "run",
-            "--in-memory",
-            "--durable",
-            "--workspace",
-            str(tmp_path),
-            "--model-role",
-            "flash",
-            "say hi",
-        ]
-    )
-
-    with pytest.raises(ValueError, match="cannot be combined"):
-        cli._host_runtime_durable(args)
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "host",
+                "run",
+                removed_flag,
+                "--workspace",
+                str(tmp_path),
+                "say hi",
+            ]
+        )
 
 
 def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) -> None:
@@ -299,8 +297,8 @@ def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) 
 
 def test_cli_host_run_returns_pending_approval_summary_for_one_shot(monkeypatch, tmp_path) -> None:
     class PendingCore(FakeCore):
-        def __init__(self, *, settings, durable: bool = False):
-            super().__init__(settings=settings, durable=durable)
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
             self.session = PendingFakeSession()
 
     PendingCore.instances.clear()
@@ -334,12 +332,13 @@ def test_cli_host_run_returns_pending_approval_summary_for_one_shot(monkeypatch,
     assert core.permission_policy.approval.value == "on_request"
     assert core.permission_policy.terminal.value == "ask"
     assert core.closed == ["host:fake"]
+    assert core.shutdown_called is True
 
 
 def test_cli_host_repl_approval_commands_show_and_resolve_pending(monkeypatch, tmp_path, capsys) -> None:
     class PendingCore(FakeCore):
-        def __init__(self, *, settings, durable: bool = False):
-            super().__init__(settings=settings, durable=durable)
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
             self.session = PendingFakeSession()
 
     PendingCore.instances.clear()
@@ -359,6 +358,7 @@ def test_cli_host_repl_approval_commands_show_and_resolve_pending(monkeypatch, t
     assert session.resolutions[0].decisions[0].tool_call_id == "call:danger"
     assert session.resolutions[0].decisions[0].confirmed is True
     assert core.closed == ["host:fake"]
+    assert core.shutdown_called is True
     out = capsys.readouterr().out
     assert '"approval_id": "approval:test"' in out
     assert "fake final" in out
@@ -385,8 +385,8 @@ def test_cli_host_repl_plan_command_enters_plan_without_running_prompt(monkeypat
 
 def test_cli_host_repl_answers_pending_plan_question(monkeypatch, tmp_path, capsys) -> None:
     class PendingPlanCore(FakeCore):
-        def __init__(self, *, settings, durable: bool = False):
-            super().__init__(settings=settings, durable=durable)
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
             self.session = PendingPlanFakeSession(kind="question")
 
     PendingPlanCore.instances.clear()
@@ -410,8 +410,8 @@ def test_cli_host_repl_answers_pending_plan_question(monkeypatch, tmp_path, caps
 
 def test_cli_host_repl_approves_pending_plan_exit(monkeypatch, tmp_path) -> None:
     class PendingPlanCore(FakeCore):
-        def __init__(self, *, settings, durable: bool = False):
-            super().__init__(settings=settings, durable=durable)
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
             self.session = PendingPlanFakeSession(kind="exit")
 
     PendingPlanCore.instances.clear()
@@ -432,8 +432,8 @@ def test_cli_host_repl_approves_pending_plan_exit(monkeypatch, tmp_path) -> None
 
 def test_cli_host_repl_stop_aborts_pending_approval(monkeypatch, tmp_path, capsys) -> None:
     class PendingCore(FakeCore):
-        def __init__(self, *, settings, durable: bool = False):
-            super().__init__(settings=settings, durable=durable)
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
             self.session = PendingFakeSession()
 
     PendingCore.instances.clear()
@@ -492,7 +492,9 @@ def test_cli_host_run_continues_when_bundled_sync_fails(monkeypatch, tmp_path, c
     assert FakeCore.instances[0].closed == ["host:fake"]
 
 
-def test_cli_host_inspect_prints_host_process_recovery_scope_and_skills(monkeypatch, tmp_path) -> None:
+def test_cli_host_inspect_prints_host_process_recovery_scope_and_skills(
+    monkeypatch, tmp_path, inspect_wiring
+) -> None:
     FakeCore.instances.clear()
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     monkeypatch.setattr(cli, "HostCore", FakeCore)
@@ -521,10 +523,6 @@ provides_tools:
         encoding="utf-8",
     )
 
-    def _fail_from_env(cls, prefix="PULSARA"):
-        raise AssertionError("inspect should not load settings")
-
-    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(_fail_from_env))
     parser = cli.build_parser()
     args = parser.parse_args(["host", "inspect", "--workspace", str(tmp_path)])
 
@@ -576,7 +574,9 @@ provides_tools:
     assert FakeCore.instances == []
 
 
-def test_cli_host_inspect_can_report_explicit_trusted_host_policy(monkeypatch, tmp_path) -> None:
+def test_cli_host_inspect_can_report_explicit_trusted_host_policy(
+    monkeypatch, tmp_path, inspect_wiring
+) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     monkeypatch.setattr(
         cli,
@@ -608,7 +608,9 @@ def test_cli_host_inspect_can_report_explicit_trusted_host_policy(monkeypatch, t
     assert snapshot["permissions"]["filesystem"]["terminal"] == "host_shell"
 
 
-def test_cli_host_inspect_can_report_terminal_ask_policy(monkeypatch, tmp_path) -> None:
+def test_cli_host_inspect_can_report_terminal_ask_policy(
+    monkeypatch, tmp_path, inspect_wiring
+) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     monkeypatch.setattr(
         cli,
@@ -640,7 +642,9 @@ def test_cli_host_inspect_can_report_terminal_ask_policy(monkeypatch, tmp_path) 
     assert snapshot["permissions"]["filesystem"]["terminal"] == "host_shell"
 
 
-def test_cli_host_inspect_can_report_on_request_with_terminal_allow(monkeypatch, tmp_path) -> None:
+def test_cli_host_inspect_can_report_on_request_with_terminal_allow(
+    monkeypatch, tmp_path, inspect_wiring
+) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     monkeypatch.setattr(
         cli,

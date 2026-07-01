@@ -48,7 +48,7 @@ from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
-from pulsara_agent.runtime import AgentRuntime, LoopState, RuntimeSession
+from pulsara_agent.runtime import AgentRuntime, LoopState
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools.base import ToolCall
 from pulsara_agent.tools.builtins.memory import (
@@ -59,6 +59,7 @@ from pulsara_agent.tools.builtins.memory import (
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
 from tests.support.memory_uow import fake_memory_uow_factory
+from tests.support.runtime_session import in_memory_runtime_session
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
@@ -539,7 +540,7 @@ def _make_llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
 
 
 def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     hooks = DurableMemoryHooks(
@@ -609,7 +610,7 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
 
 
 def test_default_agent_runtime_does_not_expose_memory_write_tools(tmp_path: Path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     transport = _ScriptedTransport(
         [
             {
@@ -647,7 +648,7 @@ def test_default_agent_runtime_does_not_expose_memory_write_tools(tmp_path: Path
 
 
 def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     hooks = DurableMemoryHooks(
@@ -696,7 +697,7 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
 
 
 def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(tmp_path: Path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     hooks = DurableMemoryHooks(

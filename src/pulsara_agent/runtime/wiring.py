@@ -199,11 +199,9 @@ def build_durable_runtime_wiring(
     )
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     postgres_graph = PostgresGraphStore(settings.storage.postgres_dsn)
-    oxigraph_graph = (
-        OxigraphGraphStore(settings.storage.oxigraph_url)
-        if settings.storage.oxigraph_url
-        else None
-    )
+    if not settings.storage.oxigraph_url.strip():
+        raise ValueError("durable runtime wiring requires a non-empty Oxigraph URL")
+    oxigraph_graph = OxigraphGraphStore(settings.storage.oxigraph_url)
     graph: GraphStore = DurableGraphFacade(postgres=postgres_graph, oxigraph=oxigraph_graph)
     candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
     memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
     EventContext,
@@ -396,7 +397,6 @@ def test_postgres_event_log_extend_rolls_back_entire_batch_on_parent_conflict(tm
 
 
 def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> None:
-    from pulsara_agent.runtime import RuntimeSession
 
     dsn = StorageConfig.from_env().postgres_dsn
     runtime_session_id = _runtime_session_id()
@@ -404,7 +404,7 @@ def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> Non
 
     try:
         event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-        runtime = RuntimeSession(
+        runtime = in_memory_runtime_session(
             tmp_path,
             runtime_session_id=runtime_session_id,
             event_log=event_log,

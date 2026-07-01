@@ -4,9 +4,10 @@ import time
 import types
 
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import EventContext, TextBlockDeltaEvent
-from pulsara_agent.runtime import RuntimeEventPublisher, RuntimePublishedEvent, RuntimeSession
+from pulsara_agent.runtime import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 
 
@@ -37,7 +38,7 @@ class FailingSubscriber:
 
 
 def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
     ready = threading.Event()
@@ -68,7 +69,7 @@ def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) 
 
 
 def test_emit_from_thread_preserves_loop_state_for_subscribers(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
     state = LoopState(session_id=runtime.runtime_session_id)
@@ -84,7 +85,7 @@ def test_emit_from_thread_preserves_loop_state_for_subscribers(tmp_path) -> None
 
 
 def test_emit_from_thread_does_not_wait_for_slow_subscribers(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     slow = SlowSubscriber(delay=0.2)
     runtime.publisher.subscribe(slow)
 
@@ -111,7 +112,7 @@ def test_emit_from_thread_does_not_wait_for_slow_subscribers(tmp_path) -> None:
 
 
 def test_emit_from_thread_eventually_publishes_after_slow_subscriber(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     slow = SlowSubscriber(delay=0.05)
     runtime.publisher.subscribe(slow)
 

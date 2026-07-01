@@ -19,6 +19,12 @@ class StorageConfig:
     oxigraph_url: str = DEFAULT_OXIGRAPH_URL
     postgres_dsn: str = DEFAULT_POSTGRES_DSN
 
+    def __post_init__(self) -> None:
+        if not self.postgres_dsn.strip():
+            raise ValueError("postgres_dsn is required for production storage wiring")
+        if not self.oxigraph_url.strip():
+            raise ValueError("oxigraph_url is required for production storage wiring")
+
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "StorageConfig":
         return cls(

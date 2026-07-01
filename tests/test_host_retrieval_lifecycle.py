@@ -19,7 +19,7 @@ def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(tmp_p
                 pro_model="test-pro",
                 flash_model="test-flash",
             ),
-            storage=StorageConfig(postgres_dsn="", oxigraph_url=""),
+            storage=StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"),
         )
         wiring = build_agent_runtime_wiring(
             settings,

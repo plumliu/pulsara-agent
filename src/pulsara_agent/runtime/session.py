@@ -8,8 +8,7 @@ from typing import Iterable
 from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent
-from pulsara_agent.event_log import EventLog, InMemoryEventLog
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.event_log import EventLog
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.runtime.hooks import RuntimeHookManager
@@ -23,11 +22,7 @@ from pulsara_agent.runtime.terminal import (
     TerminalRuntimeBinding,
     TerminalSessionManager,
 )
-from pulsara_agent.runtime.tool_artifacts import (
-    InMemoryToolResultArtifactIndex,
-    ToolResultArtifactIndex,
-    ToolResultArtifactService,
-)
+from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactIndex, ToolResultArtifactService
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,12 +37,12 @@ class RuntimeThreadRecorder:
 @dataclass(slots=True)
 class RuntimeSession:
     workspace_root: Path
+    event_log: EventLog
+    archive: ArtifactStore
+    tool_result_artifacts: ToolResultArtifactIndex
     runtime_session_id: str = field(default_factory=lambda: f"runtime:{uuid4().hex}")
-    event_log: EventLog = field(default_factory=InMemoryEventLog)
     hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
-    archive: ArtifactStore | None = None
-    tool_result_artifacts: ToolResultArtifactIndex | None = None
     terminal_binding: TerminalRuntimeBinding | None = None
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)
@@ -57,10 +52,6 @@ class RuntimeSession:
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
-        if self.archive is None:
-            self.archive = InMemoryArchiveStore()
-        if self.tool_result_artifacts is None:
-            self.tool_result_artifacts = InMemoryToolResultArtifactIndex()
         self.artifact_service = ToolResultArtifactService(
             archive=self.archive,
             index=self.tool_result_artifacts,

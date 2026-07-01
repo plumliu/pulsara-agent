@@ -372,6 +372,9 @@ governed canonical memory graph 的唯一写入口是：
 
 - `MemoryGovernanceExecutor` 只有一条 UoW 执行路径，`memory_write_uow_factory` 是必填依赖；缺失或显式传 `None` 必须在构造期失败，不得推断 storage backend。
 - 生产 wiring 只能注入 PostgreSQL `MemoryWriteUnitOfWork`。PostgreSQL 是 governed canonical authority；Oxigraph、search 与 vector 都是 outbox 驱动的异步派生面，不进入同步 UoW。
+- 生产 `RuntimeSession` 必须显式注入 PostgreSQL event log、artifact store 与 tool-result artifact index；裸构造不得创建任何 InMemory 默认依赖。
+- `MemoryWriteUnitOfWork.archive` 是必填依赖，生产 wiring 必须传入 `PostgresArtifactStore`，不得以 InMemory archive 补缺。
+- durable storage 配置必须提供非空 Oxigraph URL；durable wiring 总是构造真实 `OxigraphGraphStore`。空 URL 是配置错误，不表示允许静默关闭该 surface。
 - `InMemoryMemoryWriteUnitOfWork` 只服务显式的 deprecated compatibility/test wiring，不是 fallback，也不满足生产 durability、事务原子性或 async materialization 契约。测试 fake 只能验证 executor 决策逻辑；事务、rollback 与 outbox 一致性必须由 real PostgreSQL 测试证明。
 - `durable=False` / in-memory runtime 暂留作后向兼容，但属于 unsupported production path；后续功能不得新增对该路径的依赖。
 
@@ -381,6 +384,7 @@ governed canonical memory graph 的唯一写入口是：
 2. Postgres-intent-first
 3. 每条 governed memory 写都有原子的 decision / mutation provenance
 4. 不得以“未配置 UoW”为条件 fallback 到 InMemory 或 no-op outbox
+5. 生产 CLI 不得暴露 backend downgrade 开关；InMemory builder 只作为 deprecated 测试兼容 API 保留
 
 ---
 

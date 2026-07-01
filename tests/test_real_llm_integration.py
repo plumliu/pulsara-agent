@@ -4203,6 +4203,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),

@@ -1,6 +1,18 @@
 import os
 
-from pulsara_agent.settings import PulsaraSettings, load_env_file
+import pytest
+
+from pulsara_agent.settings import PulsaraSettings, StorageConfig, load_env_file
+
+
+def test_storage_config_rejects_empty_oxigraph_url() -> None:
+    with pytest.raises(ValueError, match="oxigraph_url is required"):
+        StorageConfig(oxigraph_url="   ")
+
+
+def test_storage_config_rejects_empty_postgres_dsn() -> None:
+    with pytest.raises(ValueError, match="postgres_dsn is required"):
+        StorageConfig(postgres_dsn="   ")
 
 
 def test_settings_can_load_env_file(tmp_path, monkeypatch):

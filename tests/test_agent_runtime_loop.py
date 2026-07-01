@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -63,7 +64,6 @@ from pulsara_agent.runtime import (
     LoopState,
     LoopStatus,
     LoopTransition,
-    RuntimeSession,
     ToolApprovalDecision,
     build_tool_result_error_events,
     msg_to_llm_messages,
@@ -155,7 +155,7 @@ def _trusted_terminal_policy() -> EffectivePermissionPolicy:
 
 
 def test_loop_state_initializes_from_runtime_session(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
 
     state = LoopState(session_id=runtime_session.runtime_session_id)
     first_turn = state.turn_id
@@ -251,7 +251,7 @@ def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> Non
 
 def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Say done"))
 
@@ -263,7 +263,7 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
 
 
 def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     state = LoopState(session_id=runtime_session.runtime_session_id)
     delivered: list[AgentEvent] = []
 
@@ -304,7 +304,7 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
 def test_agent_runtime_accepts_prior_messages(tmp_path) -> None:
     prior = [UserMsg(name="user", content="previous sentinel")]
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("current", prior_messages=prior))
 
@@ -315,7 +315,7 @@ def test_agent_runtime_accepts_prior_messages(tmp_path) -> None:
 
 
 def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     seen_events: list[EventType] = []
     seen_blocks: list[str] = []
 
@@ -347,7 +347,7 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
             {"text": "I read it."},
         ]
     )
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Read note.txt"))
 
@@ -361,7 +361,7 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
 
 def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
     (tmp_path / "note.txt").write_text("hook file", encoding="utf-8")
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     seen_tool_result_events: list[EventType] = []
     seen_tool_result_blocks: list[str] = []
 
@@ -399,7 +399,7 @@ def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
 
 
 def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
 
     def failing_hook(context, event) -> None:
         if event.type is EventType.TEXT_BLOCK_DELTA:
@@ -418,7 +418,7 @@ def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
 
 
 def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     (tmp_path / "note.txt").write_text("OLD", encoding="utf-8")
     first_transport = ScriptedTransport(
         [
@@ -474,7 +474,7 @@ def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
             {"text": "Recovered."},
         ]
     )
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Use a malformed tool."))
     events = agent.runtime_session.event_log.iter()
@@ -496,7 +496,7 @@ def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
 
 
 def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     first_transport = ScriptedTransport(
         [
             {"tool_calls": [{"id": "call:bad", "name": "read_file", "arguments": "[]"}]},
@@ -539,7 +539,7 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
             {"text": "Recovered from missing tool."},
         ]
     )
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Call a missing tool."))
     second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
@@ -557,7 +557,7 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
 
 def test_model_failure_sets_typed_in_run_recovery_state(tmp_path) -> None:
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
     )
     state = agent.new_state()
@@ -586,7 +586,7 @@ def test_agent_runtime_exceeds_max_turns(tmp_path) -> None:
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_turns=1),
     )
@@ -630,7 +630,7 @@ class DenyGate:
 
 
 def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     first_transport = ScriptedTransport(
         [
             {"tool_calls": [{"id": "call:deny", "name": "read_file", "arguments": json.dumps({"path": "x"})}]},
@@ -689,7 +689,7 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -725,7 +725,7 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_pa
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -745,7 +745,7 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_pa
 
 def test_agent_runtime_finalize_run_is_idempotent(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Say done"))
     second = asyncio.run(agent.abort_run(result.state))
@@ -778,7 +778,7 @@ def test_approval_resume_approve_executes_original_tool_snapshot_and_continues(t
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -827,7 +827,7 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -877,7 +877,7 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_p
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -923,7 +923,7 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_pat
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
         memory_hooks=hooks,
@@ -968,7 +968,7 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -1018,7 +1018,7 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
     )
@@ -1040,7 +1040,7 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
 
 
 def test_agent_runtime_finished_run_keeps_background_process_until_session_close(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     transport = ScriptedTransport(
         [
             {
@@ -1188,7 +1188,7 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     hooks = RecordingHooks()
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=hooks,
     )
@@ -1223,7 +1223,7 @@ Use the review checklist.
             {"text": "done"},
         ]
     )
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     domain = MemoryDomainContext(
         memory_domain_id="u_test",
         workspace_kind="project",
@@ -1270,7 +1270,7 @@ description: Review pull requests.
     )
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         capability_resolver=_workspace_only_resolver(),
     )
@@ -1296,7 +1296,7 @@ def _workspace_only_resolver() -> LocalSkillResolver:
 def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=SlowProjectionHooks(),
         budget=LoopBudget(recall_hard_timeout_ms=1),
@@ -1395,7 +1395,7 @@ def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> N
 def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "should not run"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("on_session_start"),
     )
@@ -1410,7 +1410,7 @@ def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) ->
 def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("after_model_reply"),
     )
@@ -1424,7 +1424,7 @@ def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -
 def test_memory_hook_event_emit_failure_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=InvalidEventHook(),
     )
@@ -1438,7 +1438,7 @@ def test_memory_hook_event_emit_failure_returns_failed_result(tmp_path) -> None:
 def test_agent_runtime_accepts_memory_hook_without_proposal_sink_property(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=LegacyShapeMemoryHook(),
     )
@@ -1463,7 +1463,7 @@ def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) 
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("after_tool_results"),
     )
@@ -1493,7 +1493,7 @@ def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> No
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         tool_result_persistence_hook=ExecutionEvidencePersistenceHook(ledger),
     )
@@ -1549,7 +1549,7 @@ def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> No
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         tool_result_persistence_hook=FailingPersistenceHook(),
     )
@@ -1577,7 +1577,7 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("should_compact"),
     )
@@ -1591,7 +1591,7 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
 def test_memory_hook_failure_on_session_end_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("on_session_end"),
     )
@@ -1711,7 +1711,7 @@ class BlockingUntilStartHookTool:
 
 def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> None:
     release = threading.Event()
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     registry = ToolRegistry()
     registry.register(BlockingUntilStartHookTool(release=release))
     transport = ScriptedTransport(
@@ -1758,7 +1758,7 @@ def test_duplicate_tool_call_id_becomes_error_observation_without_execution(tmp_
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
     agent.tool_executor.registry = registry
@@ -1792,7 +1792,7 @@ def test_duplicate_tool_call_id_only_blocks_the_duplicate_calls(tmp_path) -> Non
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(RecordingTool("ok_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
     registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
@@ -1829,7 +1829,7 @@ def test_tool_budget_blocks_unsafe_tool_before_execution(tmp_path) -> None:
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_tool_calls=0),
     )
@@ -1864,7 +1864,7 @@ def test_tool_budget_blocks_concurrent_batch_before_partial_execution(tmp_path) 
         ]
     )
     agent = AgentRuntime(
-        runtime_session=RuntimeSession(tmp_path),
+        runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_tool_calls=1),
     )
@@ -1898,7 +1898,7 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(runtime_session=RuntimeSession(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(SleepTool("sleep_a", delay=0.2))
     registry.register(SleepTool("sleep_b", delay=0.2))
@@ -1925,7 +1925,7 @@ def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurren
             {"text": "done"},
         ]
     )
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
     shared: dict[str, object] = {}
     registry = ToolRegistry()
@@ -1958,7 +1958,7 @@ def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_
             {"text": "done"},
         ]
     )
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
     recall = _ConcurrentRecallService()
     registry = ToolRegistry()
@@ -1991,7 +1991,7 @@ def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -
             {"text": "done"},
         ]
     )
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(SleepTool("sleep_a", delay=0.2))

@@ -15,6 +15,7 @@ from pulsara_agent.memory import (
     InMemoryCandidatePool,
     MemoryGovernanceExecutor,
     MemoryWriteUnitOfWork,
+    PostgresArtifactStore,
     PooledMemoryCandidate,
     PostgresCandidatePool,
     PostgresMemoryQuery,
@@ -49,6 +50,14 @@ def test_governance_executor_requires_explicit_uow_factory() -> None:
         MemoryGovernanceExecutor(
             **common,
             memory_write_uow_factory=None,  # type: ignore[arg-type]
+        )
+
+
+def test_postgres_uow_requires_explicit_artifact_store() -> None:
+    with pytest.raises(TypeError, match="archive"):
+        MemoryWriteUnitOfWork(  # type: ignore[call-arg]
+            dsn="postgresql://unused",
+            runtime_session_id="runtime:test",
         )
 
 
@@ -314,6 +323,7 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -392,6 +402,7 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -494,6 +505,7 @@ def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -544,6 +556,7 @@ def test_postgres_uow_dedupe_sees_uncommitted_same_transaction_node(tmp_path) ->
         with MemoryWriteUnitOfWork(
             dsn=dsn,
             runtime_session_id=runtime_session_id,
+            archive=PostgresArtifactStore(dsn=dsn),
             graph_id=graph_id,
             workspace_root=tmp_path,
         ) as uow:

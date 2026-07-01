@@ -21,6 +21,7 @@ from pulsara_agent.memory import (
     InMemoryCandidatePool,
     MemoryGovernanceExecutor,
     MemoryWriteUnitOfWork,
+    PostgresArtifactStore,
     PostgresCandidatePool,
     PostgresMemoryQuery,
     WriteFailedOutcome,
@@ -443,10 +444,11 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
             event_log=log,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
-            memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
-                dsn=dsn,
-                runtime_session_id=runtime_session_id,
-                graph_id=graph_id,
+                memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
+                    dsn=dsn,
+                    runtime_session_id=runtime_session_id,
+                    archive=PostgresArtifactStore(dsn=dsn),
+                    graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
         )
@@ -848,6 +850,7 @@ def _postgres_executor(
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
             dsn=dsn,
             runtime_session_id=runtime_session_id,
+            archive=PostgresArtifactStore(dsn=dsn),
             graph_id=graph_id,
             workspace_root=workspace_root,
         ),

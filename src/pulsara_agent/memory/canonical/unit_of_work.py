@@ -19,7 +19,6 @@ from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import CandidatePayload
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.pool import (
     CANDIDATE_POOL_SCHEMA_SQL,
     CandidatePool,
@@ -87,8 +86,8 @@ class MemoryWriteUnitOfWork:
 
     dsn: str
     runtime_session_id: str
+    archive: ArtifactStore
     graph_id: str | None = None
-    archive: ArtifactStore | None = None
     workspace_root: str | Path | None = None
     gate: MemoryWriteGate = field(default_factory=MemoryWriteGate)
 
@@ -115,7 +114,7 @@ class MemoryWriteUnitOfWork:
         self.lifecycle = MemoryLifecycle(graph=self.graph, mutable=self.graph)
         ledger = ExecutionEvidenceLedger(
             graph=self.graph,
-            archive=self.archive or InMemoryArchiveStore(),
+            archive=self.archive,
             gate=self.gate,
             graph_id=resolved_graph_id,
         )

@@ -4,6 +4,7 @@ import threading
 import time
 
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent, ToolResultEndEvent, ToolResultTextDeltaEvent
 from pulsara_agent.event_log import InMemoryEventLog
@@ -67,11 +68,11 @@ class _AsyncContextProbeTool:
 
 
 def make_registry(tmp_path):
-    return build_core_tool_registry(RuntimeSession(tmp_path))
+    return build_core_tool_registry(in_memory_runtime_session(tmp_path))
 
 
 def make_runtime_executor(tmp_path) -> tuple[RuntimeSession, ToolExecutor]:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     return runtime_session, runtime_session.create_tool_executor(
         record_event=runtime_session.make_thread_recorder()
     )
@@ -135,7 +136,7 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
 
 def test_core_tool_registry_can_enable_memory_write_tools(tmp_path) -> None:
     registry = build_core_tool_registry(
-        RuntimeSession(tmp_path),
+        in_memory_runtime_session(tmp_path),
         memory_proposal_sink=MemoryProposalSink(),
     )
 
@@ -153,7 +154,7 @@ def test_core_tool_registry_registers_all_tools_under_read_only(tmp_path) -> Non
     # PERMISSION_POLICY_CONTRACT: gate is the sole authority. Tools stay fully
     # registered (visible) under read-only; the gate denies disallowed calls.
     registry = build_core_tool_registry(
-        RuntimeSession(tmp_path),
+        in_memory_runtime_session(tmp_path),
         permission_state=PermissionState.from_policy(
             EffectivePermissionPolicy(
                 profile=PermissionProfile.READ_ONLY,
@@ -173,7 +174,7 @@ def test_core_tool_registry_registers_all_tools_under_read_only(tmp_path) -> Non
 
 def test_core_tool_registry_keeps_terminal_tools_registered_when_terminal_off(tmp_path) -> None:
     registry = build_core_tool_registry(
-        RuntimeSession(tmp_path),
+        in_memory_runtime_session(tmp_path),
         permission_state=PermissionState.from_policy(
             EffectivePermissionPolicy(
                 profile=PermissionProfile.WORKSPACE_GUARDED,
@@ -194,7 +195,7 @@ def test_core_tool_registry_is_constant_across_permission_modes(tmp_path) -> Non
     def names_for(profile, approval, terminal):
         return set(
             build_core_tool_registry(
-                RuntimeSession(tmp_path),
+                in_memory_runtime_session(tmp_path),
                 permission_state=PermissionState.from_policy(
                     EffectivePermissionPolicy(profile=profile, approval=approval, terminal=terminal)
                 ),
@@ -1031,7 +1032,7 @@ def test_tool_executor_archives_generic_large_output(tmp_path) -> None:
                 output="GENERIC_HEAD\n" + ("g" * 9000) + "\nGENERIC_TAIL",
             )
 
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     registry = ToolRegistry()
     registry.register(LargeOutputTool())
     executor = ToolExecutor(
@@ -1061,8 +1062,8 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
     index = InMemoryToolResultArtifactIndex()
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
-    session_a = RuntimeSession(tmp_path / "a", archive=archive, tool_result_artifacts=index)
-    session_b = RuntimeSession(tmp_path / "b", archive=archive, tool_result_artifacts=index)
+    session_a = in_memory_runtime_session(tmp_path / "a", archive=archive, tool_result_artifacts=index)
+    session_b = in_memory_runtime_session(tmp_path / "b", archive=archive, tool_result_artifacts=index)
     executor_a = session_a.create_tool_executor(record_event=session_a.make_thread_recorder())
     executor_b = session_b.create_tool_executor(record_event=session_b.make_thread_recorder())
 
@@ -1096,7 +1097,7 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
 
 
 def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     artifact_id = "artifact:tool-result:run-tools:call-binary:screenshot:0"
     write = runtime_session.archive.put_bytes(
         artifact_id,
@@ -1314,7 +1315,7 @@ def test_read_only_allowlist_matches_is_read_only_tools(tmp_path) -> None:
         """Registration-only stand-in; the drift test never executes tools."""
 
     registry = build_core_tool_registry(
-        RuntimeSession(tmp_path),
+        in_memory_runtime_session(tmp_path),
         memory_proposal_sink=MemoryProposalSink(),
         memory_recall_service=_StubService(),
         memory_query=_StubService(),

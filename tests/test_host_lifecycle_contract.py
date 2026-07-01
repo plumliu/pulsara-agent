@@ -16,6 +16,7 @@ import time
 from typing import AsyncIterator
 
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -51,7 +52,6 @@ from pulsara_agent.runtime.permission import (
     PermissionProfile,
     TerminalAccess,
 )
-from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
     TerminalOwnerContext,
@@ -399,7 +399,7 @@ def test_repeated_owner_release_does_not_exhaust_shared_session_capacity(tmp_pat
 def test_borrowed_runtime_close_does_not_touch_shared_manager(tmp_path) -> None:
     manager = TerminalSessionManager(tmp_path)
     owner = TerminalOwnerContext(host_session_id="host:x", conversation_id="conversation:x")
-    rs = RuntimeSession(tmp_path, terminal_binding=BorrowedWorkspaceTerminalRuntime(owner=owner, manager=manager))
+    rs = in_memory_runtime_session(tmp_path, terminal_binding=BorrowedWorkspaceTerminalRuntime(owner=owner, manager=manager))
     manager.get_or_create("work", owner_host_session_id="host:x")
     assert manager.session_count() == 1
     assert rs.terminal_owner_host_session_id == "host:x"
@@ -411,7 +411,7 @@ def test_borrowed_runtime_close_does_not_touch_shared_manager(tmp_path) -> None:
 
 
 def test_owned_runtime_close_is_idempotent(tmp_path) -> None:
-    rs = RuntimeSession(tmp_path)
+    rs = in_memory_runtime_session(tmp_path)
     assert rs._owns_terminal_manager is True
     rs.close()
     rs.close()  # second close is a no-op

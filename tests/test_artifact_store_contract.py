@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
 from pulsara_agent.event_log import PostgresEventLog
@@ -19,7 +20,6 @@ from pulsara_agent.memory import (
 )
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.ontology import runtime as rt
-from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.settings import StorageConfig
 
 
@@ -250,7 +250,7 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
     dsn = StorageConfig.from_env().postgres_dsn
     runtime_session_id = _runtime_session_id()
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    runtime = RuntimeSession(
+    runtime = in_memory_runtime_session(
         tmp_path,
         runtime_session_id=runtime_session_id,
         event_log=event_log,

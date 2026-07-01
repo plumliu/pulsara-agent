@@ -2,6 +2,7 @@ import json
 import asyncio
 
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import EventContext, TextBlockDeltaEvent
 from pulsara_agent.message import ToolResultState
@@ -14,6 +15,11 @@ from pulsara_agent.tools import ToolCall, build_core_tool_registry
 CTX = EventContext(run_id="run:runtime", turn_id="turn:runtime", reply_id="reply:runtime")
 
 
+def test_runtime_session_has_no_implicit_in_memory_storage(tmp_path) -> None:
+    with pytest.raises(TypeError, match="event_log"):
+        RuntimeSession(tmp_path)
+
+
 class RecordingSubscriber:
     def __init__(self) -> None:
         self.events: list[RuntimePublishedEvent] = []
@@ -23,7 +29,7 @@ class RecordingSubscriber:
 
 
 def test_runtime_session_create_tool_executor_does_not_record_by_default(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     executor = runtime.create_tool_executor()
 
     result = executor.execute(
@@ -37,7 +43,7 @@ def test_runtime_session_create_tool_executor_does_not_record_by_default(tmp_pat
 
 def test_runtime_session_keeps_named_terminal_sessions_separate(tmp_path) -> None:
     (tmp_path / "src").mkdir()
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     executor = runtime.create_tool_executor()
 
     code_result = executor.execute(
@@ -58,7 +64,7 @@ def test_runtime_session_keeps_named_terminal_sessions_separate(tmp_path) -> Non
 
 
 def test_runtime_session_terminal_session_limit_and_validation(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     executor = runtime.create_tool_executor()
 
     invalid = executor.execute(
@@ -84,7 +90,7 @@ def test_runtime_session_terminal_session_limit_and_validation(tmp_path) -> None
 
 
 def test_runtime_session_create_tool_executor_can_explicitly_record_to_shared_event_log(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     executor = runtime.create_tool_executor(record_event=runtime.make_thread_recorder())
 
     result = executor.execute(
@@ -97,7 +103,7 @@ def test_runtime_session_create_tool_executor_can_explicitly_record_to_shared_ev
 
 
 def test_runtime_session_close_kills_background_terminal_process(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     executor = runtime.create_tool_executor()
     start = executor.execute(
         ToolCall(id="call:terminal", name="terminal", arguments={"command": "sleep 10", "yield_time_ms": 0}),
@@ -112,14 +118,14 @@ def test_runtime_session_close_kills_background_terminal_process(tmp_path) -> No
 
 
 def test_runtime_session_create_tool_executor_rejects_raw_append_recorders(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
 
     with pytest.raises(TypeError, match="requires RuntimeSession.make_thread_recorder"):
         runtime.create_tool_executor(record_event=runtime.event_log.append)
 
 
 def test_build_core_tool_registry_requires_runtime_session(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
 
     registry = build_core_tool_registry(runtime)
 
@@ -129,7 +135,7 @@ def test_build_core_tool_registry_requires_runtime_session(tmp_path) -> None:
 
 
 def test_runtime_session_emit_and_emit_many_publish_events(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
     state = LoopState(session_id=runtime.runtime_session_id)
@@ -153,7 +159,7 @@ def test_runtime_session_emit_and_emit_many_publish_events(tmp_path) -> None:
 
 
 def test_runtime_session_emit_from_thread_without_bound_loop_only_appends(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
 
@@ -165,7 +171,7 @@ def test_runtime_session_emit_from_thread_without_bound_loop_only_appends(tmp_pa
 
 
 def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
 
@@ -186,7 +192,7 @@ def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(tmp_
 
 
 def test_runtime_session_emit_rejects_preassigned_sequence(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
 
     async def run() -> None:
         with pytest.raises(ValueError, match="sequence=None"):
@@ -196,7 +202,7 @@ def test_runtime_session_emit_rejects_preassigned_sequence(tmp_path) -> None:
 
 
 def test_runtime_session_emit_from_thread_rejects_preassigned_sequence(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
 
     with pytest.raises(ValueError, match="sequence=None"):
         runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="bad", sequence=10))

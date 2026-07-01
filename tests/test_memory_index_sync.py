@@ -20,6 +20,7 @@ from pulsara_agent.memory import (
     MemoryGovernanceExecutor,
     MemoryWriteService,
     MemoryWriteUnitOfWork,
+    PostgresArtifactStore,
     PooledMemoryCandidate,
     PostgresCandidatePool,
     PostgresMemoryQuery,
@@ -148,6 +149,7 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
@@ -259,6 +261,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
                 graph_id=graph_id,
                 workspace_root=tmp_path,
             ),

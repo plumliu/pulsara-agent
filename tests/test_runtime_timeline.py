@@ -4,6 +4,7 @@ import urllib.parse
 from pathlib import Path
 
 import pytest
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
     EventContext,
@@ -39,14 +40,14 @@ from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.event import ConfirmResult
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.message import ToolCallBlock, ToolCallState
-from pulsara_agent.runtime import RuntimeSession, build_run_timeline
+from pulsara_agent.runtime import build_run_timeline
 
 
 CTX = EventContext(run_id="run:timeline", turn_id="turn:timeline/001", reply_id="reply:timeline/001")
 
 
 def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
-    runtime = RuntimeSession(Path("."))
+    runtime = in_memory_runtime_session(Path("."))
 
     async def run() -> None:
         for event in [
@@ -87,7 +88,7 @@ def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
 
 
 def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -> None:
-    runtime = RuntimeSession(Path("."))
+    runtime = in_memory_runtime_session(Path("."))
 
     async def run() -> None:
         for event in [
@@ -125,7 +126,7 @@ def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -
 
 
 def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None:
-    runtime = RuntimeSession(Path("."))
+    runtime = in_memory_runtime_session(Path("."))
     tool_call = ToolCallBlock(
         id="call:danger",
         name="terminal",
@@ -162,7 +163,7 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
 
 
 def test_build_run_timeline_projects_plan_waiting_and_resolution(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
 
     async def run() -> None:
         for event in [
@@ -231,7 +232,7 @@ def test_build_run_timeline_projects_plan_waiting_and_resolution(tmp_path) -> No
 
 
 def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     archive = InMemoryArchiveStore()
     runtime.hook_manager.register_event(
@@ -272,7 +273,7 @@ def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(tmp_pa
 
 
 def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     archive = InMemoryArchiveStore()
     runtime.hook_manager.register_event(
@@ -303,7 +304,7 @@ def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(t
 
 
 def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     archive = InMemoryArchiveStore()
     runtime.hook_manager.register_event(
@@ -396,7 +397,7 @@ def test_run_timeline_preserves_non_success_run_end_status(
     session_status: str,
     timeline_status: str,
 ) -> None:
-    runtime = RuntimeSession(tmp_path)
+    runtime = in_memory_runtime_session(tmp_path)
 
     async def run() -> None:
         await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))

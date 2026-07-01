@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import AsyncIterator
 
+from tests.support.runtime_session import in_memory_runtime_session
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
@@ -33,7 +35,7 @@ import pulsara_agent.memory.reflection.engine as reflection_module
 from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, MemoryReflectionHint, cheap_memory_hints
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState, UserMsg
 from pulsara_agent.ontology import memory
-from pulsara_agent.runtime import AgentRuntime, LoopState, LoopStatus, RuntimeSession
+from pulsara_agent.runtime import AgentRuntime, LoopState, LoopStatus
 
 
 class _ScriptedTransport:
@@ -419,7 +421,7 @@ def _agent_with_reflection(
     pool: InMemoryCandidatePool,
     transport: _ScriptedTransport,
 ) -> AgentRuntime:
-    runtime_session = RuntimeSession(tmp_path)
+    runtime_session = in_memory_runtime_session(tmp_path)
     llm_runtime = _make_llm_runtime(transport)
     reflection = MemoryReflectionEngine(
         llm_runtime=llm_runtime,
