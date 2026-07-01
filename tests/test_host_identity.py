@@ -92,8 +92,10 @@ def test_host_workspace_auto_transient_resolution_can_opt_into_cleanup(tmp_path)
     assert resolved.cleanup_workspace_root_on_close is True
 
 
-def test_host_workspace_kind_alias_is_adapter_only() -> None:
-    assert normalize_workspace_kind("ephemeral") == "transient"
+def test_host_workspace_kind_ephemeral_alias_is_removed() -> None:
+    # `ephemeral` was a transient alias (legacy shim); it is now rejected everywhere.
+    with pytest.raises(ValueError, match="workspace_kind"):
+        normalize_workspace_kind("ephemeral")
     with pytest.raises(ValueError, match="workspace_kind"):
         MemoryDomainContext(memory_domain_id="u_test", workspace_kind="ephemeral")  # type: ignore[arg-type]
 

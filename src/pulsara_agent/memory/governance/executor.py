@@ -33,7 +33,7 @@ from pulsara_agent.memory.governance.relatedness import (
     RelatednessAvailability,
     RelatednessExecutionContext,
 )
-from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
+from pulsara_agent.memory.canonical.unit_of_work import GovernanceWriteUnitOfWork
 from pulsara_agent.memory.canonical.mutation_outbox import (
     CanonicalMutationSurface,
     governed_memory_mutation_payload,
@@ -65,13 +65,17 @@ class MemoryGovernanceExecutor:
     event_log: EventLog
     graph: GraphStore
     runtime_session_id: str
+    memory_write_uow_factory: Callable[[], GovernanceWriteUnitOfWork]
     graph_id: str | None = None
-    memory_write_uow_factory: Callable[[], MemoryWriteUnitOfWork] | None = None
     allowed_write_scopes: frozenset[str] = frozenset({CTX_USER})
     async_surfaces: tuple[str, ...] = (
         CanonicalMutationSurface.SEARCH_INDEX.value,
         CanonicalMutationSurface.OXIGRAPH.value,
     )
+
+    def __post_init__(self) -> None:
+        if self.memory_write_uow_factory is None:
+            raise ValueError("memory_write_uow_factory is required; no storage fallback is allowed")
 
     def apply_decision(
         self,
@@ -82,76 +86,11 @@ class MemoryGovernanceExecutor:
     ) -> MemoryGovernanceApplyResult:
         batch_id = governance_batch_id or new_governance_batch_id()
         self._validate_target_entries(decision)
-        if self.memory_write_uow_factory is not None:
-            return self._apply_decision_with_uow(
-                decision,
-                governance_batch_id=batch_id,
-                relatedness_context=relatedness_context,
-            )
-
-        if isinstance(decision, SkipDecision):
-            record = self._append_decision(
-                decision=decision,
-                governance_batch_id=batch_id,
-                write_outcome=NoWriteOutcome(),
-            )
-            return MemoryGovernanceApplyResult(decision_record=record, events=[])
-
-        is_supersede_origin = isinstance(decision, SupersedeAndSubmitDecision)
-        is_contradiction_origin = isinstance(decision, ContradictAndSubmitDecision)
-        effective_decision: GovernanceDecision = (
-            _downgrade_to_coexist(decision, "legacy_no_uow")
-            if is_supersede_origin
-            else _downgrade_contradiction_to_coexist(decision, "legacy_no_uow")
-            if is_contradiction_origin
-            else decision
-        )
-
-        candidate = self._candidate_for_decision(effective_decision)
-        if candidate is None:
-            record = self._append_decision(
-                decision=_skip_for_invalid(effective_decision),
-                governance_batch_id=batch_id,
-                write_outcome=NoWriteOutcome(),
-            )
-            return MemoryGovernanceApplyResult(decision_record=record, events=[])
-        if candidate.scope not in self.allowed_write_scopes:
-            record = self._append_decision(
-                decision=_skip_out_of_scope(effective_decision, candidate.scope),
-                governance_batch_id=batch_id,
-                write_outcome=NoWriteOutcome(),
-            )
-            return MemoryGovernanceApplyResult(decision_record=record, events=[])
-
-        if already_exists(candidate, self.graph, graph_id=self.graph_id):
-            record = self._append_decision(
-                decision=SkipDecision(
-                    target_entry_ids=_target_entry_ids(effective_decision),
-                    reason="A canonical memory with the same type, scope, and statement already exists.",
-                    skip_reason="duplicate_existing_memory",
-                ),
-                governance_batch_id=batch_id,
-                write_outcome=NoWriteOutcome(),
-            )
-            return MemoryGovernanceApplyResult(decision_record=record, events=[])
-
-        outcome = self.memory_write_service.submit(
-            candidate,
-            event_context=governance_batch_context(batch_id),
-        )
-        stored_events = self.event_log.extend(outcome.events)
-        if not (is_supersede_origin or is_contradiction_origin):
-            governance_candidate = self._governance_candidate_for_decision(
-                effective_decision, governance_batch_id=batch_id
-            )
-            if governance_candidate is not None:
-                self.candidate_pool.append_candidate(governance_candidate)
-        record = self._append_decision(
-            decision=effective_decision,
+        return self._apply_decision_with_uow(
+            decision,
             governance_batch_id=batch_id,
-            write_outcome=_write_outcome(outcome, stored_events),
+            relatedness_context=relatedness_context,
         )
-        return MemoryGovernanceApplyResult(decision_record=record, events=stored_events)
 
     def _apply_decision_with_uow(
         self,
@@ -417,21 +356,6 @@ class MemoryGovernanceExecutor:
             user_quote=f"corrected_from:{source_entry_id}",
         )
 
-    def _append_decision(
-        self,
-        *,
-        decision: GovernanceDecision,
-        governance_batch_id: str,
-        write_outcome,
-    ) -> MemoryGovernanceDecisionRecord:
-        return self.candidate_pool.append_decision(
-            _decision_record(
-                governance_batch_id=governance_batch_id,
-                decision=decision,
-                write_outcome=write_outcome,
-            )
-        )
-
     def _validate_target_entries(self, decision: GovernanceDecision) -> tuple[PooledMemoryCandidate, ...]:
         targets: list[PooledMemoryCandidate] = []
         for entry_id in _target_entry_ids(decision):
@@ -444,7 +368,7 @@ class MemoryGovernanceExecutor:
     def _validate_supersede_targets(
         self,
         decision: SupersedeAndSubmitDecision,
-        uow: MemoryWriteUnitOfWork,
+        uow: GovernanceWriteUnitOfWork,
     ) -> tuple[tuple[str, ...], str | None]:
         candidate = decision.candidate
         if candidate.kind not in _SUPERSEDABLE_TYPES:
@@ -514,7 +438,7 @@ class MemoryGovernanceExecutor:
     def _validate_contradiction_targets(
         self,
         decision: ContradictAndSubmitDecision,
-        uow: MemoryWriteUnitOfWork,
+        uow: GovernanceWriteUnitOfWork,
     ) -> tuple[tuple[str, ...], str | None]:
         candidate = decision.candidate
         if candidate.kind not in _CONTRADICTABLE_TYPES:

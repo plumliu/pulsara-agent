@@ -58,6 +58,7 @@ from pulsara_agent.tools.builtins.memory import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
+from tests.support.memory_uow import fake_memory_uow_factory
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
@@ -583,12 +584,18 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
     assert pending[0].payload.candidate.kind == "Preference"
     assert pending[0].user_quote == "Remember that I prefer concise summaries."
     assert graph.find_by_type(memory.PREFERENCE) == []
+    service = _service_on(graph)
     governance = MemoryGovernanceExecutor(
         candidate_pool=pool,
-        memory_write_service=_service_on(graph),
+        memory_write_service=service,
         event_log=runtime_session.event_log,
         graph=graph,
         runtime_session_id=runtime_session.runtime_session_id,
+        memory_write_uow_factory=fake_memory_uow_factory(
+            graph=graph,
+            candidate_pool=pool,
+            memory_write_service=service,
+        ),
     )
     governance_results = governance.submit_pending_as_is()
     result = next(e for e in governance_results[0].events if e.type is EventType.MEMORY_WRITE_RESULT)

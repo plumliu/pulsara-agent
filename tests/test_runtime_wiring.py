@@ -28,6 +28,10 @@ from pulsara_agent.capability import LocalSkillResolver
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.memory.canonical.mutation_outbox import CanonicalMutationSurface
+from pulsara_agent.memory.canonical.unit_of_work import (
+    InMemoryMemoryWriteUnitOfWork,
+    MemoryWriteUnitOfWork,
+)
 
 
 class _WiringEmbeddingProvider:
@@ -45,7 +49,11 @@ class _WiringEmbeddingProvider:
 
 
 def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
-    wiring = build_in_memory_runtime_wiring(tmp_path, runtime_session_id=f"runtime:test:{uuid4().hex}")
+    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
+        wiring = build_in_memory_runtime_wiring(
+            tmp_path,
+            runtime_session_id=f"runtime:test:{uuid4().hex}",
+        )
     ctx = _event_context("in-memory-wiring")
 
     asyncio.run(_emit_timeline_events(wiring.runtime_session, ctx, "hello wiring"))
@@ -61,6 +69,10 @@ def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
 
     assert wiring.event_log is wiring.runtime_session.event_log
     assert wiring.graph_id is None
+    assert isinstance(
+        wiring.memory_governance_executor.memory_write_uow_factory(),
+        InMemoryMemoryWriteUnitOfWork,
+    )
     assert summary.assistant_text == "hello wiring"
     assert summary.status == "completed"
 
@@ -74,6 +86,10 @@ def test_vector_enabled_durable_wiring_explicitly_registers_vector_outbox_surfac
         tmp_path,
         graph_id=f"graph:test/{uuid4().hex}",
         retrieval_resources=resources,
+    )
+    assert isinstance(
+        wiring.memory_governance_executor.memory_write_uow_factory(),
+        MemoryWriteUnitOfWork,
     )
 
     assert wiring.memory_governance_executor.async_surfaces == (

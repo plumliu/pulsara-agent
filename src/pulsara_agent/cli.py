@@ -154,8 +154,8 @@ def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.Argume
     parser.add_argument(
         "--workspace-kind",
         default="project",
-        choices=("project", "transient", "ephemeral"),
-        help="Workspace kind. 'ephemeral' is accepted as an adapter alias for 'transient'.",
+        choices=("project", "transient"),
+        help="Workspace kind: 'project' or 'transient'.",
     )
     parser.add_argument("--display-label", default=None, help="Optional workspace display label.")
     parser.add_argument("--memory-domain-id", default="u_local", help="Memory domain id. Defaults to u_local.")

@@ -51,6 +51,7 @@ from pulsara_agent.memory.recall.service import (
 )
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
+from tests.support.memory_uow import fake_memory_uow_factory
 
 
 def test_contradict_decision_facade_export_and_round_trip() -> None:
@@ -155,13 +156,18 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
     pooled = pool.append_candidate(
         _pooled_valid(runtime_session_id=runtime_session_id, source_ctx=_source_context("uow"), candidate=candidate)
     )
+    service = _service_on(graph)
     executor = MemoryGovernanceExecutor(
         candidate_pool=pool,
-        memory_write_service=_service_on(InMemoryGraphStore()),
+        memory_write_service=service,
         event_log=log,
         graph=graph,
         runtime_session_id=runtime_session_id,
-        memory_write_uow_factory=lambda: _InMemoryUow(graph=graph, pool=pool),
+        memory_write_uow_factory=fake_memory_uow_factory(
+            graph=graph,
+            candidate_pool=pool,
+            memory_write_service=service,
+        ),
     )
 
     result = executor.apply_decision(
@@ -470,7 +476,10 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
         _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
 
 
-def test_legacy_contradiction_downgrades_to_coexist_without_audit_candidate() -> None:
+def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -> None:
+    # The explicit fake takes the same executor decision path as durable.
+    # Contradiction without relatedness evidence is safely blocked and
+    # downgraded with the real relatedness-gate reason.
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     log = InMemoryEventLog()
@@ -490,6 +499,11 @@ def test_legacy_contradiction_downgrades_to_coexist_without_audit_candidate() ->
         event_log=log,
         graph=graph,
         runtime_session_id="runtime:test",
+        memory_write_uow_factory=fake_memory_uow_factory(
+            graph=graph,
+            candidate_pool=pool,
+            memory_write_service=service,
+        ),
     )
 
     result = executor.apply_decision(
@@ -497,13 +511,16 @@ def test_legacy_contradiction_downgrades_to_coexist_without_audit_candidate() ->
             target_entry_id=pooled.entry_id,
             candidate=candidate,
             contradicted_memory_ids=(old_id,),
-            reason="Legacy cannot atomically link contradiction.",
+            reason="Contradiction attempted without relatedness context.",
         ),
-        governance_batch_id="governance:test:legacy-contradiction",
+        governance_batch_id="governance:test:contradiction-no-context",
     )
 
     assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
-    assert result.decision_record.decision.reason.startswith(_CONTRADICTION_DOWNGRADE_SENTINEL)
+    reason = result.decision_record.decision.reason
+    assert reason.startswith(_CONTRADICTION_DOWNGRADE_SENTINEL)
+    assert "relatedness_context_missing" in reason
+    assert result.diagnostics == ("relatedness_context_missing",)
     assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
     assert result.decision_record.write_outcome.contradicted_memory_ids == ()
     old_doc = graph.get_jsonld(old_id)
@@ -845,41 +862,6 @@ def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
             gate=MemoryWriteGate(),
         )
     )
-
-
-class _InMemoryUow:
-    def __init__(self, *, graph: InMemoryGraphStore, pool: InMemoryCandidatePool) -> None:
-        self.graph = graph
-        self.resolved_graph_id = None
-        self.decisions = _InMemoryDecisionRepository(pool)
-        self.outbox = _NoopOutbox()
-        self.lifecycle = MemoryLifecycle(graph=graph, mutable=graph)
-        self.memory_write_service = _service_on(graph)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        return None
-
-    def ensure_event_context_rows(self, context: EventContext) -> None:
-        return None
-
-
-class _InMemoryDecisionRepository:
-    def __init__(self, pool: InMemoryCandidatePool) -> None:
-        self._pool = pool
-
-    def append_candidate(self, candidate):
-        return self._pool.append_candidate(candidate)
-
-    def append_decision(self, record):
-        return self._pool.append_decision(record)
-
-
-class _NoopOutbox:
-    def append_decision(self, record, *, graph_id, target_entry_key=None, payload=None) -> str:
-        return "outbox:test:no-op"
 
 
 class _FailingContradictionLifecycleUow(MemoryWriteUnitOfWork):

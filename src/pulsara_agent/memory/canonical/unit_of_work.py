@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, Protocol, Self
 
 import psycopg
 from psycopg import Connection
@@ -17,11 +17,12 @@ from pydantic import TypeAdapter
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import CandidatePayload
-from pulsara_agent.graph import DEFAULT_GRAPH_ID
+from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.pool import (
     CANDIDATE_POOL_SCHEMA_SQL,
+    CandidatePool,
     GovernanceDecision,
     GovernanceWriteOutcome,
     MemoryGovernanceDecisionRecord,
@@ -35,6 +36,49 @@ from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL, RUNTIME_TRUTH_SCHEMA_SQL
+
+
+class GovernanceDecisionRepository(Protocol):
+    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate: ...
+
+    def append_decision(
+        self, record: MemoryGovernanceDecisionRecord
+    ) -> MemoryGovernanceDecisionRecord: ...
+
+
+class GovernanceOutboxRepository(Protocol):
+    def append_decision(
+        self,
+        record: MemoryGovernanceDecisionRecord,
+        *,
+        graph_id: str,
+        target_entry_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str | None: ...
+
+
+class GovernanceWriteUnitOfWork(Protocol):
+    """Structural contract required by the single governance executor path."""
+
+    graph: GraphStore
+    decisions: GovernanceDecisionRepository
+    outbox: GovernanceOutboxRepository
+    lifecycle: MemoryLifecycle
+    memory_write_service: MemoryWriteService
+
+    @property
+    def resolved_graph_id(self) -> str: ...
+
+    def ensure_event_context_rows(self, context: EventContext) -> None: ...
+
+    def __enter__(self) -> Self: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
 
 
 @dataclass(slots=True)
@@ -148,6 +192,77 @@ class MemoryWriteUnitOfWork:
                     f"turn_id {context.turn_id!r} already belongs to runtime session {session_id!r} "
                     f"and run {run_id!r}"
                 )
+
+
+@dataclass(slots=True)
+class _PoolDecisionRepository:
+    """Route in-memory UOW decisions/candidates back into the shared pool."""
+
+    candidate_pool: CandidatePool
+
+    def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate:
+        return self.candidate_pool.append_candidate(candidate)
+
+    def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
+        return self.candidate_pool.append_decision(record)
+
+
+@dataclass(slots=True)
+class _NoopOutboxRepository:
+    """No async materialization off the in-memory test-double substrate."""
+
+    def append_decision(
+        self,
+        record: MemoryGovernanceDecisionRecord,
+        *,
+        graph_id: str,
+        target_entry_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str | None:
+        return None
+
+
+@dataclass(slots=True)
+class InMemoryMemoryWriteUnitOfWork:
+    """Compatibility-only UOW for the deprecated in-memory runtime.
+
+    This is never selected as a fallback and does not provide production
+    durability, transaction atomicity, or async materialization. New production
+    work must use ``MemoryWriteUnitOfWork`` backed by PostgreSQL. It remains only
+    so existing explicit in-memory/test wiring can share the executor decision
+    path during its compatibility window.
+    """
+
+    graph: GraphStore
+    candidate_pool: CandidatePool
+    memory_write_service: MemoryWriteService
+    graph_id: str | None = None
+    decisions: _PoolDecisionRepository = field(init=False)
+    outbox: _NoopOutboxRepository = field(init=False)
+    lifecycle: MemoryLifecycle = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.decisions = _PoolDecisionRepository(self.candidate_pool)
+        self.outbox = _NoopOutboxRepository()
+        self.lifecycle = MemoryLifecycle(graph=self.graph, mutable=self.graph)
+
+    def __enter__(self) -> "InMemoryMemoryWriteUnitOfWork":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    @property
+    def resolved_graph_id(self) -> str:
+        return self.graph_id or DEFAULT_GRAPH_ID
+
+    def ensure_event_context_rows(self, context: EventContext) -> None:
+        return None
 
 
 @dataclass(slots=True)

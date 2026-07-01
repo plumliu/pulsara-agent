@@ -28,6 +28,28 @@ from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
+from tests.support.memory_uow import fake_memory_uow_factory
+
+
+def test_governance_executor_requires_explicit_uow_factory() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    service = _service_on(graph)
+    common = {
+        "candidate_pool": pool,
+        "memory_write_service": service,
+        "event_log": InMemoryEventLog(),
+        "graph": graph,
+        "runtime_session_id": "runtime:test",
+    }
+
+    with pytest.raises(TypeError, match="memory_write_uow_factory"):
+        MemoryGovernanceExecutor(**common)
+    with pytest.raises(ValueError, match="required; no storage fallback"):
+        MemoryGovernanceExecutor(
+            **common,
+            memory_write_uow_factory=None,  # type: ignore[arg-type]
+        )
 
 
 def test_governance_submit_as_is_writes_with_synthetic_context_and_resolves_pending() -> None:
@@ -262,6 +284,7 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
         reply_id=f"reply:source:{uuid4().hex}",
     )
     batch_id = f"governance:test:postgres-correct:{uuid4().hex}"
+    graph_id = f"graph:test/{uuid4().hex}"
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
     log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
@@ -288,6 +311,12 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
             event_log=log,
             graph=graph,
             runtime_session_id=runtime_session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                graph_id=graph_id,
+                workspace_root=tmp_path,
+            ),
         )
 
         result = executor.apply_decision(
@@ -312,10 +341,14 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
+                cursor.execute("delete from memory_write_outbox where governance_batch_id = %s", (batch_id,))
                 cursor.execute(
                     "delete from memory_governance_decisions where governance_batch_id = %s",
                     (batch_id,),
                 )
+                cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
                 cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
 
 
@@ -538,12 +571,18 @@ def _executor(
     log: InMemoryEventLog,
     allowed_write_scopes: frozenset[str] = frozenset({"ctx:user"}),
 ) -> MemoryGovernanceExecutor:
+    service = _service_on(graph)
     return MemoryGovernanceExecutor(
         candidate_pool=pool,
-        memory_write_service=_service_on(graph),
+        memory_write_service=service,
         event_log=log,
         graph=graph,
         runtime_session_id="runtime:test",
+        memory_write_uow_factory=fake_memory_uow_factory(
+            graph=graph,
+            candidate_pool=pool,
+            memory_write_service=service,
+        ),
         allowed_write_scopes=allowed_write_scopes,
     )
 

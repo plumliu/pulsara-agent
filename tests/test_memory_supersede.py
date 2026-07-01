@@ -39,6 +39,7 @@ from pulsara_agent.memory.recall.explain import ClaimKind, explain_memory
 from pulsara_agent.memory.recall.service import LexicalMemoryRecallService, RecallQuery, RecallStatus
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
+from tests.support.memory_uow import fake_memory_uow_factory
 
 
 def test_supersede_decision_facade_export_and_round_trip() -> None:
@@ -50,6 +51,57 @@ def test_supersede_decision_facade_export_and_round_trip() -> None:
     )
 
     assert decision.kind == "supersede_and_submit"
+
+
+def test_explicit_fake_uow_supersedes_with_full_relatedness() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    service = _service_on(graph)
+    runtime_session_id = "runtime:test"
+    batch_id = "governance:test:fake-supersede"
+    source_ctx = _source_context("fake-supersede")
+    source_event = log.append(
+        TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed")
+    )
+    old_id = "preference:test-fake-supersede-old"
+    graph.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."))
+    candidate = _preference_candidate("candidate:fake-new", "The user prefers concise summaries.")
+    pooled = pool.append_candidate(
+        _pooled_valid(
+            runtime_session_id=runtime_session_id,
+            source_ctx=source_ctx,
+            candidate=candidate,
+        )
+    )
+    executor = MemoryGovernanceExecutor(
+        candidate_pool=pool,
+        memory_write_service=service,
+        event_log=log,
+        graph=graph,
+        runtime_session_id=runtime_session_id,
+        memory_write_uow_factory=fake_memory_uow_factory(
+            graph=graph,
+            candidate_pool=pool,
+            memory_write_service=service,
+        ),
+    )
+
+    result = executor.apply_decision(
+        SupersedeAndSubmitDecision(
+            target_entry_id=pooled.entry_id,
+            candidate=candidate,
+            superseded_memory_ids=(old_id,),
+            replacement_evidence_refs=(source_event.id,),
+            reason="Explicit replacement through the fake decision substrate.",
+        ),
+        governance_batch_id=batch_id,
+        relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+    )
+
+    assert isinstance(result.decision_record.decision, SupersedeAndSubmitDecision)
+    assert result.decision_record.write_outcome.superseded_memory_ids == (old_id,)
+    assert graph.get_jsonld(old_id)[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
 
 
 def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcome(tmp_path) -> None:
@@ -687,7 +739,10 @@ def test_postgres_supersede_dedupe_skip_happens_before_retirement(tmp_path) -> N
         _cleanup_postgres(dsn, graph_id=graph_id, runtime_session_id=runtime_session_id, governance_batch_id=batch_id)
 
 
-def test_legacy_supersede_downgrades_to_coexist_without_audit_candidate() -> None:
+def test_supersede_without_relatedness_context_is_blocked_and_downgraded() -> None:
+    # The explicit fake takes the same executor decision path as durable.
+    # Supersede without relatedness evidence is safely blocked and downgraded
+    # with the real relatedness-gate reason.
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     log = InMemoryEventLog()
@@ -710,6 +765,11 @@ def test_legacy_supersede_downgrades_to_coexist_without_audit_candidate() -> Non
         event_log=log,
         graph=graph,
         runtime_session_id="runtime:test",
+        memory_write_uow_factory=fake_memory_uow_factory(
+            graph=graph,
+            candidate_pool=pool,
+            memory_write_service=service,
+        ),
     )
 
     result = executor.apply_decision(
@@ -717,13 +777,16 @@ def test_legacy_supersede_downgrades_to_coexist_without_audit_candidate() -> Non
             target_entry_id=pooled.entry_id,
             candidate=_preference_candidate("candidate:new", "The user prefers concise summaries."),
             superseded_memory_ids=(old_id,),
-            reason="Legacy cannot atomically supersede.",
+            reason="Supersede attempted without relatedness context.",
         ),
-        governance_batch_id="governance:test:legacy-supersede",
+        governance_batch_id="governance:test:supersede-no-context",
     )
 
     assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
-    assert result.decision_record.decision.reason.startswith(_SUPERSEDE_DOWNGRADE_SENTINEL)
+    reason = result.decision_record.decision.reason
+    assert reason.startswith(_SUPERSEDE_DOWNGRADE_SENTINEL)
+    assert "relatedness_context_missing" in reason
+    assert result.diagnostics == ("relatedness_context_missing",)
     assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
     assert result.decision_record.write_outcome.superseded_memory_ids == ()
     assert graph.get_jsonld(old_id)[memory.STATUS.name] == memory.NodeStatus.ACTIVE.value

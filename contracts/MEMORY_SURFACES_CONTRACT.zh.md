@@ -368,11 +368,19 @@ governed canonical memory graph 的唯一写入口是：
   - decision row + canonical mutation journal + 同步 projection refresh 在 Postgres 事务内原子提交
   - Oxigraph / `memory_search_index` / `memory_vector_index` 由 unified outbox 异步物化
 
+生产路径的 hard-cut 边界：
+
+- `MemoryGovernanceExecutor` 只有一条 UoW 执行路径，`memory_write_uow_factory` 是必填依赖；缺失或显式传 `None` 必须在构造期失败，不得推断 storage backend。
+- 生产 wiring 只能注入 PostgreSQL `MemoryWriteUnitOfWork`。PostgreSQL 是 governed canonical authority；Oxigraph、search 与 vector 都是 outbox 驱动的异步派生面，不进入同步 UoW。
+- `InMemoryMemoryWriteUnitOfWork` 只服务显式的 deprecated compatibility/test wiring，不是 fallback，也不满足生产 durability、事务原子性或 async materialization 契约。测试 fake 只能验证 executor 决策逻辑；事务、rollback 与 outbox 一致性必须由 real PostgreSQL 测试证明。
+- `durable=False` / in-memory runtime 暂留作后向兼容，但属于 unsupported production path；后续功能不得新增对该路径的依赖。
+
 ### 8.3 迁移前后不变的硬约束
 
 1. governance 是唯一 governed memory 写入口
 2. Postgres-intent-first
 3. 每条 governed memory 写都有原子的 decision / mutation provenance
+4. 不得以“未配置 UoW”为条件 fallback 到 InMemory 或 no-op outbox
 
 ---
 

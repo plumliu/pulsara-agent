@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -44,7 +46,11 @@ from pulsara_agent.memory.governance.relatedness import (
     GovernanceRelatednessService,
     MemoryGovernanceRelatednessOptions,
 )
-from pulsara_agent.memory.canonical.unit_of_work import MemoryWriteUnitOfWork
+from pulsara_agent.memory.canonical.unit_of_work import (
+    GovernanceWriteUnitOfWork,
+    InMemoryMemoryWriteUnitOfWork,
+    MemoryWriteUnitOfWork,
+)
 from pulsara_agent.memory.canonical.mutation_outbox import CanonicalMutationSurface, MutationOutboxWriter
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -94,6 +100,12 @@ def build_in_memory_runtime_wiring(
     memory_domain: MemoryDomainContext | None = None,
     terminal_binding: TerminalRuntimeBinding | None = None,
 ) -> RuntimeWiring:
+    warnings.warn(
+        "build_in_memory_runtime_wiring() is compatibility/test-only; "
+        "production runtimes require PostgreSQL durable wiring",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     resolved_graph_id = graph_id or (memory_domain.graph_id if memory_domain is not None else None)
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     event_log = InMemoryEventLog()
@@ -129,6 +141,12 @@ def build_in_memory_runtime_wiring(
         graph=graph,
         graph_id=resolved_graph_id,
         runtime_session_id=runtime_session.runtime_session_id,
+        memory_write_uow_factory=lambda: InMemoryMemoryWriteUnitOfWork(
+            graph=graph,
+            candidate_pool=candidate_pool,
+            memory_write_service=memory_write_service,
+            graph_id=resolved_graph_id,
+        ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
     )
     return RuntimeWiring(
@@ -471,7 +489,7 @@ def _build_memory_governance_executor(
     graph: GraphStore,
     graph_id: str | None,
     runtime_session_id: str,
-    memory_write_uow_factory=None,
+    memory_write_uow_factory: Callable[[], GovernanceWriteUnitOfWork],
     allowed_write_scopes: frozenset[str],
     async_surfaces: tuple[str, ...] = (
         CanonicalMutationSurface.SEARCH_INDEX.value,

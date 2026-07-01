@@ -35,8 +35,6 @@ class ResolvedWorkspace:
 
 def normalize_workspace_kind(raw: str) -> WorkspaceKind:
     value = raw.strip().lower()
-    if value == "ephemeral":
-        return "transient"
     if value in {"project", "transient"}:
         return value  # type: ignore[return-value]
     raise ValueError("workspace_kind must be 'project' or 'transient'")

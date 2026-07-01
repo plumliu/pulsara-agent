@@ -51,6 +51,7 @@ from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
+from tests.support.memory_uow import fake_memory_uow_factory
 
 
 class _ScriptedTransport:
@@ -455,12 +456,18 @@ def _executor(
         archive=InMemoryArchiveStore(),
         gate=MemoryWriteGate(),
     )
+    service = MemoryWriteService(ledger=ledger)
     return MemoryGovernanceExecutor(
         candidate_pool=pool,
-        memory_write_service=MemoryWriteService(ledger=ledger),
+        memory_write_service=service,
         event_log=log,
         graph=graph,
         runtime_session_id="runtime:test",
+        memory_write_uow_factory=fake_memory_uow_factory(
+            graph=graph,
+            candidate_pool=pool,
+            memory_write_service=service,
+        ),
     )
 
 

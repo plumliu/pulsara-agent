@@ -147,7 +147,7 @@ class FakeCore:
         self.shutdown_called = True
 
 
-def test_cli_host_run_uses_host_core_and_normalizes_ephemeral(monkeypatch, tmp_path) -> None:
+def test_cli_host_run_uses_host_core_with_transient_workspace(monkeypatch, tmp_path) -> None:
     FakeCore.instances.clear()
     sync_calls = []
     monkeypatch.setattr(cli, "HostCore", FakeCore)
@@ -159,7 +159,7 @@ def test_cli_host_run_uses_host_core_and_normalizes_ephemeral(monkeypatch, tmp_p
             "host",
             "run",
             "--workspace-kind",
-            "ephemeral",
+            "transient",
             "--workspace",
             str(tmp_path),
             "--model-role",
@@ -181,6 +181,15 @@ def test_cli_host_run_uses_host_core_and_normalizes_ephemeral(monkeypatch, tmp_p
     assert core.session.active_skill_names == [frozenset({"review-pr"})]
     assert core.closed == ["host:fake"]
     assert sync_calls == ["sync"]
+
+
+def test_cli_host_run_rejects_removed_ephemeral_workspace_kind() -> None:
+    # The `ephemeral` alias is hard-cut: argparse no longer accepts it.
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["host", "run", "--workspace-kind", "ephemeral", "--workspace", ".", "say hi"]
+        )
 
 
 def test_cli_host_run_defaults_to_durable_runtime(monkeypatch, tmp_path) -> None:
