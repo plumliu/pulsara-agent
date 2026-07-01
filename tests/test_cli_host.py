@@ -473,6 +473,39 @@ def test_cli_host_repl_runs_bundled_sync_before_opening_session(monkeypatch, tmp
     assert core.closed == ["host:fake"]
 
 
+def test_cli_host_repl_ctrl_c_clears_input_without_closing_session(monkeypatch, tmp_path, capsys) -> None:
+    class FakePrompt:
+        def __init__(self) -> None:
+            self.responses = iter([KeyboardInterrupt(), ":help", "hello", "quit"])
+            self.messages = []
+
+        async def read_line(self, message: str) -> str:
+            self.messages.append(message)
+            response = next(self.responses)
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+    FakeCore.instances.clear()
+    prompt = FakePrompt()
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli, "build_repl_prompt", lambda **_kwargs: prompt)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    core = FakeCore.instances[0]
+    assert prompt.messages == ["pulsara> ", "pulsara> ", "pulsara> ", "pulsara> "]
+    assert core.session.prompts == ["hello"]
+    assert core.shutdown_called is True
+    output = capsys.readouterr().out
+    assert "^C" in output
+    assert "Ctrl-R search" in output
+
+
 def test_cli_host_run_continues_when_bundled_sync_fails(monkeypatch, tmp_path, capsys) -> None:
     FakeCore.instances.clear()
     monkeypatch.setattr(cli, "HostCore", FakeCore)

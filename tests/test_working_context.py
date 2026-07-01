@@ -47,6 +47,53 @@ def test_working_context_guard_rejects_low_signal_run() -> None:
     assert update.reason == "low_signal_run"
 
 
+def test_working_context_guard_rejects_empty_memory_search_run() -> None:
+    ctx = _ctx()
+    timeline = build_run_timeline(
+        [
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:search",
+                tool_call_name="memory_search",
+            ),
+            ToolResultStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:search",
+                tool_call_name="memory_search",
+            ),
+            ToolResultTextDeltaEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:search",
+                delta=(
+                    '{"status":"empty","results":[],"guidance":"'
+                    + ("no canonical match " * 40)
+                    + '"}'
+                ),
+            ),
+            ToolResultEndEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:search",
+                state=ToolResultState.SUCCESS,
+            ),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(),
+                block_id="text:1",
+                delta=(
+                    "I could not find canonical durable memory, so I do not know what happened before. "
+                    "Please tell me what you were working on and I will continue from there."
+                ),
+            ),
+            ReplyEndEvent(**ctx.event_fields()),
+        ],
+        runtime_session_id="runtime:test",
+    )
+
+    update = propose_working_context_update(summarize_run_timeline(timeline))
+
+    assert update.should_update is False
+    assert update.reason == "low_signal_run"
+
+
 def test_working_context_store_upserts_domain_latest() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()

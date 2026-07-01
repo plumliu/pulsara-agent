@@ -443,7 +443,7 @@ def spawn_local_process(
                 stdin=pty_slave_fd,
                 stdout=pty_slave_fd,
                 stderr=pty_slave_fd,
-                preexec_fn=os.setsid,
+                start_new_session=True,
                 close_fds=True,
                 env=subprocess_env,
             )
@@ -456,7 +456,7 @@ def spawn_local_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
-            preexec_fn=os.setsid,
+            start_new_session=True,
             env=subprocess_env,
         )
     state = TerminalProcessState(

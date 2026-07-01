@@ -125,6 +125,26 @@ class RuntimeSession:
             self.publisher.discard_unpublished(published)
         return stored
 
+    def publish_stored_event(self, event: AgentEvent, *, state: LoopState | None = None) -> None:
+        if event.sequence is None:
+            raise ValueError("Stored events must have a canonical sequence")
+        published = RuntimePublishedEvent(
+            runtime_session_id=self.runtime_session_id,
+            event=event,
+            state=state,
+        )
+        if not self.publisher.publish_from_thread(published):
+            self.publisher.discard_unpublished(published)
+
+    def publish_stored_events(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        state: LoopState | None = None,
+    ) -> None:
+        for event in events:
+            self.publish_stored_event(event, state=state)
+
     def make_thread_recorder(self, *, state: LoopState | None = None) -> RuntimeThreadRecorder:
         return RuntimeThreadRecorder(runtime_session=self, state=state)
 

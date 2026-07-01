@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.28.1",
     "jieba>=0.42.1",
     "openai>=2.43.0",
+    "prompt-toolkit>=3.0.52",
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.0",
     "pyyaml>=6.0.3",

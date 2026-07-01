@@ -6,12 +6,14 @@ import psycopg
 import pytest
 
 from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
+from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import load_run_timeline, summarize_run_timeline
+from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate, SubmitAsIsDecision
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
-from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
     AgentRuntimeWiring,
     build_agent_runtime_wiring,
@@ -26,6 +28,7 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.capability import LocalSkillResolver
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from tests.support.settings import compatibility_storage_config
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.memory.canonical.mutation_outbox import CanonicalMutationSurface
 from pulsara_agent.memory.canonical.unit_of_work import (
@@ -77,6 +80,58 @@ def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
     assert summary.status == "completed"
 
 
+def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) -> None:
+    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
+        wiring = build_in_memory_runtime_wiring(
+            tmp_path,
+            runtime_session_id=f"runtime:test:{uuid4().hex}",
+        )
+    runtime = wiring.runtime_session
+    source_ctx = _event_context("governance-publisher-gap")
+    candidate = wiring.candidate_pool.append_candidate(
+        PooledMemoryCandidate(
+            payload=ValidCandidatePayload(
+                candidate=PreferenceCandidate(
+                    candidate_id=f"candidate:test:{uuid4().hex}",
+                    statement="The user dislikes egg tarts.",
+                    scope="ctx:user",
+                    source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                    verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                )
+            ),
+            origin=CandidateOrigin.REFLECTION,
+            source_session_id=runtime.runtime_session_id,
+            source_run_id=source_ctx.run_id,
+            source_turn_id=source_ctx.turn_id,
+            source_reply_id=source_ctx.reply_id,
+            user_quote="我特别讨厌吃蛋挞",
+        )
+    )
+
+    async def run() -> None:
+        await runtime.emit(
+            TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:1", delta="bind")
+        )
+        result = wiring.memory_governance_executor.apply_decision(
+            SubmitAsIsDecision(
+                target_entry_id=candidate.entry_id,
+                reason="Explicit durable preference.",
+            ),
+            governance_batch_id=f"governance:test:{uuid4().hex}",
+        )
+        assert [event.sequence for event in result.events] == [2, 3]
+
+        final = await asyncio.wait_for(
+            runtime.emit(
+                TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:2", delta="after")
+            ),
+            timeout=0.5,
+        )
+        assert final.sequence == 4
+
+    asyncio.run(run())
+
+
 def test_vector_enabled_durable_wiring_explicitly_registers_vector_outbox_surface(tmp_path) -> None:
     storage = StorageConfig.from_env()
     _connect_or_skip(storage.postgres_dsn).close()
@@ -102,7 +157,7 @@ def test_vector_enabled_durable_wiring_explicitly_registers_vector_outbox_surfac
 def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_services(tmp_path) -> None:
     runtime_session_id = f"runtime:test:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
-    settings = _settings_for_storage(StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"))
+    settings = _settings_for_storage(compatibility_storage_config())
     wiring = build_agent_runtime_wiring(
         settings,
         tmp_path,
@@ -156,7 +211,7 @@ def test_agent_runtime_wiring_threads_memory_domain_to_capability_context(tmp_pa
         workspace_kind="project",
         stable_project_key=str(project_root),
     )
-    settings = _settings_for_storage(StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"))
+    settings = _settings_for_storage(compatibility_storage_config())
 
     wiring = build_agent_runtime_wiring(
         settings,
@@ -176,7 +231,7 @@ def test_agent_runtime_wiring_threads_memory_domain_to_capability_context(tmp_pa
 
 
 def test_agent_runtime_wiring_threads_permission_policy_to_session_registry(tmp_path) -> None:
-    settings = _settings_for_storage(StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"))
+    settings = _settings_for_storage(compatibility_storage_config())
     policy = EffectivePermissionPolicy(
         profile=PermissionProfile.READ_ONLY,
         approval=ApprovalPolicy.ON_REQUEST,
@@ -209,7 +264,7 @@ def test_in_memory_runtime_wiring_rejects_user_graph_without_domain(tmp_path) ->
 
 
 def test_durable_runtime_wiring_rejects_user_graph_without_domain(tmp_path) -> None:
-    storage = StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1")
+    storage = compatibility_storage_config()
 
     with pytest.raises(ValueError, match="graph:user"):
         build_durable_runtime_wiring(

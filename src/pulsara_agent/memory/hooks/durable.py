@@ -64,8 +64,15 @@ class DurableMemoryHooks(NoopMemoryHooks):
     def memory_proposal_sink(self) -> MemoryProposalSink | None:
         return self.sink
 
+    def baseline_projection(self, state: LoopState, *, token_budget: int) -> dict | None:
+        cache_key = "durable_working_context_projection_baseline"
+        if cache_key not in state.scratchpad:
+            state.scratchpad[cache_key] = self._working_context_projection(token_budget=token_budget)
+        cached = state.scratchpad[cache_key]
+        return cached if isinstance(cached, dict) else None
+
     async def project(self, state: LoopState, *, token_budget: int) -> dict | None:
-        working_context = self._working_context_projection(token_budget=token_budget)
+        working_context = self.baseline_projection(state, token_budget=token_budget)
         if self.recall is None:
             return working_context
         latest_user_text = _latest_user_quote(state)

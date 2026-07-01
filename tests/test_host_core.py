@@ -60,7 +60,8 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.terminal import TerminalStatus
-from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from pulsara_agent.settings import PulsaraSettings
+from tests.support.settings import compatibility_storage_config
 
 
 class ScriptedTransport:
@@ -167,7 +168,7 @@ def _settings() -> PulsaraSettings:
             flash_model="flash",
             api="scripted",
         ),
-        storage=StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"),
+        storage=compatibility_storage_config(),
     )
 
 

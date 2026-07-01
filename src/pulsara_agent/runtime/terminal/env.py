@@ -336,6 +336,7 @@ def capture_shell_env_snapshot(
             stdin=subprocess.DEVNULL,
             env=dict(parent_env),
             close_fds=True,
+            start_new_session=True,
         )
         try:
             stdout = _read_bounded_stdout(proc, timeout_seconds=config.shell_snapshot_timeout_seconds)

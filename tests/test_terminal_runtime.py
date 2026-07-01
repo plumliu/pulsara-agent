@@ -189,6 +189,22 @@ def test_terminal_runtime_cleans_per_process_cwd_file_after_readback(tmp_path) -
     assert not cwd_file.exists()
 
 
+def test_spawn_local_process_starts_isolated_session_without_preexec_hook(tmp_path) -> None:
+    process = spawn_local_process(
+        terminal_session_id="default",
+        command="sleep 10",
+        cwd=tmp_path,
+        max_output_chars=1000,
+        stdin_pipe=True,
+        capture_cwd=False,
+    )
+    try:
+        assert os.getsid(process.process.pid) == process.process.pid
+        assert os.getpgid(process.process.pid) == process.process.pid
+    finally:
+        wait_for_process(process, timeout_seconds=0.01, kill_on_timeout=True)
+
+
 def test_spawn_local_process_default_env_does_not_inherit_provider_secret(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PULSARA_API_KEY", "pulsara-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")

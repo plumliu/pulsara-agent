@@ -17,6 +17,7 @@ from typing import AsyncIterator
 
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.settings import compatibility_storage_config
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -59,7 +60,7 @@ from pulsara_agent.runtime.terminal import (
     TerminalSessionManager,
     TerminalStatus,
 )
-from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from pulsara_agent.settings import PulsaraSettings
 
 
 class ScriptedTransport:
@@ -112,7 +113,7 @@ def _settings() -> PulsaraSettings:
             flash_model="flash",
             api="scripted",
         ),
-        storage=StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"),
+        storage=compatibility_storage_config(),
     )
 
 

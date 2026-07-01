@@ -7,6 +7,7 @@ it never enters the governed memory graph.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -185,12 +186,26 @@ def working_context_projection(summary: WorkingContextSummary, *, token_budget: 
 
 
 def _has_substantive_signal(timeline: RunTimelineSummary) -> bool:
-    if timeline.tool_traces:
-        return True
     if timeline.errors:
         return True
+    if timeline.tool_traces:
+        return any(_is_substantive_tool_trace(trace) for trace in timeline.tool_traces)
     text = _normalized(timeline.assistant_text)
     return len(text) >= 80
+
+
+def _is_substantive_tool_trace(trace: Any) -> bool:
+    if trace.tool_name != "memory_search":
+        return True
+    if re.search(r'"status"\s*:\s*"empty"', trace.result_summary):
+        # Timeline summaries are bounded and may truncate the closing JSON, so
+        # recognize the status field before attempting a full parse.
+        return False
+    try:
+        payload = json.loads(trace.result_summary)
+    except (json.JSONDecodeError, TypeError):
+        return True
+    return not (isinstance(payload, dict) and payload.get("status") == "empty")
 
 
 def _summary_text(timeline: RunTimelineSummary) -> str:

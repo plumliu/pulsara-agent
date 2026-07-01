@@ -17,6 +17,7 @@ from pulsara_agent.capability import (
     bundled_skills_status,
     reset_bundled_skill,
     sync_bundled_skills,
+    default_pulsara_home,
 )
 from pulsara_agent.host import (
     HostCore,
@@ -44,6 +45,7 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
     resolve_permission_policy,
 )
+from pulsara_agent.repl import ReplPrompt, build_repl_prompt
 from pulsara_agent.settings import PulsaraSettings, load_env_file
 from pulsara_agent.tools import build_core_tool_registry
 
@@ -282,29 +284,45 @@ async def _host_repl(args) -> None:
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
     core = HostCore(settings=settings)
+    repl_prompt: ReplPrompt = build_repl_prompt(
+        history_path=default_pulsara_home() / "repl_history",
+    )
     try:
         session = await core.open_session(
             _workspace_input_from_args(args),
             model_role=ModelRole(args.model_role),
             permission_policy=permission_policy,
         )
+        print("Pulsara REPL · :help 查看命令 · Ctrl-D 退出")
         while True:
             try:
-                prompt = input("> ")
+                prompt = await repl_prompt.read_line(_repl_prompt_message(session))
+            except KeyboardInterrupt:
+                # prompt_toolkit has already cleared the current input buffer.
+                # Keep the session alive instead of turning Ctrl-C into teardown.
+                print("^C")
+                continue
             except EOFError:
+                print()
                 break
-            if prompt.strip() in {"exit", "quit", ":q"}:
+            command = prompt.strip()
+            if not command:
+                continue
+            if command in {"exit", "quit", ":q"}:
                 break
-            if prompt.strip() == ":approval":
+            if command in {":help", ":h", ":?"}:
+                print(_REPL_HELP)
+                continue
+            if command == ":approval":
                 pending = session.get_pending_approval()
                 print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
                 continue
-            if prompt.strip() == ":interaction":
+            if command == ":interaction":
                 pending = session.get_pending_interaction()
                 print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
                 continue
-            if prompt.strip().startswith(":plan"):
-                reason = prompt.strip()[len(":plan"):].strip()
+            if command.startswith(":plan"):
+                reason = command[len(":plan"):].strip()
                 try:
                     policy = session.enter_plan(reason=reason)
                 except (HostSessionBusyError, HostSessionPendingApprovalError, HostSessionPendingInteractionError) as exc:
@@ -312,7 +330,7 @@ async def _host_repl(args) -> None:
                     continue
                 print(json.dumps({"plan": session.plan_state.to_dict(), "policy": policy.to_dict()}, indent=2))
                 continue
-            if prompt.strip() == ":status":
+            if command == ":status":
                 mode = session.current_permission_mode
                 print(
                     json.dumps(
@@ -324,8 +342,8 @@ async def _host_repl(args) -> None:
                     )
                 )
                 continue
-            if prompt.strip().startswith(":mode"):
-                requested = prompt.strip()[len(":mode"):].strip()
+            if command.startswith(":mode"):
+                requested = command[len(":mode"):].strip()
                 if not requested:
                     allowed = ", ".join(m.value for m in PermissionMode)
                     print(f"Usage: :mode <preset>  (one of: {allowed})", file=sys.stderr)
@@ -342,19 +360,19 @@ async def _host_repl(args) -> None:
                     continue
                 print(json.dumps({"mode": requested, "policy": policy.to_dict()}, indent=2))
                 continue
-            if prompt.strip() == ":stop":
+            if command == ":stop":
                 result = await session.stop_current_turn()
                 if result is None:
                     print("No active turn to stop.")
                 else:
                     print(json.dumps({"status": result.status.value, "stop_reason": result.stop_reason}, indent=2))
                 continue
-            if prompt.strip().startswith(":answer"):
+            if command.startswith(":answer"):
                 pending = session.get_pending_interaction()
                 if not isinstance(pending, PendingPlanInteraction) or pending.kind != "question":
                     print("No pending plan question.")
                     continue
-                answer = prompt.strip()[len(":answer"):].strip()
+                answer = command[len(":answer"):].strip()
                 if not answer:
                     print("Usage: :answer <text>", file=sys.stderr)
                     continue
@@ -367,7 +385,7 @@ async def _host_repl(args) -> None:
                 if pending is not None:
                     print(json.dumps({"pending_interaction": pending.to_dict()}, indent=2))
                 continue
-            if prompt.strip() == ":approve-plan":
+            if command == ":approve-plan":
                 pending = session.get_pending_interaction()
                 if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
                     print("No pending plan exit request.")
@@ -378,12 +396,12 @@ async def _host_repl(args) -> None:
                 if result.final_text:
                     print(result.final_text)
                 continue
-            if prompt.strip().startswith(":revise-plan"):
+            if command.startswith(":revise-plan"):
                 pending = session.get_pending_interaction()
                 if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
                     print("No pending plan exit request.")
                     continue
-                feedback = prompt.strip()[len(":revise-plan"):].strip()
+                feedback = command[len(":revise-plan"):].strip()
                 result = await session.resolve_plan_interaction(
                     PlanExitResolution(
                         interaction_id=pending.interaction_id,
@@ -394,7 +412,7 @@ async def _host_repl(args) -> None:
                 if result.final_text:
                     print(result.final_text)
                 continue
-            if prompt.strip() == ":cancel-plan":
+            if command == ":cancel-plan":
                 pending = session.get_pending_interaction()
                 if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
                     print("No pending plan exit request.")
@@ -405,12 +423,12 @@ async def _host_repl(args) -> None:
                 if result.final_text:
                     print(result.final_text)
                 continue
-            if prompt.strip() in {":approve", ":deny"}:
+            if command in {":approve", ":deny"}:
                 pending = session.get_pending_approval()
                 if pending is None:
                     print("No pending approval.")
                     continue
-                confirmed = prompt.strip() == ":approve"
+                confirmed = command == ":approve"
                 resolution = ApprovalResolution(
                     approval_id=pending.approval_id,
                     decisions=tuple(
@@ -436,6 +454,32 @@ async def _host_repl(args) -> None:
                 print(json.dumps({"pending_interaction": pending_interaction.to_dict()}, indent=2))
     finally:
         await core.shutdown()
+
+
+def _repl_prompt_message(session) -> str:
+    if session.get_pending_approval() is not None:
+        return "approval> "
+    pending = session.get_pending_interaction()
+    if isinstance(pending, PendingPlanInteraction):
+        return "plan> "
+    return "pulsara> "
+
+
+_REPL_HELP = """Commands:
+  :status                 Show the current permission mode and policy
+  :mode <preset>          Switch permission mode
+  :plan [reason]          Enter plan mode
+  :interaction            Show a pending plan interaction
+  :answer <text>          Answer a pending plan question
+  :approve-plan           Approve plan exit
+  :revise-plan <feedback> Request a plan revision
+  :cancel-plan            Cancel plan exit
+  :approval               Show a pending tool approval
+  :approve / :deny        Resolve a pending tool approval
+  :stop                   Stop the current active or suspended turn
+  :q / quit / exit        Close the session
+
+Editing: Up/Down history · Ctrl-R search · Ctrl-C clear · Ctrl-Z suspend · Ctrl-D exit"""
 
 
 async def _host_inspect(args) -> dict[str, object]:

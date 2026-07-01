@@ -44,7 +44,7 @@ class HybridMemoryRecallService(LexicalMemoryRecallService):
         allow_needs_review: bool = False,
         enable_graph_rerank: bool = True,
         recent_suppression_limit: int = 10,
-        auto_dense_timeout_seconds: float = 0.3,
+        auto_dense_timeout_seconds: float = 1.0,
         explicit_dense_timeout_seconds: float = 4.0,
         explicit_rerank_timeout_seconds: float = 4.0,
         explicit_total_deadline_seconds: float = 8.0,

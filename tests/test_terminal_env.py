@@ -210,6 +210,31 @@ def test_capture_shell_env_snapshot_uses_login_interactive_probe_for_zshrc_tools
     assert snapshot.env["PATH"].split(os.pathsep)[0] == "/zshrc-tool/bin"
 
 
+def test_capture_shell_env_snapshot_detaches_interactive_probe_from_host_tty(tmp_path, monkeypatch) -> None:
+    fake_shell = tmp_path / "zsh"
+    _write_executable(
+        fake_shell,
+        "#!/bin/sh\nprintf '__PULSARA_ENV_START__\\0PATH=/usr/bin\\0'\n",
+    )
+    real_popen = subprocess.Popen
+    observed_kwargs = {}
+
+    def recording_popen(*args, **kwargs):
+        observed_kwargs.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(terminal_env.subprocess, "Popen", recording_popen)
+
+    snapshot = capture_shell_env_snapshot(
+        shell=TerminalShellConfig(path=fake_shell),
+        parent_env={"PATH": "/usr/bin", "HOME": str(tmp_path)},
+        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_timeout_seconds=2),
+    )
+
+    assert snapshot.error is None
+    assert observed_kwargs["start_new_session"] is True
+
+
 def test_terminal_env_builder_uses_snapshot_cache_until_startup_file_changes(tmp_path) -> None:
     home = tmp_path / "home"
     home.mkdir()

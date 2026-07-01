@@ -56,7 +56,7 @@ class LoopBudget:
     max_plan_interactions_per_run: int = 16
     max_plan_exit_revisions_per_run: int = 8
     projection_token_budget: int = 2_000
-    recall_hard_timeout_ms: int = 500
+    recall_hard_timeout_ms: int = 1_500
     tool_result_context_chars: int = 8_000
 
 

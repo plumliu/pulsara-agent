@@ -1184,6 +1184,19 @@ class SlowProjectionHooks(NoopMemoryHooks):
         return {"summary": "too late", "included_memory_ids": ["mem:late"]}
 
 
+class SlowProjectionWithBaselineHooks(SlowProjectionHooks):
+    def baseline_projection(self, state: LoopState, *, token_budget: int):
+        return {
+            "summary": (
+                '<working-context-projection authority="recent_activity">'
+                "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT"
+                "</working-context-projection>"
+            ),
+            "included_memory_ids": [],
+            "projection_kind": "working_context",
+        }
+
+
 def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     hooks = RecordingHooks()
     transport = ScriptedTransport([{"text": "done"}])
@@ -1311,6 +1324,33 @@ def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -
     failed = next(event for event in events if event.type is EventType.PROJECTION_FAILED)
     assert failed.error == "recall_timeout"
     assert "Recalled Memory" not in (transport.contexts[0].system_prompt or "")
+
+
+def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        memory_hooks=SlowProjectionWithBaselineHooks(),
+        budget=LoopBudget(recall_hard_timeout_ms=1),
+    )
+
+    result = asyncio.run(agent.run_task("What did I just do?"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert result.state.memory_projection is not None
+    assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in result.state.memory_projection["summary"]
+    events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
+    ready = next(event for event in events if event.type is EventType.PROJECTION_READY)
+    assert ready.metadata == {
+        "degraded": True,
+        "warnings": ["semantic_recall_timeout"],
+        "fallback": "baseline_projection",
+    }
+    assert not any(event.type is EventType.PROJECTION_FAILED for event in events)
+    system_prompt = transport.contexts[0].system_prompt or ""
+    assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in system_prompt
+    assert "empty memory_search result does not invalidate" in system_prompt
 
 
 class FailingHook(NoopMemoryHooks):

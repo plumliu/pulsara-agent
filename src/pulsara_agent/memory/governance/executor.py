@@ -68,6 +68,7 @@ class MemoryGovernanceExecutor:
     memory_write_uow_factory: Callable[[], GovernanceWriteUnitOfWork]
     graph_id: str | None = None
     allowed_write_scopes: frozenset[str] = frozenset({CTX_USER})
+    stored_event_publisher: Callable[[list[AgentEvent]], None] | None = None
     async_surfaces: tuple[str, ...] = (
         CanonicalMutationSurface.SEARCH_INDEX.value,
         CanonicalMutationSurface.OXIGRAPH.value,
@@ -264,6 +265,8 @@ class MemoryGovernanceExecutor:
             )
 
         stored_events = self.event_log.extend(outcome.events + supersede_events + contradiction_events)
+        if stored_events and self.stored_event_publisher is not None:
+            self.stored_event_publisher(stored_events)
         diagnostics: list[str] = []
         blocked_reason = supersede_blocked_reason or contradiction_blocked_reason
         if blocked_reason is not None:

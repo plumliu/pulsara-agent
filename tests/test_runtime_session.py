@@ -191,6 +191,31 @@ def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(tmp_
     assert [published.event.sequence for published in subscriber.events] == [2]
 
 
+def test_runtime_session_publish_stored_events_bridges_direct_event_log_writes(tmp_path) -> None:
+    runtime = in_memory_runtime_session(tmp_path)
+    subscriber = RecordingSubscriber()
+    runtime.publisher.subscribe(subscriber)
+
+    async def run() -> None:
+        await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="bind"))
+        stored = runtime.event_log.append(
+            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:2", delta="direct")
+        )
+        assert stored.sequence == 2
+
+        runtime.publish_stored_events([stored])
+        final = await asyncio.wait_for(
+            runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:3", delta="after")),
+            timeout=0.5,
+        )
+        assert final.sequence == 3
+
+    asyncio.run(run())
+
+    assert [event.sequence for event in runtime.event_log.iter()] == [1, 2, 3]
+    assert [published.event.sequence for published in subscriber.events] == [1, 2, 3]
+
+
 def test_runtime_session_emit_rejects_preassigned_sequence(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
 

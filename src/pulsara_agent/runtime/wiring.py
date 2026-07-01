@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from pulsara_agent.capability import CapabilityResolver, LocalSkillResolver
+from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore, InMemoryGraphStore, PostgresGraphStore
 from pulsara_agent.graph.durable_facade import DurableGraphFacade
@@ -148,6 +149,7 @@ def build_in_memory_runtime_wiring(
             graph_id=resolved_graph_id,
         ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
+        stored_event_publisher=runtime_session.publish_stored_events,
     )
     return RuntimeWiring(
         runtime_session=runtime_session,
@@ -298,6 +300,7 @@ def build_durable_runtime_wiring(
             workspace_root=workspace_root,
         ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
+        stored_event_publisher=runtime_session.publish_stored_events,
         async_surfaces=(
             CanonicalMutationSurface.SEARCH_INDEX.value,
             CanonicalMutationSurface.OXIGRAPH.value,
@@ -489,6 +492,7 @@ def _build_memory_governance_executor(
     runtime_session_id: str,
     memory_write_uow_factory: Callable[[], GovernanceWriteUnitOfWork],
     allowed_write_scopes: frozenset[str],
+    stored_event_publisher: Callable[[list[AgentEvent]], None] | None = None,
     async_surfaces: tuple[str, ...] = (
         CanonicalMutationSurface.SEARCH_INDEX.value,
         CanonicalMutationSurface.OXIGRAPH.value,
@@ -503,6 +507,7 @@ def _build_memory_governance_executor(
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=memory_write_uow_factory,
         allowed_write_scopes=allowed_write_scopes,
+        stored_event_publisher=stored_event_publisher,
         async_surfaces=async_surfaces,
     )
 

@@ -7,7 +7,8 @@ from pulsara_agent.host.session import HostSession
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
-from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from pulsara_agent.settings import PulsaraSettings
+from tests.support.settings import compatibility_storage_config
 
 
 def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(tmp_path) -> None:
@@ -19,7 +20,7 @@ def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(tmp_p
                 pro_model="test-pro",
                 flash_model="test-flash",
             ),
-            storage=StorageConfig(postgres_dsn="", oxigraph_url="http://127.0.0.1:1"),
+            storage=compatibility_storage_config(),
         )
         wiring = build_agent_runtime_wiring(
             settings,

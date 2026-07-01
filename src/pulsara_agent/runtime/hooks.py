@@ -192,6 +192,8 @@ class MemoryHooks(Protocol):
 
     async def on_session_start(self, state: LoopState, user_input: str) -> None: ...
 
+    def baseline_projection(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None: ...
+
     async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None: ...
 
     async def after_model_reply(self, state: LoopState, assistant: Msg) -> list[AgentEvent]: ...
@@ -221,6 +223,9 @@ class NoopMemoryHooks:
 
     async def on_turn_start(self, state: LoopState, user_input: str) -> None:
         return await self.on_session_start(state, user_input)
+
+    def baseline_projection(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None:
+        return None
 
     async def project(self, state: LoopState, *, token_budget: int) -> dict[str, Any] | None:
         return None

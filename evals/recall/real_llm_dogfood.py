@@ -63,7 +63,7 @@ async def run_memory_recall_dogfood(
     root_b.mkdir(parents=True, exist_ok=True)
     hidden_root.mkdir(parents=True, exist_ok=True)
     domain_id = f"u_recall_dogfood_{uuid4().hex[:12]}"
-    core = HostCore(settings, durable=True, use_workspace_supervisor=False)
+    core = HostCore(settings, durable=True)
     session_a = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",

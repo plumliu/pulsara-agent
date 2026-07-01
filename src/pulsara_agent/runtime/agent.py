@@ -949,7 +949,12 @@ class AgentRuntime:
             ),
             state=state,
         )
+        baseline = None
         try:
+            baseline = self.memory_hooks.baseline_projection(
+                state,
+                token_budget=self.budget.projection_token_budget,
+            )
             projection = await asyncio.wait_for(
                 self.memory_hooks.project(
                     state,
@@ -958,7 +963,26 @@ class AgentRuntime:
                 timeout=self.budget.recall_hard_timeout_ms / 1000,
             )
         except TimeoutError:
-            state.memory_projection = None
+            state.memory_projection = baseline
+            if baseline is not None:
+                yield await self.runtime_session.emit(
+                    ProjectionReadyEvent(
+                        **context.event_fields(),
+                        projection_id=projection_id,
+                        role=self.model_role.value,
+                        scope=state.current_scope or "session",
+                        token_budget=self.budget.projection_token_budget,
+                        included_memory_ids=_projection_ids(baseline),
+                        summary=_projection_summary(baseline),
+                        metadata={
+                            "degraded": True,
+                            "warnings": ["semantic_recall_timeout"],
+                            "fallback": "baseline_projection",
+                        },
+                    ),
+                    state=state,
+                )
+                return
             yield await self.runtime_session.emit(
                 ProjectionFailedEvent(
                     **context.event_fields(),

@@ -196,10 +196,20 @@ def _data_placeholder(block: DataBlock) -> str:
 def _system_prompt_with_projection(system_prompt: str, projection: dict[str, Any] | None) -> str:
     if not projection:
         return system_prompt
+    projection_kind = projection.get("projection_kind")
+    if projection_kind in {"working_context", "mixed"}:
+        heading = (
+            "Recalled Memory and Recent Working Context "
+            "(source=fenced_memory_context; do not write it back as new memory):\n"
+            "Recent Working Context is independent from canonical memory search. "
+            "An empty memory_search result does not invalidate recent activity shown here."
+        )
+    else:
+        heading = "Recalled Memory (source=fenced_recalled_memory; do not write it back as new memory):"
     return "\n\n".join(
         [
             system_prompt,
-            "Recalled Memory (source=fenced_recalled_memory; do not write it back as new memory):",
+            heading,
             _projection_text(projection),
         ]
     )
