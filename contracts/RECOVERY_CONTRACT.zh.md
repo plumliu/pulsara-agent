@@ -70,7 +70,7 @@ class RecoveryProjection:
 
 ### 2.3 in-run:project_recovery_from_state
 
-`project_recovery_from_state(state)` 从 live `LoopState` 产出,喂 runtime prompt。`state.recovery_mode` 为 False 时返回 `None`。产出固定 `guidance_kind=IN_RUN_STEP_FAILED`、`run_status=None`、`unfinished_tools=()`。
+`project_recovery_from_state(state)` 从 live `LoopState` 产出,喂 runtime prompt。`state.in_run_recovery is None` 时返回 `None`。产出固定 `guidance_kind=IN_RUN_STEP_FAILED`、`run_status=None`、`unfinished_tools=()`。
 
 ## 3. AbortKind:typed、可审计
 
@@ -79,13 +79,14 @@ abort 类型用 `AbortKind`(`recovery.py`)表达,不再走 `scratchpad["abort_re
 ```python
 class AbortKind(StrEnum):
     USER_STOP = "user_stop"
+    HOST_TEARDOWN = "host_teardown"
 ```
 
 - `LoopState.abort_kind: AbortKind | None`,在 `stream_abort_run` 设置。
 - **持久化到 `RunEndEvent.abort_kind: str | None`**(additive 字段,旧事件 load 不受影响)。cross-run producer 从事件读 abort_kind,而非靠 scratchpad(scratchpad 不进 log)。
 - `abort_run` / `stop_current_turn` 链路上的 `reason` 参数类型为 `AbortKind`(不是 str),确保不会有裸字符串流入 `state.abort_kind`。
 
-V1 运行级 abort 只有 `USER_STOP` 一个成员(teardown / watchdog 是 terminal-process 级,不是 run 级,不在此枚举)。typed 化的价值是杀掉暗线 + 让 abort 类型可审计 + 留扩展点。
+V1 运行级 abort 有两个成员：`USER_STOP` 表示用户显式停止；`HOST_TEARDOWN` 表示 HostSession/application 生命周期关闭。二者不得共享“用户停止”的恢复文案。terminal process 的 teardown / watchdog 仍是 process 级原因，不进入这个 run 枚举。
 
 ## 4. GuidanceKind 与两张文案表
 
@@ -96,6 +97,7 @@ class GuidanceKind(StrEnum):
     RUN_FAILED = "run_failed"                 # 整个 run 失败(provider/runtime)
     USER_ABORTED = "user_aborted"             # 用户停了普通 run
     PLAN_ABORTED = "plan_aborted"             # 用户停了 plan 中的 turn(plan 仍 active)
+    HOST_TEARDOWN = "host_teardown"            # host/session 生命周期关闭，不归因于用户 stop
     IN_RUN_STEP_FAILED = "in_run_step_failed" # 同一 run 内某 step 失败,就地恢复
 ```
 
@@ -112,6 +114,7 @@ class GuidanceKind(StrEnum):
 cross-run:
 
 - `run_status == "failed"` → `RUN_FAILED`。
+- `run_status == "aborted"` 且 `abort_kind == HOST_TEARDOWN` → `HOST_TEARDOWN`（优先于 plan active 判定）。
 - `run_status == "aborted"` 且 `in_plan_workflow` → `PLAN_ABORTED`。
 - `run_status == "aborted"` 且非 plan → `USER_ABORTED`。
 

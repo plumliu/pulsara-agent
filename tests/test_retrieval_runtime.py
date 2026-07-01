@@ -129,7 +129,7 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(tmp_pat
             ),
             storage=storage,
         )
-        core = HostCore(settings, durable=True, use_workspace_supervisor=False)
+        core = HostCore(settings, durable=True)
         domain_id = f"u_vector_worker_{uuid4().hex}"
         first = await core.open_session(
             HostWorkspaceInput(

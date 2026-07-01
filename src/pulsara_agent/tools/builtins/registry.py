@@ -64,6 +64,7 @@ def build_core_tool_registry(
             root,
             runtime_session.terminal_sessions,
             owner_host_session_id=runtime_session.terminal_owner_host_session_id,
+            owner_conversation_id=runtime_session.terminal_owner_conversation_id,
             permission_state=permission_state,
         )
     )

@@ -113,6 +113,27 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
     assert projection.unfinished_tools == ()
 
 
+def test_host_teardown_has_distinct_recovery_guidance() -> None:
+    events = [
+        RunStartEvent(**CTX.event_fields(), user_input_chars=4, metadata={"user_input": "work"}),
+        RunEndEvent(
+            **CTX.event_fields(),
+            status="aborted",
+            stop_reason="aborted",
+            abort_kind=AbortKind.HOST_TEARDOWN.value,
+        ),
+    ]
+
+    projection = project_recovery_from_events(events)
+
+    assert projection is not None
+    assert projection.abort_kind is AbortKind.HOST_TEARDOWN
+    assert projection.guidance_kind is GuidanceKind.HOST_TEARDOWN
+    text = render_recovery_text(projection, audience="transcript")
+    assert "host lifecycle teardown" in text
+    assert "not a user stop" in text
+
+
 def test_project_recovery_from_state_uses_in_run_step_failed_guidance() -> None:
     state = LoopState(session_id="runtime:test")
     state.in_run_recovery = InRunRecoveryState(

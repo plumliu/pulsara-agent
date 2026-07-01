@@ -521,8 +521,9 @@ provides_tools:
 
     snapshot = asyncio.run(cli._host_inspect(args))
 
-    assert snapshot["sessions"] == []
-    assert snapshot["workspace_supervisors"] == []
+    assert snapshot["inspect_kind"] == "static_workspace_capability"
+    assert "sessions" not in snapshot
+    assert "workspace_supervisors" not in snapshot
     assert snapshot["recovery_scope"] == "host_process"
     assert snapshot["workspace"]["workspace_kind"] == "project"
     assert snapshot["workspace"]["workspace_root"] == str(tmp_path)

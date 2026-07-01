@@ -102,6 +102,15 @@ class ProcessRegistry:
     max_finished_processes: int = 32
     finished_ttl_seconds: float = 3600.0
     _processes: dict[str, TerminalProcessState] = field(default_factory=dict, init=False, repr=False)
+    _released_owners: set[str] = field(default_factory=set, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    def activate_owner(self, owner_host_session_id: str) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("terminal process registry is closed")
+            self._released_owners.discard(owner_host_session_id)
 
     def exec_with_yield(
         self,
@@ -124,7 +133,9 @@ class ProcessRegistry:
         origin_tool_call_id: str | None = None,
         record_event: Callable[[AgentEvent], AgentEvent] | None = None,
     ) -> tuple[TerminalProcessState, bool]:
-        self._cleanup_finished()
+        with self._lock:
+            self._require_accepting_locked(owner_host_session_id)
+            self._cleanup_finished_locked()
         state = spawn_local_process(
             terminal_session_id=terminal_session_id,
             command=command,
@@ -153,14 +164,24 @@ class ProcessRegistry:
         )
         if finished:
             return state, False
-        if self._live_count() >= self.max_live_processes:
+        over_limit = False
+        released = False
+        with self._lock:
+            if not self._is_accepting_locked(owner_host_session_id):
+                released = True
+            elif self._live_count_locked() >= self.max_live_processes:
+                over_limit = True
+            else:
+                with state.lock:
+                    state.yielded = True
+                    state.output_callback = None
+                self._processes[state.process_id] = state
+        if released or over_limit:
             kill_process(state, reason=TerminalKillReason.TEARDOWN)
             _cleanup_cwd_file(state)
+            if released:
+                raise ProcessLimitError("terminal owner was released while command was running")
             raise ProcessLimitError(f"max live terminal processes reached: {self.max_live_processes}")
-        with state.lock:
-            state.yielded = True
-            state.output_callback = None
-        self._processes[state.process_id] = state
         _maybe_record_completion_event(state)
         return state, True
 
@@ -222,26 +243,54 @@ class ProcessRegistry:
         return snapshot_process(state, max_output_chars=max_output_chars)
 
     def shutdown(self) -> None:
-        for state in list(self._processes.values()):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            states = list(self._processes.values())
+        for state in states:
             if state.is_running:
                 kill_process(state, reason=TerminalKillReason.TEARDOWN)
 
     def kill_owned(self, owner_host_session_id: str) -> list[TerminalResult]:
+        with self._lock:
+            states = [
+                state
+                for state in self._processes.values()
+                if state.owner_host_session_id == owner_host_session_id
+            ]
+        return self._kill_states(states)
+
+    def release_owner(self, owner_host_session_id: str) -> list[TerminalResult]:
+        """Revoke an owner before killing its current process snapshot."""
+        with self._lock:
+            self._released_owners.add(owner_host_session_id)
+            states = [
+                state
+                for state in self._processes.values()
+                if state.owner_host_session_id == owner_host_session_id
+            ]
+        return self._kill_states(states)
+
+    def _kill_states(self, states: list[TerminalProcessState]) -> list[TerminalResult]:
         results: list[TerminalResult] = []
-        for state in list(self._processes.values()):
-            if state.owner_host_session_id != owner_host_session_id:
-                continue
+        for state in states:
             if state.is_running:
                 kill_process(state, reason=TerminalKillReason.TEARDOWN)
             results.append(snapshot_process(state))
         return results
 
     def list_owned(self, owner_host_session_id: str) -> list[TerminalResult]:
-        self._cleanup_finished()
+        with self._lock:
+            self._cleanup_finished_locked()
+            states = [
+                state
+                for state in self._processes.values()
+                if state.owner_host_session_id == owner_host_session_id
+            ]
         return [
             snapshot_process(state)
-            for state in self._processes.values()
-            if state.owner_host_session_id == owner_host_session_id
+            for state in states
         ]
 
     def list_processes(
@@ -251,10 +300,12 @@ class ProcessRegistry:
         include_finished: bool = True,
         include_running: bool = True,
     ) -> list[TerminalProcessInfo]:
-        self._cleanup_finished()
+        with self._lock:
+            self._cleanup_finished_locked()
+            states = list(self._processes.values())
         processes = [
             process_info(state)
-            for state in self._processes.values()
+            for state in states
             if state.yielded
             and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
             and ((include_running and state.is_running) or (include_finished and state.is_finished))
@@ -278,18 +329,22 @@ class ProcessRegistry:
         return process_log(state, max_output_chars=max_output_chars or state.max_output_chars)
 
     def live_count(self, *, owner_host_session_id: str | None = None) -> int:
+        with self._lock:
+            states = list(self._processes.values())
         return sum(
             1
-            for state in self._processes.values()
+            for state in states
             if state.yielded
             and state.is_running
             and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
         )
 
     def finished_count(self, *, owner_host_session_id: str | None = None) -> int:
+        with self._lock:
+            states = list(self._processes.values())
         return sum(
             1
-            for state in self._processes.values()
+            for state in states
             if state.yielded
             and state.is_finished
             and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
@@ -301,19 +356,35 @@ class ProcessRegistry:
         *,
         owner_host_session_id: str | None = None,
     ) -> TerminalProcessState:
-        self._cleanup_finished()
-        try:
-            state = self._processes[process_id]
-        except KeyError as exc:
-            raise KeyError(f"terminal process not found or expired: {process_id}") from exc
+        with self._lock:
+            self._cleanup_finished_locked()
+            try:
+                state = self._processes[process_id]
+            except KeyError as exc:
+                raise KeyError(f"terminal process not found or expired: {process_id}") from exc
         if owner_host_session_id is not None and state.owner_host_session_id != owner_host_session_id:
             raise KeyError(f"terminal process not found or not owned by this session: {process_id}")
         return state
 
-    def _live_count(self) -> int:
+    def _live_count_locked(self) -> int:
         return sum(1 for state in self._processes.values() if state.yielded and state.is_running)
 
+    def _is_accepting_locked(self, owner_host_session_id: str | None) -> bool:
+        return not self._closed and (
+            owner_host_session_id is None or owner_host_session_id not in self._released_owners
+        )
+
+    def _require_accepting_locked(self, owner_host_session_id: str | None) -> None:
+        if self._closed:
+            raise ProcessLimitError("terminal process registry is closed")
+        if owner_host_session_id is not None and owner_host_session_id in self._released_owners:
+            raise ProcessLimitError(f"terminal owner has been released: {owner_host_session_id}")
+
     def _cleanup_finished(self) -> None:
+        with self._lock:
+            self._cleanup_finished_locked()
+
+    def _cleanup_finished_locked(self) -> None:
         now = time.monotonic()
         expired = [
             process_id

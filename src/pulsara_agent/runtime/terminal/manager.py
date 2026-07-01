@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 
 from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder, TerminalEnvConfig
 from pulsara_agent.runtime.terminal.models import TerminalBackendType, TerminalSessionState
@@ -29,6 +30,9 @@ class TerminalSessionManager:
     env_config: TerminalEnvConfig | None = None
     _sessions: dict[tuple[str | None, str], TerminalSession] = field(default_factory=dict, init=False, repr=False)
     process_registry: ProcessRegistry = field(init=False)
+    _released_owners: set[str] = field(default_factory=set, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
@@ -50,30 +54,65 @@ class TerminalSessionManager:
         owner_conversation_id: str | None = None,
     ) -> TerminalSession:
         normalized = self._normalize_session_id(session_id)
-        key = (owner_host_session_id, normalized)
-        if key in self._sessions:
-            return self._sessions[key]
-        if len(self._sessions) >= self.max_sessions:
-            raise ValueError(f"terminal session limit reached: max {self.max_sessions}")
-        session = TerminalSession(
-            state=TerminalSessionState(
-                session_id=normalized,
-                workspace_root=self.workspace_root,
-                current_cwd=self.workspace_root,
-                backend_type=TerminalBackendType.LOCAL,
-                backend_metadata={"shell": self.shell.to_metadata()},
-                owner_host_session_id=owner_host_session_id,
-                owner_conversation_id=owner_conversation_id,
-            ),
-            process_registry=self.process_registry,
-            shell=self.shell,
-            env_builder=self.env_builder,
-        )
-        self._sessions[key] = session
-        return session
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("terminal session manager is closed")
+            if owner_host_session_id is not None and owner_host_session_id in self._released_owners:
+                raise RuntimeError(f"terminal owner has been released: {owner_host_session_id}")
+            key = (owner_host_session_id, normalized)
+            if key in self._sessions:
+                return self._sessions[key]
+            if len(self._sessions) >= self.max_sessions:
+                # Shared-pool capacity is workspace-wide; surface the owner
+                # distribution so a limit hit is diagnosable per owner.
+                raise ValueError(
+                    f"terminal session limit reached: max {self.max_sessions} "
+                    f"(workspace_root={self.workspace_root}, "
+                    f"owner_sessions={self._owner_session_counts_locked()})"
+                )
+            session = TerminalSession(
+                state=TerminalSessionState(
+                    session_id=normalized,
+                    workspace_root=self.workspace_root,
+                    current_cwd=self.workspace_root,
+                    backend_type=TerminalBackendType.LOCAL,
+                    backend_metadata={"shell": self.shell.to_metadata()},
+                    owner_host_session_id=owner_host_session_id,
+                    owner_conversation_id=owner_conversation_id,
+                ),
+                process_registry=self.process_registry,
+                shell=self.shell,
+                env_builder=self.env_builder,
+            )
+            self._sessions[key] = session
+            return session
+
+    def activate_owner(self, owner_host_session_id: str) -> None:
+        """Allow a newly issued supervisor lease to use this manager."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("terminal session manager is closed")
+            self._released_owners.discard(owner_host_session_id)
+        self.process_registry.activate_owner(owner_host_session_id)
 
     def list_session_ids(self) -> list[str]:
-        return sorted(session_id for _owner, session_id in self._sessions)
+        with self._lock:
+            return sorted(session_id for _owner, session_id in self._sessions)
+
+    def session_count(self) -> int:
+        with self._lock:
+            return len(self._sessions)
+
+    def owner_session_counts(self) -> dict[str | None, int]:
+        """Per-owner terminal session counts, for shared-capacity diagnostics."""
+        with self._lock:
+            return self._owner_session_counts_locked()
+
+    def _owner_session_counts_locked(self) -> dict[str | None, int]:
+        counts: dict[str | None, int] = {}
+        for owner, _session_id in self._sessions:
+            counts[owner] = counts.get(owner, 0) + 1
+        return counts
 
     def poll_process(
         self,
@@ -175,6 +214,27 @@ class TerminalSessionManager:
     def kill_owned(self, owner_host_session_id: str):
         return self.process_registry.kill_owned(owner_host_session_id)
 
+    def release_owner(self, owner_host_session_id: str):
+        """Release everything a single owner holds in this shared manager.
+
+        This kills/drains the owner's yielded processes AND drops the owner's
+        terminal sessions (and their cwd state) from ``_sessions``. Dropping the
+        session keys is what restores ``max_sessions`` capacity: ``kill_owned``
+        alone clears the ProcessRegistry but leaves stale ``(owner, session_id)``
+        keys that would otherwise permanently occupy the shared workspace pool
+        until the whole manager is destroyed (audit P0-7).
+
+        Synchronous: the underlying kill waits on process groups and joins reader
+        threads, so callers on an event loop must run this via asyncio.to_thread
+        and outside any held async lock.
+        """
+        with self._lock:
+            self._released_owners.add(owner_host_session_id)
+            stale_keys = [key for key in self._sessions if key[0] == owner_host_session_id]
+            for key in stale_keys:
+                self._sessions.pop(key, None)
+        return self.process_registry.release_owner(owner_host_session_id)
+
     def list_owned(self, owner_host_session_id: str):
         return self.process_registry.list_owned(owner_host_session_id)
 
@@ -188,6 +248,11 @@ class TerminalSessionManager:
         return self.process_registry.finished_count(owner_host_session_id=owner_host_session_id)
 
     def shutdown(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._sessions.clear()
         self.process_registry.shutdown()
 
     def _normalize_session_id(self, session_id: str | None) -> str:

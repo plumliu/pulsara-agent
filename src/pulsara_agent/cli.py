@@ -513,8 +513,7 @@ async def _host_inspect(args) -> dict[str, object]:
     finally:
         runtime_session.close()
     return {
-        "sessions": [],
-        "workspace_supervisors": [],
+        "inspect_kind": "static_workspace_capability",
         "recovery_scope": "host_process",
         "workspace": {
             "workspace_kind": workspace.workspace_kind,

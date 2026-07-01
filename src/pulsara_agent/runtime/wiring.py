@@ -53,7 +53,7 @@ from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.terminal import TerminalSessionManager
+from pulsara_agent.runtime.terminal import TerminalRuntimeBinding
 from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex, PostgresToolResultArtifactIndex
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.retrieval.tokenizer.factory import build_tokenizer
@@ -92,9 +92,7 @@ def build_in_memory_runtime_wiring(
     runtime_session_id: str | None = None,
     graph_id: str | None = None,
     memory_domain: MemoryDomainContext | None = None,
-    terminal_session_manager: TerminalSessionManager | None = None,
-    terminal_owner_host_session_id: str | None = None,
-    owns_terminal_session_manager: bool = True,
+    terminal_binding: TerminalRuntimeBinding | None = None,
 ) -> RuntimeWiring:
     resolved_graph_id = graph_id or (memory_domain.graph_id if memory_domain is not None else None)
     _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
@@ -109,9 +107,7 @@ def build_in_memory_runtime_wiring(
         event_log=event_log,
         archive=archive,
         tool_result_artifacts=tool_result_artifacts,
-        terminal_session_manager=terminal_session_manager,
-        terminal_owner_host_session_id=terminal_owner_host_session_id,
-        owns_terminal_session_manager=owns_terminal_session_manager,
+        terminal_binding=terminal_binding,
     )
     _register_timeline_hook(
         runtime_session=runtime_session,
@@ -158,9 +154,7 @@ def build_durable_runtime_wiring(
     runtime_session_id: str | None = None,
     graph_id: str | None = None,
     memory_domain: MemoryDomainContext | None = None,
-    terminal_session_manager: TerminalSessionManager | None = None,
-    terminal_owner_host_session_id: str | None = None,
-    owns_terminal_session_manager: bool = True,
+    terminal_binding: TerminalRuntimeBinding | None = None,
     retrieval_resources: RetrievalRuntimeResources | None = None,
     governance_coordinator: MemoryGovernanceCoordinator | None = None,
 ) -> RuntimeWiring:
@@ -178,9 +172,7 @@ def build_durable_runtime_wiring(
         event_log=event_log,
         archive=archive,
         tool_result_artifacts=tool_result_artifacts,
-        terminal_session_manager=terminal_session_manager,
-        terminal_owner_host_session_id=terminal_owner_host_session_id,
-        owns_terminal_session_manager=owns_terminal_session_manager,
+        terminal_binding=terminal_binding,
     )
     resolved_graph_id = graph_id or (
         memory_domain.graph_id
@@ -332,9 +324,7 @@ def build_agent_runtime_wiring(
     memory_domain: MemoryDomainContext | None = None,
     memory_reflection: bool = True,
     memory_reflection_options: MemoryReflectionOptions | None = None,
-    terminal_session_manager: TerminalSessionManager | None = None,
-    terminal_owner_host_session_id: str | None = None,
-    owns_terminal_session_manager: bool = True,
+    terminal_binding: TerminalRuntimeBinding | None = None,
     capability_resolver: CapabilityResolver | None = None,
     enable_workspace_skills: bool = True,
     permission_policy: EffectivePermissionPolicy | None = None,
@@ -348,9 +338,7 @@ def build_agent_runtime_wiring(
             runtime_session_id=runtime_session_id,
             graph_id=graph_id,
             memory_domain=memory_domain,
-            terminal_session_manager=terminal_session_manager,
-            terminal_owner_host_session_id=terminal_owner_host_session_id,
-            owns_terminal_session_manager=owns_terminal_session_manager,
+            terminal_binding=terminal_binding,
             retrieval_resources=retrieval_resources,
             governance_coordinator=governance_coordinator,
         )
@@ -360,9 +348,7 @@ def build_agent_runtime_wiring(
             runtime_session_id=runtime_session_id,
             graph_id=graph_id,
             memory_domain=memory_domain,
-            terminal_session_manager=terminal_session_manager,
-            terminal_owner_host_session_id=terminal_owner_host_session_id,
-            owns_terminal_session_manager=owns_terminal_session_manager,
+            terminal_binding=terminal_binding,
         )
     )
     llm_runtime = build_llm_runtime(settings.llm)

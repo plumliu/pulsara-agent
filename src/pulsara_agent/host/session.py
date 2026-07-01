@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
 import time
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from enum import StrEnum
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.host.identity import ResolvedWorkspace
@@ -38,6 +38,7 @@ from pulsara_agent.runtime.plan import (
 )
 from pulsara_agent.runtime.recovery import AbortKind, StopRequest
 from pulsara_agent.runtime.state import LoopState, LoopStatus
+from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 
 
@@ -53,23 +54,66 @@ class HostSessionPendingInteractionError(RuntimeError):
     """Raised when a HostSession is suspended on any pending user interaction."""
 
 
+class HostSessionLifecycle(StrEnum):
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
+
+
+class _StreamError:
+    __slots__ = ("exc",)
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+
+_STREAM_DONE = object()
+_STREAM_QUEUE_MAX_ITEMS = 128
+
+
+class _StreamObserver:
+    """Bounded, detachable observation channel for one Host-owned run."""
+
+    __slots__ = ("attached", "queue")
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_STREAM_QUEUE_MAX_ITEMS)
+        self.attached = True
+
+    async def emit(self, item: Any) -> None:
+        if self.attached:
+            await self.queue.put(item)
+
+    def detach(self) -> None:
+        # Mark detached before making space. A producer already blocked in put()
+        # may enqueue one final item after the drain, but every subsequent emit
+        # becomes a no-op and the queue remains bounded.
+        self.attached = False
+        while True:
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+
 @dataclass(slots=True)
 class HostSession:
     host_session_id: str
     conversation_id: str
     workspace: ResolvedWorkspace
     wiring: AgentRuntimeWiring
+    terminal_lease: WorkspaceTerminalLease | None = None
     created_at: float = field(default_factory=time.monotonic)
     last_active_at: float = field(default_factory=time.monotonic)
-    closed: bool = False
     active_run_id: str | None = None
     stopping_run_id: str | None = None
     suspended_run_id: str | None = None
     pending_interaction: PendingInteraction | None = None
     plan_state: PlanWorkflowState = field(default_factory=PlanWorkflowState)
+    _lifecycle: HostSessionLifecycle = field(default=HostSessionLifecycle.OPEN)
     _suspended_state: LoopState | None = None
     _active_state: LoopState | None = None
-    _active_task: asyncio.Task[AgentRunResult] | None = None
+    _active_task: asyncio.Task[Any] | None = None
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
@@ -82,6 +126,19 @@ class HostSession:
                 preset_to_policy(PermissionMode.READ_ONLY),
                 mode=PermissionMode.READ_ONLY,
             )
+
+    @property
+    def closed(self) -> bool:
+        return self._lifecycle is HostSessionLifecycle.CLOSED
+
+    @property
+    def lifecycle(self) -> HostSessionLifecycle:
+        return self._lifecycle
+
+    def begin_close(self) -> None:
+        """Synchronously close the mutation gate before async teardown starts."""
+        if self._lifecycle is HostSessionLifecycle.OPEN:
+            self._lifecycle = HostSessionLifecycle.CLOSING
 
     @property
     def runtime_session_id(self) -> str:
@@ -104,54 +161,37 @@ class HostSession:
             "processes": [process.to_payload() for process in processes],
         }
 
+    # -- Run entry points -----------------------------------------------------
+    # run_turn / stream_turn / approval resume / plan resume all flow through one
+    # internal execution handle (_run_owned / _stream_owned). The HostSession owns
+    # the task and cancel scope; whether the caller consumes a result or an event
+    # stream is only an observation difference and never changes stop/drain/close
+    # semantics (contract §6.1).
+
     async def run_turn(
         self,
         user_input: str,
         *,
         active_skill_names: frozenset[str] | None = None,
     ) -> AgentRunResult:
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("starting a new turn")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("starting a new turn")
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         async with self._run_lock:
             prior_messages = self._prior_messages()
             prior_messages.extend(self._plan_runtime_messages())
-            state = self.wiring.agent_runtime.new_state()
-            self._prepare_state_for_plan(state)
-            self.active_run_id = state.run_id
-            self._active_state = state
-            self.last_active_at = time.monotonic()
-            task = asyncio.create_task(
-                self.wiring.agent_runtime.run_task(
+            state = self._begin_active_state()
+            return await self._run_owned(
+                state,
+                lambda: self.wiring.agent_runtime.run_task(
                     user_input,
                     prior_messages=prior_messages,
                     state=state,
                     active_skill_names=active_skill_names,
-                )
+                ),
             )
-            self._active_task = task
-            try:
-                try:
-                    result = await task
-                except asyncio.CancelledError:
-                    request = state.stop_request
-                    if request is None:
-                        raise
-                    result = await self.wiring.agent_runtime.abort_run(state, reason=request.reason)
-                self._capture_pending_interaction(result.state)
-                self._clear_plan_entry_audit_if_emitted(result.state)
-                return result
-            finally:
-                self._notify_governance()
-                self._active_task = None
-                self._active_state = None
-                self.active_run_id = None
-                self.stopping_run_id = None
-                self.last_active_at = time.monotonic()
 
     async def stream_turn(
         self,
@@ -159,36 +199,25 @@ class HostSession:
         *,
         active_skill_names: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("starting a new turn")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("starting a new turn")
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         async with self._run_lock:
             prior_messages = self._prior_messages()
             prior_messages.extend(self._plan_runtime_messages())
-            state = self.wiring.agent_runtime.new_state()
-            self._prepare_state_for_plan(state)
-            self.active_run_id = state.run_id
-            self._active_state = state
-            self.last_active_at = time.monotonic()
-            try:
-                async for event in self.wiring.agent_runtime.stream_task(
+            state = self._begin_active_state()
+            async for event in self._stream_owned(
+                state,
+                lambda: self.wiring.agent_runtime.stream_task(
                     user_input,
                     prior_messages=prior_messages,
                     state=state,
                     active_skill_names=active_skill_names,
-                ):
-                    yield event
-            finally:
-                self._notify_governance()
-                self._capture_pending_interaction(state)
-                self._clear_plan_entry_audit_if_emitted(state)
-                self.active_run_id = None
-                self._active_state = None
-                self.last_active_at = time.monotonic()
+                ),
+            ):
+                yield event
 
     def get_pending_approval(self) -> PendingApproval | None:
         return self.pending_interaction if isinstance(self.pending_interaction, PendingApproval) else None
@@ -210,13 +239,11 @@ class HostSession:
         Rejected while a run is active, a turn is stopping, or an approval is
         pending, so the switch never corrupts an in-flight turn. Takes effect
         on the next turn (gate) / next execution (terminal tools)."""
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("switching mode")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("switching mode")
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         parsed = parse_permission_mode(mode)
         policy = preset_to_policy(parsed)
         self.wiring.agent_runtime.set_permission_policy(policy, mode=parsed)
@@ -224,95 +251,69 @@ class HostSession:
         return policy
 
     async def resolve_approval(self, resolution: ApprovalResolution) -> AgentRunResult:
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("resolving an approval")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_approval(resolution.approval_id)
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         async with self._run_lock:
-            state = self._require_suspended_state(pending)
-            self.active_run_id = state.run_id
-            self.last_active_at = time.monotonic()
-            try:
-                result = await self.wiring.agent_runtime.resume_after_approval(state, resolution)
-                self._capture_pending_interaction(result.state)
-                return result
-            finally:
-                self.active_run_id = None
-                self.last_active_at = time.monotonic()
+            state = self._resume_active_state(pending)
+            return await self._run_owned(
+                state,
+                lambda: self.wiring.agent_runtime.resume_after_approval(state, resolution),
+            )
 
     async def stream_approval_resolution(
         self,
         resolution: ApprovalResolution,
     ) -> AsyncIterator[AgentEvent]:
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("resolving an approval")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_approval(resolution.approval_id)
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         async with self._run_lock:
-            state = self._require_suspended_state(pending)
-            self.active_run_id = state.run_id
-            self.last_active_at = time.monotonic()
-            try:
-                async for event in self.wiring.agent_runtime.stream_after_approval(state, resolution):
-                    yield event
-            finally:
-                self._capture_pending_interaction(state)
-                self.active_run_id = None
-                self.last_active_at = time.monotonic()
+            state = self._resume_active_state(pending)
+            async for event in self._stream_owned(
+                state,
+                lambda: self.wiring.agent_runtime.stream_after_approval(state, resolution),
+            ):
+                yield event
 
     async def resolve_plan_interaction(
         self,
         resolution: PlanInteractionResolution,
     ) -> AgentRunResult:
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("resolving a plan interaction")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         async with self._run_lock:
-            state = self._require_suspended_state(pending)
+            state = self._resume_active_state(pending)
             self._prepare_state_for_plan(state)
-            self.active_run_id = state.run_id
-            self.last_active_at = time.monotonic()
-            try:
-                result = await self.wiring.agent_runtime.resume_after_plan_interaction(state, resolution)
-                self._capture_pending_interaction(result.state)
-                return result
-            finally:
-                self.active_run_id = None
-                self.last_active_at = time.monotonic()
+            return await self._run_owned(
+                state,
+                lambda: self.wiring.agent_runtime.resume_after_plan_interaction(state, resolution),
+            )
 
     async def stream_plan_interaction_resolution(
         self,
         resolution: PlanInteractionResolution,
     ) -> AsyncIterator[AgentEvent]:
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("resolving a plan interaction")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         async with self._run_lock:
-            state = self._require_suspended_state(pending)
+            state = self._resume_active_state(pending)
             self._prepare_state_for_plan(state)
-            self.active_run_id = state.run_id
-            self.last_active_at = time.monotonic()
-            try:
-                async for event in self.wiring.agent_runtime.stream_after_plan_interaction(state, resolution):
-                    yield event
-            finally:
-                self._capture_pending_interaction(state)
-                self.active_run_id = None
-                self.last_active_at = time.monotonic()
+            async for event in self._stream_owned(
+                state,
+                lambda: self.wiring.agent_runtime.stream_after_plan_interaction(state, resolution),
+            ):
+                yield event
 
     async def stop_current_turn(
         self,
@@ -320,10 +321,11 @@ class HostSession:
         reason: AbortKind = AbortKind.USER_STOP,
         timeout: float = 2.0,
     ) -> AgentRunResult | None:
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("stopping the current turn")
         async with self._stop_lock:
-            if self.pending_interaction is not None:
+            task = self._active_task
+            state = self._active_state
+            if self.pending_interaction is not None and (task is None or task.done()):
                 if self._run_lock.locked():
                     raise HostSessionBusyError("host session already has an active run")
                 async with self._run_lock:
@@ -343,8 +345,6 @@ class HostSession:
                         self.stopping_run_id = None
                         self.last_active_at = time.monotonic()
 
-            task = self._active_task
-            state = self._active_state
             if task is None or state is None:
                 return None
             if task.done():
@@ -353,19 +353,32 @@ class HostSession:
             state.stop_request = StopRequest(reason=reason)
             task.cancel()
             try:
-                return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
             except asyncio.CancelledError:
-                return await self.wiring.agent_runtime.abort_run(state, reason=reason)
+                pass
             except TimeoutError:
                 return None
+            except Exception:
+                pass
+            # The owned task (streaming drive or run coroutine) finalizes itself
+            # on a stop_request; abort_run is idempotent and yields the result.
+            return await self.wiring.agent_runtime.abort_run(state, reason=reason)
 
     def replay_events(self, *, after_sequence: int | None = None) -> list[AgentEvent]:
         return self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
 
+    # -- Close / teardown -----------------------------------------------------
+
     def close(self) -> None:
-        if self.closed:
+        """Synchronous runtime-local close. Idempotent.
+
+        Does NOT release the shared workspace terminal lease (HostCore/supervisor
+        owns that) and does NOT delete the workspace root (HostCore does that
+        last, after lease release) — see contract §6.2/§7.1.
+        """
+        if self._lifecycle is HostSessionLifecycle.CLOSED:
             return
-        self.closed = True
+        self._lifecycle = HostSessionLifecycle.CLOSED
         self.pending_interaction = None
         self._suspended_state = None
         self._active_state = None
@@ -373,24 +386,64 @@ class HostSession:
         self.stopping_run_id = None
         self.suspended_run_id = None
         self.wiring.agent_runtime.close()
-        self._cleanup_workspace_root()
 
-    async def aclose(self, *, drain_timeout_seconds: float = 5.0) -> None:
-        """Boundedly cancel an active run before releasing session resources."""
+    async def aclose(
+        self,
+        *,
+        reason: AbortKind = AbortKind.HOST_TEARDOWN,
+        drain_timeout_seconds: float = 5.0,
+    ) -> None:
+        """Bounded, idempotent run-control close.
 
-        await self.drain_active_run(timeout_seconds=drain_timeout_seconds)
+        Both the active run and any suspended (pending-interaction) run get a
+        typed, auditable terminal RunEnd under ``reason`` (default host-teardown,
+        never masqueraded as USER_STOP) instead of being silently dropped
+        (contract §6.2, decision 1)."""
+        if self._lifecycle is HostSessionLifecycle.CLOSED:
+            return
+        self.begin_close()
+        await self.drain_active_run(reason=reason, timeout_seconds=drain_timeout_seconds)
+        await self._finalize_suspended_run(reason)
         self.close()
 
-    async def drain_active_run(self, *, timeout_seconds: float = 5.0) -> None:
-        """Stop an in-flight provider borrower without releasing terminal resources."""
+    async def drain_active_run(
+        self,
+        *,
+        reason: AbortKind | None = None,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        """Stop an in-flight run via the owned task handle.
 
+        When ``reason`` is given the run is finalized with an auditable terminal
+        outcome (a stop_request the owned task converts into a RunEnd); without a
+        reason it is a best-effort cancel only.
+        """
         task = self._active_task
-        if task is not None and not task.done() and task is not asyncio.current_task():
-            task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
-            except (asyncio.CancelledError, TimeoutError):
-                pass
+        state = self._active_state
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        if reason is not None and state is not None and state.stop_request is None:
+            state.stop_request = StopRequest(reason=reason)
+            self.stopping_run_id = state.run_id
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        except (asyncio.CancelledError, TimeoutError):
+            pass
+        except Exception:
+            pass
+
+    async def _finalize_suspended_run(self, reason: AbortKind) -> None:
+        state = self._suspended_state
+        if state is None:
+            return
+        try:
+            await self.wiring.agent_runtime.abort_run(state, reason=reason)
+        except Exception:
+            pass
+        self._suspended_state = None
+        self.pending_interaction = None
+        self.suspended_run_id = None
 
     def summary(self) -> dict[str, object]:
         return {
@@ -402,6 +455,7 @@ class HostSession:
             "display_label": self.workspace.display_label,
             "created_at": self.created_at,
             "last_active_at": self.last_active_at,
+            "lifecycle": self._lifecycle.value,
             "closed": self.closed,
             "active_run_id": self.active_run_id,
             "stopping_run_id": self.stopping_run_id,
@@ -413,6 +467,110 @@ class HostSession:
             "has_live_processes": self.has_live_processes,
             "terminal": self.terminal_summary,
         }
+
+    # -- Internal execution primitive -----------------------------------------
+
+    def _begin_active_state(self) -> LoopState:
+        state = self.wiring.agent_runtime.new_state()
+        self._prepare_state_for_plan(state)
+        self.active_run_id = state.run_id
+        self._active_state = state
+        self.last_active_at = time.monotonic()
+        return state
+
+    def _resume_active_state(self, pending: PendingInteraction) -> LoopState:
+        state = self._require_suspended_state(pending)
+        self.active_run_id = state.run_id
+        self._active_state = state
+        self.last_active_at = time.monotonic()
+        return state
+
+    async def _run_owned(
+        self,
+        state: LoopState,
+        make_result: Callable[[], Awaitable[AgentRunResult]],
+    ) -> AgentRunResult:
+        async def _drive() -> AgentRunResult:
+            try:
+                try:
+                    result = await make_result()
+                except asyncio.CancelledError:
+                    request = state.stop_request
+                    if request is None:
+                        raise
+                    result = await self.wiring.agent_runtime.abort_run(state, reason=request.reason)
+                self._capture_pending_interaction(result.state)
+                self._clear_plan_entry_audit_if_emitted(result.state)
+                return result
+            finally:
+                self._finish_active_run()
+
+        # The owned handle covers the complete execution lifecycle, including
+        # cancellation -> abort/RunEnd conversion and host bookkeeping. A closer
+        # that drains this task therefore cannot release runtime/terminal resources
+        # while the outer wrapper is still finalizing the run.
+        task: asyncio.Task[AgentRunResult] = asyncio.create_task(_drive())
+        self._active_task = task
+        return await task
+
+    async def _stream_owned(
+        self,
+        state: LoopState,
+        make_stream: Callable[[], AsyncIterator[AgentEvent]],
+    ) -> AsyncIterator[AgentEvent]:
+        observer = _StreamObserver()
+
+        async def _drive() -> None:
+            try:
+                async for event in make_stream():
+                    await observer.emit(event)
+            except asyncio.CancelledError:
+                request = state.stop_request
+                if request is not None:
+                    async for event in self.wiring.agent_runtime.stream_abort_run(state, reason=request.reason):
+                        await observer.emit(event)
+                    await observer.emit(_STREAM_DONE)
+                    return
+                raise
+            except Exception as exc:  # surface to consumer, mirror prior direct-iteration semantics
+                await observer.emit(_StreamError(exc))
+                await observer.emit(_STREAM_DONE)
+                return
+            else:
+                await observer.emit(_STREAM_DONE)
+            finally:
+                self._capture_pending_interaction(state)
+                self._clear_plan_entry_audit_if_emitted(state)
+                self._finish_active_run()
+
+        task = asyncio.create_task(_drive())
+        self._active_task = task
+        stream_error: BaseException | None = None
+        try:
+            while True:
+                item = await observer.queue.get()
+                if item is _STREAM_DONE:
+                    await asyncio.shield(task)
+                    if stream_error is not None:
+                        raise stream_error
+                    break
+                if isinstance(item, _StreamError):
+                    stream_error = item.exc
+                    continue
+                yield item
+        finally:
+            # Closing or abandoning the transport-facing generator only detaches
+            # this observer. HostSession remains the execution owner; explicit
+            # stop/session close/HostCore shutdown are the cancellation paths.
+            observer.detach()
+
+    def _finish_active_run(self) -> None:
+        self._notify_governance()
+        self._active_task = None
+        self._active_state = None
+        self.active_run_id = None
+        self.stopping_run_id = None
+        self.last_active_at = time.monotonic()
 
     def _prior_messages(self):
         return rebuild_prior_messages(self.wiring.runtime_wiring.event_log)
@@ -465,13 +623,11 @@ class HostSession:
         This is the :plan / Plan button path: no control run is created, but
         permission is synchronously narrowed before the next model turn.
         """
-        if self.closed:
-            raise RuntimeError("host session is closed")
+        self._raise_if_not_open("entering plan")
         if self.stopping_run_id is not None:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("entering plan")
-        if self._run_lock.locked():
-            raise HostSessionBusyError("host session already has an active run")
+        self._raise_if_active_run()
         if not self.plan_state.active:
             self.plan_state.begin(
                 source="user",
@@ -521,6 +677,10 @@ class HostSession:
         if state.scratchpad.get("plan_entry_audit_emitted"):
             self.plan_state.pending_entry_audit = False
 
+    def _raise_if_not_open(self, action: str) -> None:
+        if self._lifecycle is not HostSessionLifecycle.OPEN:
+            raise RuntimeError(f"host session is closed; cannot {action}")
+
     def _raise_if_pending_interaction(self, action: str) -> None:
         pending = self.pending_interaction
         if pending is None:
@@ -533,7 +693,7 @@ class HostSession:
             f"host session has a pending user interaction; resolve or stop it before {action}"
         )
 
-    def _cleanup_workspace_root(self) -> None:
-        if not self.workspace.cleanup_workspace_root_on_close:
-            return
-        shutil.rmtree(self.workspace.workspace_root, ignore_errors=True)
+    def _raise_if_active_run(self) -> None:
+        task = self._active_task
+        if self._run_lock.locked() or (task is not None and not task.done()):
+            raise HostSessionBusyError("host session already has an active run")

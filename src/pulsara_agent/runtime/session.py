@@ -16,7 +16,13 @@ from pulsara_agent.runtime.hooks import RuntimeHookManager
 from pulsara_agent.runtime.permission import PermissionState
 from pulsara_agent.runtime.publisher import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
-from pulsara_agent.runtime.terminal import TerminalSessionManager
+from pulsara_agent.runtime.terminal import (
+    BorrowedWorkspaceTerminalRuntime,
+    OwnedTerminalRuntime,
+    TerminalOwnerContext,
+    TerminalRuntimeBinding,
+    TerminalSessionManager,
+)
 from pulsara_agent.runtime.tool_artifacts import (
     InMemoryToolResultArtifactIndex,
     ToolResultArtifactIndex,
@@ -42,12 +48,12 @@ class RuntimeSession:
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
     archive: ArtifactStore | None = None
     tool_result_artifacts: ToolResultArtifactIndex | None = None
-    terminal_session_manager: TerminalSessionManager | None = None
-    owns_terminal_session_manager: bool = True
-    terminal_owner_host_session_id: str | None = None
+    terminal_binding: TerminalRuntimeBinding | None = None
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)
     artifact_service: ToolResultArtifactService = field(init=False)
+    _owns_terminal_manager: bool = field(default=False, init=False, repr=False)
+    _terminal_owner: TerminalOwnerContext | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
@@ -62,11 +68,30 @@ class RuntimeSession:
         )
         self.publisher = RuntimeEventPublisher(runtime_session_id=self.runtime_session_id)
         self.publisher.subscribe(self.hook_manager)
-        if self.terminal_session_manager is None:
-            self.terminal_sessions = TerminalSessionManager(self.workspace_root)
-            self.owns_terminal_session_manager = True
+        self._bind_terminal(self.terminal_binding)
+
+    def _bind_terminal(self, binding: TerminalRuntimeBinding | None) -> None:
+        # Default is owned-local: a bare RuntimeSession(workspace_root) keeps a
+        # private manager it shuts down on close. HostCore injects a borrowed
+        # binding whose lease release is the supervisor's job, not ours.
+        binding = binding or OwnedTerminalRuntime()
+        self.terminal_binding = binding
+        if isinstance(binding, BorrowedWorkspaceTerminalRuntime):
+            self.terminal_sessions = binding.manager
+            self._owns_terminal_manager = False
+            self._terminal_owner = binding.owner
         else:
-            self.terminal_sessions = self.terminal_session_manager
+            self.terminal_sessions = binding.manager or TerminalSessionManager(self.workspace_root)
+            self._owns_terminal_manager = True
+            self._terminal_owner = None
+
+    @property
+    def terminal_owner_host_session_id(self) -> str | None:
+        return self._terminal_owner.host_session_id if self._terminal_owner is not None else None
+
+    @property
+    def terminal_owner_conversation_id(self) -> str | None:
+        return self._terminal_owner.conversation_id if self._terminal_owner is not None else None
 
     def _require_runtime_managed_sequence(self, event: AgentEvent) -> None:
         if event.sequence is not None:
@@ -113,10 +138,12 @@ class RuntimeSession:
         return RuntimeThreadRecorder(runtime_session=self, state=state)
 
     def close(self) -> None:
-        if self.owns_terminal_session_manager:
+        # Owned-local: we shut the manager down. Borrowed (HostCore path): we do
+        # NOT kill/detach/shutdown the shared manager here — lease release is the
+        # supervisor/HostCore job and must run exactly once (contract §5).
+        # Idempotent: shutting an already-shut manager down is a no-op.
+        if self._owns_terminal_manager:
             self.terminal_sessions.shutdown()
-        elif self.terminal_owner_host_session_id is not None:
-            self.terminal_sessions.kill_owned(self.terminal_owner_host_session_id)
 
     def create_tool_executor(
         self,

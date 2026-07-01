@@ -1385,7 +1385,7 @@ async def _run_real_agent_trusted_terminal_permission_smoke(tmp_path: Path) -> d
 
 async def _run_real_host_core_terminal_ask_approval_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -1457,7 +1457,7 @@ async def _run_real_host_core_terminal_ask_approval_smoke(tmp_path: Path) -> dic
 async def _run_real_host_core_on_request_write_approval_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
     target = tmp_path / "on_request.txt"
-    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -1521,7 +1521,7 @@ async def _run_real_host_core_on_request_write_approval_smoke(tmp_path: Path) ->
 
 async def _run_real_host_core_plan_mode_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -2193,7 +2193,7 @@ async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
 
 async def _run_real_host_core_active_stop_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -2248,7 +2248,7 @@ async def _run_real_host_core_active_stop_smoke(tmp_path: Path) -> dict:
 
 async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",
@@ -2314,7 +2314,7 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
 
 async def _run_real_host_core_plan_stop_smoke(tmp_path: Path) -> dict:
     settings = _load_settings_for_real_llm()
-    core = HostCore(settings=settings, durable=True, use_workspace_supervisor=False)
+    core = HostCore(settings=settings, durable=True)
     session = await core.open_session(
         HostWorkspaceInput(
             workspace_kind="project",

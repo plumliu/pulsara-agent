@@ -38,6 +38,7 @@ class ToolSeverity(StrEnum):
 
 class AbortKind(StrEnum):
     USER_STOP = "user_stop"
+    HOST_TEARDOWN = "host_teardown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,7 @@ class GuidanceKind(StrEnum):
     RUN_FAILED = "run_failed"
     USER_ABORTED = "user_aborted"
     PLAN_ABORTED = "plan_aborted"
+    HOST_TEARDOWN = "host_teardown"
     IN_RUN_STEP_FAILED = "in_run_step_failed"
 
 
@@ -103,6 +105,12 @@ PLAN_ABORTED_NOTE_TEXT = (
     "from the preserved input."
 )
 
+HOST_TEARDOWN_NOTE_TEXT = (
+    "Pulsara note: the previous host session was closed before that turn completed. "
+    "This was a host lifecycle teardown, not a user stop. Any assistant text or tool "
+    "work from that turn may be partial; verify external state before continuing."
+)
+
 IN_RUN_STEP_FAILED_TRANSCRIPT_TEXT = (
     "Pulsara note: a recoverable step failed. Inspect the latest observation and continue carefully."
 )
@@ -111,6 +119,7 @@ GUIDANCE_TEXT_FOR_TRANSCRIPT: dict[GuidanceKind, str] = {
     GuidanceKind.RUN_FAILED: FAILURE_NOTE_TEXT,
     GuidanceKind.USER_ABORTED: INTERRUPTED_NOTE_TEXT,
     GuidanceKind.PLAN_ABORTED: PLAN_ABORTED_NOTE_TEXT,
+    GuidanceKind.HOST_TEARDOWN: HOST_TEARDOWN_NOTE_TEXT,
     GuidanceKind.IN_RUN_STEP_FAILED: IN_RUN_STEP_FAILED_TRANSCRIPT_TEXT,
 }
 
@@ -127,6 +136,10 @@ GUIDANCE_TEXT_FOR_PROMPT: dict[GuidanceKind, str] = {
         "The previous plan turn was stopped by the user, but plan mode is still active and "
         "read-only. Continue planning from the preserved input; do not implement changes until "
         "exit_plan is approved."
+    ),
+    GuidanceKind.HOST_TEARDOWN: (
+        "The previous host session closed before the run completed. Treat any partial tool "
+        "work as uncertain and verify external state before retrying or continuing."
     ),
     GuidanceKind.IN_RUN_STEP_FAILED: (
         "The previous model/tool step failed. Recover by inspecting the latest observation and "
@@ -219,6 +232,8 @@ def project_recovery_from_events(events: Iterable[AgentEvent]) -> RecoveryProjec
     abort_kind = _parse_abort_kind(target_run_end.abort_kind)
     if target_run_end.status == "failed":
         guidance_kind = GuidanceKind.RUN_FAILED
+    elif abort_kind is AbortKind.HOST_TEARDOWN:
+        guidance_kind = GuidanceKind.HOST_TEARDOWN
     elif in_plan_workflow:
         guidance_kind = GuidanceKind.PLAN_ABORTED
     else:

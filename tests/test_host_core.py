@@ -171,11 +171,11 @@ def _settings() -> PulsaraSettings:
     )
 
 
-def _core(monkeypatch, transport: ScriptedTransport, *, use_workspace_supervisor: bool = True) -> HostCore:
+def _core(monkeypatch, transport: ScriptedTransport) -> HostCore:
     settings = _settings()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    core = HostCore(settings=settings, durable=False, use_workspace_supervisor=use_workspace_supervisor)
+    core = HostCore(settings=settings, durable=False)
 
     def _patched_runtime(_config):
         return LLMRuntime(config=settings.llm, registry=registry)
@@ -233,7 +233,7 @@ def _context_text(context: LLMContext) -> str:
 
 def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> None:
     transport = ScriptedTransport([{"text": "sentinel-one"}, {"text": "sentinel-two"}])
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -777,7 +777,7 @@ def test_host_session_injects_failed_turn_note_into_next_context(tmp_path, monke
             {"text": "recovered"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -982,7 +982,7 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
             {"text": "approved continuation"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -1028,7 +1028,7 @@ def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(tm
             {"text": "approved ask continuation"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
@@ -1075,7 +1075,7 @@ def test_host_session_on_request_write_approval_executes_file_snapshot(tmp_path,
             {"text": "write approved"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
@@ -1114,7 +1114,7 @@ def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(tmp
             {"text": "write denied"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
@@ -1161,7 +1161,7 @@ def test_host_session_stop_terminal_access_ask_pending_approval_aborts(tmp_path,
             {"text": "continued after ask stop"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
@@ -1198,7 +1198,7 @@ def test_host_session_stop_on_request_write_pending_approval_aborts_without_file
             {"text": "continued after write stop"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
@@ -1236,7 +1236,7 @@ def test_host_session_hardline_under_terminal_ask_denies_without_approval(tmp_pa
             {"text": "hardline denied"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
@@ -1280,7 +1280,7 @@ def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(tmp_p
             {"text": "ask-permissions terminal continuation"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1328,7 +1328,7 @@ def test_ask_permissions_preset_write_suspends_then_executes_on_approve(tmp_path
             {"text": "ask-permissions write continuation"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1382,7 +1382,7 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkey
             {"text": "accept-edits continuation"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1437,7 +1437,7 @@ def test_bypass_permissions_preset_runs_without_pending_approval(tmp_path, monke
             {"text": "bypass continuation"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1479,7 +1479,7 @@ def test_bypass_permissions_preset_still_denies_hardline_terminal(tmp_path, monk
             {"text": "bypass hardline denied"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1518,7 +1518,7 @@ def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkey
             {"text": "read-only denied write"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1558,7 +1558,7 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_entry_audit(tm
             {"text": "planned only"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1619,7 +1619,7 @@ def test_agent_enter_plan_tool_switches_read_only_before_next_tool_turn(tmp_path
             {"text": "stayed in plan"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1669,7 +1669,7 @@ def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monk
             {"text": "question answered"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -1724,7 +1724,7 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
             {"text": "approved execution can begin"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -1783,7 +1783,7 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch)
             {"text": "revising plan"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -1827,7 +1827,7 @@ def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(tmp_path, mo
             }
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -1864,7 +1864,7 @@ def test_stop_pending_plan_interaction_keeps_plan_active_read_only(tmp_path, mon
             {"text": "still planning"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -1913,7 +1913,7 @@ def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(tmp_
             },
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -1973,7 +1973,7 @@ def test_plan_exit_revision_budget_exhaustion_fails_run(tmp_path, monkeypatch) -
             {"text": "should not reach here"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -2038,7 +2038,7 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(tm
             {"text": "resolved without deadlock"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -2081,7 +2081,7 @@ def test_host_session_stop_pending_approval_aborts_without_tool_execution(tmp_pa
             {"text": "continued after stop"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -2124,7 +2124,7 @@ def test_host_core_stop_current_turn_delegates_to_session(tmp_path, monkeypatch)
             }
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -2139,7 +2139,7 @@ def test_host_core_stop_current_turn_delegates_to_session(tmp_path, monkeypatch)
 
 def test_host_session_stop_active_run_turn_aborts_and_releases_lock(tmp_path, monkeypatch) -> None:
     transport = ScriptedTransport([{"text": "continued"}], delay=0.2)
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path)
@@ -2173,7 +2173,7 @@ def test_host_session_stop_active_run_turn_aborts_and_releases_lock(tmp_path, mo
 
 def test_host_session_stop_active_run_publishes_aborted_event_to_live_subscriber(tmp_path, monkeypatch) -> None:
     transport = ScriptedTransport([], delay=0.2)
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
     delivered: list[AgentEvent] = []
 
     class Subscriber:
@@ -2240,7 +2240,7 @@ def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(tmp
             yield ModelCallEndEvent(**event_context.event_fields())
 
     transport = CancellationSwallowingTransport()
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         transport.started = asyncio.Event()
@@ -2287,7 +2287,7 @@ def test_host_session_resume_can_suspend_again_with_new_pending_approval(tmp_pat
             },
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -2330,7 +2330,7 @@ def test_host_session_close_invalidates_pending_approval(tmp_path, monkeypatch) 
             }
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -2371,7 +2371,7 @@ def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(tmp_p
             {"text": "denied continuation"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -2415,7 +2415,7 @@ def test_host_session_stream_turn_captures_suspended_run_id_before_clearing_acti
             }
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
@@ -2447,7 +2447,7 @@ def test_host_core_approval_facade_resolves_pending_request(tmp_path, monkeypatc
             {"text": "core approved"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -2573,14 +2573,19 @@ def test_idle_sweep_marks_live_process_session_without_closing(tmp_path, monkeyp
         session = await _open_project_session(core, tmp_path, host_session_id="host:idle")
         await session.run_turn("start process")
         session.last_active_at -= 30_000
-        closed = await core.registry.sweep_idle()
+        # Sweep is pure discovery now: a live-process session is never a
+        # candidate, and the registry only marks the diagnostic flag — it never
+        # closes anything itself (contract §3). HostCore is the sole closer.
+        candidates = await core.registry.list_idle_candidates()
+        swept = await core.sweep_idle()
         summaries = await core.list_sessions()
         await core.close_session(session.host_session_id)
-        return closed, summaries
+        return candidates, swept, summaries
 
-    closed, summaries = asyncio.run(run())
+    candidates, swept, summaries = asyncio.run(run())
 
-    assert closed == []
+    assert candidates == []
+    assert swept == []
     assert summaries[0].idle_with_live_processes is True
 
 
@@ -2843,7 +2848,7 @@ def test_host_session_switch_mode_changes_gate_behavior_next_turn(tmp_path, monk
             {"text": "bypass wrote"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -2881,7 +2886,7 @@ def test_host_session_switch_mode_rejected_while_pending_approval(tmp_path, monk
             {"text": "after approve"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
@@ -2920,7 +2925,7 @@ def test_host_session_switch_mode_preserves_live_terminal_process(tmp_path, monk
             {"text": "yielded a process"},
         ]
     )
-    core = _core(monkeypatch, transport, use_workspace_supervisor=False)
+    core = _core(monkeypatch, transport)
 
     async def run():
         session = await _open_project_session(
