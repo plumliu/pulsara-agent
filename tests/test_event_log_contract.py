@@ -1,11 +1,13 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
@@ -40,6 +42,16 @@ def _cleanup_session(dsn: str, runtime_session_id: str) -> None:
     with _connect_or_skip(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+
+
+def _fetch_run_row(dsn: str, run_id: str):
+    with psycopg.connect(dsn, row_factory=dict_row, connect_timeout=2) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "select id, status, stop_reason, started_at, completed_at from runs where id = %s",
+                (run_id,),
+            )
+            return cursor.fetchone()
 
 
 def _runtime_session_id() -> str:
@@ -112,6 +124,120 @@ def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> 
 
     assert load_agent_event(dump_agent_event(started)) == started
     assert load_agent_event(dump_agent_event(ended)) == ended
+
+
+@pytest.mark.parametrize(
+    ("status", "stop_reason"),
+    [
+        ("finished", "final"),
+        ("failed", "model_error"),
+        ("aborted", "aborted"),
+    ],
+)
+def test_postgres_event_log_updates_runs_projection_on_run_lifecycle(
+    tmp_path: Path,
+    status: str,
+    stop_reason: str,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+
+    try:
+        event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx(f"postgres:run-projection:{status}:{uuid4().hex}")
+        started = RunStartEvent(
+            **ctx.event_fields(),
+            user_input_chars=12,
+            created_at="2026-01-02T03:04:05+00:00",
+        )
+        event_log.append(started)
+
+        row = _fetch_run_row(dsn, ctx.run_id)
+        assert row["status"] == "running"
+        assert row["stop_reason"] is None
+        assert row["completed_at"] is None
+        assert row["started_at"] == datetime.fromisoformat(started.created_at)
+
+        ended = RunEndEvent(
+            **ctx.event_fields(),
+            status=status,
+            stop_reason=stop_reason,
+            created_at="2026-01-02T03:05:06+00:00",
+        )
+        event_log.append(ended)
+
+        row = _fetch_run_row(dsn, ctx.run_id)
+        assert row["status"] == status
+        assert row["stop_reason"] == stop_reason
+        assert row["completed_at"] == datetime.fromisoformat(ended.created_at)
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_postgres_event_log_repairs_stale_runs_projection(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+
+    try:
+        event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ended_ctx = _ctx(f"postgres:run-repair-ended:{uuid4().hex}")
+        running_ctx = _ctx(f"postgres:run-repair-running:{uuid4().hex}")
+        ended = RunEndEvent(
+            **ended_ctx.event_fields(),
+            status="failed",
+            stop_reason="model_error",
+            created_at="2026-01-02T03:05:06+00:00",
+        )
+        event_log.extend(
+            [
+                RunStartEvent(
+                    **ended_ctx.event_fields(),
+                    user_input_chars=8,
+                    created_at="2026-01-02T03:04:05+00:00",
+                ),
+                ended,
+                RunStartEvent(
+                    **running_ctx.event_fields(),
+                    user_input_chars=9,
+                    created_at="2026-01-03T04:05:06+00:00",
+                ),
+            ]
+        )
+
+        with psycopg.connect(dsn, connect_timeout=2) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    update runs
+                    set status = 'running', stop_reason = null, completed_at = null
+                    where id = %s
+                    """,
+                    (ended_ctx.run_id,),
+                )
+                cursor.execute(
+                    """
+                    update runs
+                    set status = 'failed', stop_reason = 'stale', completed_at = now()
+                    where id = %s
+                    """,
+                    (running_ctx.run_id,),
+                )
+
+        assert event_log.repair_run_projection() >= 2
+
+        ended_row = _fetch_run_row(dsn, ended_ctx.run_id)
+        assert ended_row["status"] == "failed"
+        assert ended_row["stop_reason"] == "model_error"
+        assert ended_row["completed_at"] == datetime.fromisoformat(ended.created_at)
+
+        running_row = _fetch_run_row(dsn, running_ctx.run_id)
+        assert running_row["status"] == "running"
+        assert running_row["stop_reason"] is None
+        assert running_row["completed_at"] is None
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
 
 
 def test_terminal_process_completed_event_round_trips_through_agent_event_serialization() -> None:

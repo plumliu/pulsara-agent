@@ -11,7 +11,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.event.events import AgentEvent, ReplyStartEvent
+from pulsara_agent.event.events import AgentEvent, ReplyStartEvent, RunEndEvent, RunStartEvent
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import MessageReducer
@@ -40,8 +40,72 @@ class PostgresEventLog:
                     self._ensure_parent_rows(cursor, event)
                     stored, next_sequence = self._with_canonical_sequence(event, next_sequence)
                     self._insert_event(cursor, stored)
+                    self._sync_run_projection(cursor, stored)
                     stored_events.append(stored)
                 return stored_events
+
+    def repair_run_projection(self) -> int:
+        """Rebuild this session's runs summary rows from canonical events."""
+
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                self._lock_session(cursor)
+                cursor.execute(
+                    """
+                    with starts as (
+                        select run_id, min(created_at) as started_at
+                        from agent_events
+                        where session_id = %s and event_type = 'RUN_START'
+                        group by run_id
+                    )
+                    update runs r
+                    set started_at = starts.started_at
+                    from starts
+                    where r.session_id = %s and r.id = starts.run_id
+                    """,
+                    (self.runtime_session_id, self.runtime_session_id),
+                )
+                updated = cursor.rowcount
+                cursor.execute(
+                    """
+                    with latest_end as (
+                        select distinct on (run_id)
+                            run_id,
+                            payload->>'status' as status,
+                            payload->>'stop_reason' as stop_reason,
+                            created_at as completed_at
+                        from agent_events
+                        where session_id = %s and event_type = 'RUN_END'
+                        order by run_id, sequence desc
+                    )
+                    update runs r
+                    set
+                        status = latest_end.status,
+                        stop_reason = latest_end.stop_reason,
+                        completed_at = latest_end.completed_at
+                    from latest_end
+                    where r.session_id = %s and r.id = latest_end.run_id
+                    """,
+                    (self.runtime_session_id, self.runtime_session_id),
+                )
+                updated += cursor.rowcount
+                cursor.execute(
+                    """
+                    update runs r
+                    set status = 'running', stop_reason = null, completed_at = null
+                    where r.session_id = %s
+                      and not exists (
+                        select 1
+                        from agent_events e
+                        where e.session_id = %s
+                          and e.run_id = r.id
+                          and e.event_type = 'RUN_END'
+                      )
+                    """,
+                    (self.runtime_session_id, self.runtime_session_id),
+                )
+                updated += cursor.rowcount
+                return updated
 
     def iter(
         self,
@@ -183,6 +247,33 @@ class PostgresEventLog:
                 Jsonb(payload),
             ),
         )
+
+    def _sync_run_projection(self, cursor, stored: AgentEvent) -> None:
+        if isinstance(stored, RunStartEvent):
+            cursor.execute(
+                """
+                update runs
+                set status = 'running',
+                    stop_reason = null,
+                    started_at = %s::timestamptz,
+                    completed_at = null
+                where id = %s and session_id = %s
+                """,
+                (stored.created_at, stored.run_id, self.runtime_session_id),
+            )
+            return
+
+        if isinstance(stored, RunEndEvent):
+            cursor.execute(
+                """
+                update runs
+                set status = %s,
+                    stop_reason = %s,
+                    completed_at = %s::timestamptz
+                where id = %s and session_id = %s
+                """,
+                (stored.status, stored.stop_reason, stored.created_at, stored.run_id, self.runtime_session_id),
+            )
 
     def _next_sequence(self, cursor) -> int:
         cursor.execute(

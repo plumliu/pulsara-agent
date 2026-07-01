@@ -389,7 +389,10 @@ def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
 def _textual_responses_input(message: LLMMessage) -> dict[str, Any]:
     return {
         "role": message.role.value,
-        "content": [{"type": "input_text", "text": text} for text in message.content],
+        # Use Responses' EasyInputMessage string form for maximum compatibility
+        # with OpenAI-compatible gateways. Some gateways parse prior assistant
+        # messages incorrectly when they are sent as input_text content parts.
+        "content": "\n".join(message.content),
     }
 
 

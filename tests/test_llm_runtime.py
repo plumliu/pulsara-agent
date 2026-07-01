@@ -145,6 +145,7 @@ def test_openai_responses_payload_uses_internal_context() -> None:
     assert payload["model"] == "pro"
     assert payload["instructions"] == "You are Pulsara."
     assert payload["input"][0]["role"] == "user"
+    assert payload["input"][0]["content"] == "Use the tool."
     assert payload["tools"][0]["name"] == "lookup"
     assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
     assert payload["max_output_tokens"] == 128
@@ -205,16 +206,43 @@ def test_openai_responses_payload_preserves_message_level_system_items() -> None
 
     assert payload["input"][0] == {
         "role": "user",
-        "content": [{"type": "input_text", "text": "original user input"}],
+        "content": "original user input",
     }
     assert payload["input"][1] == {
         "role": "system",
-        "content": [{"type": "input_text", "text": "Pulsara note: previous turn failed."}],
+        "content": "Pulsara note: previous turn failed.",
     }
     assert payload["input"][2] == {
         "role": "user",
-        "content": [{"type": "input_text", "text": "please continue"}],
+        "content": "please continue",
     }
+
+
+def test_openai_responses_payload_keeps_current_user_after_prior_assistant_text() -> None:
+    config = LLMConfig(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+    context = LLMContext(
+        messages=(
+            LLMMessage.user("hello"),
+            LLMMessage.assistant("Hello! How can I help?"),
+            LLMMessage.user("你能帮我把这个贪吃蛇小游戏做的再好一些吗？发挥你的能力"),
+        )
+    )
+
+    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+
+    assert payload["input"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hello! How can I help?"},
+        {
+            "role": "user",
+            "content": "你能帮我把这个贪吃蛇小游戏做的再好一些吗？发挥你的能力",
+        },
+    ]
 
 
 def test_openai_responses_payload_expands_assistant_turn_tool_calls() -> None:
@@ -241,9 +269,7 @@ def test_openai_responses_payload_expands_assistant_turn_tool_calls() -> None:
     payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
 
     assert payload["input"][1]["role"] == "assistant"
-    assert payload["input"][1]["content"] == [
-        {"type": "input_text", "text": "I will call lookup."}
-    ]
+    assert payload["input"][1]["content"] == "I will call lookup."
     assert payload["input"][2] == {
         "type": "function_call",
         "call_id": "call_responses_123",
