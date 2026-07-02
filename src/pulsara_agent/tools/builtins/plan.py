@@ -47,8 +47,26 @@ class AskPlanQuestionTool:
             },
             "options": {
                 "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional suggested answers.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "description": "Short user-facing option label.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "One concise sentence explaining this option.",
+                        },
+                        "recommended": {
+                            "type": "boolean",
+                            "description": "Whether this option is the recommended safe default.",
+                        },
+                    },
+                    "required": ["label"],
+                    "additionalProperties": False,
+                },
+                "description": "Optional structured suggested answers. Provide 2-3 mutually exclusive options when asking for a design decision.",
             },
             "allow_free_text": {
                 "type": "boolean",

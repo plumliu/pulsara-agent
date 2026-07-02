@@ -1680,7 +1680,7 @@ def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monk
         assert isinstance(pending, PendingPlanInteraction)
         assert pending.kind == "question"
         assert pending.question == "Which module should I inspect?"
-        assert pending.options == ("runtime", "host")
+        assert [option.label for option in pending.options] == ["runtime", "host"]
         with pytest.raises(HostSessionPendingInteractionError):
             await session.run_turn("new prompt should not start")
         resolved = await session.resolve_plan_interaction(
@@ -1707,6 +1707,56 @@ def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monk
     assert {event.run_id for event in events if isinstance(event, PlanQuestionAskedEvent | PlanQuestionAnsweredEvent)} == {
         first.state.run_id
     }
+
+
+def test_plan_question_supports_structured_options(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:question",
+                        "name": "ask_plan_question",
+                        "arguments": json.dumps(
+                            {
+                                "question": "Which plan shape?",
+                                "options": [
+                                    {
+                                        "label": "Small",
+                                        "description": "Make the smallest safe change.",
+                                        "recommended": True,
+                                    },
+                                    {
+                                        "label": "Broad",
+                                        "description": "Refactor the surrounding subsystem.",
+                                    },
+                                ],
+                            }
+                        ),
+                    }
+                ]
+            }
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(core, tmp_path)
+        session.enter_plan(reason="structured question")
+        await session.run_turn("ask a structured question")
+        return session
+
+    session = asyncio.run(run())
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingPlanInteraction)
+    assert pending.to_dict()["options"] == [
+        {"label": "Small", "description": "Make the smallest safe change.", "recommended": True},
+        {"label": "Broad", "description": "Refactor the surrounding subsystem.", "recommended": False},
+    ]
+    asked = [event for event in session.replay_events() if isinstance(event, PlanQuestionAskedEvent)]
+    assert asked
+    assert asked[0].options[0].label == "Small"
+    assert asked[0].options[0].recommended is True
 
 
 def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -> None:
@@ -1782,6 +1832,17 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch)
                 ]
             },
             {"text": "revising plan"},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:revised-exit",
+                        "name": "exit_plan",
+                        "arguments": json.dumps(
+                            {"plan": "revised draft with tests", "summary": "revised"}
+                        ),
+                    }
+                ]
+            },
         ]
     )
     core = _core(monkeypatch, transport)
@@ -1803,10 +1864,86 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch)
 
     session, result = asyncio.run(run())
 
-    assert result.final_text == "revising plan"
+    assert result.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingPlanInteraction)
+    assert pending.kind == "exit"
+    assert pending.plan_text == "revised draft with tests"
+    assert result.final_text == ""
     assert session.plan_state.active is True
     assert session.current_permission_mode is PermissionMode.READ_ONLY
     assert not any(isinstance(event, PlanModeExitedEvent) for event in session.replay_events())
+    revision_context = _context_text(transport.contexts[1])
+    assert "call exit_plan again immediately" in revision_context
+    assert "add tests" in revision_context
+    retry_context = _context_text(transport.contexts[2])
+    assert "Plan revision is still pending" in retry_context
+
+
+def test_cancel_plan_exits_plan_mode_and_aborts_suspended_exit_run(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:exit",
+                        "name": "exit_plan",
+                        "arguments": json.dumps({"plan": "draft", "summary": "draft"}),
+                    }
+                ]
+            }
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        session.enter_plan(reason="cancel path")
+        first = await session.run_turn("submit plan")
+        pending = session.get_pending_interaction()
+        assert isinstance(pending, PendingPlanInteraction)
+        assert pending.kind == "exit"
+        await session.exit_plan_workflow(source="user_cancel")
+        return session, first
+
+    session, first = asyncio.run(run())
+    events = session.replay_events()
+
+    assert first.status.value == "waiting_user"
+    assert session.plan_state.active is False
+    assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
+    assert session.get_pending_interaction() is None
+    assert any(isinstance(event, PlanExitResolvedEvent) and event.decision == "cancel" for event in events)
+    exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
+    assert exited[-1].source == "user_cancel"
+    run_ends = [event for event in events if isinstance(event, RunEndEvent)]
+    assert run_ends[-1].status == "aborted"
+
+
+def test_force_exit_plan_exits_without_pending_exit(tmp_path, monkeypatch) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        session.enter_plan(reason="force path")
+        await session.exit_plan_workflow(source="user_force_exit")
+        return session
+
+    session = asyncio.run(run())
+    events = session.replay_events()
+
+    assert session.plan_state.active is False
+    assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
+    exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
+    assert exited[-1].source == "user_force_exit"
 
 
 def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(tmp_path, monkeypatch) -> None:

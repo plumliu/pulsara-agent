@@ -36,6 +36,7 @@ class RecallQuery:
     limit: int = 5
     max_hops: int = 0
     trigger: RecallTrigger = RecallTrigger.CHEAP_AUTO
+    trace: bool = True
     session_id: str | None = None
     run_id: str | None = None
     turn_id: str | None = None
@@ -301,7 +302,7 @@ class LexicalMemoryRecallService(MemoryRecallService):
         candidate_ids: Sequence[str],
         latency_ms: int,
     ) -> None:
-        if self.trace_store is None or not _has_trace_coordinates(query):
+        if not query.trace or self.trace_store is None or not _has_trace_coordinates(query):
             return
         try:
             self.trace_store.record(

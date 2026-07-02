@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 from pulsara_agent.memory.recall.explain import explain_memory, explanation_to_payload
 from pulsara_agent.memory.recall.graph import RecallPath
 from pulsara_agent.memory.canonical.query import CanonicalNodeView, MemoryQuery
-from pulsara_agent.memory.recall.service import MemoryRecallService, RecallQuery, RecallStatus, RecallTrigger
+from pulsara_agent.memory.recall.service import (
+    MemoryRecallService,
+    RecallQuery,
+    RecallResult,
+    RecallStatus,
+    RecallTrigger,
+)
 from pulsara_agent.memory.scope import CTX_USER, format_scope_list, is_valid_scope
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
@@ -38,7 +44,10 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         },
         "kind": {
             "type": "string",
-            "description": "Optional memory type: Claim, Preference, Observation, ActionBoundary, or Decision.",
+            "description": (
+                "Optional exact canonical memory type: Claim, Preference, Observation, ActionBoundary, or Decision. "
+                "Omit unless the user explicitly names one of these types; do not infer a type from the question."
+            ),
         },
         "limit": {
             "type": "integer",
@@ -117,20 +126,22 @@ class MemorySearchTool:
             return _tool_success(call, scope_error)
         scopes = (scope,) if scope else _default_scopes(self.read_scopes)
         event_context = runtime_context.event_context if runtime_context is not None else None
-        result = await self.recall.recall(
-            RecallQuery(
-                text=query_text,
-                scopes=scopes,
-                types=(kind,) if kind else (),
-                limit=limit,
-                max_hops=max_hops,
-                trigger=RecallTrigger.EXPLICIT_SEARCH,
-                session_id=runtime_context.runtime_session_id if runtime_context is not None else None,
-                run_id=event_context.run_id if event_context is not None else None,
-                turn_id=event_context.turn_id if event_context is not None else None,
-                reply_id=event_context.reply_id if event_context is not None else None,
-            ),
-            graph_id=self.graph_id,
+        query = RecallQuery(
+            text=query_text,
+            scopes=scopes,
+            types=(kind,) if kind else (),
+            limit=limit,
+            max_hops=max_hops,
+            trigger=RecallTrigger.EXPLICIT_SEARCH,
+            session_id=runtime_context.runtime_session_id if runtime_context is not None else None,
+            run_id=event_context.run_id if event_context is not None else None,
+            turn_id=event_context.turn_id if event_context is not None else None,
+            reply_id=event_context.reply_id if event_context is not None else None,
+        )
+        result = await self._recall_with_relaxed_model_filters(
+            query,
+            requested_kind=kind,
+            requested_scope=scope,
         )
         if result.status is RecallStatus.UNAVAILABLE:
             payload = {
@@ -149,6 +160,7 @@ class MemorySearchTool:
         else:
             payload = {
                 "status": result.status.value,
+                "warnings": list(result.warnings),
                 "results": [
                     {
                         "memory_id": item.memory_id,
@@ -170,6 +182,73 @@ class MemorySearchTool:
                 "filtered_ids": list(result.filtered_ids),
             }
         return _tool_success(call, payload)
+
+    async def _recall_with_relaxed_model_filters(
+        self,
+        query: RecallQuery,
+        *,
+        requested_kind: str | None,
+        requested_scope: str | None,
+    ) -> RecallResult:
+        default_scopes = _default_scopes(self.read_scopes)
+        can_relax_scope = bool(requested_scope and query.scopes != default_scopes)
+        if not requested_kind and not can_relax_scope:
+            return await self.recall.recall(query, graph_id=self.graph_id)
+        attempts: list[tuple[RecallQuery, tuple[str, ...], dict[str, Any]]] = [
+            (query, (), {}),
+        ]
+        if requested_kind:
+            attempts.append(
+                (
+                    replace(query, types=()),
+                    ("kind_filter_relaxed",),
+                    {"kind_filter_relaxed": True, "requested_kind": requested_kind},
+                )
+            )
+        if can_relax_scope:
+            attempts.append(
+                (
+                    replace(query, scopes=default_scopes),
+                    ("scope_filter_relaxed",),
+                    {"scope_filter_relaxed": True, "requested_scope": requested_scope},
+                )
+            )
+            if requested_kind:
+                attempts.append(
+                    (
+                        replace(query, scopes=default_scopes, types=()),
+                        ("scope_filter_relaxed", "kind_filter_relaxed"),
+                        {
+                            "scope_filter_relaxed": True,
+                            "kind_filter_relaxed": True,
+                            "requested_scope": requested_scope,
+                            "requested_kind": requested_kind,
+                        },
+                    )
+                )
+
+        selected_query = query
+        selected_warnings: tuple[str, ...] = ()
+        selected_metadata: dict[str, Any] = {}
+        for attempt_query, warnings, metadata in attempts:
+            probe = await self.recall.recall(replace(attempt_query, trace=False), graph_id=self.graph_id)
+            if probe.status is RecallStatus.OK:
+                selected_query = attempt_query
+                selected_warnings = warnings
+                selected_metadata = metadata
+                break
+
+        result = await self.recall.recall(selected_query, graph_id=self.graph_id)
+        if not selected_warnings:
+            return result
+        return RecallResult(
+            status=result.status,
+            items=result.items,
+            filtered_ids=result.filtered_ids,
+            guidance=result.guidance,
+            warnings=(*selected_warnings, *result.warnings),
+            metadata={**result.metadata, **selected_metadata},
+        )
 
 
 @dataclass(frozen=True, slots=True)

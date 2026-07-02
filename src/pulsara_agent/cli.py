@@ -373,6 +373,102 @@ def _inspect(args) -> dict[str, object]:
     raise ValueError(f"unsupported inspect command: {args.inspect_command}")
 
 
+PLAN_APPROVE_TOKENS = frozenset({"approve", "yes", "是", "好", "可以", "同意", "好的", "批准", "y", "Y"})
+
+
+def _format_plan_question(pending: PendingPlanInteraction) -> str:
+    lines = ["Plan question:", "", pending.question]
+    if pending.options:
+        lines.extend(["", "Options:"])
+        for index, option in enumerate(pending.options, start=1):
+            suffix = " (Recommended)" if option.recommended else ""
+            lines.append(f"  {index}. {option.label}{suffix}")
+            if option.description:
+                lines.append(f"     {option.description}")
+    if pending.allow_free_text:
+        lines.extend(["", "Reply with :choose <n|label>, a number/label, or :answer <text>."])
+    else:
+        lines.extend(["", "Reply with :choose <n|label> or a number/label. Free text is disabled."])
+    return "\n".join(lines)
+
+
+def _format_plan_exit(pending: PendingPlanInteraction) -> str:
+    lines = ["Plan ready for approval:"]
+    if pending.summary:
+        lines.extend(["", pending.summary])
+    if pending.plan_text:
+        lines.extend(["", pending.plan_text])
+    lines.extend(
+        [
+            "",
+            "Reply with:",
+            "  :approve-plan    Accept and exit plan mode",
+            "  :revise-plan ... Request a revision and stay read-only",
+            "  :cancel-plan     Abandon this plan workflow and exit plan mode",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_pending_plan_interaction(pending: PendingPlanInteraction) -> str:
+    if pending.kind == "question":
+        return _format_plan_question(pending)
+    return _format_plan_exit(pending)
+
+
+def _print_pending_plan_interaction(pending: PendingPlanInteraction | None) -> None:
+    if pending is not None:
+        print(_format_pending_plan_interaction(pending))
+
+
+def _select_plan_question_option(pending: PendingPlanInteraction, selector: str) -> str | None:
+    value = selector.strip()
+    if not value:
+        return None
+    if value.isdigit():
+        index = int(value)
+        if 1 <= index <= len(pending.options):
+            return pending.options[index - 1].label
+        return None
+    for option in pending.options:
+        if option.label == value:
+            return option.label
+    return None
+
+
+async def _answer_plan_question(session, pending: PendingPlanInteraction, answer: str) -> None:
+    selected_option = _select_plan_question_option(pending, answer)
+    if selected_option is None and not pending.allow_free_text:
+        print("Free text is disabled for this question. Use :choose <n|label>.", file=sys.stderr)
+        return
+    result = await session.resolve_plan_interaction(
+        PlanQuestionResolution(
+            interaction_id=pending.interaction_id,
+            answer_text=selected_option or answer,
+            selected_option=selected_option,
+        )
+    )
+    if result.final_text:
+        print(result.final_text)
+    _print_pending_plan_interaction(session.get_pending_interaction())
+
+
+async def _choose_plan_question_option(session, pending: PendingPlanInteraction, selector: str) -> None:
+    selected_option = _select_plan_question_option(pending, selector)
+    if selected_option is None:
+        print("No matching plan question option. Use :interaction to see available choices.", file=sys.stderr)
+        return
+    await _answer_plan_question(session, pending, selected_option)
+
+
+async def _approve_pending_plan(session, pending: PendingPlanInteraction) -> None:
+    result = await session.resolve_plan_interaction(
+        PlanExitResolution(interaction_id=pending.interaction_id, decision="approve")
+    )
+    if result.final_text:
+        print(result.final_text)
+
+
 async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
@@ -474,7 +570,10 @@ async def _host_repl(args) -> None:
                 continue
             if command == ":interaction":
                 pending = session.get_pending_interaction()
-                print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
+                if isinstance(pending, PendingPlanInteraction):
+                    print(_format_pending_plan_interaction(pending))
+                else:
+                    print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
                 continue
             if command.startswith(":plan"):
                 reason = command[len(":plan"):].strip()
@@ -531,25 +630,25 @@ async def _host_repl(args) -> None:
                 if not answer:
                     print("Usage: :answer <text>", file=sys.stderr)
                     continue
-                result = await session.resolve_plan_interaction(
-                    PlanQuestionResolution(interaction_id=pending.interaction_id, answer_text=answer)
-                )
-                if result.final_text:
-                    print(result.final_text)
+                await _answer_plan_question(session, pending, answer)
+                continue
+            if command.startswith(":choose"):
                 pending = session.get_pending_interaction()
-                if pending is not None:
-                    print(json.dumps({"pending_interaction": pending.to_dict()}, indent=2))
+                if not isinstance(pending, PendingPlanInteraction) or pending.kind != "question":
+                    print("No pending plan question.")
+                    continue
+                selector = command[len(":choose"):].strip()
+                if not selector:
+                    print("Usage: :choose <n|label>", file=sys.stderr)
+                    continue
+                await _choose_plan_question_option(session, pending, selector)
                 continue
             if command == ":approve-plan":
                 pending = session.get_pending_interaction()
                 if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
                     print("No pending plan exit request.")
                     continue
-                result = await session.resolve_plan_interaction(
-                    PlanExitResolution(interaction_id=pending.interaction_id, decision="approve")
-                )
-                if result.final_text:
-                    print(result.final_text)
+                await _approve_pending_plan(session, pending)
                 continue
             if command.startswith(":revise-plan"):
                 pending = session.get_pending_interaction()
@@ -566,17 +665,26 @@ async def _host_repl(args) -> None:
                 )
                 if result.final_text:
                     print(result.final_text)
+                _print_pending_plan_interaction(session.get_pending_interaction())
                 continue
             if command == ":cancel-plan":
                 pending = session.get_pending_interaction()
                 if not isinstance(pending, PendingPlanInteraction) or pending.kind != "exit":
-                    print("No pending plan exit request.")
+                    print("No pending plan exit request. Use :force-exit-plan to leave active plan mode.", file=sys.stderr)
                     continue
-                result = await session.resolve_plan_interaction(
-                    PlanExitResolution(interaction_id=pending.interaction_id, decision="cancel")
-                )
-                if result.final_text:
-                    print(result.final_text)
+                await session.exit_plan_workflow(source="user_cancel")
+                print("Plan workflow cancelled.")
+                continue
+            if command == ":force-exit-plan":
+                if not session.plan_state.active:
+                    print("Plan workflow is not active.")
+                    continue
+                try:
+                    await session.exit_plan_workflow(source="user_force_exit")
+                except (HostSessionBusyError, HostSessionPendingInteractionError, ValueError) as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    continue
+                print("Plan workflow exited.")
                 continue
             if command in {":approve", ":deny"}:
                 pending = session.get_pending_approval()
@@ -598,6 +706,29 @@ async def _host_repl(args) -> None:
                 if pending is not None:
                     print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
                 continue
+            pending_interaction = session.get_pending_interaction()
+            if isinstance(pending_interaction, PendingPlanInteraction):
+                if pending_interaction.kind == "question":
+                    selected_option = _select_plan_question_option(pending_interaction, command)
+                    if selected_option is not None:
+                        await _choose_plan_question_option(session, pending_interaction, selected_option)
+                    elif pending_interaction.allow_free_text:
+                        await _answer_plan_question(session, pending_interaction, command)
+                    else:
+                        print(
+                            "Pending plan question requires one of the listed options. Use :interaction to see choices.",
+                            file=sys.stderr,
+                        )
+                    continue
+                if pending_interaction.kind == "exit":
+                    if command in PLAN_APPROVE_TOKENS:
+                        await _approve_pending_plan(session, pending_interaction)
+                    else:
+                        print(
+                            "Pending plan approval. Use :approve-plan, :revise-plan <feedback>, or :cancel-plan.",
+                            file=sys.stderr,
+                        )
+                    continue
             result = await session.run_turn(prompt, active_skill_names=_active_skill_names_from_args(args))
             if result.final_text:
                 print(result.final_text)
@@ -606,7 +737,10 @@ async def _host_repl(args) -> None:
                 print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
             pending_interaction = session.get_pending_interaction()
             if pending_interaction is not None:
-                print(json.dumps({"pending_interaction": pending_interaction.to_dict()}, indent=2))
+                if isinstance(pending_interaction, PendingPlanInteraction):
+                    print(_format_pending_plan_interaction(pending_interaction))
+                else:
+                    print(json.dumps({"pending_interaction": pending_interaction.to_dict()}, indent=2))
     finally:
         await core.shutdown()
 
@@ -645,6 +779,8 @@ def _repl_prompt_message(session) -> str:
     pending = session.get_pending_interaction()
     if isinstance(pending, PendingPlanInteraction):
         return "plan> "
+    if session.plan_state.active:
+        return "plan> "
     return "pulsara> "
 
 
@@ -657,10 +793,12 @@ _REPL_HELP = """Commands:
   :mode <preset>          Switch permission mode
   :plan [reason]          Enter plan mode
   :interaction            Show a pending plan interaction
+  :choose <n|label>       Choose a pending plan question option
   :answer <text>          Answer a pending plan question
   :approve-plan           Approve plan exit
   :revise-plan <feedback> Request a plan revision
-  :cancel-plan            Cancel plan exit
+  :cancel-plan            Cancel the plan workflow from a pending plan draft
+  :force-exit-plan        Exit active plan mode without approving a draft
   :approval               Show a pending tool approval
   :approve / :deny        Resolve a pending tool approval
   :stop                   Stop the current active or suspended turn

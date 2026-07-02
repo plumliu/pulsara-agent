@@ -321,7 +321,7 @@ def build_run_timeline(
                 metadata={
                     "question_id": event.question_id,
                     "tool_call_id": event.tool_call_id,
-                    "options": list(event.options),
+                    "options": [option.model_dump() for option in event.options],
                     "allow_free_text": event.allow_free_text,
                 },
             )

@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.message.blocks import (
@@ -324,14 +324,43 @@ class PlanModeEnteredEvent(EventBase):
     reason: str = ""
 
 
+class PlanQuestionOption(BaseModel):
+    label: str
+    description: str = ""
+    recommended: bool = False
+
+    @field_validator("label")
+    @classmethod
+    def _label_must_not_be_empty(cls, value: str) -> str:
+        label = value.strip()
+        if not label:
+            raise ValueError("plan question option label must not be empty")
+        return label
+
+
 class PlanQuestionAskedEvent(EventBase):
     type: Literal[EventType.PLAN_QUESTION_ASKED] = EventType.PLAN_QUESTION_ASKED
     question_id: str
     tool_call_id: str
     question: str
-    options: list[str] = Field(default_factory=list)
+    options: list[PlanQuestionOption] = Field(default_factory=list)
     allow_free_text: bool = True
     reason: str = ""
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _normalize_options(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+        normalized: list[Any] = []
+        for item in value:
+            if isinstance(item, str):
+                normalized.append({"label": item})
+            else:
+                normalized.append(item)
+        return normalized
 
 
 class PlanQuestionAnsweredEvent(EventBase):

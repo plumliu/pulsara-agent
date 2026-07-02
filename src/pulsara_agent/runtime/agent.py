@@ -41,6 +41,7 @@ from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.message import (
     Msg,
+    SystemMsg,
     ToolCallBlock,
     ToolCallState,
     ToolResultState,
@@ -76,6 +77,7 @@ from pulsara_agent.runtime.plan import (
     PlanInteractionResolution,
     PlanQuestionResolution,
     PlanWorkflowState,
+    normalize_plan_question_options,
 )
 from pulsara_agent.runtime.recovery import (
     AbortKind,
@@ -98,6 +100,8 @@ from pulsara_agent.runtime.tool_loop import (
 from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutor
 
 WorkspaceKind = Literal["project", "transient"]
+
+_PLAN_REVISION_REQUIRED_INSTRUCTION_NAME = "plan_revision_required_instruction"
 
 StopReason = Literal[
     "final",
@@ -477,6 +481,21 @@ class AgentRuntime:
 
             tool_blocks = _tool_call_blocks(assistant)
             if not tool_blocks:
+                if self._plan_revision_required(state):
+                    if state.messages and state.messages[-1].role == "assistant":
+                        state.messages.pop()
+                    state.messages.append(
+                        SystemMsg(
+                            _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME,
+                            _plan_revision_required_instruction(
+                                str(state.scratchpad.get("plan_revision_feedback") or "")
+                            ),
+                            metadata={"runtime_instruction": "plan_revision_required"},
+                        )
+                    )
+                    state.transition(LoopTransition.CONTINUE_AFTER_RECOVERY)
+                    state.begin_next_turn()
+                    continue
                 state.status = LoopStatus.FINISHED
                 state.stop_reason = "final"
                 state.transition(LoopTransition.FINISH)
@@ -691,6 +710,9 @@ class AgentRuntime:
             state.scratchpad["plan_exit_revisions"] = revisions
             if revisions > state.budget.max_plan_exit_revisions_per_run:
                 yield await self._mark_plan_budget_exceeded(state, kind="exit_revision")
+            else:
+                state.scratchpad["plan_revision_required"] = True
+                state.scratchpad["plan_revision_feedback"] = resolution.user_feedback
         if resolution.decision == "approve":
             plan_state = self._plan_state(state)
             event_context = self._event_context(state)
@@ -737,10 +759,7 @@ class AgentRuntime:
             )
             _remove_plan_runtime_instructions(state)
         output = json.dumps(
-            {
-                "decision": resolution.decision,
-                "user_feedback": resolution.user_feedback,
-            },
+            _plan_exit_resolution_output(resolution),
             ensure_ascii=False,
         )
         async for event in self._emit_tool_result_and_record(
@@ -1267,12 +1286,8 @@ class AgentRuntime:
                 yield event
             return
         question = _required_str(call.arguments.get("question"), "question")
-        raw_options = call.arguments.get("options")
-        if raw_options is None:
-            raw_options = []
-        if not isinstance(raw_options, list):
-            raise ValueError("options must be a list of strings")
-        options = tuple(str(option) for option in raw_options)
+        options = normalize_plan_question_options(call.arguments.get("options") or ())
+        option_payload = [option.model_dump() for option in options]
         allow_free_text = bool(call.arguments.get("allow_free_text", True))
         reason = _optional_str(call.arguments.get("reason"))
         question_id = f"plan_question:{uuid4().hex}"
@@ -1283,7 +1298,7 @@ class AgentRuntime:
                 question_id=question_id,
                 tool_call_id=call.id,
                 question=question,
-                options=list(options),
+                options=option_payload,
                 allow_free_text=allow_free_text,
                 reason=reason,
             ),
@@ -1297,7 +1312,7 @@ class AgentRuntime:
             "tool_call_id": call.id,
             "question_id": question_id,
             "question": question,
-            "options": list(options),
+            "options": option_payload,
             "allow_free_text": allow_free_text,
         }
         state.status = LoopStatus.WAITING_USER
@@ -1321,6 +1336,8 @@ class AgentRuntime:
             return
         plan_text = _required_str(call.arguments.get("plan"), "plan")
         summary = _optional_str(call.arguments.get("summary"))
+        state.scratchpad.pop("plan_revision_required", None)
+        state.scratchpad.pop("plan_revision_feedback", None)
         exit_request_id = f"plan_exit:{uuid4().hex}"
         interaction_id = f"plan_interaction:{uuid4().hex}"
         yield await self.runtime_session.emit(
@@ -1387,6 +1404,9 @@ class AgentRuntime:
         plan_state = PlanWorkflowState()
         state.scratchpad["plan_state"] = plan_state
         return plan_state
+
+    def _plan_revision_required(self, state: LoopState) -> bool:
+        return bool(state.scratchpad.get("plan_revision_required")) and self._plan_state(state).active
 
     def _consume_plan_interaction_budget(self, state: LoopState) -> bool:
         consumed = int(state.scratchpad.get("plan_interactions", 0))
@@ -1640,8 +1660,34 @@ def _remove_plan_runtime_instructions(state: LoopState) -> None:
     state.messages = [
         message
         for message in state.messages
-        if message.metadata.get("runtime_instruction") not in {"plan_entry", "plan_active"}
+        if message.metadata.get("runtime_instruction")
+        not in {"plan_entry", "plan_active", "plan_revision_required"}
     ]
+
+
+def _plan_exit_resolution_output(resolution: PlanExitResolution) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "decision": resolution.decision,
+        "user_feedback": resolution.user_feedback,
+    }
+    if resolution.decision == "revise":
+        payload["next_required_action"] = (
+            "Revise the plan according to user_feedback and call exit_plan again immediately. "
+            "Do not answer with prose only. Ask another plan question only if a new material "
+            "ambiguity genuinely blocks the revised plan."
+        )
+    return payload
+
+
+def _plan_revision_required_instruction(user_feedback: str) -> str:
+    feedback = user_feedback.strip() or "(no additional feedback text was provided)"
+    return (
+        "Plan revision is still pending. The user requested a revision with this feedback:\n"
+        f"{feedback}\n\n"
+        "You must now present the revised plan by calling exit_plan. Do not provide a plain-text "
+        "final answer or implementation summary. Only call ask_plan_question if a new material "
+        "ambiguity genuinely blocks the revised plan."
+    )
 
 
 def _accepted_plan_artifact_id(run_id: str, exit_request_id: str) -> str:

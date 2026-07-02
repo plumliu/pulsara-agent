@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from pulsara_agent.event import AgentEvent
+from pulsara_agent.event import AgentEvent, PlanExitResolvedEvent, PlanModeExitedEvent
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.message import SystemMsg
@@ -19,8 +19,12 @@ from pulsara_agent.runtime.approval import (
 )
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import (
+    ApprovalPolicy,
     EffectivePermissionPolicy,
     PermissionMode,
+    PermissionProfile,
+    TerminalAccess,
+    default_permission_policy,
     parse_permission_mode,
     preset_to_policy,
 )
@@ -296,6 +300,63 @@ class HostSession:
                 state,
                 lambda: self.wiring.agent_runtime.resume_after_plan_interaction(state, resolution),
             )
+
+    async def exit_plan_workflow(
+        self,
+        *,
+        source: str,
+        user_feedback: str = "",
+    ) -> None:
+        self._raise_if_not_open("exiting plan")
+        if source not in {"user_cancel", "user_force_exit"}:
+            raise ValueError("plan exit source must be user_cancel or user_force_exit")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        if not self.plan_state.active:
+            raise ValueError("plan workflow is not active")
+        self._raise_if_active_run()
+        async with self._run_lock:
+            pending = self.pending_interaction
+            state = self._suspended_state
+            if pending is not None:
+                if not isinstance(pending, PendingPlanInteraction):
+                    raise HostSessionPendingInteractionError(
+                        "host session has a non-plan pending interaction; resolve or stop it before exiting plan"
+                    )
+                if pending.kind != "exit" and source != "user_force_exit":
+                    raise HostSessionPendingInteractionError(
+                        "host session has a pending plan question; answer it or use force-exit before cancelling plan"
+                    )
+                state = self._resume_active_state(pending)
+                if pending.kind == "exit":
+                    await self.wiring.runtime_wiring.runtime_session.emit(
+                        PlanExitResolvedEvent(
+                            run_id=state.run_id,
+                            turn_id=state.turn_id,
+                            reply_id=state.reply_id,
+                            exit_request_id=pending.exit_request_id or "",
+                            tool_call_id=pending.tool_call_id,
+                            decision="cancel",
+                            user_feedback=user_feedback,
+                        ),
+                        state=state,
+                    )
+            else:
+                state = self.wiring.agent_runtime.new_state()
+                self._prepare_state_for_plan(state)
+                self.active_run_id = state.run_id
+                self._active_state = state
+            await self._emit_plan_mode_exited(
+                state,
+                source=source,
+                exit_request_id=pending.exit_request_id if isinstance(pending, PendingPlanInteraction) else None,
+            )
+            if pending is not None:
+                await self.wiring.agent_runtime.abort_run(state, reason=AbortKind.USER_STOP)
+                self._suspended_state = None
+                self.suspended_run_id = None
+                self.pending_interaction = None
+            self._finish_active_run()
 
     async def stream_plan_interaction_resolution(
         self,
@@ -676,6 +737,45 @@ class HostSession:
     def _clear_plan_entry_audit_if_emitted(self, state: LoopState) -> None:
         if state.scratchpad.get("plan_entry_audit_emitted"):
             self.plan_state.pending_entry_audit = False
+
+    def _pre_plan_policy(self) -> EffectivePermissionPolicy:
+        payload = self.plan_state.pre_plan_permission_policy or {}
+        if not payload:
+            return default_permission_policy()
+        return EffectivePermissionPolicy(
+            profile=PermissionProfile(str(payload["profile"])),
+            approval=ApprovalPolicy(str(payload["approval_policy"])),
+            terminal=TerminalAccess(str(payload["terminal_access"])),
+            execution_boundary="host",
+            network_isolated=bool(payload.get("network_isolated", False)),
+        )
+
+    async def _emit_plan_mode_exited(
+        self,
+        state: LoopState,
+        *,
+        source: str,
+        exit_request_id: str | None = None,
+    ) -> None:
+        restored_mode = self.plan_state.pre_plan_permission_mode
+        restored_policy = self._pre_plan_policy()
+        self.wiring.agent_runtime.set_permission_policy(
+            restored_policy,
+            mode=parse_permission_mode(restored_mode) if restored_mode is not None else None,
+        )
+        await self.wiring.runtime_wiring.runtime_session.emit(
+            PlanModeExitedEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                source=source,  # type: ignore[arg-type]
+                exit_request_id=exit_request_id,
+                restored_permission_mode=restored_mode,
+                restored_permission_policy=restored_policy.to_dict(),
+            ),
+            state=state,
+        )
+        self.plan_state.finish()
 
     def _raise_if_not_open(self, action: str) -> None:
         if self._lifecycle is not HostSessionLifecycle.OPEN:

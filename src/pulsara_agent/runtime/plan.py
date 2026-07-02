@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Literal, TypeAlias
+from typing import Any, Iterable, Literal, TypeAlias
 from uuid import uuid4
 
-from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent
+from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent, PlanQuestionOption
 from pulsara_agent.runtime.approval import PendingApproval
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode
 from pulsara_agent.runtime.state import LoopState, LoopStatus
@@ -16,16 +16,38 @@ PLAN_ACTIVE_INSTRUCTION_NAME = "plan_active_instruction"
 
 PLAN_ENTRY_INSTRUCTION = (
     "Plan workflow is active. The host has already switched this session to read-only for planning. "
-    "Do not implement changes yet. Inspect relevant context with read-only tools, keep any scratch work in "
-    "agent-local todo if useful, ask the user with ask_plan_question when blocked, and submit the final plan "
-    "with exit_plan for user approval before doing side-effecting work."
+    "Do not implement changes yet. Inspect relevant context with read-only tools and keep scratch work in "
+    "agent-local todo if useful. Resolve discoverable facts from the repository before asking. When a material "
+    "design choice remains ambiguous and needs the user, call ask_plan_question with one concise question and "
+    "2-3 mutually exclusive structured options; mark one option recommended when there is a safe default. "
+    "Submit the final plan with exit_plan for user approval before doing side-effecting work."
 )
 
 PLAN_ACTIVE_INSTRUCTION = (
     "You are still in Plan workflow. Workspace/file/terminal/durable side effects are blocked by read-only permission."
-    "Continue planning with read-only inspection and agent-local todo only. When the plan is ready, "
-    "call exit_plan and wait for the user's decision."
+    "Continue planning with read-only inspection and agent-local todo only. Ask the user with ask_plan_question only "
+    "for material choices that cannot be resolved from repo evidence; provide 2-3 structured options and a recommended "
+    "default when possible. When the plan is ready, call exit_plan and wait for the user's decision. If the user "
+    "requests a plan revision, incorporate that feedback and call exit_plan again; do not answer with prose only."
 )
+
+
+def normalize_plan_question_options(raw_options: Any) -> tuple[PlanQuestionOption, ...]:
+    if raw_options is None:
+        return ()
+    if not isinstance(raw_options, list | tuple):
+        raise ValueError("options must be a list of strings or objects")
+    options: list[PlanQuestionOption] = []
+    for item in raw_options:
+        if isinstance(item, PlanQuestionOption):
+            options.append(item)
+        elif isinstance(item, str):
+            options.append(PlanQuestionOption(label=item))
+        elif isinstance(item, dict):
+            options.append(PlanQuestionOption.model_validate(item))
+        else:
+            raise ValueError("options must contain strings or objects")
+    return tuple(options)
 
 
 @dataclass(slots=True)
@@ -116,7 +138,7 @@ class PendingPlanInteraction:
     tool_call_id: str
     question_id: str | None = None
     question: str = ""
-    options: tuple[str, ...] = ()
+    options: tuple[PlanQuestionOption, ...] = ()
     allow_free_text: bool = True
     exit_request_id: str | None = None
     plan_text: str = ""
@@ -136,7 +158,7 @@ class PendingPlanInteraction:
             "tool_call_id": self.tool_call_id,
             "question_id": self.question_id,
             "question": self.question,
-            "options": list(self.options),
+            "options": [option.model_dump() for option in self.options],
             "allow_free_text": self.allow_free_text,
             "exit_request_id": self.exit_request_id,
             "plan_text": self.plan_text,
@@ -169,7 +191,7 @@ def pending_plan_interaction_from_state(state: LoopState, host_session_id: str) 
         tool_call_id=str(payload["tool_call_id"]),
         question_id=payload.get("question_id"),
         question=str(payload.get("question") or ""),
-        options=tuple(str(option) for option in payload.get("options") or ()),
+        options=normalize_plan_question_options(payload.get("options") or ()),
         allow_free_text=bool(payload.get("allow_free_text", True)),
         exit_request_id=payload.get("exit_request_id"),
         plan_text=str(payload.get("plan_text") or ""),

@@ -346,6 +346,17 @@ class HostCore:
         session = await self.get_session(host_session_id)
         return await session.resolve_plan_interaction(resolution)
 
+    async def exit_plan_workflow(
+        self,
+        host_session_id: str,
+        *,
+        source: str,
+        user_feedback: str = "",
+    ) -> None:
+        self._raise_if_not_accepting("exit plan workflow")
+        session = await self.get_session(host_session_id)
+        await session.exit_plan_workflow(source=source, user_feedback=user_feedback)
+
     async def stop_current_turn(
         self,
         host_session_id: str,

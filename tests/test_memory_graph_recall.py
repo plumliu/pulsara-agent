@@ -504,6 +504,61 @@ def test_memory_search_protocol_defaults_to_zero_and_serializes_paths() -> None:
     assert payload["results"][0]["conflicts_with"] == ["preference:seed"]
 
 
+def test_memory_search_relaxes_inferred_kind_when_it_would_empty_recall() -> None:
+    recall = _KindSensitiveRecallService()
+    tool = MemorySearchTool(recall=recall)
+
+    payload = json.loads(
+        tool.execute(
+            ToolCall(
+                id="call:search",
+                name="memory_search",
+                arguments={
+                    "query": "weekly digest schedule timezone",
+                    "kind": "Claim",
+                },
+            )
+        ).output
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["warnings"] == ["kind_filter_relaxed"]
+    assert payload["results"][0]["memory_id"] == "observation:timezone"
+    assert [query.types for query in recall.queries] == [("Claim",), (), ()]
+    assert [query.trace for query in recall.queries] == [False, False, True]
+
+
+def test_memory_search_relaxes_visible_scope_when_it_would_empty_recall() -> None:
+    recall = _ScopeSensitiveRecallService()
+    tool = MemorySearchTool(
+        recall=recall,
+        read_scopes=frozenset({"ctx:user", "ctx:workspace/current"}),
+    )
+
+    payload = json.loads(
+        tool.execute(
+            ToolCall(
+                id="call:search",
+                name="memory_search",
+                arguments={
+                    "query": "Project Lumen persistence stack",
+                    "scope": "ctx:workspace/current",
+                },
+            )
+        ).output
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["warnings"] == ["scope_filter_relaxed"]
+    assert payload["results"][0]["memory_id"] == "decision:persistence"
+    assert [query.scopes for query in recall.queries] == [
+        ("ctx:workspace/current",),
+        ("ctx:user", "ctx:workspace/current"),
+        ("ctx:user", "ctx:workspace/current"),
+    ]
+    assert [query.trace for query in recall.queries] == [False, False, True]
+
+
 @pytest.mark.parametrize("max_hops", [-1, 3])
 def test_memory_search_rejects_out_of_range_hops(max_hops: int) -> None:
     tool = MemorySearchTool(recall=_RecallService(RecallResult(status=RecallStatus.EMPTY)))
@@ -525,6 +580,56 @@ class _RecallService:
     async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
         self.query = query
         return self.result
+
+
+@dataclass
+class _KindSensitiveRecallService:
+    queries: list[RecallQuery] = field(default_factory=list)
+
+    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+        self.queries.append(query)
+        if query.types:
+            return RecallResult(status=RecallStatus.EMPTY, guidance=("no match",))
+        return RecallResult(
+            status=RecallStatus.OK,
+            items=(
+                RecallItem(
+                    memory_id="observation:timezone",
+                    memory_type=memory.OBSERVATION.name,
+                    scope="ctx:user",
+                    status=memory.NodeStatus.ACTIVE,
+                    snippet="The weekly digest schedule is interpreted in Asia/Shanghai local time.",
+                    score=0.5,
+                    why=("vector",),
+                    deep_recall="memory_get observation:timezone",
+                ),
+            ),
+        )
+
+
+@dataclass
+class _ScopeSensitiveRecallService:
+    queries: list[RecallQuery] = field(default_factory=list)
+
+    async def recall(self, query: RecallQuery, *, graph_id: str | None = None) -> RecallResult:
+        self.queries.append(query)
+        if query.scopes == ("ctx:workspace/current",):
+            return RecallResult(status=RecallStatus.EMPTY, guidance=("no match",))
+        return RecallResult(
+            status=RecallStatus.OK,
+            items=(
+                RecallItem(
+                    memory_id="decision:persistence",
+                    memory_type=memory.DECISION.name,
+                    scope="ctx:user",
+                    status=memory.NodeStatus.ACTIVE,
+                    snippet="Project Lumen selected PostgreSQL with pgvector.",
+                    score=0.5,
+                    why=("vector",),
+                    deep_recall="memory_get decision:persistence",
+                ),
+            ),
+        )
 
 
 @dataclass

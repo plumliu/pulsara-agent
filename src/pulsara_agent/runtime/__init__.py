@@ -36,8 +36,10 @@ from pulsara_agent.runtime.plan import (
     PendingPlanInteraction,
     PlanExitResolution,
     PlanInteractionResolution,
+    PlanQuestionOption,
     PlanQuestionResolution,
     PlanWorkflowState,
+    normalize_plan_question_options,
     reduce_plan_workflow_state,
 )
 from pulsara_agent.runtime.recovery import (
@@ -119,8 +121,10 @@ __all__ = [
     "PendingPlanInteraction",
     "PlanExitResolution",
     "PlanInteractionResolution",
+    "PlanQuestionOption",
     "PlanQuestionResolution",
     "PlanWorkflowState",
+    "normalize_plan_question_options",
     "RecoveryProjection",
     "StopRequest",
     "reduce_plan_workflow_state",

@@ -11,7 +11,7 @@ from pulsara_agent.capability.bundled_skills import (
 )
 from pulsara_agent.host import HostWorkspaceInput
 from pulsara_agent.message import ToolCallBlock, ToolCallState
-from pulsara_agent.runtime import PendingApproval, PendingPlanInteraction
+from pulsara_agent.runtime import PendingApproval, PendingPlanInteraction, PlanQuestionOption
 from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus
@@ -33,6 +33,7 @@ class FakeSession:
         self.active_skill_names: list[frozenset[str] | None] = []
         self.plan_state = PlanWorkflowState()
         self.enter_plan_reasons: list[str] = []
+        self.exit_plan_sources: list[str] = []
 
     async def run_turn(self, prompt: str, *, active_skill_names=None):
         self.prompts.append(prompt)
@@ -58,6 +59,10 @@ class FakeSession:
 
     async def stop_current_turn(self):
         return None
+
+    async def exit_plan_workflow(self, *, source: str, user_feedback: str = ""):
+        self.exit_plan_sources.append(source)
+        self.plan_state.finish()
 
 
 class PendingFakeSession(FakeSession):
@@ -107,6 +112,10 @@ class PendingPlanFakeSession(FakeSession):
             tool_call_id="call:plan",
             question_id="plan_question:test" if kind == "question" else None,
             question="Scope?" if kind == "question" else "",
+            options=(
+                PlanQuestionOption(label="runtime", description="Inspect runtime.", recommended=True),
+                PlanQuestionOption(label="host", description="Inspect host."),
+            ) if kind == "question" else (),
             exit_request_id="plan_exit:test" if kind == "exit" else None,
             plan_text="draft" if kind == "exit" else "",
             summary="draft summary" if kind == "exit" else "",
@@ -119,6 +128,10 @@ class PendingPlanFakeSession(FakeSession):
         self.resolutions.append(resolution)
         self._pending = None
         return FakeResult()
+
+    async def exit_plan_workflow(self, *, source: str, user_feedback: str = ""):
+        await super().exit_plan_workflow(source=source, user_feedback=user_feedback)
+        self._pending = None
 
 
 class FakeCore:
@@ -424,8 +437,10 @@ def test_cli_host_repl_answers_pending_plan_question(monkeypatch, tmp_path, caps
     session = PendingPlanCore.instances[0].session
     assert session.resolutions[0].interaction_id == "plan_interaction:test"
     assert session.resolutions[0].answer_text == "runtime"
+    assert session.resolutions[0].selected_option == "runtime"
     out = capsys.readouterr().out
-    assert '"kind": "question"' in out
+    assert "Plan question:" in out
+    assert "runtime (Recommended)" in out
     assert "fake final" in out
 
 
@@ -449,6 +464,221 @@ def test_cli_host_repl_approves_pending_plan_exit(monkeypatch, tmp_path) -> None
     resolution = PendingPlanCore.instances[0].session.resolutions[0]
     assert resolution.interaction_id == "plan_interaction:test"
     assert resolution.decision == "approve"
+
+
+def test_repl_prompt_message_stays_in_plan_mode_without_pending_interaction() -> None:
+    session = FakeSession()
+    session.plan_state.begin(
+        source="user",
+        previous_mode=PermissionMode.BYPASS_PERMISSIONS,
+        previous_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        reason="still planning",
+    )
+
+    assert cli._repl_prompt_message(session) == "plan> "
+
+
+def test_cli_host_repl_revise_plan_prints_new_pending_exit(monkeypatch, tmp_path, capsys) -> None:
+    class RevisingPlanSession(PendingPlanFakeSession):
+        async def resolve_plan_interaction(self, resolution):
+            self.resolutions.append(resolution)
+            self._pending = PendingPlanInteraction(
+                interaction_id="plan_interaction:revised",
+                kind="exit",
+                host_session_id=self.host_session_id,
+                runtime_session_id="runtime:test",
+                run_id="run:test",
+                turn_id="turn:test",
+                reply_id="reply:test",
+                tool_call_id="call:plan-revised",
+                exit_request_id="plan_exit:revised",
+                plan_text="revised draft",
+                summary="revised summary",
+            )
+            return FakeResult()
+
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session = RevisingPlanSession(kind="exit")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter([":revise-plan please update it", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    session = PendingPlanCore.instances[0].session
+    assert session.resolutions[0].decision == "revise"
+    out = capsys.readouterr().out
+    assert "Plan ready for approval:" in out
+    assert "revised draft" in out
+
+
+def test_cli_host_repl_choose_plan_question_option_by_number(monkeypatch, tmp_path) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session = PendingPlanFakeSession(kind="question")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter([":choose 1", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    resolution = PendingPlanCore.instances[0].session.resolutions[0]
+    assert resolution.answer_text == "runtime"
+    assert resolution.selected_option == "runtime"
+
+
+def test_cli_host_repl_answers_pending_plan_question_with_bare_label(monkeypatch, tmp_path) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session = PendingPlanFakeSession(kind="question")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter(["host", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    resolution = PendingPlanCore.instances[0].session.resolutions[0]
+    assert resolution.answer_text == "host"
+    assert resolution.selected_option == "host"
+    assert PendingPlanCore.instances[0].session.prompts == []
+
+
+def test_cli_host_repl_rejects_free_text_when_plan_question_disallows_it(monkeypatch, tmp_path, capsys) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session = PendingPlanFakeSession(kind="question")
+            self.session._pending.allow_free_text = False
+
+    PendingPlanCore.instances.clear()
+    inputs = iter(["something else", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    session = PendingPlanCore.instances[0].session
+    assert session.resolutions == []
+    assert session.prompts == []
+    assert "Pending plan question requires one of the listed options" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("token", ["approve", "yes", "是", "好", "可以", "同意", "好的", "批准", "y", "Y"])
+def test_cli_host_repl_approves_pending_plan_exit_with_exact_tokens(monkeypatch, tmp_path, token) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session = PendingPlanFakeSession(kind="exit")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter([token, "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    resolution = PendingPlanCore.instances[0].session.resolutions[0]
+    assert resolution.decision == "approve"
+
+
+def test_cli_host_repl_does_not_natural_language_approve_plan_exit(monkeypatch, tmp_path, capsys) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session = PendingPlanFakeSession(kind="exit")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter(["我批准这个计划，直接执行即可", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    session = PendingPlanCore.instances[0].session
+    assert session.resolutions == []
+    assert session.prompts == []
+    assert "Pending plan approval" in capsys.readouterr().err
+
+
+def test_cli_host_repl_cancel_plan_exits_workflow(monkeypatch, tmp_path) -> None:
+    class PendingPlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session = PendingPlanFakeSession(kind="exit")
+
+    PendingPlanCore.instances.clear()
+    inputs = iter([":cancel-plan", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PendingPlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    session = PendingPlanCore.instances[0].session
+    assert session.exit_plan_sources == ["user_cancel"]
+    assert session.resolutions == []
+
+
+def test_cli_host_repl_force_exit_plan_without_pending_exit(monkeypatch, tmp_path) -> None:
+    class PlanCore(FakeCore):
+        def __init__(self, *, settings):
+            super().__init__(settings=settings)
+            self.session.plan_state.begin(
+                source="user",
+                previous_mode=PermissionMode.BYPASS_PERMISSIONS,
+                previous_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+                reason="force",
+            )
+
+    PlanCore.instances.clear()
+    inputs = iter([":force-exit-plan", "quit"])
+    monkeypatch.setattr(cli, "HostCore", PlanCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    assert PlanCore.instances[0].session.exit_plan_sources == ["user_force_exit"]
 
 
 def test_cli_host_repl_stop_aborts_pending_approval(monkeypatch, tmp_path, capsys) -> None:
