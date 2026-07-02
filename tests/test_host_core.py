@@ -48,7 +48,12 @@ from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultBlock,
 from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
-from pulsara_agent.runtime.plan import PendingPlanInteraction, PlanExitResolution, PlanQuestionResolution
+from pulsara_agent.runtime.plan import (
+    PendingPlanInteraction,
+    PlanExitResolution,
+    PlanQuestionResolution,
+    reduce_plan_workflow_state,
+)
 from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
@@ -1544,7 +1549,7 @@ def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkey
     assert "not allowed by permission policy" in denied_output
 
 
-def test_user_enter_plan_immediately_switches_read_only_and_emits_entry_audit(tmp_path, monkeypatch) -> None:
+def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(tmp_path, monkeypatch) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1571,7 +1576,14 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_entry_audit(tm
         assert policy == preset_to_policy(PermissionMode.READ_ONLY)
         assert session.current_permission_mode is PermissionMode.READ_ONLY
         assert session.plan_state.active is True
-        assert session.plan_state.pending_entry_audit is True
+        assert session.plan_state.pending_entry_audit is False
+        immediate_events = session.replay_events()
+        immediate_entered = [event for event in immediate_events if isinstance(event, PlanModeEnteredEvent)]
+        assert len(immediate_entered) == 1
+        assert immediate_entered[0].source == "user"
+        reduced = reduce_plan_workflow_state(immediate_events)
+        assert reduced.active is True
+        assert reduced.pre_plan_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
         result = await session.run_turn("please plan the change")
         return session, result
 
@@ -1588,11 +1600,57 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_entry_audit(tm
     assert result.final_text == "planned only"
     assert session.plan_state.active is True
     assert session.plan_state.pending_entry_audit is False
+    assert len(entered) == 1
     assert entered[0].source == "user"
     assert entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
-    assert "Plan workflow is active" in first_context
+    assert "Plan workflow" in first_context
     assert "please plan the change" in first_context
     assert not (tmp_path / "plan_write.txt").exists()
+    assert "not allowed by permission policy" in write_output
+
+
+def test_plan_mode_blocks_permission_switch_until_explicit_exit(tmp_path, monkeypatch) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bypass-write",
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": "bypass_write.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                    }
+                ]
+            },
+            {"text": "still planning"},
+        ]
+    )
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        session.enter_plan(reason="permission barrier")
+        with pytest.raises(ValueError, match="plan workflow is active"):
+            session.set_permission_mode(PermissionMode.BYPASS_PERMISSIONS)
+        assert session.current_permission_mode is PermissionMode.READ_ONLY
+        result = await session.run_turn("try to write anyway")
+        return session, result
+
+    session, result = asyncio.run(run())
+    events = session.replay_events()
+    write_output = "".join(
+        event.delta
+        for event in events
+        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bypass-write"
+    )
+
+    assert result.final_text == "still planning"
+    assert session.plan_state.active is True
+    assert session.current_permission_mode is PermissionMode.READ_ONLY
+    assert not (tmp_path / "bypass_write.txt").exists()
     assert "not allowed by permission policy" in write_output
 
 

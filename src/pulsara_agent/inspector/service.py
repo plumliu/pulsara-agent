@@ -6,7 +6,15 @@ import json
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from pulsara_agent.event import AgentEvent, ProjectionReadyEvent, ReplyStartEvent, RunStartEvent
+from pulsara_agent.event import (
+    AgentEvent,
+    ContextCompactionCompletedEvent,
+    ContextCompactionFailedEvent,
+    ContextCompactionStartedEvent,
+    ProjectionReadyEvent,
+    ReplyStartEvent,
+    RunStartEvent,
+)
 from pulsara_agent.event_log import dump_agent_event
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
@@ -17,6 +25,7 @@ from pulsara_agent.inspector.diagnostics import (
     tool_flow_diagnostics,
 )
 from pulsara_agent.inspector.store import PostgresInspectorStore
+from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.message import AssistantMsg, Msg
 from pulsara_agent.message.blocks import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.message.reducer import MessageReducer
@@ -59,6 +68,7 @@ class InspectorService:
         events = self.store.events_for_session(session_id)
         runs = self.store.session_runs(session_id)
         diagnostics = sequence_gap_diagnostics(events)
+        diagnostics.extend(_compaction_diagnostics(events, self.store))
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -68,6 +78,7 @@ class InspectorService:
                 _summarize_working_context(row)
                 for row in self.store.working_context_for_session(session_id)
             ],
+            "compaction_windows": _compaction_windows(events, self.store),
             "events": _event_summaries(events[:limit_events], include_payload=include_payload),
             "event_count": len(events),
             "events_truncated": len(events) > limit_events,
@@ -100,7 +111,13 @@ class InspectorService:
             and prior_boundary is not None
             and event.sequence < prior_boundary
         ]
-        prior_messages = rebuild_prior_messages(_BoundedEventLog(prior_events))
+        archive = PostgresArtifactStore(self.store.dsn)
+        prior_messages = rebuild_prior_messages(
+            _BoundedEventLog(prior_events),
+            archive=archive,
+            session_id=session_id,
+        )
+        compaction_boundary = _latest_compaction_window(prior_events, self.store)
         timeline = build_run_timeline(run_events, runtime_session_id=session_id, run_id=run_id)
         tool_artifacts = self.store.tool_result_artifacts_for_run(run_id)
         indexed_artifact_ids = {str(row["artifact_id"]) for row in tool_artifacts}
@@ -121,6 +138,7 @@ class InspectorService:
                 "current_user_input": _run_user_input(run_start),
             },
             "timeline": timeline.to_dict(),
+            "compaction_boundary_as_seen": compaction_boundary,
             "prior_messages_as_seen": [_message_to_dict(message) for message in prior_messages],
             "projections_as_seen": [_projection_to_dict(event) for event in run_events if isinstance(event, ProjectionReadyEvent)],
             "assistant_replies": _assistant_replies(run_events),
@@ -160,7 +178,7 @@ class InspectorService:
             "artifact": _json_safe(metadata),
             "payload": payload,
             "tool_refs": [_json_safe(ref) for ref in self.store.artifact_tool_refs(artifact_id)],
-            "diagnostics": [],
+            "diagnostics": _artifact_diagnostics(metadata),
         }
 
     def inspect_memory(self, memory_id: str) -> dict[str, Any]:
@@ -194,7 +212,9 @@ class InspectorService:
         recent_session_ids = self.store.recent_session_ids()
         sequence_diagnostics = []
         for session_id in recent_session_ids:
-            sequence_diagnostics.extend(sequence_gap_diagnostics(self.store.events_for_session(session_id)))
+            events = self.store.events_for_session(session_id)
+            sequence_diagnostics.extend(sequence_gap_diagnostics(events))
+            sequence_diagnostics.extend(_compaction_diagnostics(events, self.store))
         outbox_counts = self.store.outbox_status_counts()
         oxigraph = self._inspect_oxigraph()
         diagnostics = []
@@ -338,6 +358,18 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "question_id",
         "exit_request_id",
         "decision",
+        "compaction_id",
+        "trigger",
+        "reason",
+        "window_number",
+        "window_id",
+        "summary_artifact_id",
+        "through_sequence",
+        "keep_after_sequence",
+        "estimated_tokens_before",
+        "estimated_tokens_after",
+        "threshold_tokens",
+        "context_window_tokens",
     ):
         if key in payload:
             summary[key] = payload[key]
@@ -375,6 +407,106 @@ def _projection_to_dict(event: ProjectionReadyEvent) -> dict[str, Any]:
         "summary": event.summary,
         "created_at": event.created_at,
     }
+
+
+def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> list[dict[str, Any]]:
+    windows: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, ContextCompactionCompletedEvent):
+            continue
+        artifact = store.artifact(event.summary_artifact_id)
+        windows.append(
+            {
+                "sequence": event.sequence,
+                "compaction_id": event.compaction_id,
+                "trigger": event.trigger,
+                "reason": event.reason,
+                "window_number": event.window_number,
+                "window_id": event.window_id,
+                "summary_artifact_id": event.summary_artifact_id,
+                "summary_artifact_present": artifact is not None,
+                "through_sequence": event.through_sequence,
+                "keep_after_sequence": event.keep_after_sequence,
+                "estimated_tokens_before": event.estimated_tokens_before,
+                "estimated_tokens_after": event.estimated_tokens_after,
+                "threshold_tokens": event.threshold_tokens,
+                "context_window_tokens": event.context_window_tokens,
+                "included_run_ids": list(event.included_run_ids),
+                "included_artifact_ids": list(event.included_artifact_ids),
+            }
+        )
+    return windows
+
+
+def _latest_compaction_window(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> dict[str, Any] | None:
+    windows = _compaction_windows(events, store)
+    for window in reversed(windows):
+        if window["summary_artifact_present"]:
+            return window
+    return None
+
+
+def _compaction_diagnostics(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> list[dict[str, Any]]:
+    events_list = list(events)
+    completed_ids = {
+        event.compaction_id
+        for event in events_list
+        if isinstance(event, ContextCompactionCompletedEvent)
+    }
+    failed_ids = {
+        event.compaction_id
+        for event in events_list
+        if isinstance(event, ContextCompactionFailedEvent)
+    }
+    diagnostics: list[dict[str, Any]] = []
+    for event in events_list:
+        if isinstance(event, ContextCompactionStartedEvent) and event.compaction_id not in completed_ids | failed_ids:
+            diagnostics.append(
+                {
+                    "code": "context_compaction_dangling_started",
+                    "severity": "warning",
+                    "message": "Context compaction attempt started but has no completed/failed terminal event.",
+                    "details": {
+                        "compaction_id": event.compaction_id,
+                        "sequence": event.sequence,
+                        "trigger": event.trigger,
+                        "reason": event.reason,
+                    },
+                }
+            )
+        if isinstance(event, ContextCompactionCompletedEvent) and store.artifact(event.summary_artifact_id) is None:
+            diagnostics.append(
+                {
+                    "code": "context_compaction_missing_summary_artifact",
+                    "severity": "error",
+                    "message": "Completed context compaction references a missing summary artifact.",
+                    "details": {
+                        "compaction_id": event.compaction_id,
+                        "summary_artifact_id": event.summary_artifact_id,
+                        "sequence": event.sequence,
+                    },
+                }
+            )
+    return diagnostics
+
+
+def _artifact_diagnostics(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    artifact_metadata = metadata.get("metadata")
+    if not isinstance(artifact_metadata, dict):
+        return []
+    if artifact_metadata.get("kind") != "context_compaction_summary":
+        return []
+    diagnostics = []
+    if artifact_metadata.get("do_not_write_back") is not True:
+        diagnostics.append(
+            {
+                "code": "context_compaction_summary_missing_no_writeback",
+                "severity": "error",
+                "message": "Context compaction summary artifact is missing do_not_write_back=true.",
+                "details": {"artifact_id": metadata.get("id")},
+            }
+        )
+    return diagnostics
 
 
 def _message_to_dict(message: Msg) -> dict[str, Any]:

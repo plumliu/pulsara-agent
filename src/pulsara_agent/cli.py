@@ -28,6 +28,7 @@ from pulsara_agent.host import (
     normalize_workspace_kind,
     resolve_workspace,
 )
+from pulsara_agent.event import ContextCompactionCompletedEvent, ContextCompactionFailedEvent
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.runtime import (
@@ -469,6 +470,42 @@ async def _approve_pending_plan(session, pending: PendingPlanInteraction) -> Non
         print(result.final_text)
 
 
+def _attach_repl_compaction_notifications(session) -> None:
+    add_listener = getattr(session, "add_compaction_listener", None)
+    if not callable(add_listener):
+        return
+    add_listener(_print_context_compaction_event)
+
+
+def _print_context_compaction_event(event) -> None:
+    if isinstance(event, ContextCompactionCompletedEvent):
+        print(
+            "context compaction completed: "
+            f"compaction_id={event.compaction_id} "
+            f"summary_artifact_id={event.summary_artifact_id} "
+            f"window_id={event.window_id}"
+        )
+        return
+    if isinstance(event, ContextCompactionFailedEvent):
+        print(
+            "context compaction failed: "
+            f"compaction_id={event.compaction_id} "
+            f"{event.error_type}: {event.message}",
+            file=sys.stderr,
+        )
+
+
+def _format_manual_compaction_result(result: dict[str, object]) -> str:
+    if result.get("compacted"):
+        return (
+            "context compaction completed: "
+            f"compaction_id={result.get('compaction_id')} "
+            f"summary_artifact_id={result.get('summary_artifact_id')} "
+            f"window_id={result.get('window_id')}"
+        )
+    return "context compaction skipped: no eligible compact window"
+
+
 async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
@@ -491,6 +528,7 @@ async def _host_repl(args) -> None:
             resume_workspace_input=resume_workspace_input,
             permission_policy=permission_policy,
         )
+        _attach_repl_compaction_notifications(session)
         print("Pulsara REPL · :help 查看命令 · Ctrl-D detach · :close 关闭对话")
         while True:
             try:
@@ -532,6 +570,7 @@ async def _host_repl(args) -> None:
                     )
                     await core.detach_session(session.host_session_id)
                     session = next_session
+                    _attach_repl_compaction_notifications(session)
                 except Exception as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     continue
@@ -555,6 +594,7 @@ async def _host_repl(args) -> None:
                     )
                     await core.detach_session(session.host_session_id)
                     session = next_session
+                    _attach_repl_compaction_notifications(session)
                 except Exception as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     continue
@@ -620,6 +660,14 @@ async def _host_repl(args) -> None:
                     print("No active turn to stop.")
                 else:
                     print(json.dumps({"status": result.status.value, "stop_reason": result.stop_reason}, indent=2))
+                continue
+            if command == ":compact":
+                try:
+                    result = await session.compact_now()
+                except Exception as exc:
+                    print(f"context compaction failed: {exc}", file=sys.stderr)
+                    continue
+                print(_format_manual_compaction_result(result))
                 continue
             if command.startswith(":answer"):
                 pending = session.get_pending_interaction()
@@ -802,6 +850,7 @@ _REPL_HELP = """Commands:
   :approval               Show a pending tool approval
   :approve / :deny        Resolve a pending tool approval
   :stop                   Stop the current active or suspended turn
+  :compact                Manually compact idle session context before the auto threshold
   :q / quit / exit        Detach from the conversation
 
 Editing: Up/Down history · Ctrl-R search · Ctrl-C clear · Ctrl-Z suspend · Ctrl-D exit"""

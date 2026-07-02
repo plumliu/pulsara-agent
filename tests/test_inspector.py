@@ -8,6 +8,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.event import (
+    ContextCompactionCompletedEvent,
     EventContext,
     ProjectionReadyEvent,
     ReplyEndEvent,
@@ -25,6 +26,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
+from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.memory.candidates.pool import CANDIDATE_POOL_SCHEMA_SQL
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
 from pulsara_agent.settings import StorageConfig
@@ -143,6 +145,96 @@ def test_inspect_run_prior_messages_are_bounded_to_target_run_start(tmp_path: Pa
         assert "FIRST_ASSISTANT" in prior_text
         assert "target user" not in prior_text
         assert "FUTURE_ASSISTANT" not in prior_text
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspect_run_prior_messages_use_context_compaction_boundary(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        old = _ctx("compacted-old")
+        target = _ctx("compacted-target")
+        log.extend(_simple_run_events(old, user_input="old user text", text="OLD_ASSISTANT_TEXT"))
+        summary_artifact_id = f"context_compaction_summary:{uuid4().hex}"
+        PostgresArtifactStore(dsn).put_text(
+            summary_artifact_id,
+            "COMPACTED_OLD_CONTEXT_SUMMARY",
+            session_id=runtime_session_id,
+            run_id=old.run_id,
+            media_type="text/plain; charset=utf-8",
+            metadata={"kind": "context_compaction_summary", "do_not_write_back": True},
+        )
+        log.append(
+            ContextCompactionCompletedEvent(
+                **old.event_fields(),
+                compaction_id=f"context_compaction:{uuid4().hex}",
+                trigger="manual",
+                reason="user_requested",
+                window_number=1,
+                window_id="context_window:test",
+                summary_artifact_id=summary_artifact_id,
+                summary_chars=len("COMPACTED_OLD_CONTEXT_SUMMARY"),
+                estimated_tokens_before=10_000,
+                estimated_tokens_after=100,
+                threshold_tokens=200_000,
+                context_window_tokens=256_000,
+                through_sequence=7,
+                keep_after_sequence=7,
+                included_run_ids=[old.run_id],
+            )
+        )
+        log.extend(_simple_run_events(target, user_input="target user", text="TARGET_ASSISTANT"))
+
+        report = _service(dsn).inspect_run(target.run_id)
+        prior_text = str(report["prior_messages_as_seen"])
+
+        assert report["compaction_boundary_as_seen"]["summary_artifact_id"] == summary_artifact_id
+        assert "COMPACTED_OLD_CONTEXT_SUMMARY" in prior_text
+        assert "<context-compaction-summary" in prior_text
+        assert "old user text" not in prior_text
+        assert "OLD_ASSISTANT_TEXT" not in prior_text
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspect_session_reports_missing_context_compaction_summary_artifact(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx("missing-compaction-summary")
+        log.extend(_simple_run_events(ctx, user_input="old", text="done"))
+        log.append(
+            ContextCompactionCompletedEvent(
+                **ctx.event_fields(),
+                compaction_id=f"context_compaction:{uuid4().hex}",
+                trigger="auto",
+                reason="context_threshold",
+                window_number=1,
+                window_id="context_window:missing",
+                summary_artifact_id=f"artifact:missing:{uuid4().hex}",
+                summary_chars=10,
+                estimated_tokens_before=200_001,
+                estimated_tokens_after=1_000,
+                threshold_tokens=200_000,
+                context_window_tokens=256_000,
+                through_sequence=7,
+                keep_after_sequence=7,
+                included_run_ids=[ctx.run_id],
+            )
+        )
+
+        report = _service(dsn).inspect_session(runtime_session_id)
+
+        assert report["compaction_windows"][0]["summary_artifact_present"] is False
+        assert any(
+            diagnostic["code"] == "context_compaction_missing_summary_artifact"
+            for diagnostic in report["diagnostics"]
+        )
     finally:
         _cleanup_session(dsn, runtime_session_id)
 

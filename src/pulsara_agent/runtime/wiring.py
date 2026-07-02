@@ -58,6 +58,7 @@ from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
 from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.runtime.compaction import ContextCompactionPolicy, ContextCompactionService
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal import TerminalRuntimeBinding
@@ -85,6 +86,7 @@ class RuntimeWiring:
     retrieval_resources: RetrievalRuntimeResources | None = None
     governance_coordinator: MemoryGovernanceCoordinator | None = None
     governance_relatedness: GovernanceRelatednessService | None = None
+    compaction_service: ContextCompactionService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,6 +418,15 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         retrieval_resources=runtime_wiring.retrieval_resources,
         governance_coordinator=runtime_wiring.governance_coordinator,
         governance_relatedness=runtime_wiring.governance_relatedness,
+        compaction_service=ContextCompactionService(
+            event_log=runtime_wiring.event_log,
+            archive=runtime_wiring.archive,
+            llm_runtime=llm_runtime,
+            runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
+            policy=ContextCompactionPolicy(),
+        )
+        if isinstance(runtime_wiring.event_log, PostgresEventLog)
+        else None,
         memory_governance_engine=MemoryGovernanceEngine(
             llm_runtime=llm_runtime,
             executor=runtime_wiring.memory_governance_executor,

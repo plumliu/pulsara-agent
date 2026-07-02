@@ -10,6 +10,7 @@ from pulsara_agent.capability.bundled_skills import (
     sync_bundled_skills as real_sync_bundled_skills,
 )
 from pulsara_agent.host import HostWorkspaceInput
+from pulsara_agent.event import ContextCompactionCompletedEvent, ContextCompactionFailedEvent, EventContext
 from pulsara_agent.message import ToolCallBlock, ToolCallState
 from pulsara_agent.runtime import PendingApproval, PendingPlanInteraction, PlanQuestionOption
 from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
@@ -34,6 +35,7 @@ class FakeSession:
         self.plan_state = PlanWorkflowState()
         self.enter_plan_reasons: list[str] = []
         self.exit_plan_sources: list[str] = []
+        self.compact_count = 0
 
     async def run_turn(self, prompt: str, *, active_skill_names=None):
         self.prompts.append(prompt)
@@ -59,6 +61,17 @@ class FakeSession:
 
     async def stop_current_turn(self):
         return None
+
+    async def compact_now(self):
+        self.compact_count += 1
+        return {
+            "compacted": True,
+            "compaction_id": "context_compaction:fake",
+            "summary_artifact_id": "context_compaction_fake:summary",
+            "window_id": "context_window:fake",
+            "through_sequence": 10,
+            "keep_after_sequence": 10,
+        }
 
     async def exit_plan_workflow(self, *, source: str, user_feedback: str = ""):
         self.exit_plan_sources.append(source)
@@ -703,6 +716,70 @@ def test_cli_host_repl_stop_aborts_pending_approval(monkeypatch, tmp_path, capsy
     assert core.closed == ["host:fake"]
     out = capsys.readouterr().out
     assert '"status": "aborted"' in out
+
+
+def test_cli_host_repl_compact_command_invokes_session_compaction(monkeypatch, tmp_path, capsys) -> None:
+    FakeCore.instances.clear()
+    inputs = iter([":compact", "quit"])
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    session = FakeCore.instances[0].session
+    assert session.compact_count == 1
+    out = capsys.readouterr().out
+    assert "context compaction completed:" in out
+    assert "context_compaction:fake" in out
+
+
+def test_cli_context_compaction_event_notices(capsys) -> None:
+    ctx = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+    cli._print_context_compaction_event(
+        ContextCompactionCompletedEvent(
+            **ctx.event_fields(),
+            compaction_id="context_compaction:done",
+            trigger="auto",
+            reason="run_end_context_threshold",
+            window_number=1,
+            window_id="context_window:1",
+            summary_artifact_id="context_compaction_done:summary",
+            summary_chars=12,
+            estimated_tokens_before=200_001,
+            estimated_tokens_after=10_000,
+            threshold_tokens=200_000,
+            context_window_tokens=256_000,
+            through_sequence=20,
+            keep_after_sequence=12,
+        )
+    )
+    cli._print_context_compaction_event(
+        ContextCompactionFailedEvent(
+            **ctx.event_fields(),
+            compaction_id="context_compaction:fail",
+            trigger="auto",
+            reason="run_end_context_threshold",
+            window_number=1,
+            window_id="context_window:1",
+            estimated_tokens_before=200_001,
+            threshold_tokens=200_000,
+            context_window_tokens=256_000,
+            through_sequence=20,
+            keep_after_sequence=12,
+            error_type="RuntimeError",
+            message="boom",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "context compaction completed:" in captured.out
+    assert "context_compaction:done" in captured.out
+    assert "context compaction failed:" in captured.err
+    assert "RuntimeError: boom" in captured.err
 
 
 def test_cli_host_repl_runs_bundled_sync_before_opening_session(monkeypatch, tmp_path) -> None:

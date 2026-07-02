@@ -7,8 +7,16 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, AsyncIterator, Awaitable, Callable
+from uuid import uuid4
 
-from pulsara_agent.event import AgentEvent, PlanExitResolvedEvent, PlanModeExitedEvent
+from pulsara_agent.event import (
+    AgentEvent,
+    ContextCompactionCompletedEvent,
+    ContextCompactionFailedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+)
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.message import SystemMsg
@@ -118,6 +126,8 @@ class HostSession:
     _suspended_state: LoopState | None = None
     _active_state: LoopState | None = None
     _active_task: asyncio.Task[Any] | None = None
+    _auto_compaction_task: asyncio.Task[Any] | None = None
+    _compaction_listeners: list[Callable[[AgentEvent], None]] = field(default_factory=list, init=False, repr=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
@@ -184,7 +194,7 @@ class HostSession:
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
         async with self._run_lock:
-            prior_messages = self._prior_messages()
+            prior_messages = await self._prepare_prior_messages_for_turn(user_input)
             prior_messages.extend(self._plan_runtime_messages())
             state = self._begin_active_state()
             return await self._run_owned(
@@ -209,7 +219,7 @@ class HostSession:
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
         async with self._run_lock:
-            prior_messages = self._prior_messages()
+            prior_messages = await self._prepare_prior_messages_for_turn(user_input)
             prior_messages.extend(self._plan_runtime_messages())
             state = self._begin_active_state()
             async for event in self._stream_owned(
@@ -248,6 +258,11 @@ class HostSession:
             raise HostSessionBusyError("host session is stopping an active run")
         self._raise_if_pending_interaction("switching mode")
         self._raise_if_active_run()
+        if self.plan_state.active:
+            raise ValueError(
+                "cannot switch permission mode while plan workflow is active; "
+                "approve, cancel, or force-exit the plan first"
+            )
         parsed = parse_permission_mode(mode)
         policy = preset_to_policy(parsed)
         self.wiring.agent_runtime.set_permission_policy(policy, mode=parsed)
@@ -428,6 +443,34 @@ class HostSession:
     def replay_events(self, *, after_sequence: int | None = None) -> list[AgentEvent]:
         return self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
 
+    def add_compaction_listener(self, listener: Callable[[AgentEvent], None]) -> None:
+        """Register a best-effort observer for terminal context compaction events."""
+
+        self._compaction_listeners.append(listener)
+
+    async def compact_now(self) -> dict[str, object]:
+        """Manually compact this idle session before the auto threshold is reached."""
+
+        self._raise_if_not_open("compacting context")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        self._raise_if_pending_interaction("compacting context")
+        self._raise_if_active_run()
+        service = self.wiring.runtime_wiring.compaction_service
+        if service is None:
+            raise RuntimeError("context compaction is not configured for this session")
+        async with self._run_lock:
+            await self._drain_auto_compaction()
+            event = await service.compact(trigger="manual", reason="user_requested", force=True)
+            return {
+                "compacted": event is not None,
+                "compaction_id": event.compaction_id if event is not None else None,
+                "summary_artifact_id": event.summary_artifact_id if event is not None else None,
+                "window_id": event.window_id if event is not None else None,
+                "through_sequence": event.through_sequence if event is not None else None,
+                "keep_after_sequence": event.keep_after_sequence if event is not None else None,
+            }
+
     # -- Close / teardown -----------------------------------------------------
 
     def close(self) -> None:
@@ -444,6 +487,8 @@ class HostSession:
         self._suspended_state = None
         self._active_state = None
         self._active_task = None
+        if self._auto_compaction_task is not None and not self._auto_compaction_task.done():
+            self._auto_compaction_task.cancel()
         self.stopping_run_id = None
         self.suspended_run_id = None
         self.wiring.agent_runtime.close()
@@ -463,6 +508,7 @@ class HostSession:
         if self._lifecycle is HostSessionLifecycle.CLOSED:
             return
         self.begin_close()
+        await self._drain_auto_compaction(cancel=True)
         await self.drain_active_run(reason=reason, timeout_seconds=drain_timeout_seconds)
         await self._finalize_suspended_run(reason)
         self.close()
@@ -632,9 +678,78 @@ class HostSession:
         self.active_run_id = None
         self.stopping_run_id = None
         self.last_active_at = time.monotonic()
+        self._schedule_auto_compaction_after_run()
+
+    async def _prepare_prior_messages_for_turn(self, user_input: str):
+        await self._drain_auto_compaction()
+        service = self.wiring.runtime_wiring.compaction_service
+        if service is not None:
+            await self._compact_if_needed_and_notify(
+                service,
+                current_user_input=user_input,
+                reason="preflight_context_threshold",
+            )
+        return self._prior_messages()
 
     def _prior_messages(self):
-        return rebuild_prior_messages(self.wiring.runtime_wiring.event_log)
+        runtime_wiring = self.wiring.runtime_wiring
+        return rebuild_prior_messages(
+            runtime_wiring.event_log,
+            archive=runtime_wiring.archive,
+            session_id=runtime_wiring.runtime_session.runtime_session_id,
+        )
+
+    def _schedule_auto_compaction_after_run(self) -> None:
+        if self._lifecycle is not HostSessionLifecycle.OPEN:
+            return
+        if self.pending_interaction is not None:
+            return
+        service = self.wiring.runtime_wiring.compaction_service
+        if service is None:
+            return
+        task = self._auto_compaction_task
+        if task is not None and not task.done():
+            return
+        self._auto_compaction_task = asyncio.create_task(
+            self._compact_if_needed_and_notify(service, reason="run_end_context_threshold")
+        )
+
+    async def _drain_auto_compaction(self, *, cancel: bool = False) -> None:
+        task = self._auto_compaction_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        if cancel:
+            task.cancel()
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def _compact_if_needed_and_notify(self, service, **kwargs) -> bool:
+        event_log = self.wiring.runtime_wiring.event_log
+        before_sequence = await asyncio.to_thread(event_log.next_sequence)
+        compacted = await service.compact_if_needed(**kwargs)
+        terminal_event = await asyncio.to_thread(self._latest_terminal_compaction_event, before_sequence - 1)
+        if terminal_event is not None:
+            self._notify_compaction_listeners(terminal_event)
+        return compacted
+
+    def _latest_terminal_compaction_event(self, after_sequence: int) -> AgentEvent | None:
+        terminal_events = [
+            event
+            for event in self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
+            if isinstance(event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent))
+        ]
+        return terminal_events[-1] if terminal_events else None
+
+    def _notify_compaction_listeners(self, event: AgentEvent) -> None:
+        for listener in list(self._compaction_listeners):
+            try:
+                listener(event)
+            except Exception:
+                continue
 
     def _capture_pending_interaction(self, state: LoopState) -> None:
         if state.status is LoopStatus.WAITING_USER:
@@ -695,12 +810,27 @@ class HostSession:
                 previous_mode=self.current_permission_mode,
                 previous_policy=self.current_permission_policy(),
                 reason=reason,
-                pending_entry_audit=True,
+                pending_entry_audit=False,
             )
+            self._emit_user_plan_mode_entered(reason=reason)
         policy = preset_to_policy(PermissionMode.READ_ONLY)
         self.wiring.agent_runtime.set_permission_policy(policy, mode=PermissionMode.READ_ONLY)
         self.last_active_at = time.monotonic()
         return policy
+
+    def _emit_user_plan_mode_entered(self, *, reason: str = "") -> AgentEvent:
+        suffix = uuid4().hex
+        return self.wiring.runtime_wiring.runtime_session.emit_from_thread(
+            PlanModeEnteredEvent(
+                run_id=f"run:host-plan-entry:{suffix}",
+                turn_id=f"turn:host-plan-entry:{suffix}",
+                reply_id=f"reply:host-plan-entry:{suffix}",
+                source="user",
+                previous_permission_mode=self.plan_state.pre_plan_permission_mode,
+                previous_permission_policy=self.plan_state.pre_plan_permission_policy or {},
+                reason=reason,
+            )
+        )
 
     def _plan_runtime_messages(self):
         if not self.plan_state.active:

@@ -82,6 +82,10 @@ class EventType(StrEnum):
     PROJECTION_READY = "PROJECTION_READY"
     PROJECTION_FAILED = "PROJECTION_FAILED"
 
+    CONTEXT_COMPACTION_STARTED = "CONTEXT_COMPACTION_STARTED"
+    CONTEXT_COMPACTION_COMPLETED = "CONTEXT_COMPACTION_COMPLETED"
+    CONTEXT_COMPACTION_FAILED = "CONTEXT_COMPACTION_FAILED"
+
     CUSTOM = "CUSTOM"
 
 
@@ -520,6 +524,56 @@ class ProjectionFailedEvent(ProjectionEventBase):
     error: str
 
 
+class ContextCompactionStartedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_COMPACTION_STARTED] = EventType.CONTEXT_COMPACTION_STARTED
+    compaction_id: str
+    trigger: Literal["manual", "auto"]
+    reason: str
+    window_number: int
+    window_id: str
+    estimated_tokens_before: int
+    threshold_tokens: int
+    context_window_tokens: int
+    through_sequence: int
+    keep_after_sequence: int
+    force: bool = False
+
+
+class ContextCompactionCompletedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_COMPACTION_COMPLETED] = EventType.CONTEXT_COMPACTION_COMPLETED
+    compaction_id: str
+    trigger: Literal["manual", "auto"]
+    reason: str
+    window_number: int
+    window_id: str
+    summary_artifact_id: str
+    summary_chars: int
+    estimated_tokens_before: int
+    estimated_tokens_after: int
+    threshold_tokens: int
+    context_window_tokens: int
+    through_sequence: int
+    keep_after_sequence: int
+    included_run_ids: list[str] = Field(default_factory=list)
+    included_artifact_ids: list[str] = Field(default_factory=list)
+
+
+class ContextCompactionFailedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_COMPACTION_FAILED] = EventType.CONTEXT_COMPACTION_FAILED
+    compaction_id: str
+    trigger: Literal["manual", "auto"]
+    reason: str
+    window_number: int
+    window_id: str
+    estimated_tokens_before: int
+    threshold_tokens: int
+    context_window_tokens: int
+    through_sequence: int | None = None
+    keep_after_sequence: int | None = None
+    error_type: str
+    message: str
+
+
 class CustomEvent(EventBase):
     type: Literal[EventType.CUSTOM] = EventType.CUSTOM
     name: str
@@ -577,5 +631,8 @@ AgentEvent: TypeAlias = (
     | ProjectionRequestedEvent
     | ProjectionReadyEvent
     | ProjectionFailedEvent
+    | ContextCompactionStartedEvent
+    | ContextCompactionCompletedEvent
+    | ContextCompactionFailedEvent
     | CustomEvent
 )

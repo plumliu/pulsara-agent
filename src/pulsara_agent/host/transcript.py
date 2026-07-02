@@ -7,8 +7,13 @@ from typing import Literal
 
 from pulsara_agent.event import ReplyEndEvent, RunEndEvent, RunStartEvent, TerminalProcessCompletedEvent, ToolResultEndEvent
 from pulsara_agent.event_log import EventLog
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.message import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.message import Msg, SystemMsg, UserMsg
+from pulsara_agent.runtime.compaction.planner import (
+    build_compaction_summary_message,
+    latest_completed_boundary,
+)
 from pulsara_agent.runtime.recovery import (
     FAILURE_NOTE_TEXT as FAILURE_NOTE_TEXT,
     INTERRUPTED_NOTE_TEXT as INTERRUPTED_NOTE_TEXT,
@@ -39,10 +44,24 @@ class _TerminalRunNoteTarget:
     id_prefix: str
 
 
-def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
+def rebuild_prior_messages(
+    event_log: EventLog,
+    *,
+    archive: ArtifactStore | None = None,
+    session_id: str | None = None,
+) -> list[Msg]:
     """Rebuild completed user/assistant turns from the canonical event log."""
 
     events = event_log.iter()
+    boundary = latest_completed_boundary(events, archive=archive, session_id=session_id)
+    prefix: list[Msg] = []
+    if boundary is not None:
+        prefix.append(build_compaction_summary_message(boundary))
+        events = [
+            event
+            for event in events
+            if event.sequence is not None and event.sequence > boundary.keep_after_sequence
+        ]
     recovery = project_recovery_from_events(events)
     note_target = _last_terminal_run_note_target(events, recovery)
     completion_note = _completion_note_after_last_run_start(events)
@@ -86,7 +105,7 @@ def rebuild_prior_messages(event_log: EventLog) -> list[Msg]:
         messages.append(_note_message(note_target, recovery=recovery, created_at=note_target.created_at))
     if completion_note is not None:
         messages.append(completion_note)
-    return messages
+    return prefix + messages
 
 
 def _last_terminal_run_note_target(
