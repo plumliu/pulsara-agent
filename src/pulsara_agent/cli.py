@@ -28,6 +28,7 @@ from pulsara_agent.host import (
     normalize_workspace_kind,
     resolve_workspace,
 )
+from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.runtime import (
     ApprovalResolution,
@@ -103,6 +104,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Let values from --env-file override existing environment variables.",
     )
+    inspect = subcommands.add_parser("inspect", help="Read-only durable runtime inspector.")
+    inspect_subcommands = inspect.add_subparsers(dest="inspect_command")
+    inspect_run = _add_inspect_common_args(inspect_subcommands.add_parser("run", help="Inspect a durable run."))
+    inspect_run.add_argument("run_id")
+    inspect_session = _add_inspect_common_args(
+        inspect_subcommands.add_parser("session", help="Inspect a durable session.")
+    )
+    inspect_session.add_argument("session_id")
+    inspect_artifact = _add_inspect_common_args(
+        inspect_subcommands.add_parser("artifact", help="Inspect an artifact.")
+    )
+    inspect_artifact.add_argument("artifact_id")
+    inspect_memory = _add_inspect_common_args(inspect_subcommands.add_parser("memory", help="Inspect a memory node."))
+    inspect_memory.add_argument("memory_id")
+    _add_inspect_common_args(inspect_subcommands.add_parser("health", help="Inspect durable subsystem health."))
     return parser
 
 
@@ -179,6 +195,17 @@ def _add_skills_common_args(parser: argparse.ArgumentParser) -> argparse.Argumen
     return parser
 
 
+def _add_inspect_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--env-file", default=None, help="Load settings from a .env file before inspecting.")
+    parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
+    parser.add_argument("--prefix", default="PULSARA", help="Environment variable prefix. Defaults to PULSARA.")
+    parser.add_argument("--format", default="json", choices=("json",), help="Output format. Defaults to json.")
+    parser.add_argument("--include-payload", action="store_true", help="Include raw event or artifact payloads.")
+    parser.add_argument("--limit-events", type=int, default=200, help="Maximum event summaries to include.")
+    parser.add_argument("--max-chars", type=int, default=2000, help="Maximum artifact preview characters.")
+    return parser
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -230,6 +257,16 @@ def main() -> None:
             return
         parser.error("host requires a subcommand")
 
+    if args.command == "inspect":
+        try:
+            report = _inspect(args)
+        except ValueError as exc:
+            parser.error(str(exc))
+        except KeyError as exc:
+            parser.error(f"not found: {exc.args[0]}")
+        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        return
+
     if args.command == "skills":
         if args.skills_command == "sync-bundled":
             result = _skills_sync_bundled(args)
@@ -277,6 +314,39 @@ async def _host_run(args) -> object:
         return result
     finally:
         await core.shutdown()
+
+
+def _inspect(args) -> dict[str, object]:
+    if args.inspect_command is None:
+        raise ValueError("inspect requires a subcommand")
+    settings = _settings_from_inspect_args(args)
+    service = InspectorService(
+        PostgresInspectorStore(settings.storage.postgres_dsn),
+        oxigraph_url=settings.storage.oxigraph_url,
+    )
+    if args.inspect_command == "run":
+        return service.inspect_run(
+            args.run_id,
+            limit_events=args.limit_events,
+            include_payload=args.include_payload,
+        )
+    if args.inspect_command == "session":
+        return service.inspect_session(
+            args.session_id,
+            limit_events=args.limit_events,
+            include_payload=args.include_payload,
+        )
+    if args.inspect_command == "artifact":
+        return service.inspect_artifact(
+            args.artifact_id,
+            include_payload=args.include_payload,
+            max_chars=args.max_chars,
+        )
+    if args.inspect_command == "memory":
+        return service.inspect_memory(args.memory_id)
+    if args.inspect_command == "health":
+        return service.inspect_health()
+    raise ValueError(f"unsupported inspect command: {args.inspect_command}")
 
 
 async def _host_repl(args) -> None:
@@ -560,6 +630,16 @@ async def _host_inspect(args) -> dict[str, object]:
 
 
 def _settings_from_host_args(args) -> PulsaraSettings:
+    if args.env_file:
+        return PulsaraSettings.from_env_file(
+            args.env_file,
+            prefix=args.prefix,
+            override=args.override_env,
+        )
+    return PulsaraSettings.from_env(prefix=args.prefix)
+
+
+def _settings_from_inspect_args(args) -> PulsaraSettings:
     if args.env_file:
         return PulsaraSettings.from_env_file(
             args.env_file,
