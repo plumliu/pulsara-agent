@@ -62,3 +62,7 @@ class InMemoryEventLog:
         for event in events:
             reducer.append(event)
         return reducer.message
+
+    def next_sequence(self) -> int:
+        with self._lock:
+            return self._next_sequence

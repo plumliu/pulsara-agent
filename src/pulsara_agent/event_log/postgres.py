@@ -159,6 +159,11 @@ class PostgresEventLog:
             reducer.append(event)
         return reducer.message
 
+    def next_sequence(self) -> int:
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                return self._next_sequence(cursor)
+
     def _lock_session(self, cursor) -> None:
         cursor.execute(
             "select pg_advisory_xact_lock(hashtextextended(%s, 0))",

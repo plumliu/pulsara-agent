@@ -214,3 +214,21 @@ def test_runtime_publisher_publish_raises_when_subscriber_fails_but_continues_de
 
     assert [event.event.sequence for event in recording.events] == [1]
     assert [type(error) for error in publisher.errors] == [RuntimeError]
+
+
+def test_runtime_publisher_can_resume_after_existing_history_sequence() -> None:
+    publisher = RuntimeEventPublisher(runtime_session_id="runtime:publisher", next_sequence_to_publish=4)
+    subscriber = RecordingSubscriber()
+    publisher.subscribe(subscriber)
+
+    async def run() -> None:
+        await publisher.publish(
+            RuntimePublishedEvent(
+                runtime_session_id="runtime:publisher",
+                event=TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:4", delta="resumed", sequence=4),
+            )
+        )
+
+    asyncio.run(run())
+
+    assert [event.event.sequence for event in subscriber.events] == [4]

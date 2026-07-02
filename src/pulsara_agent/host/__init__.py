@@ -13,6 +13,7 @@ from pulsara_agent.host.registry import (
     HostSessionSummary,
     SessionReservation,
 )
+from pulsara_agent.host.resume import DanglingRunRepairResult
 from pulsara_agent.host.session import (
     HostSession,
     HostSessionBusyError,
@@ -20,6 +21,7 @@ from pulsara_agent.host.session import (
     HostSessionPendingApprovalError,
     HostSessionPendingInteractionError,
 )
+from pulsara_agent.host.session_manifest import ResumableSessionSummary, SessionManifest
 from pulsara_agent.host.supervisor import (
     DuplicateTerminalOwnerError,
     WorkspaceClosingError,
@@ -31,6 +33,7 @@ from pulsara_agent.host.supervisor import (
 __all__ = [
     "DuplicateHostSessionError",
     "DuplicateTerminalOwnerError",
+    "DanglingRunRepairResult",
     "HostCore",
     "HostCoreLifecycle",
     "HostSession",
@@ -42,7 +45,9 @@ __all__ = [
     "HostSessionSummary",
     "HostWorkspaceInput",
     "ResolvedWorkspace",
+    "ResumableSessionSummary",
     "SessionReservation",
+    "SessionManifest",
     "WorkspaceClosingError",
     "WorkspaceLifecycleState",
     "WorkspaceTerminalSnapshot",

@@ -11,7 +11,13 @@ from uuid import uuid4
 
 from pulsara_agent.host.identity import HostWorkspaceInput, ResolvedWorkspace, resolve_workspace
 from pulsara_agent.host.registry import HostSessionRegistry, HostSessionSummary
+from pulsara_agent.host.resume import DanglingRunRepairResult, repair_dangling_runs_for_resume
 from pulsara_agent.host.session import HostSession
+from pulsara_agent.host.session_manifest import (
+    ResumableSessionSummary,
+    SessionManifestStore,
+    permission_policy_from_manifest,
+)
 from pulsara_agent.host.supervisor import (
     WorkspaceClosingError,
     WorkspaceTerminalSnapshot,
@@ -85,6 +91,135 @@ class HostCore:
         memory_reflection: bool = True,
         permission_policy: EffectivePermissionPolicy | None = None,
     ) -> HostSession:
+        return await self._open_session_with_runtime_id(
+            workspace_input,
+            runtime_session_id=None,
+            conversation_id=conversation_id,
+            host_session_id=host_session_id,
+            model_role=model_role,
+            options=options,
+            system_prompt=system_prompt,
+            memory_reflection=memory_reflection,
+            permission_policy=permission_policy,
+            created_by="host_open",
+        )
+
+    async def resume_session(
+        self,
+        runtime_session_id: str,
+        *,
+        workspace_input: HostWorkspaceInput | None = None,
+        conversation_id: str | None = None,
+        host_session_id: str | None = None,
+        model_role: ModelRole | None = None,
+        options: LLMOptions | None = None,
+        system_prompt: str | None = None,
+        memory_reflection: bool = True,
+        permission_policy: EffectivePermissionPolicy | None = None,
+        repair_dangling: bool = True,
+    ) -> HostSession:
+        """Reopen an existing durable runtime session in this HostCore process."""
+        if not self.durable:
+            raise RuntimeError("resume_session requires durable HostCore wiring")
+        self._raise_if_not_accepting("resume a session")
+        manifest = self._manifest_store().get(runtime_session_id)
+        if manifest is None:
+            raise KeyError(f"runtime session not found: {runtime_session_id}")
+        if not manifest.resumable:
+            raise RuntimeError(f"runtime session is closed or archived: {runtime_session_id}")
+        resolved_workspace_input = workspace_input or manifest.to_workspace_input()
+        resolved_model_role = model_role or ModelRole(manifest.model_role)
+        if repair_dangling:
+            repair_dangling_runs_for_resume(
+                dsn=self.settings.storage.postgres_dsn,
+                runtime_session_id=runtime_session_id,
+                workspace_root=manifest.workspace_root,
+            )
+        return await self._open_session_with_runtime_id(
+            resolved_workspace_input,
+            runtime_session_id=runtime_session_id,
+            conversation_id=conversation_id or manifest.conversation_id,
+            host_session_id=host_session_id,
+            model_role=resolved_model_role,
+            options=options,
+            system_prompt=system_prompt,
+            memory_reflection=memory_reflection,
+            permission_policy=permission_policy or permission_policy_from_manifest(manifest),
+            created_by="host_resume",
+        )
+
+    async def resume_most_recent_session(
+        self,
+        workspace_input: HostWorkspaceInput | None = None,
+        *,
+        host_session_id: str | None = None,
+        model_role: ModelRole | None = None,
+        options: LLMOptions | None = None,
+        system_prompt: str | None = None,
+        memory_reflection: bool = True,
+        permission_policy: EffectivePermissionPolicy | None = None,
+    ) -> HostSession:
+        self._raise_if_not_accepting("resume the most recent session")
+        sessions = await self.list_resumable_sessions(
+            workspace_input=workspace_input,
+            limit=1,
+        )
+        if not sessions:
+            raise KeyError("no resumable runtime session found")
+        return await self.resume_session(
+            sessions[0].runtime_session_id,
+            workspace_input=workspace_input,
+            host_session_id=host_session_id,
+            model_role=model_role,
+            options=options,
+            system_prompt=system_prompt,
+            memory_reflection=memory_reflection,
+            permission_policy=permission_policy,
+        )
+
+    async def list_resumable_sessions(
+        self,
+        *,
+        workspace_input: HostWorkspaceInput | None = None,
+        include_closed: bool = False,
+        limit: int = 20,
+    ) -> list[ResumableSessionSummary]:
+        if not self.durable:
+            return []
+        workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root) if workspace_input is not None else None
+        return self._manifest_store().list_resumable(
+            workspace_root=workspace.workspace_root if workspace is not None else None,
+            memory_domain_id=workspace.memory_domain.memory_domain_id if workspace is not None else None,
+            include_closed=include_closed,
+            limit=limit,
+        )
+
+    async def repair_session_for_resume(self, runtime_session_id: str) -> DanglingRunRepairResult:
+        if not self.durable:
+            raise RuntimeError("repair_session_for_resume requires durable HostCore wiring")
+        manifest = self._manifest_store().get(runtime_session_id)
+        if manifest is None:
+            raise KeyError(f"runtime session not found: {runtime_session_id}")
+        return repair_dangling_runs_for_resume(
+            dsn=self.settings.storage.postgres_dsn,
+            runtime_session_id=runtime_session_id,
+            workspace_root=manifest.workspace_root,
+        )
+
+    async def _open_session_with_runtime_id(
+        self,
+        workspace_input: HostWorkspaceInput,
+        *,
+        runtime_session_id: str | None,
+        conversation_id: str | None,
+        host_session_id: str | None,
+        model_role: ModelRole,
+        options: LLMOptions | None,
+        system_prompt: str | None,
+        memory_reflection: bool,
+        permission_policy: EffectivePermissionPolicy | None,
+        created_by: str,
+    ) -> HostSession:
         self._raise_if_not_accepting("open a session")
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root)
         host_session_id = host_session_id or f"host:{uuid4().hex}"
@@ -103,6 +238,7 @@ class HostCore:
                 model_role=model_role,
                 options=options,
                 system_prompt=system_prompt,
+                runtime_session_id=runtime_session_id,
                 memory_domain=workspace.memory_domain,
                 memory_reflection=memory_reflection,
                 terminal_binding=BorrowedWorkspaceTerminalRuntime(
@@ -114,8 +250,17 @@ class HostCore:
                 ),
                 permission_policy=permission_policy,
                 retrieval_resources=await self._get_retrieval_resources() if self.durable else None,
-                governance_coordinator=self._governance_coordinator if self.durable else None,
+                    governance_coordinator=self._governance_coordinator if self.durable else None,
             )
+            if self.durable:
+                self._manifest_store().upsert_open_manifest(
+                    runtime_session_id=wiring.runtime_wiring.runtime_session.runtime_session_id,
+                    conversation_id=conversation_id,
+                    workspace=workspace,
+                    model_role=model_role,
+                    permission_policy=wiring.agent_runtime.permission_policy,
+                    created_by=created_by,
+                )
             session = HostSession(
                 host_session_id=host_session_id,
                 conversation_id=conversation_id,
@@ -251,7 +396,10 @@ class HostCore:
 
     # -- Close paths (the three flows share one close primitive) --------------
 
-    async def close_session(self, host_session_id: str) -> None:
+    async def detach_session(self, host_session_id: str) -> None:
+        await self.close_session(host_session_id, close_conversation=False)
+
+    async def close_session(self, host_session_id: str, *, close_conversation: bool = False) -> None:
         """Sole session-close coordinator. Concurrent callers await one close."""
         async with self._session_close_lock:
             session = await self.registry.begin_close(host_session_id)
@@ -286,6 +434,11 @@ class HostCore:
                 self._cleanup_workspace_root(session.workspace)
             except BaseException as exc:
                 errors.append(exc)
+            if close_conversation and self.durable:
+                try:
+                    self._manifest_store().mark_closed(session.runtime_session_id)
+                except BaseException as exc:
+                    errors.append(exc)
         finally:
             assert close_event is not None
             close_event.set()
@@ -439,3 +592,6 @@ class HostCore:
         # safe to remove now.
         if workspace.cleanup_workspace_root_on_close:
             shutil.rmtree(workspace.workspace_root, ignore_errors=True)
+
+    def _manifest_store(self) -> SessionManifestStore:
+        return SessionManifestStore(self.settings.storage.postgres_dsn)

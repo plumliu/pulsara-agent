@@ -26,6 +26,7 @@ class FakeResult:
 
 class FakeSession:
     host_session_id = "host:fake"
+    runtime_session_id = "runtime:fake"
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
@@ -128,6 +129,9 @@ class FakeCore:
         self.session = FakeSession()
         self.workspace_input: HostWorkspaceInput | None = None
         self.closed: list[str] = []
+        self.close_conversation_flags: list[bool] = []
+        self.resumed: list[str] = []
+        self.resume_kwargs: list[dict] = []
         self.shutdown_called = False
         self.__class__.instances.append(self)
 
@@ -137,8 +141,25 @@ class FakeCore:
         self.permission_policy = permission_policy
         return self.session
 
-    async def close_session(self, host_session_id: str):
+    async def close_session(self, host_session_id: str, *, close_conversation: bool = False):
         self.closed.append(host_session_id)
+        self.close_conversation_flags.append(close_conversation)
+
+    async def detach_session(self, host_session_id: str):
+        await self.close_session(host_session_id, close_conversation=False)
+
+    async def resume_session(self, runtime_session_id: str, **_kwargs):
+        self.resumed.append(runtime_session_id)
+        self.resume_kwargs.append(_kwargs)
+        self.session = FakeSession()
+        self.session.runtime_session_id = runtime_session_id
+        return self.session
+
+    async def resume_most_recent_session(self, workspace_input=None, **_kwargs):
+        return await self.resume_session("runtime:latest")
+
+    async def list_resumable_sessions(self, **_kwargs):
+        return []
 
     async def list_sessions(self):
         return []
@@ -471,6 +492,112 @@ def test_cli_host_repl_runs_bundled_sync_before_opening_session(monkeypatch, tmp
     assert core.workspace_input is not None
     assert core.workspace_input.workspace_root == tmp_path
     assert core.closed == ["host:fake"]
+
+
+def test_cli_host_repl_resume_starts_from_existing_runtime_session(monkeypatch, tmp_path) -> None:
+    FakeCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path), "--resume", "runtime:resume-target"])
+
+    asyncio.run(cli._host_repl(args))
+
+    core = FakeCore.instances[0]
+    assert core.resumed == ["runtime:resume-target"]
+    assert core.resume_kwargs[0]["workspace_input"].workspace_root == tmp_path
+    assert core.closed == ["host:fake"]
+    assert core.close_conversation_flags == [False]
+
+
+def test_cli_host_repl_resume_without_workspace_override_uses_manifest_workspace(monkeypatch) -> None:
+    FakeCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--resume", "runtime:manifest-workspace"])
+
+    asyncio.run(cli._host_repl(args))
+
+    core = FakeCore.instances[0]
+    assert core.resumed == ["runtime:manifest-workspace"]
+    assert core.resume_kwargs[0]["workspace_input"] is None
+    assert core.close_conversation_flags == [False]
+
+
+def test_cli_host_repl_close_marks_durable_conversation_closed(monkeypatch, tmp_path) -> None:
+    class FakePrompt:
+        async def read_line(self, _message: str) -> str:
+            return ":close"
+
+    FakeCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli, "build_repl_prompt", lambda **_kwargs: FakePrompt())
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    core = FakeCore.instances[0]
+    assert core.closed == ["host:fake"]
+    assert core.close_conversation_flags == [True]
+
+
+def test_cli_host_repl_list_sessions_prints_resumable_sessions(monkeypatch, tmp_path, capsys) -> None:
+    class ListingCore(FakeCore):
+        async def list_resumable_sessions(self, **_kwargs):
+            return [
+                SimpleNamespace(
+                    to_dict=lambda: {
+                        "runtime_session_id": "runtime:list",
+                        "display_label": "listed",
+                    }
+                )
+            ]
+
+    ListingCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", ListingCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path), "--list-sessions"])
+
+    asyncio.run(cli._host_repl(args))
+
+    out = capsys.readouterr().out
+    assert "runtime:list" in out
+    assert ListingCore.instances[0].shutdown_called is True
+
+
+def test_cli_host_repl_continue_without_resumable_session_reports_friendly_error(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    class EmptyResumeCore(FakeCore):
+        async def resume_most_recent_session(self, workspace_input=None, **_kwargs):
+            raise KeyError("no resumable runtime session found")
+
+    EmptyResumeCore.instances.clear()
+    monkeypatch.setattr(cli, "HostCore", EmptyResumeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["pulsara", "host", "repl", "--workspace", str(tmp_path), "--continue"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "no resumable runtime session found for this workspace" in err
+    assert "--resume <runtime_session_id>" in err
 
 
 def test_cli_host_repl_ctrl_c_clears_input_without_closing_session(monkeypatch, tmp_path, capsys) -> None:

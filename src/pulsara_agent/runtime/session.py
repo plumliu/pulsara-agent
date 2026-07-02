@@ -57,7 +57,10 @@ class RuntimeSession:
             index=self.tool_result_artifacts,
             runtime_session_id=self.runtime_session_id,
         )
-        self.publisher = RuntimeEventPublisher(runtime_session_id=self.runtime_session_id)
+        self.publisher = RuntimeEventPublisher(
+            runtime_session_id=self.runtime_session_id,
+            next_sequence_to_publish=_next_publish_sequence(self.event_log),
+        )
         self.publisher.subscribe(self.hook_manager)
         self._bind_terminal(self.terminal_binding)
 
@@ -189,3 +192,7 @@ class RuntimeSession:
             artifact_service=self.artifact_service,
             runtime_session_id=self.runtime_session_id,
         )
+
+
+def _next_publish_sequence(event_log: EventLog) -> int:
+    return event_log.next_sequence()

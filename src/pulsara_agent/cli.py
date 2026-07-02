@@ -61,8 +61,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_host_common_args(
         host_subcommands.add_parser("run", help="Run one prompt through HostCore and close the session.")
     ).add_argument("prompt", help="Prompt to run.")
-    _add_host_common_args(
-        host_subcommands.add_parser("repl", help="Start a minimal HostCore REPL.")
+    repl = _add_host_common_args(host_subcommands.add_parser("repl", help="Start a minimal HostCore REPL."))
+    repl_resume = repl.add_mutually_exclusive_group()
+    repl_resume.add_argument("--resume", default=None, help="Resume an existing runtime session id.")
+    repl_resume.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Resume the most recent resumable session for this workspace.",
+    )
+    repl.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="List resumable sessions for this workspace and exit.",
     )
     inspect_cmd = _add_host_permission_args(
         _add_host_workspace_args(
@@ -144,15 +155,15 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
 
 
 def _add_host_workspace_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--workspace", default=".", help="Workspace path. Defaults to current directory.")
+    parser.add_argument("--workspace", default=None, help="Workspace path. Defaults to current directory.")
     parser.add_argument(
         "--workspace-kind",
-        default="project",
+        default=None,
         choices=("project", "transient"),
         help="Workspace kind: 'project' or 'transient'.",
     )
     parser.add_argument("--display-label", default=None, help="Optional workspace display label.")
-    parser.add_argument("--memory-domain-id", default="u_local", help="Memory domain id. Defaults to u_local.")
+    parser.add_argument("--memory-domain-id", default=None, help="Memory domain id. Defaults to u_local.")
     return parser
 
 
@@ -247,6 +258,8 @@ def main() -> None:
                 asyncio.run(_host_repl(args))
             except ValueError as exc:
                 parser.error(str(exc))
+            except KeyError as exc:
+                parser.error(_format_not_found_error(exc))
             return
         if args.host_command == "inspect":
             try:
@@ -290,6 +303,7 @@ async def _host_run(args) -> object:
     permission_policy = _permission_policy_from_host_args(args, intent="run")
     _best_effort_sync_bundled_skills()
     core = HostCore(settings=settings)
+    session = None
     try:
         session = await core.open_session(
             _workspace_input_from_args(args),
@@ -313,7 +327,17 @@ async def _host_run(args) -> object:
             }
         return result
     finally:
-        await core.shutdown()
+        close_error = None
+        if session is not None:
+            try:
+                await core.close_session(session.host_session_id, close_conversation=True)
+            except BaseException as exc:
+                close_error = exc
+        try:
+            await core.shutdown()
+        finally:
+            if close_error is not None:
+                raise close_error
 
 
 def _inspect(args) -> dict[str, object]:
@@ -358,12 +382,20 @@ async def _host_repl(args) -> None:
         history_path=default_pulsara_home() / "repl_history",
     )
     try:
-        session = await core.open_session(
-            _workspace_input_from_args(args),
-            model_role=ModelRole(args.model_role),
+        workspace_input = _workspace_input_from_args(args)
+        resume_workspace_input = workspace_input if _has_explicit_workspace_override(args) else None
+        if getattr(args, "list_sessions", False):
+            sessions = await core.list_resumable_sessions(workspace_input=workspace_input)
+            print(json.dumps([summary.to_dict() for summary in sessions], indent=2, ensure_ascii=False))
+            return
+        session = await _open_initial_repl_session(
+            core,
+            args,
+            workspace_input=workspace_input,
+            resume_workspace_input=resume_workspace_input,
             permission_policy=permission_policy,
         )
-        print("Pulsara REPL · :help 查看命令 · Ctrl-D 退出")
+        print("Pulsara REPL · :help 查看命令 · Ctrl-D detach · :close 关闭对话")
         while True:
             try:
                 prompt = await repl_prompt.read_line(_repl_prompt_message(session))
@@ -383,6 +415,59 @@ async def _host_repl(args) -> None:
             if command in {":help", ":h", ":?"}:
                 print(_REPL_HELP)
                 continue
+            if command == ":sessions":
+                sessions = await core.list_resumable_sessions(workspace_input=workspace_input)
+                print(json.dumps([summary.to_dict() for summary in sessions], indent=2, ensure_ascii=False))
+                continue
+            if command.startswith(":resume"):
+                runtime_session_id = command[len(":resume"):].strip()
+                if not runtime_session_id:
+                    print("Usage: :resume <runtime_session_id>", file=sys.stderr)
+                    continue
+                if runtime_session_id == session.runtime_session_id:
+                    print(f"Already attached to {session.runtime_session_id}")
+                    continue
+                try:
+                    next_session = await core.resume_session(
+                        runtime_session_id,
+                        workspace_input=resume_workspace_input,
+                        model_role=ModelRole(args.model_role),
+                        permission_policy=permission_policy,
+                    )
+                    await core.detach_session(session.host_session_id)
+                    session = next_session
+                except Exception as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    continue
+                print(f"Resumed {session.runtime_session_id}")
+                continue
+            if command == ":continue":
+                try:
+                    summaries = await core.list_resumable_sessions(workspace_input=workspace_input)
+                    target = next(
+                        (summary for summary in summaries if summary.runtime_session_id != session.runtime_session_id),
+                        None,
+                    )
+                    if target is None:
+                        print(f"Already attached to the latest session: {session.runtime_session_id}")
+                        continue
+                    next_session = await core.resume_session(
+                        target.runtime_session_id,
+                        workspace_input=workspace_input,
+                        model_role=ModelRole(args.model_role),
+                        permission_policy=permission_policy,
+                    )
+                    await core.detach_session(session.host_session_id)
+                    session = next_session
+                except Exception as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    continue
+                print(f"Resumed {session.runtime_session_id}")
+                continue
+            if command == ":close":
+                await core.close_session(session.host_session_id, close_conversation=True)
+                print(f"Closed {session.runtime_session_id}")
+                break
             if command == ":approval":
                 pending = session.get_pending_approval()
                 print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
@@ -526,6 +611,34 @@ async def _host_repl(args) -> None:
         await core.shutdown()
 
 
+async def _open_initial_repl_session(
+    core: HostCore,
+    args,
+    *,
+    workspace_input: HostWorkspaceInput,
+    resume_workspace_input: HostWorkspaceInput | None,
+    permission_policy,
+):
+    if getattr(args, "resume", None):
+        return await core.resume_session(
+            args.resume,
+            workspace_input=resume_workspace_input,
+            model_role=ModelRole(args.model_role),
+            permission_policy=permission_policy,
+        )
+    if getattr(args, "continue_session", False):
+        return await core.resume_most_recent_session(
+            workspace_input,
+            model_role=ModelRole(args.model_role),
+            permission_policy=permission_policy,
+        )
+    return await core.open_session(
+        workspace_input,
+        model_role=ModelRole(args.model_role),
+        permission_policy=permission_policy,
+    )
+
+
 def _repl_prompt_message(session) -> str:
     if session.get_pending_approval() is not None:
         return "approval> "
@@ -536,6 +649,10 @@ def _repl_prompt_message(session) -> str:
 
 
 _REPL_HELP = """Commands:
+  :sessions               List resumable sessions for this workspace
+  :resume <session-id>    Detach current HostSession and resume a durable runtime session
+  :continue               Detach current HostSession and resume the latest workspace session
+  :close                  Explicitly close this durable conversation
   :status                 Show the current permission mode and policy
   :mode <preset>          Switch permission mode
   :plan [reason]          Enter plan mode
@@ -547,7 +664,7 @@ _REPL_HELP = """Commands:
   :approval               Show a pending tool approval
   :approve / :deny        Resolve a pending tool approval
   :stop                   Stop the current active or suspended turn
-  :q / quit / exit        Close the session
+  :q / quit / exit        Detach from the conversation
 
 Editing: Up/Down history · Ctrl-R search · Ctrl-C clear · Ctrl-Z suspend · Ctrl-D exit"""
 
@@ -639,6 +756,14 @@ def _settings_from_host_args(args) -> PulsaraSettings:
     return PulsaraSettings.from_env(prefix=args.prefix)
 
 
+def _format_not_found_error(exc: KeyError) -> str:
+    raw = exc.args[0] if exc.args else "not found"
+    text = str(raw)
+    if text == "no resumable runtime session found":
+        return "no resumable runtime session found for this workspace. Start a new REPL without --continue, or use --resume <runtime_session_id>."
+    return f"not found: {text}"
+
+
 def _settings_from_inspect_args(args) -> PulsaraSettings:
     if args.env_file:
         return PulsaraSettings.from_env_file(
@@ -688,10 +813,17 @@ def _skills_reset(args):
 
 def _workspace_input_from_args(args) -> HostWorkspaceInput:
     return HostWorkspaceInput(
-        workspace_kind=normalize_workspace_kind(args.workspace_kind),
-        workspace_root=Path(args.workspace),
+        workspace_kind=normalize_workspace_kind(args.workspace_kind or "project"),
+        workspace_root=Path(args.workspace or "."),
         display_label=args.display_label,
-        memory_domain_id=args.memory_domain_id,
+        memory_domain_id=args.memory_domain_id or "u_local",
+    )
+
+
+def _has_explicit_workspace_override(args) -> bool:
+    return any(
+        getattr(args, name, None) is not None
+        for name in ("workspace", "workspace_kind", "display_label", "memory_domain_id")
     )
 
 

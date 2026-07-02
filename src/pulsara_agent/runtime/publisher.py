@@ -30,14 +30,16 @@ class _PublishItem:
 
 
 class RuntimeEventPublisher:
-    def __init__(self, *, runtime_session_id: str) -> None:
+    def __init__(self, *, runtime_session_id: str, next_sequence_to_publish: int = 1) -> None:
+        if next_sequence_to_publish < 1:
+            raise ValueError("next_sequence_to_publish must be >= 1")
         self.runtime_session_id = runtime_session_id
         self._subscribers: list[RuntimeEventSubscriber] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread_id: int | None = None
         self._mailbox: asyncio.Queue[_PublishItem] | None = None
         self._drain_task: asyncio.Task[None] | None = None
-        self._next_sequence_to_publish = 1
+        self._next_sequence_to_publish = next_sequence_to_publish
         self._pending_by_sequence: dict[int, _PublishItem] = {}
         self.errors: list[Exception] = []
 

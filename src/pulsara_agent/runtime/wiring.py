@@ -179,6 +179,12 @@ def build_durable_runtime_wiring(
     governance_coordinator: MemoryGovernanceCoordinator | None = None,
 ) -> RuntimeWiring:
     runtime_session_id = runtime_session_id or _new_runtime_session_id()
+    resolved_graph_id = graph_id or (
+        memory_domain.graph_id
+        if memory_domain is not None
+        else f"graph:runtime/{runtime_session_id}"
+    )
+    _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     event_log = PostgresEventLog(
         dsn=settings.storage.postgres_dsn,
         runtime_session_id=runtime_session_id,
@@ -194,12 +200,6 @@ def build_durable_runtime_wiring(
         tool_result_artifacts=tool_result_artifacts,
         terminal_binding=terminal_binding,
     )
-    resolved_graph_id = graph_id or (
-        memory_domain.graph_id
-        if memory_domain is not None
-        else f"graph:runtime/{runtime_session.runtime_session_id}"
-    )
-    _validate_graph_domain_coupling(resolved_graph_id, memory_domain)
     postgres_graph = PostgresGraphStore(settings.storage.postgres_dsn)
     if not settings.storage.oxigraph_url.strip():
         raise ValueError("durable runtime wiring requires a non-empty Oxigraph URL")
