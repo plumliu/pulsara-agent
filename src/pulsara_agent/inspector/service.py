@@ -11,6 +11,7 @@ from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
+    CustomEvent,
     ProjectionReadyEvent,
     ReplyStartEvent,
     RunStartEvent,
@@ -78,6 +79,7 @@ class InspectorService:
                 _summarize_working_context(row)
                 for row in self.store.working_context_for_session(session_id)
             ],
+            "capability_surface_as_seen": _capability_surface_projection(events),
             "compaction_windows": _compaction_windows(events, self.store),
             "events": _event_summaries(events[:limit_events], include_payload=include_payload),
             "event_count": len(events),
@@ -141,6 +143,7 @@ class InspectorService:
             "compaction_boundary_as_seen": compaction_boundary,
             "prior_messages_as_seen": [_message_to_dict(message) for message in prior_messages],
             "projections_as_seen": [_projection_to_dict(event) for event in run_events if isinstance(event, ProjectionReadyEvent)],
+            "capability_surface_as_seen": _capability_surface_projection(run_events),
             "assistant_replies": _assistant_replies(run_events),
             "tool_result_artifacts": [_json_safe(row) for row in tool_artifacts],
             "recall_traces": [_json_safe(row) for row in self.store.recall_traces_for_run(run_id)],
@@ -370,6 +373,7 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "estimated_tokens_after",
         "threshold_tokens",
         "context_window_tokens",
+        "name",
     ):
         if key in payload:
             summary[key] = payload[key]
@@ -378,6 +382,31 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
     if include_payload:
         summary["payload"] = payload
     return summary
+
+
+def _capability_surface_projection(events: Iterable[AgentEvent]) -> dict[str, Any]:
+    exposures: list[dict[str, Any]] = []
+    gate_decisions: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, CustomEvent):
+            continue
+        if event.name == "capability_exposure_resolved":
+            value = dict(event.value)
+            value["sequence"] = event.sequence
+            value["run_id"] = event.run_id
+            value["turn_id"] = event.turn_id
+            exposures.append(_json_safe(value))
+        elif event.name == "capability_gate_decision":
+            value = dict(event.value)
+            value["sequence"] = event.sequence
+            value["run_id"] = event.run_id
+            value["turn_id"] = event.turn_id
+            gate_decisions.append(_json_safe(value))
+    return {
+        "latest_exposure": exposures[-1] if exposures else None,
+        "exposures": exposures,
+        "gate_decisions": gate_decisions,
+    }
 
 
 def _assistant_replies(events: Iterable[AgentEvent]) -> list[dict[str, Any]]:

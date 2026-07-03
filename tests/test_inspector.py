@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
+    CustomEvent,
     EventContext,
     ProjectionReadyEvent,
     ReplyEndEvent,
@@ -287,6 +288,62 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
         assert "TARGET_PROJECTION_AS_SEEN" in projection_text
         assert "FUTURE_PROJECTION_NOT_SEEN" not in projection_text
         assert "working_context" not in report
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx("capability-surface")
+        events = _simple_run_events(ctx, user_input="hello", text="done")
+        log.extend(
+            [
+                events[0],
+                CustomEvent(
+                    **ctx.event_fields(),
+                    name="capability_exposure_resolved",
+                    value={
+                        "registry_generation": 1,
+                        "direct_names": ["read_file"],
+                        "callable_names": ["read_file"],
+                    },
+                ),
+                CustomEvent(
+                    **ctx.event_fields(),
+                    name="capability_gate_decision",
+                    value={
+                        "tool_call_id": "call:read",
+                        "tool_name": "read_file",
+                        "descriptor_id": "builtin:read_file",
+                        "decision": "allow",
+                        "reason_code": None,
+                    },
+                ),
+                *events[1:],
+            ]
+        )
+
+        report = _service(dsn).inspect_run(ctx.run_id)
+
+        capability = report["capability_surface_as_seen"]
+        assert capability["latest_exposure"]["direct_names"] == ["read_file"]
+        assert capability["latest_exposure"]["callable_names"] == ["read_file"]
+        assert capability["gate_decisions"] == [
+            {
+                "sequence": capability["gate_decisions"][0]["sequence"],
+                "run_id": ctx.run_id,
+                "turn_id": ctx.turn_id,
+                "tool_call_id": "call:read",
+                "tool_name": "read_file",
+                "descriptor_id": "builtin:read_file",
+                "decision": "allow",
+                "reason_code": None,
+            }
+        ]
     finally:
         _cleanup_session(dsn, runtime_session_id)
 

@@ -26,7 +26,7 @@ from pulsara_agent.runtime.permission import (
     PermissionProfile,
     TerminalAccess,
 )
-from pulsara_agent.capability import LocalSkillResolver
+from pulsara_agent.capability import BuiltinToolCapabilityProvider, LocalSkillCapabilityProvider
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from tests.support.settings import compatibility_storage_config
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
@@ -176,7 +176,10 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     assert wiring.agent_runtime.model_role.name == "FLASH"
     assert wiring.agent_runtime.options == LLMOptions(temperature=0, max_output_tokens=32)
     assert wiring.agent_runtime.system_prompt == "test prompt"
-    assert isinstance(wiring.agent_runtime.capability_resolver, LocalSkillResolver)
+    assert [type(provider) for provider in wiring.agent_runtime.capability_runtime.providers] == [
+        BuiltinToolCapabilityProvider,
+        LocalSkillCapabilityProvider,
+    ]
     assert wiring.agent_runtime.workspace_kind == "transient"
     assert wiring.agent_runtime.permission_policy.profile is PermissionProfile.TRUSTED_HOST
     assert wiring.agent_runtime.permission_policy.approval is ApprovalPolicy.NEVER

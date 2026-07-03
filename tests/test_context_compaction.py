@@ -25,6 +25,7 @@ from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
+from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.compaction.planner import strip_compaction_analysis
 from pulsara_agent.runtime.compaction.service import (
@@ -502,7 +503,7 @@ def test_host_session_compact_now_uses_manual_force_entrypoint(tmp_path) -> None
         conversation_id="conversation:test",
         workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(), 
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
             ),
@@ -539,7 +540,7 @@ def test_host_session_invokes_compaction_at_preflight_and_run_end_safe_points(tm
         conversation_id="conversation:test",
         workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(), 
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
             ),
@@ -574,7 +575,7 @@ def test_host_session_notifies_auto_compaction_failure(tmp_path) -> None:
         conversation_id="conversation:test",
         workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
+            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(), 
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
             ),

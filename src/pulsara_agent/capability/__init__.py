@@ -15,16 +15,28 @@ from pulsara_agent.capability.bundled_skills import (
     user_product_skills_root,
 )
 from pulsara_agent.capability.local_skills import LocalSkillProvider
+from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
 from pulsara_agent.capability.render import render_active_skill_prompt, render_catalog_prompt
-from pulsara_agent.capability.resolver import LocalSkillResolver
+from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
+from pulsara_agent.capability.call_classifier import (
+    CapabilityCallClassification,
+    DefaultCapabilityCallClassifier,
+)
+from pulsara_agent.capability.descriptor import (
+    CapabilityAdvertisePolicy,
+    CapabilityArtifactMode,
+    CapabilityAvailability,
+    CapabilityDescriptor,
+    CapabilityProviderKind,
+    CapabilityProvenance,
+)
+from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.capability.provider import CapabilityProvider, CapabilityProviderOutput
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityDiagnostic,
     CapabilityResolveContext,
-    CapabilityResolver,
     LocalSkillManifest,
-    NoopCapabilityResolver,
-    ResolvedCapabilitySet,
     ResolvedSkillCatalogEntry,
     RenderedCapabilityPrompt,
 )
@@ -38,15 +50,24 @@ __all__ = [
     "BundledSkillStatusResult",
     "BundledSkillSyncItem",
     "BundledSkillSyncResult",
+    "BuiltinToolCapabilityProvider",
     "CapabilityDiagnostic",
+    "CapabilityAdvertisePolicy",
+    "CapabilityArtifactMode",
+    "CapabilityAvailability",
+    "CapabilityCallClassification",
+    "CapabilityDescriptor",
+    "CapabilityExposurePlan",
+    "CapabilityProviderKind",
+    "CapabilityProvenance",
+    "CapabilityProvider",
+    "CapabilityProviderOutput",
     "CapabilityResolveContext",
-    "CapabilityResolver",
+    "DefaultCapabilityCallClassifier",
     "LocalSkillManifest",
+    "LocalSkillCapabilityProvider",
     "LocalSkillProvider",
-    "LocalSkillResolver",
-    "NoopCapabilityResolver",
     "RenderedCapabilityPrompt",
-    "ResolvedCapabilitySet",
     "ResolvedSkillCatalogEntry",
     "bundled_skills_status",
     "default_pulsara_home",

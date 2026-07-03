@@ -13,12 +13,13 @@ from pulsara_agent import __version__
 from pulsara_agent.capability import (
     BUNDLED_OPT_OUT_MARKER_NAME,
     CapabilityResolveContext,
-    LocalSkillResolver,
+    LocalSkillCapabilityProvider,
     bundled_skills_status,
     reset_bundled_skill,
     sync_bundled_skills,
     default_pulsara_home,
 )
+from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.host import (
     HostCore,
     HostSessionBusyError,
@@ -871,15 +872,18 @@ async def _host_inspect(args) -> dict[str, object]:
             runtime_session,
             permission_state=PermissionState.from_policy(permission_policy),
         )
-        resolver = LocalSkillResolver()
-        capabilities = resolver.resolve(
+        capability_runtime = CapabilityRuntime.with_default_providers(LocalSkillCapabilityProvider())
+        exposure = capability_runtime.resolve_for_turn(
             CapabilityResolveContext(
                 workspace_root=workspace.workspace_root,
                 workspace_kind=workspace.workspace_kind,
                 memory_domain=workspace.memory_domain,
                 available_tool_names=frozenset(registry.names()),
                 user_input="",
-            )
+            ),
+            tool_registry=registry,
+            permission_policy=permission_policy,
+            plan_active=False,
         )
     finally:
         runtime_session.close()
@@ -896,6 +900,18 @@ async def _host_inspect(args) -> dict[str, object]:
             "allowed_write_scopes": sorted(workspace.memory_domain.allowed_write_scopes),
         },
         "tools": registry.names(),
+        "capability_surface": {
+            "registry_generation": exposure.registry_generation,
+            "direct_names": sorted(exposure.direct_names),
+            "deferred_names": sorted(exposure.deferred_names),
+            "hidden_names": sorted(exposure.hidden_names),
+            "callable_names": sorted(exposure.callable_names),
+            "descriptors": [
+                descriptor.to_diagnostic_dict()
+                for descriptor in sorted(exposure.descriptors_by_name.values(), key=lambda item: item.name)
+            ],
+            "diagnostics": [diagnostic.to_dict() for diagnostic in exposure.diagnostics],
+        },
         "permissions": permission_policy.to_dict(),
         "current_mode": (
             mode_for_policy(permission_policy).value
@@ -918,7 +934,7 @@ async def _host_inspect(args) -> dict[str, object]:
                 "location": entry.location,
                 "provides_tools": list(entry.provides_tools),
             }
-            for entry in capabilities.catalog_entries
+            for entry in exposure.catalog_entries
         ],
         "active_skills": [
             {
@@ -926,9 +942,9 @@ async def _host_inspect(args) -> dict[str, object]:
                 "location": injection.location,
                 "reason": injection.reason,
             }
-            for injection in capabilities.active_injections
+            for injection in exposure.active_injections
         ],
-        "capability_diagnostics": [diagnostic.to_dict() for diagnostic in capabilities.diagnostics],
+        "capability_diagnostics": [diagnostic.to_dict() for diagnostic in exposure.diagnostics],
         "bundled_skills": bundled_skills_status().to_dict(),
     }
 

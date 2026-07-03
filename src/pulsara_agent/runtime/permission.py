@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Mapping, Protocol
 
+from pulsara_agent.capability.call_classifier import (
+    CapabilityCallClassifier,
+    DefaultCapabilityCallClassifier,
+)
+from pulsara_agent.capability.descriptor import CapabilityAvailability
+from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.runtime.terminal_risk import (
     is_hardline_terminal_command,
     is_risky_terminal_command,
@@ -250,6 +256,34 @@ def is_tool_allowed_by_policy(tool_name: str, policy: EffectivePermissionPolicy)
     return True
 
 
+def evaluate_capability_exposure_access(
+    call: ToolCall,
+    exposure: CapabilityExposurePlan,
+) -> PermissionDecision | None:
+    descriptor = exposure.descriptors_by_name.get(call.name)
+    if descriptor is None:
+        return PermissionDecision(
+            kind=PermissionDecisionKind.DENY,
+            reason=f"Unknown tool: {call.name} (capability_descriptor_missing)",
+        )
+    if descriptor.availability is CapabilityAvailability.UNAVAILABLE:
+        return PermissionDecision(
+            kind=PermissionDecisionKind.DENY,
+            reason=f"capability_unavailable: {call.name}",
+        )
+    if call.name in exposure.hidden_names:
+        return PermissionDecision(
+            kind=PermissionDecisionKind.DENY,
+            reason=f"capability_hidden_in_current_exposure: {call.name}",
+        )
+    if call.name not in exposure.callable_names:
+        return PermissionDecision(
+            kind=PermissionDecisionKind.DENY,
+            reason=f"capability_not_callable_in_current_exposure: {call.name}",
+        )
+    return None
+
+
 class PolicyPermissionGate:
     def __init__(
         self,
@@ -266,13 +300,99 @@ class PolicyPermissionGate:
     def policy(self) -> EffectivePermissionPolicy:
         return self._state.policy
 
-    async def evaluate(self, calls: list[ToolCall]) -> PermissionDecision:
+    async def evaluate(
+        self,
+        calls: list[ToolCall],
+        *,
+        exposure: CapabilityExposurePlan | None = None,
+        classifier: CapabilityCallClassifier | None = None,
+    ) -> PermissionDecision:
         for call in calls:
-            decision = self._evaluate_call(call)
+            decision = (
+                self._evaluate_capability_call(call, exposure, classifier or DefaultCapabilityCallClassifier())
+                if exposure is not None
+                else self._evaluate_call(call)
+            )
             if decision.kind is not PermissionDecisionKind.ALLOW:
                 return decision
         base = await self.inner.evaluate(calls)
         return base
+
+    def _evaluate_capability_call(
+        self,
+        call: ToolCall,
+        exposure: CapabilityExposurePlan,
+        classifier: CapabilityCallClassifier,
+    ) -> PermissionDecision:
+        exposure_decision = evaluate_capability_exposure_access(call, exposure)
+        if exposure_decision is not None:
+            return exposure_decision
+        descriptor = exposure.descriptors_by_name[call.name]
+        if call.name == "terminal":
+            command = call.arguments.get("command")
+            if isinstance(command, str) and is_hardline_terminal_command(command):
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.DENY,
+                    reason="terminal command blocked by hardline permission policy",
+                    suggested_rules=[
+                        {
+                            "tool": "terminal",
+                            "reason": "hardline_terminal_command",
+                            "command": command,
+                        }
+                    ],
+                )
+        if call.name == "terminal_process":
+            terminal_input = _terminal_process_input(call)
+            if terminal_input is not None and is_hardline_terminal_command(terminal_input):
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.DENY,
+                    reason="terminal process input blocked by hardline permission policy",
+                    suggested_rules=[
+                        {
+                            "tool": "terminal_process",
+                            "reason": "hardline_terminal_process_input",
+                        }
+                    ],
+                )
+        classification = classifier.classify(call, descriptor)
+        if self.policy.profile is PermissionProfile.READ_ONLY:
+            if not descriptor.is_read_only or call.name not in READ_ONLY_ALLOWED_TOOL_NAMES:
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.DENY,
+                    reason=f"tool '{call.name}' is not allowed by permission policy",
+                )
+        elif self.policy.terminal is TerminalAccess.OFF and call.name in TERMINAL_TOOL_NAMES:
+            return PermissionDecision(
+                kind=PermissionDecisionKind.DENY,
+                reason=f"tool '{call.name}' is not allowed by permission policy",
+            )
+
+        if classification.effective_permission_category == "terminal_process_observe":
+            if self.policy.profile is not PermissionProfile.READ_ONLY and self.policy.terminal is not TerminalAccess.OFF:
+                return PermissionDecision.allow()
+            return PermissionDecision(
+                kind=PermissionDecisionKind.DENY,
+                reason=f"tool '{call.name}' is not allowed by permission policy",
+            )
+        if classification.effective_permission_category == "terminal":
+            return self._evaluate_terminal_call(call)
+        if (
+            self.policy.approval is ApprovalPolicy.ON_REQUEST
+            and classification.effective_permission_category == "filesystem_write"
+        ):
+            return PermissionDecision(
+                kind=PermissionDecisionKind.WAIT_FOR_USER,
+                reason="file write tool requires user confirmation by approval policy",
+                suggested_rules=[{"tool": call.name, "reason": "write_tool_on_request"}],
+            )
+        if self.policy.approval is ApprovalPolicy.ON_REQUEST and classification.effective_is_destructive:
+            return PermissionDecision(
+                kind=PermissionDecisionKind.WAIT_FOR_USER,
+                reason="destructive tool requires user confirmation by approval policy",
+                suggested_rules=[{"tool": call.name, "reason": "destructive_tool_on_request"}],
+            )
+        return PermissionDecision.allow()
 
     def _evaluate_call(self, call: ToolCall) -> PermissionDecision:
         if call.name == "terminal":

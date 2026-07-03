@@ -1,22 +1,24 @@
-"""Local V1 skill resolver for one user-message boundary."""
+"""Local skill capability provider for one user-message boundary."""
 
 from __future__ import annotations
 
 import re
 
 from pulsara_agent.capability.local_skills import LocalSkillProvider
+from pulsara_agent.capability.provider import CapabilityProviderOutput
 from pulsara_agent.capability.render import render_active_skill_prompt, render_catalog_prompt
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityDiagnostic,
     CapabilityResolveContext,
     LocalSkillManifest,
-    ResolvedCapabilitySet,
     ResolvedSkillCatalogEntry,
 )
 
 
-class LocalSkillResolver:
+class LocalSkillCapabilityProvider:
+    provider_id = "local-skills"
+
     def __init__(
         self,
         *,
@@ -26,10 +28,15 @@ class LocalSkillResolver:
         self.provider = provider or LocalSkillProvider()
         self.catalog_budget_chars = catalog_budget_chars
 
-    def resolve(self, context: CapabilityResolveContext) -> ResolvedCapabilitySet:
+    def resolve(
+        self,
+        context: CapabilityResolveContext,
+        *,
+        bound_tool_names: frozenset[str],
+    ) -> CapabilityProviderOutput:
         discovery = self.provider.discover(
             context.workspace_root,
-            available_tool_names=context.available_tool_names,
+            available_tool_names=bound_tool_names,
         )
         skills_by_name = {skill.name: skill for skill in discovery.skills}
         catalog_entries = tuple(
@@ -48,10 +55,9 @@ class LocalSkillResolver:
             *catalog.diagnostics,
             *active.diagnostics,
         )
-        return ResolvedCapabilitySet(
+        return CapabilityProviderOutput(
             catalog_entries=catalog_entries,
             active_injections=active_injections,
-            visible_tool_names=context.available_tool_names,
             diagnostics=diagnostics,
             catalog_prompt=catalog.text,
             active_skill_prompt=active.text,

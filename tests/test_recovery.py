@@ -30,7 +30,6 @@ from pulsara_agent.runtime.recovery import (
     render_recovery_text,
 )
 from pulsara_agent.runtime.state import LoopState
-from pulsara_agent.tools.registry import ToolRegistry
 
 
 CTX = EventContext(run_id="run:recovery", turn_id="turn:recovery", reply_id="reply:recovery")
@@ -163,7 +162,7 @@ def test_build_llm_context_appends_prompt_text_from_in_run_projection() -> None:
 
     context = build_llm_context(
         state=state,
-        registry=ToolRegistry(),
+        tools=(),
         system_prompt="System",
         budget=state.budget,
     )

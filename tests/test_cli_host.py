@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent import cli
-from pulsara_agent.capability import LocalSkillProvider, LocalSkillResolver
+from pulsara_agent.capability import LocalSkillCapabilityProvider, LocalSkillProvider
 from pulsara_agent.capability.bundled_skills import (
     reset_bundled_skill as real_reset_bundled_skill,
     sync_bundled_skills as real_sync_bundled_skills,
@@ -972,8 +972,8 @@ def test_cli_host_inspect_prints_host_process_recovery_scope_and_skills(
     )
     monkeypatch.setattr(
         cli,
-        "LocalSkillResolver",
-        lambda: LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False)),
+        "LocalSkillCapabilityProvider",
+        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
     )
     skill_dir = tmp_path / ".agents" / "skills" / "review-pr"
     skill_dir.mkdir(parents=True)
@@ -1047,8 +1047,8 @@ def test_cli_host_inspect_can_report_explicit_trusted_host_policy(
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     monkeypatch.setattr(
         cli,
-        "LocalSkillResolver",
-        lambda: LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False)),
+        "LocalSkillCapabilityProvider",
+        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
     )
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -1081,8 +1081,8 @@ def test_cli_host_inspect_can_report_terminal_ask_policy(
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     monkeypatch.setattr(
         cli,
-        "LocalSkillResolver",
-        lambda: LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False)),
+        "LocalSkillCapabilityProvider",
+        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
     )
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -1115,8 +1115,8 @@ def test_cli_host_inspect_can_report_on_request_with_terminal_allow(
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     monkeypatch.setattr(
         cli,
-        "LocalSkillResolver",
-        lambda: LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False)),
+        "LocalSkillCapabilityProvider",
+        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
     )
     parser = cli.build_parser()
     args = parser.parse_args(

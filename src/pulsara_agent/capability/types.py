@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal
 
 from pulsara_agent.message import Msg
 
@@ -86,23 +86,3 @@ class ActiveSkillInjection:
 class RenderedCapabilityPrompt:
     text: str | None
     diagnostics: tuple[CapabilityDiagnostic, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedCapabilitySet:
-    catalog_entries: tuple[ResolvedSkillCatalogEntry, ...] = ()
-    active_injections: tuple[ActiveSkillInjection, ...] = ()
-    visible_tool_names: frozenset[str] = field(default_factory=frozenset)
-    diagnostics: tuple[CapabilityDiagnostic, ...] = ()
-    catalog_prompt: str | None = None
-    active_skill_prompt: str | None = None
-
-
-class CapabilityResolver(Protocol):
-    def resolve(self, context: CapabilityResolveContext) -> ResolvedCapabilitySet:
-        """Resolve model-visible capability inputs for one user message."""
-
-
-class NoopCapabilityResolver:
-    def resolve(self, context: CapabilityResolveContext) -> ResolvedCapabilitySet:
-        return ResolvedCapabilitySet(visible_tool_names=context.available_tool_names)

@@ -33,7 +33,8 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
 )
-from pulsara_agent.capability import LocalSkillResolver, sync_bundled_skills
+from pulsara_agent.capability import LocalSkillCapabilityProvider, sync_bundled_skills
+from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.entities.memory import Preference
@@ -1638,7 +1639,7 @@ When this skill is active, answer exactly: PULSARA_SKILL_ACTIVE_OK
         model_role=ModelRole.FLASH,
         options=LLMOptions(temperature=0, max_output_tokens=256),
         system_prompt="Do not call tools. Follow active skill instructions if present.",
-        capability_resolver=LocalSkillResolver(),
+        capability_runtime=CapabilityRuntime.with_default_providers(LocalSkillCapabilityProvider()),
     )
     agent = wiring.agent_runtime
 
@@ -1670,7 +1671,7 @@ async def _run_real_agent_synced_bundled_skill_smoke(tmp_path: Path) -> dict:
             "Do not call tools. If the active skill content is visible for pulsara-skill-creator, "
             "answer exactly: PULSARA_BUNDLED_SKILL_ACTIVE_OK"
         ),
-        capability_resolver=LocalSkillResolver(),
+        capability_runtime=CapabilityRuntime.with_default_providers(LocalSkillCapabilityProvider()),
     )
     agent = wiring.agent_runtime
 
@@ -4370,7 +4371,7 @@ def _build_real_durable_agent(
     options: LLMOptions | None = None,
     system_prompt: str | None = None,
     permission_policy: EffectivePermissionPolicy | None = None,
-    capability_resolver=None,
+    capability_runtime: CapabilityRuntime | None = None,
 ):
     settings = _load_settings_for_real_llm()
     return build_agent_runtime_wiring(
@@ -4382,7 +4383,7 @@ def _build_real_durable_agent(
         system_prompt=system_prompt,
         graph_id=f"graph:real-llm/{uuid4().hex}",
         memory_reflection=False,
-        capability_resolver=capability_resolver,
+        capability_runtime=capability_runtime or CapabilityRuntime.with_default_providers(LocalSkillCapabilityProvider()),
         permission_policy=permission_policy,
     )
 

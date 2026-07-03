@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -16,6 +16,9 @@ from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactService
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
 from pulsara_agent.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from pulsara_agent.capability.descriptor import CapabilityDescriptor
 
 
 @dataclass(slots=True)
@@ -32,7 +35,13 @@ class ToolExecutor:
             return False
         return hasattr(tool, "execute_async")
 
-    def execute(self, call: ToolCall, *, event_context: EventContext) -> ToolExecutionResult:
+    def execute(
+        self,
+        call: ToolCall,
+        *,
+        event_context: EventContext,
+        descriptor: CapabilityDescriptor | None = None,
+    ) -> ToolExecutionResult:
         self._append(
             ToolResultStartEvent(
                 **event_context.event_fields(),
@@ -66,13 +75,14 @@ class ToolExecutor:
                 status=ToolResultState.ERROR,
                 output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
             )
-        return self._finalize_result(call, event_context=event_context, result=result)
+        return self._finalize_result(call, event_context=event_context, result=result, descriptor=descriptor)
 
     async def execute_async(
         self,
         call: ToolCall,
         *,
         event_context: EventContext,
+        descriptor: CapabilityDescriptor | None = None,
     ) -> ToolExecutionResult:
         self._append(
             ToolResultStartEvent(
@@ -102,7 +112,7 @@ class ToolExecutor:
                 status=ToolResultState.ERROR,
                 output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
             )
-        return self._finalize_result(call, event_context=event_context, result=result)
+        return self._finalize_result(call, event_context=event_context, result=result, descriptor=descriptor)
 
     def _finalize_result(
         self,
@@ -110,6 +120,7 @@ class ToolExecutor:
         *,
         event_context: EventContext,
         result: ToolExecutionResult,
+        descriptor: CapabilityDescriptor | None = None,
     ) -> ToolExecutionResult:
         artifact_refs = ()
         if self.artifact_service is not None:
@@ -117,6 +128,7 @@ class ToolExecutor:
                 result,
                 event_context=event_context,
                 tool_call=call,
+                descriptor=descriptor,
             )
         if result.output and not result.metadata.get("streamed_output_complete"):
             self._append(

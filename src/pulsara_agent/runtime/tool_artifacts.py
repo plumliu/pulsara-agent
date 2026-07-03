@@ -10,6 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from pulsara_agent.capability.descriptor import CapabilityArtifactMode, CapabilityDescriptor
 from pulsara_agent.event import EventContext
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.message import ToolResultArtifactRef
@@ -186,17 +187,28 @@ class ToolResultArtifactService:
         *,
         event_context: EventContext,
         tool_call: ToolCall,
+        descriptor: CapabilityDescriptor | None = None,
     ) -> tuple[ToolExecutionResult, tuple[ToolResultArtifactRef, ...]]:
-        if result.tool_name == "artifact_read":
+        artifact_mode = descriptor.artifact_mode if descriptor is not None else CapabilityArtifactMode.DEFAULT
+        # Compatibility for direct service tests/callers that have not yet
+        # threaded a descriptor. The normal runtime path supplies the
+        # descriptor and expresses this as artifact_mode=NEVER.
+        if artifact_mode is CapabilityArtifactMode.NEVER or (
+            descriptor is None and result.tool_name == "artifact_read"
+        ):
             return result, ()
 
         candidates = tuple(result.artifact_candidates)
         processed_output = result.output
-        if not candidates and len(result.output.encode("utf-8")) > self.options.archive_threshold_chars:
+        force_archive = artifact_mode in {CapabilityArtifactMode.ALWAYS, CapabilityArtifactMode.STRUCTURED_JSON}
+        if not candidates and (
+            force_archive or len(result.output.encode("utf-8")) > self.options.archive_threshold_chars
+        ):
+            media_type = "application/json" if artifact_mode is CapabilityArtifactMode.STRUCTURED_JSON else "text/plain; charset=utf-8"
             candidates = (
                 ToolResultArtifactCandidate(
                     role="output",
-                    media_type="text/plain; charset=utf-8",
+                    media_type=media_type,
                     text=result.output,
                     metadata={"fallback": True},
                 ),
@@ -205,7 +217,7 @@ class ToolResultArtifactService:
         refs: list[ToolResultArtifactRef] = []
         for ordinal, candidate in enumerate(candidates):
             size_bytes = _candidate_size_bytes(candidate)
-            if size_bytes <= self.options.archive_threshold_chars:
+            if not force_archive and size_bytes <= self.options.archive_threshold_chars:
                 continue
             refs.append(
                 self._archive_candidate(
@@ -217,10 +229,11 @@ class ToolResultArtifactService:
                 )
             )
 
-        if refs and len(processed_output) > self.options.inline_preview_chars:
+        inline_preview_chars = descriptor.max_inline_chars if descriptor and descriptor.max_inline_chars else self.options.inline_preview_chars
+        if refs and len(processed_output) > inline_preview_chars:
             processed_output = finalize_output(
                 processed_output,
-                max_chars=self.options.inline_preview_chars,
+                max_chars=inline_preview_chars,
             ).text
 
         if processed_output == result.output:

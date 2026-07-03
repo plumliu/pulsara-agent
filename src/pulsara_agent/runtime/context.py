@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.input import ToolSpec
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import (
     Base64Source,
@@ -19,7 +20,6 @@ from pulsara_agent.message import (
 )
 from pulsara_agent.runtime.recovery import project_recovery_from_state, render_recovery_text
 from pulsara_agent.runtime.state import LoopBudget, LoopState
-from pulsara_agent.tools.registry import ToolRegistry
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -30,7 +30,8 @@ DEFAULT_SYSTEM_PROMPT = (
 
 def build_llm_context(
     state: LoopState,
-    registry: ToolRegistry,
+    *,
+    tools: tuple[ToolSpec, ...],
     system_prompt: str | None,
     budget: LoopBudget,
 ) -> LLMContext:
@@ -44,7 +45,7 @@ def build_llm_context(
     return LLMContext(
         system_prompt=prompt,
         messages=tuple(messages),
-        tools=registry.tool_specs(),
+        tools=tools,
     )
 
 

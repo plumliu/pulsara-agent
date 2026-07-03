@@ -31,10 +31,13 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.capability import (
     CapabilityResolveContext,
+    LocalSkillCapabilityProvider,
     LocalSkillProvider,
-    LocalSkillResolver,
-    ResolvedCapabilitySet,
 )
+from pulsara_agent.capability.descriptor import CapabilityDescriptor, CapabilityProviderKind
+from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
+from pulsara_agent.capability.provider import CapabilityProviderOutput
+from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.memory.recall.service import RecallResult, RecallStatus
@@ -251,7 +254,7 @@ def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> Non
 
 def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Say done"))
 
@@ -304,7 +307,7 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
 def test_agent_runtime_accepts_prior_messages(tmp_path) -> None:
     prior = [UserMsg(name="user", content="previous sentinel")]
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("current", prior_messages=prior))
 
@@ -322,7 +325,7 @@ def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(tmp_path)
     runtime_session.hook_manager.register_event(None, lambda context, event: seen_events.append(event.type))
     runtime_session.hook_manager.register_block(None, lambda context, completion: seen_blocks.append(completion.block_type))
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Say done"))
 
@@ -347,7 +350,7 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
             {"text": "I read it."},
         ]
     )
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Read note.txt"))
 
@@ -385,7 +388,7 @@ def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Read note.txt"))
 
@@ -407,7 +410,7 @@ def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
 
     runtime_session.hook_manager.register_event(None, failing_hook)
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Say done"))
 
@@ -430,7 +433,7 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_pat
             {"text": "first done"},
         ]
     )
-    first_agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(first_transport))
+    first_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(first_transport))
 
     first_result = asyncio.run(first_agent.run_task("Read note.txt"))
     assert first_result.status is LoopStatus.FINISHED
@@ -446,7 +449,7 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_pat
             {"text": "second done"},
         ]
     )
-    second_agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(second_transport))
+    second_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(second_transport))
 
     second_result = asyncio.run(second_agent.run_task("Read note.txt again"))
     message_output = "\n".join(
@@ -474,7 +477,7 @@ def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
             {"text": "Recovered."},
         ]
     )
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Use a malformed tool."))
     events = agent.runtime_session.event_log.iter()
@@ -503,7 +506,7 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
             {"text": "first recovered"},
         ]
     )
-    first_agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(first_transport))
+    first_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(first_transport))
     asyncio.run(first_agent.run_task("bad first"))
 
     second_transport = ScriptedTransport(
@@ -512,7 +515,7 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
             {"text": "second recovered"},
         ]
     )
-    second_agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(second_transport))
+    second_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(second_transport))
 
     second_result = asyncio.run(second_agent.run_task("bad second"))
     message_output = "\n".join(
@@ -539,7 +542,7 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
             {"text": "Recovered from missing tool."},
         ]
     )
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Call a missing tool."))
     second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
@@ -556,7 +559,7 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
 
 
 def test_model_failure_sets_typed_in_run_recovery_state(tmp_path) -> None:
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
     )
@@ -585,7 +588,7 @@ def test_agent_runtime_exceeds_max_turns(tmp_path) -> None:
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_turns=1),
@@ -637,7 +640,7 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
             {"text": "first recovered"},
         ]
     )
-    first_agent = AgentRuntime(
+    first_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(first_transport),
         permission_gate=DenyGate("FIRST_DENY"),
@@ -650,7 +653,7 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
             {"text": "second recovered"},
         ]
     )
-    second_agent = AgentRuntime(
+    second_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(second_transport),
         permission_gate=DenyGate("SECOND_DENY"),
@@ -688,7 +691,7 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -724,7 +727,7 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_pa
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -745,7 +748,7 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_pa
 
 def test_agent_runtime_finalize_run_is_idempotent(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
 
     result = asyncio.run(agent.run_task("Say done"))
     second = asyncio.run(agent.abort_run(result.state))
@@ -777,7 +780,7 @@ def test_approval_resume_approve_executes_original_tool_snapshot_and_continues(t
             {"text": "continued"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -826,7 +829,7 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path
             {"text": "continued"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -876,7 +879,7 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_p
             {"text": "denial acknowledged"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -922,7 +925,7 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_pat
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -967,7 +970,7 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -1017,7 +1020,7 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
             }
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -1055,7 +1058,7 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_trusted_terminal_policy(),
@@ -1168,14 +1171,63 @@ class RecordingHooks(NoopMemoryHooks):
         self.calls.append("turn_end")
 
 
-class CountingCapabilityResolver:
-    def __init__(self, delegate: LocalSkillResolver) -> None:
+class CountingCapabilityProvider:
+    def __init__(self, delegate: LocalSkillCapabilityProvider) -> None:
         self.delegate = delegate
         self.calls: list[CapabilityResolveContext] = []
+        self.provider_id = "counting-local-skills"
 
-    def resolve(self, context: CapabilityResolveContext) -> ResolvedCapabilitySet:
+    def resolve(
+        self,
+        context: CapabilityResolveContext,
+        *,
+        bound_tool_names: frozenset[str],
+    ) -> CapabilityProviderOutput:
         self.calls.append(context)
-        return self.delegate.resolve(context)
+        return self.delegate.resolve(context, bound_tool_names=bound_tool_names)
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCapabilityProvider:
+    descriptors: tuple[CapabilityDescriptor, ...]
+    provider_id: str = "static-test"
+
+    def resolve(
+        self,
+        context: CapabilityResolveContext,
+        *,
+        bound_tool_names: frozenset[str],
+    ) -> CapabilityProviderOutput:
+        del context, bound_tool_names
+        return CapabilityProviderOutput(descriptors=self.descriptors)
+
+
+def _test_tool_descriptor(name: str) -> CapabilityDescriptor:
+    return CapabilityDescriptor(
+        id=f"builtin:{name}",
+        name=name,
+        description=f"{name} test tool",
+        input_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        namespace=None,
+        provider_kind=CapabilityProviderKind.BUILTIN,
+        provider_id="static-test",
+        is_model_callable=True,
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="general",
+    )
+
+
+_BUILTIN_TOOL_NAMES = frozenset(descriptor.name for descriptor in builtin_tool_descriptors())
+
+
+def _install_registry_with_explicit_test_descriptors(agent: AgentRuntime, registry: ToolRegistry) -> None:
+    agent.tool_executor.registry = registry
+    custom_names = tuple(sorted(set(registry.names()).difference(_BUILTIN_TOOL_NAMES)))
+    if custom_names:
+        agent.capability_runtime = CapabilityRuntime.with_default_providers(
+            StaticCapabilityProvider(tuple(_test_tool_descriptor(name) for name in custom_names))
+        )
 
 
 class SlowProjectionHooks(NoopMemoryHooks):
@@ -1200,7 +1252,7 @@ class SlowProjectionWithBaselineHooks(SlowProjectionHooks):
 def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     hooks = RecordingHooks()
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=hooks,
@@ -1215,7 +1267,7 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     assert "Recalled Memory" in (transport.contexts[0].system_prompt or "")
 
 
-def test_capability_resolver_runs_once_per_user_message_and_prompt_is_stable(tmp_path) -> None:
+def test_capability_runtime_resolves_once_per_user_message_and_exposure_is_stable(tmp_path) -> None:
     _write_workspace_skill(
         tmp_path,
         "review-pr",
@@ -1242,11 +1294,14 @@ Use the review checklist.
         workspace_kind="project",
         stable_project_key=str(tmp_path),
     )
-    resolver = CountingCapabilityResolver(_workspace_only_resolver())
+    provider = CountingCapabilityProvider(_workspace_only_capability_provider())
     agent = AgentRuntime(
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
-        capability_resolver=resolver,
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            StaticCapabilityProvider((_test_tool_descriptor("noop"),)),
+            provider,
+        ),
         memory_domain=domain,
         workspace_kind="project",
     )
@@ -1257,11 +1312,11 @@ Use the review checklist.
     result = asyncio.run(agent.run_task("$review-pr inspect this"))
 
     assert result.status is LoopStatus.FINISHED
-    assert len(resolver.calls) == 1
-    assert resolver.calls[0].workspace_root == tmp_path
-    assert resolver.calls[0].workspace_kind == "project"
-    assert resolver.calls[0].memory_domain == domain
-    assert resolver.calls[0].available_tool_names == frozenset({"noop"})
+    assert len(provider.calls) == 1
+    assert provider.calls[0].workspace_root == tmp_path
+    assert provider.calls[0].workspace_kind == "project"
+    assert provider.calls[0].memory_domain == domain
+    assert provider.calls[0].available_tool_names == frozenset({"noop"})
     assert len(transport.contexts) == 2
     assert transport.contexts[0].system_prompt == transport.contexts[1].system_prompt
     assert "Available Skills:" in (transport.contexts[0].system_prompt or "")
@@ -1285,7 +1340,7 @@ description: Review pull requests.
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        capability_resolver=_workspace_only_resolver(),
+        capability_runtime=CapabilityRuntime.with_default_providers(_workspace_only_capability_provider()),
     )
 
     result = asyncio.run(agent.run_task("inspect this", active_skill_names=frozenset({"review-pr"})))
@@ -1302,13 +1357,13 @@ def _write_workspace_skill(root, name: str, content: str) -> None:
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
 
-def _workspace_only_resolver() -> LocalSkillResolver:
-    return LocalSkillResolver(provider=LocalSkillProvider(include_user_skills=False))
+def _workspace_only_capability_provider() -> LocalSkillCapabilityProvider:
+    return LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False))
 
 
 def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=SlowProjectionHooks(),
@@ -1328,7 +1383,7 @@ def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -
 
 def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=SlowProjectionWithBaselineHooks(),
@@ -1434,7 +1489,7 @@ def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> N
 
 def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "should not run"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("on_session_start"),
@@ -1449,7 +1504,7 @@ def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) ->
 
 def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("after_model_reply"),
@@ -1463,7 +1518,7 @@ def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -
 
 def test_memory_hook_event_emit_failure_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=InvalidEventHook(),
@@ -1477,7 +1532,7 @@ def test_memory_hook_event_emit_failure_returns_failed_result(tmp_path) -> None:
 
 def test_agent_runtime_accepts_memory_hook_without_proposal_sink_property(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=LegacyShapeMemoryHook(),
@@ -1502,7 +1557,7 @@ def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) 
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("after_tool_results"),
@@ -1532,7 +1587,7 @@ def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> No
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         tool_result_persistence_hook=ExecutionEvidencePersistenceHook(ledger),
@@ -1588,7 +1643,7 @@ def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> No
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         tool_result_persistence_hook=FailingPersistenceHook(),
@@ -1616,7 +1671,7 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("should_compact"),
@@ -1630,7 +1685,7 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
 
 def test_memory_hook_failure_on_session_end_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("on_session_end"),
@@ -1760,8 +1815,8 @@ def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> Non
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
-    agent.tool_executor.registry = registry
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    _install_registry_with_explicit_test_descriptors(agent, registry)
 
     def release_on_start(context, event) -> None:
         if isinstance(event, ToolResultStartEvent) and event.tool_call_id == "call:block":
@@ -1798,10 +1853,10 @@ def test_duplicate_tool_call_id_becomes_error_observation_without_execution(tmp_
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_registry_with_explicit_test_descriptors(agent, registry)
 
     result = asyncio.run(agent.run_task("run duplicate tool ids"))
     second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
@@ -1832,11 +1887,11 @@ def test_duplicate_tool_call_id_only_blocks_the_duplicate_calls(tmp_path) -> Non
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(RecordingTool("ok_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
     registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_registry_with_explicit_test_descriptors(agent, registry)
 
     result = asyncio.run(agent.run_task("run mixed duplicate tool ids"))
     second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
@@ -1868,14 +1923,14 @@ def test_tool_budget_blocks_unsafe_tool_before_execution(tmp_path) -> None:
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_tool_calls=0),
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("write_side_effect", calls=calls))
-    agent.tool_executor.registry = registry
+    _install_registry_with_explicit_test_descriptors(agent, registry)
 
     result = asyncio.run(agent.run_task("run unsafe tool"))
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
@@ -1903,7 +1958,7 @@ def test_tool_budget_blocks_concurrent_batch_before_partial_execution(tmp_path) 
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_tool_calls=1),
@@ -1911,7 +1966,7 @@ def test_tool_budget_blocks_concurrent_batch_before_partial_execution(tmp_path) 
     registry = ToolRegistry()
     registry.register(RecordingTool("readonly_a", calls=calls, is_read_only=True, is_concurrency_safe=True))
     registry.register(RecordingTool("readonly_b", calls=calls, is_read_only=True, is_concurrency_safe=True))
-    agent.tool_executor.registry = registry
+    _install_registry_with_explicit_test_descriptors(agent, registry)
 
     result = asyncio.run(agent.run_task("run readonly tools"))
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
@@ -1938,11 +1993,11 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(SleepTool("sleep_a", delay=0.2))
     registry.register(SleepTool("sleep_b", delay=0.2))
-    agent.tool_executor.registry = registry
+    _install_registry_with_explicit_test_descriptors(agent, registry)
 
     started = time.monotonic()
     asyncio.run(agent.run_task("run both"))
@@ -1966,12 +2021,12 @@ def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurren
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
     shared: dict[str, object] = {}
     registry = ToolRegistry()
     registry.register(AsyncConcurrencyProbeTool("async_a", shared))
     registry.register(AsyncConcurrencyProbeTool("async_b", shared))
-    agent.tool_executor.registry = registry
+    _install_registry_with_explicit_test_descriptors(agent, registry)
 
     result = asyncio.run(agent.run_task("run both async tools"))
 
@@ -1999,7 +2054,7 @@ def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
     recall = _ConcurrentRecallService()
     registry = ToolRegistry()
     registry.register(MemorySearchTool(recall=recall))  # type: ignore[arg-type]
@@ -2032,7 +2087,7 @@ def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
     registry = ToolRegistry()
     registry.register(SleepTool("sleep_a", delay=0.2))
     registry.register(SleepTool("sleep_b", delay=0.2))

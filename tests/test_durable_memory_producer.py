@@ -50,6 +50,7 @@ from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.runtime import AgentRuntime, LoopState
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
+from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.tools.base import ToolCall
 from pulsara_agent.tools.builtins.memory import (
     RememberActionBoundaryTool,
@@ -568,7 +569,7 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
         memory_hooks=hooks,
@@ -633,7 +634,7 @@ def test_default_agent_runtime_does_not_expose_memory_write_tools(tmp_path: Path
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
     )
@@ -677,7 +678,7 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
         memory_hooks=hooks,
@@ -742,7 +743,7 @@ def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(tmp_pa
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(
+    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
         memory_hooks=hooks,

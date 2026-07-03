@@ -15,7 +15,7 @@ import pytest
 
 from pulsara_agent.capability import (
     CapabilityResolveContext,
-    LocalSkillResolver,
+    LocalSkillCapabilityProvider,
     sync_bundled_skills,
 )
 from pulsara_agent.event import (
@@ -493,16 +493,15 @@ async def _run_real_pr4_dogfood_llm_user_long_session(
 def _verify_round0_inspect_baseline(session, evidence: DogfoodEvidence) -> None:
     registry_names = sorted(session.wiring.agent_runtime.tool_executor.registry.names())
     evidence.registry_names = registry_names
-    resolver = LocalSkillResolver()
-    resolved = resolver.resolve(
-        CapabilityResolveContext(
-            workspace_root=session.workspace.workspace_root,
-            workspace_kind="project",
-            memory_domain=session.wiring.runtime_wiring.memory_domain,
-            available_tool_names=frozenset(registry_names),
-            user_input="inspect dogfood baseline",
-        )
+    provider = LocalSkillCapabilityProvider()
+    context = CapabilityResolveContext(
+        workspace_root=session.workspace.workspace_root,
+        workspace_kind="project",
+        memory_domain=session.wiring.runtime_wiring.memory_domain,
+        available_tool_names=frozenset(registry_names),
+        user_input="inspect dogfood baseline",
     )
+    resolved = provider.resolve(context, bound_tool_names=context.available_tool_names)
     catalog_names = sorted(entry.name for entry in resolved.catalog_entries)
     evidence.skill_catalog_names = catalog_names
     round_evidence = {
@@ -1341,16 +1340,15 @@ async def _wait_for_active_run_start(session, task, evidence: DogfoodEvidence) -
 
 def _verify_skill_catalog_contains(session, skill_name: str, round_name: str, evidence: DogfoodEvidence) -> None:
     registry_names = sorted(session.wiring.agent_runtime.tool_executor.registry.names())
-    resolver = LocalSkillResolver()
-    resolved = resolver.resolve(
-        CapabilityResolveContext(
-            workspace_root=session.workspace.workspace_root,
-            workspace_kind="project",
-            memory_domain=session.wiring.runtime_wiring.memory_domain,
-            available_tool_names=frozenset(registry_names),
-            user_input=f"inspect {skill_name}",
-        )
+    provider = LocalSkillCapabilityProvider()
+    context = CapabilityResolveContext(
+        workspace_root=session.workspace.workspace_root,
+        workspace_kind="project",
+        memory_domain=session.wiring.runtime_wiring.memory_domain,
+        available_tool_names=frozenset(registry_names),
+        user_input=f"inspect {skill_name}",
     )
+    resolved = provider.resolve(context, bound_tool_names=context.available_tool_names)
     catalog_names = sorted(entry.name for entry in resolved.catalog_entries)
     evidence.turns.append(
         {

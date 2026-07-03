@@ -36,6 +36,7 @@ from pulsara_agent.memory.reflection.engine import MemoryReflectionEngine, Memor
 from pulsara_agent.message import TextBlock, ToolResultBlock, ToolResultState, UserMsg
 from pulsara_agent.ontology import memory
 from pulsara_agent.runtime import AgentRuntime, LoopState, LoopStatus
+from pulsara_agent.capability.runtime import CapabilityRuntime
 
 
 class _ScriptedTransport:
@@ -434,7 +435,7 @@ def _agent_with_reflection(
         reflection=reflection,
         event_store=runtime_session.event_log,
     )
-    return AgentRuntime(
+    return AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=llm_runtime,
         memory_hooks=hooks,

@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from pulsara_agent.capability import CapabilityResolver, LocalSkillResolver
+from pulsara_agent.capability import LocalSkillCapabilityProvider
+from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore, InMemoryGraphStore, PostgresGraphStore
@@ -346,7 +347,7 @@ def build_agent_runtime_wiring(
     memory_reflection: bool = True,
     memory_reflection_options: MemoryReflectionOptions | None = None,
     terminal_binding: TerminalRuntimeBinding | None = None,
-    capability_resolver: CapabilityResolver | None = None,
+    capability_runtime: CapabilityRuntime | None = None,
     enable_workspace_skills: bool = True,
     permission_policy: EffectivePermissionPolicy | None = None,
     retrieval_resources: RetrievalRuntimeResources | None = None,
@@ -375,6 +376,9 @@ def build_agent_runtime_wiring(
     llm_runtime = build_llm_runtime(settings.llm)
     runtime_wiring = _with_memory_governance_engine(runtime_wiring, llm_runtime=llm_runtime)
     effective_permission_policy = permission_policy or default_permission_policy()
+    effective_capability_runtime = capability_runtime or _default_capability_runtime(
+        enable_workspace_skills=enable_workspace_skills
+    )
     agent_runtime = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=llm_runtime,
@@ -388,9 +392,7 @@ def build_agent_runtime_wiring(
         model_role=model_role,
         options=options,
         system_prompt=system_prompt,
-        capability_resolver=capability_resolver
-        if capability_resolver is not None
-        else (LocalSkillResolver() if enable_workspace_skills else None),
+        capability_runtime=effective_capability_runtime,
         memory_domain=runtime_wiring.memory_domain,
         workspace_kind=runtime_wiring.memory_domain.workspace_kind if runtime_wiring.memory_domain is not None else "transient",
         permission_policy=effective_permission_policy,
@@ -399,6 +401,11 @@ def build_agent_runtime_wiring(
         agent_runtime=agent_runtime,
         runtime_wiring=runtime_wiring,
     )
+
+
+def _default_capability_runtime(*, enable_workspace_skills: bool) -> CapabilityRuntime:
+    providers = (LocalSkillCapabilityProvider(),) if enable_workspace_skills else ()
+    return CapabilityRuntime.with_default_providers(*providers)
 
 
 def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime) -> RuntimeWiring:

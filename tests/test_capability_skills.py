@@ -4,8 +4,8 @@ from pathlib import Path
 
 from pulsara_agent.capability import (
     CapabilityResolveContext,
+    LocalSkillCapabilityProvider,
     LocalSkillProvider,
-    LocalSkillResolver,
     render_active_skill_prompt,
     render_catalog_prompt,
 )
@@ -481,7 +481,7 @@ def test_render_active_prompt_reports_when_no_collision_free_sentinel(monkeypatc
     assert [diagnostic.code for diagnostic in rendered.diagnostics] == ["skill_body_delimiter_collision"]
 
 
-def test_local_skill_resolver_activates_explicit_mentions_and_preserves_scopes(tmp_path) -> None:
+def test_local_skill_capability_provider_activates_explicit_mentions_and_preserves_scopes(tmp_path) -> None:
     _write_skill(
         tmp_path,
         "review-pr",
@@ -506,18 +506,20 @@ provides_tools: [read_file]
         user_input="$review-pr please inspect this",
     )
 
-    resolved = _workspace_only_resolver().resolve(context)
+    resolved = _workspace_only_capability_provider().resolve(
+        context,
+        bound_tool_names=context.available_tool_names,
+    )
 
     assert [entry.name for entry in resolved.catalog_entries] == ["review-pr"]
     assert [entry.provides_tools for entry in resolved.catalog_entries] == [("read_file",)]
     assert [injection.name for injection in resolved.active_injections] == ["review-pr"]
-    assert resolved.visible_tool_names == frozenset({"read_file", "terminal"})
     assert resolved.catalog_prompt and ".agents/skills/review-pr/SKILL.md" in resolved.catalog_prompt
     assert resolved.active_skill_prompt and "# Review PR" in resolved.active_skill_prompt
     assert domain.read_scopes == frozenset({"ctx:user", workspace_scope(str(tmp_path))})
 
 
-def test_local_skill_resolver_hides_disabled_model_catalog_but_allows_host_activation(tmp_path) -> None:
+def test_local_skill_capability_provider_hides_disabled_model_catalog_but_allows_host_activation(tmp_path) -> None:
     _write_skill(
         tmp_path,
         "private-skill",
@@ -538,14 +540,14 @@ disable_model_invocation: true
         active_skill_names=frozenset({"private-skill"}),
     )
 
-    resolved = _workspace_only_resolver().resolve(context)
+    resolved = _workspace_only_capability_provider().resolve(context, bound_tool_names=frozenset())
 
     assert resolved.catalog_entries == ()
     assert [injection.name for injection in resolved.active_injections] == ["private-skill"]
     assert "Reason: host_command" in (resolved.active_skill_prompt or "")
 
 
-def test_local_skill_resolver_does_not_activate_oversized_skill_body(tmp_path) -> None:
+def test_local_skill_capability_provider_does_not_activate_oversized_skill_body(tmp_path) -> None:
     _write_skill(
         tmp_path,
         "big",
@@ -556,16 +558,19 @@ description: Big skill.
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """,
     )
-    resolver = LocalSkillResolver(provider=LocalSkillProvider(max_skill_file_bytes=40, include_user_skills=False))
+    provider = LocalSkillCapabilityProvider(
+        provider=LocalSkillProvider(max_skill_file_bytes=40, include_user_skills=False)
+    )
 
-    resolved = resolver.resolve(
+    resolved = provider.resolve(
         CapabilityResolveContext(
             workspace_root=tmp_path,
             workspace_kind="transient",
             memory_domain=None,
             available_tool_names=frozenset(),
             user_input="$big",
-        )
+        ),
+        bound_tool_names=frozenset(),
     )
 
     assert resolved.active_injections == ()
@@ -589,5 +594,5 @@ def _workspace_only_provider(**kwargs) -> LocalSkillProvider:
     return LocalSkillProvider(include_user_skills=False, **kwargs)
 
 
-def _workspace_only_resolver() -> LocalSkillResolver:
-    return LocalSkillResolver(provider=_workspace_only_provider())
+def _workspace_only_capability_provider() -> LocalSkillCapabilityProvider:
+    return LocalSkillCapabilityProvider(provider=_workspace_only_provider())

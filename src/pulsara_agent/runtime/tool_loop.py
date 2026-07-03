@@ -16,6 +16,7 @@ from pulsara_agent.event import (
 from pulsara_agent.memory.foundation.provenance import runtime_event_span_from_events
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, ToolResultState
 from pulsara_agent.message.assembler import completed_tool_result_from_events
+from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.runtime.publisher import RuntimeEventSubscriber, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.tools import ToolCall, ToolExecutor
@@ -84,11 +85,16 @@ def _tool_call_blocks(message: Msg) -> list[ToolCallBlock]:
     return [block for block in message.content if isinstance(block, ToolCallBlock)]
 
 
-def _tool_batches(calls: list[ToolCall], executor: ToolExecutor) -> list[list[ToolCall]]:
+def _tool_batches(
+    calls: list[ToolCall],
+    executor: ToolExecutor,
+    *,
+    exposure: CapabilityExposurePlan | None = None,
+) -> list[list[ToolCall]]:
     batches: list[list[ToolCall]] = []
     current_readonly: list[ToolCall] = []
     for call in calls:
-        if _call_can_run_concurrently(call, executor):
+        if _call_can_run_concurrently(call, executor, exposure=exposure):
             current_readonly.append(call)
             continue
         if current_readonly:
@@ -111,7 +117,15 @@ def _duplicate_tool_call_ids(calls: list[ToolCall]) -> set[str]:
     return duplicates
 
 
-def _call_can_run_concurrently(call: ToolCall, executor: ToolExecutor) -> bool:
+def _call_can_run_concurrently(
+    call: ToolCall,
+    executor: ToolExecutor,
+    *,
+    exposure: CapabilityExposurePlan | None = None,
+) -> bool:
+    if exposure is not None:
+        descriptor = exposure.descriptors_by_name.get(call.name)
+        return bool(descriptor and descriptor.is_read_only and descriptor.is_concurrency_safe)
     try:
         tool = executor.registry.get(call.name)
     except KeyError:

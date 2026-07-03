@@ -8,12 +8,9 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Literal
 from uuid import uuid4
 
-from pulsara_agent.capability.types import (
-    CapabilityResolveContext,
-    CapabilityResolver,
-    NoopCapabilityResolver,
-    ResolvedCapabilitySet,
-)
+from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.capability.runtime import CapabilityRuntime
+from pulsara_agent.capability.types import CapabilityResolveContext
 from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
@@ -65,9 +62,11 @@ from pulsara_agent.runtime.permission import (
     PermissionState,
     PolicyPermissionGate,
     PermissionDecisionKind,
+    PermissionDecision,
     PermissionGate,
     TerminalAccess,
     default_permission_policy,
+    evaluate_capability_exposure_access,
     mode_for_policy,
     parse_permission_mode,
     preset_to_policy,
@@ -155,11 +154,13 @@ class AgentRuntime:
         options: LLMOptions | None = None,
         budget: LoopBudget | None = None,
         system_prompt: str | None = None,
-        capability_resolver: CapabilityResolver | None = None,
+        capability_runtime: CapabilityRuntime,
         memory_domain: MemoryDomainContext | None = None,
         workspace_kind: WorkspaceKind = "transient",
         permission_policy: EffectivePermissionPolicy | None = None,
     ) -> None:
+        if capability_runtime is None:
+            raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
         self.runtime_session = runtime_session
         self.llm_runtime = llm_runtime
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
@@ -177,7 +178,7 @@ class AgentRuntime:
         self.options = options
         self.budget = budget or LoopBudget()
         self.system_prompt = system_prompt
-        self.capability_resolver = capability_resolver or NoopCapabilityResolver()
+        self.capability_runtime = capability_runtime
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
         self.tool_executor = runtime_session.create_tool_executor(
@@ -346,26 +347,34 @@ class AgentRuntime:
             async for event in self._finalize_run(state, run_session_end_hook=False):
                 yield event
             return
-        capabilities = self._resolve_capabilities(
+        exposure = self._resolve_capability_exposure(
             state,
             user_input=user_input,
             prior_messages=prior_messages,
             active_skill_names=active_skill_names,
         )
-        state.scratchpad["capabilities"] = capabilities
+        state.scratchpad["capability_exposure"] = exposure
+        yield await self.runtime_session.emit(
+            CustomEvent(
+                **self._event_context(state).event_fields(),
+                name="capability_exposure_resolved",
+                value=exposure.to_event_value(),
+            ),
+            state=state,
+        )
 
-        async for event in self._stream_model_loop(state, capabilities):
+        async for event in self._stream_model_loop(state, exposure):
             yield event
 
-    def _resolve_capabilities(
+    def _resolve_capability_exposure(
         self,
         state: LoopState,
         *,
         user_input: str,
         prior_messages: list[Msg] | None = None,
         active_skill_names: frozenset[str] | None = None,
-    ) -> ResolvedCapabilitySet:
-        return self.capability_resolver.resolve(
+    ) -> CapabilityExposurePlan:
+        return self.capability_runtime.resolve_for_turn(
             CapabilityResolveContext(
                 workspace_root=self.runtime_session.workspace_root,
                 workspace_kind=self.workspace_kind,
@@ -374,8 +383,105 @@ class AgentRuntime:
                 user_input=user_input,
                 prior_messages=tuple(prior_messages or ()),
                 active_skill_names=active_skill_names or frozenset(),
-            )
+            ),
+            tool_registry=self.tool_executor.registry,
+            permission_policy=self.permission_policy,
+            plan_active=self._plan_state(state).active,
         )
+
+    def _exposure_from_state_or_resolve(self, state: LoopState) -> CapabilityExposurePlan:
+        exposure = state.scratchpad.get("capability_exposure")
+        if isinstance(exposure, CapabilityExposurePlan):
+            return exposure
+        exposure = self._resolve_capability_exposure(
+            state,
+            user_input="",
+            prior_messages=[],
+            active_skill_names=frozenset(),
+        )
+        state.scratchpad["capability_exposure"] = exposure
+        return exposure
+
+    async def _emit_capability_gate_decision(
+        self,
+        state: LoopState,
+        call: ToolCall,
+        *,
+        exposure: CapabilityExposurePlan,
+        decision: PermissionDecision,
+        result_state: ToolResultState | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        descriptor = exposure.descriptors_by_name.get(call.name)
+        value = {
+            "tool_call_id": call.id,
+            "tool_name": call.name,
+            "descriptor_id": descriptor.id if descriptor is not None else None,
+            "decision": decision.kind.value,
+            "reason_code": decision.reason,
+            "policy_mode": self.permission_mode.value if self.permission_mode is not None else None,
+        }
+        if result_state is not None:
+            value["result_state"] = result_state.value
+        yield await self.runtime_session.emit(
+            CustomEvent(
+                **self._event_context(state).event_fields(),
+                name="capability_gate_decision",
+                value=value,
+            ),
+            state=state,
+        )
+
+    async def _emit_capability_access_denial(
+        self,
+        state: LoopState,
+        call: ToolCall,
+        *,
+        exposure: CapabilityExposurePlan,
+        decision: PermissionDecision,
+    ) -> AsyncIterator[AgentEvent]:
+        result_state = (
+            ToolResultState.ERROR
+            if decision.reason and "capability_descriptor_missing" in decision.reason
+            else ToolResultState.DENIED
+        )
+        async for event in self._emit_tool_result_and_record(
+            state,
+            tool_call_id=call.id,
+            tool_call_name=call.name,
+            output=decision.reason or "tool call denied by capability exposure",
+            result_state=result_state,
+        ):
+            yield event
+        async for event in self._emit_capability_gate_decision(
+            state,
+            call,
+            exposure=exposure,
+            decision=decision,
+            result_state=result_state,
+        ):
+            yield event
+
+    async def _stream_capability_access_filtered_calls(
+        self,
+        state: LoopState,
+        parsed_calls: list[ToolCall],
+        *,
+        exposure: CapabilityExposurePlan,
+    ) -> AsyncIterator[AgentEvent | tuple[list[ToolCall]]]:
+        executable_calls: list[ToolCall] = []
+        for call in parsed_calls:
+            local_decision = evaluate_capability_exposure_access(call, exposure)
+            if local_decision is None:
+                executable_calls.append(call)
+                continue
+            async for event in self._emit_capability_access_denial(
+                state,
+                call,
+                exposure=exposure,
+                decision=local_decision,
+            ):
+                yield event
+        yield (executable_calls,)
 
     async def _emit_pending_plan_entry_audit(self, state: LoopState) -> AsyncIterator[AgentEvent]:
         payload = state.scratchpad.get("plan_entry_audit")
@@ -399,7 +505,7 @@ class AgentRuntime:
     async def _stream_model_loop(
         self,
         state: LoopState,
-        capabilities: ResolvedCapabilitySet,
+        exposure: CapabilityExposurePlan,
     ) -> AsyncIterator[AgentEvent]:
         while state.status is LoopStatus.RUNNING:
             if self._apply_stop_request(state):
@@ -424,12 +530,12 @@ class AgentRuntime:
 
             context = build_llm_context(
                 state=state,
-                registry=self.tool_executor.registry,
+                tools=exposure.direct_tool_specs,
                 system_prompt=compose_system_prompt(
                     self.system_prompt,
                     memory_prompt=getattr(self.memory_hooks, "memory_context_prompt", lambda: None)(),
-                    capability_prompt=capabilities.catalog_prompt,
-                    active_skill_prompt=capabilities.active_skill_prompt,
+                    capability_prompt=exposure.catalog_prompt,
+                    active_skill_prompt=exposure.active_skill_prompt,
                 ),
                 budget=self.budget,
             )
@@ -589,16 +695,8 @@ class AgentRuntime:
             return
         state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
         state.begin_next_turn()
-        capabilities = state.scratchpad.get("capabilities")
-        if not isinstance(capabilities, ResolvedCapabilitySet):
-            capabilities = self._resolve_capabilities(
-                state,
-                user_input="",
-                prior_messages=[],
-                active_skill_names=frozenset(),
-            )
-            state.scratchpad["capabilities"] = capabilities
-        async for event in self._stream_model_loop(state, capabilities):
+        exposure = self._exposure_from_state_or_resolve(state)
+        async for event in self._stream_model_loop(state, exposure):
             yield event
 
     async def _stream_plan_interaction_resolution(
@@ -641,16 +739,8 @@ class AgentRuntime:
             return
         state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
         state.begin_next_turn()
-        capabilities = state.scratchpad.get("capabilities")
-        if not isinstance(capabilities, ResolvedCapabilitySet):
-            capabilities = self._resolve_capabilities(
-                state,
-                user_input="",
-                prior_messages=[],
-                active_skill_names=frozenset(),
-            )
-            state.scratchpad["capabilities"] = capabilities
-        async for event in self._stream_model_loop(state, capabilities):
+        exposure = self._exposure_from_state_or_resolve(state)
+        async for event in self._stream_model_loop(state, exposure):
             yield event
 
     async def _resolve_plan_question(
@@ -1111,13 +1201,36 @@ class AgentRuntime:
             if not parsed_calls:
                 return
 
-        if any(call.name in PLAN_WORKFLOW_TOOL_NAMES for call in parsed_calls):
-            async for event in self._handle_workflow_tool_batch(state, parsed_calls):
+        exposure = self._exposure_from_state_or_resolve(state)
+        executable_calls: list[ToolCall] = []
+        async for event_or_calls in self._stream_capability_access_filtered_calls(
+            state,
+            parsed_calls,
+            exposure=exposure,
+        ):
+            if isinstance(event_or_calls, tuple):
+                executable_calls = event_or_calls[0]
+            else:
+                yield event_or_calls
+
+        if any(call.name in PLAN_WORKFLOW_TOOL_NAMES for call in executable_calls):
+            async for event in self._handle_workflow_tool_batch(state, executable_calls):
                 yield event
             return
 
-        decision = await self.permission_gate.evaluate(parsed_calls)
+        if not executable_calls:
+            return
+
+        decision = await self.permission_gate.evaluate(executable_calls, exposure=exposure)
         if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
+            for call in executable_calls:
+                async for event in self._emit_capability_gate_decision(
+                    state,
+                    call,
+                    exposure=exposure,
+                    decision=decision,
+                ):
+                    yield event
             blocks = [
                 ToolCallBlock(
                     id=call.id,
@@ -1126,7 +1239,7 @@ class AgentRuntime:
                     state=ToolCallState.ASKING,
                     suggested_rules=decision.suggested_rules,
                 )
-                for call in parsed_calls
+                for call in executable_calls
             ]
             state.pending_tool_calls = blocks
             state.status = LoopStatus.WAITING_USER
@@ -1139,18 +1252,31 @@ class AgentRuntime:
             yield event
             return
         if decision.kind is PermissionDecisionKind.DENY:
-            for call in parsed_calls:
+            for call in executable_calls:
+                result_state = (
+                    ToolResultState.ERROR
+                    if decision.reason and "capability_descriptor_missing" in decision.reason
+                    else ToolResultState.DENIED
+                )
                 stored_events = await self.runtime_session.emit_many(
                     build_tool_result_error_events(
                         self._event_context(state),
                         tool_call_id=call.id,
                         tool_call_name=call.name,
                         message=decision.reason or "tool call denied by permission gate",
-                        state=ToolResultState.DENIED,
+                        state=result_state,
                     ),
                     state=state,
                 )
                 for event in stored_events:
+                    yield event
+                async for event in self._emit_capability_gate_decision(
+                    state,
+                    call,
+                    exposure=exposure,
+                    decision=decision,
+                    result_state=result_state,
+                ):
                     yield event
                 result_block = _tool_result_from_event_slice(stored_events, call.id)
                 _remember_tool_result_event_span(state, stored_events, call.id)
@@ -1165,7 +1291,16 @@ class AgentRuntime:
                 )
             return
 
-        async for event in self._stream_parsed_tool_calls(state, parsed_calls):
+        for call in executable_calls:
+            async for event in self._emit_capability_gate_decision(
+                state,
+                call,
+                exposure=exposure,
+                decision=decision,
+            ):
+                yield event
+
+        async for event in self._stream_parsed_tool_calls(state, executable_calls):
             yield event
 
     async def _handle_workflow_tool_batch(
@@ -1483,7 +1618,24 @@ class AgentRuntime:
                 return
             calls = parsed_calls
             parsed_calls = []
-            async for event in self._stream_parsed_tool_calls(state, calls):
+            exposure = self._exposure_from_state_or_resolve(state)
+            executable_calls: list[ToolCall] = []
+            async for event_or_calls in self._stream_capability_access_filtered_calls(
+                state,
+                calls,
+                exposure=exposure,
+            ):
+                if isinstance(event_or_calls, tuple):
+                    executable_calls = event_or_calls[0]
+                else:
+                    yield event_or_calls
+            if not executable_calls:
+                return
+            if any(call.name in PLAN_WORKFLOW_TOOL_NAMES for call in executable_calls):
+                async for event in self._handle_workflow_tool_batch(state, executable_calls):
+                    yield event
+                return
+            async for event in self._stream_parsed_tool_calls(state, executable_calls):
                 yield event
 
         for block in state.pending_tool_calls:
@@ -1550,12 +1702,13 @@ class AgentRuntime:
         state: LoopState,
         parsed_calls: list[ToolCall],
     ) -> AsyncIterator[AgentEvent]:
-        for batch in _tool_batches(parsed_calls, self.tool_executor):
+        exposure = self._exposure_from_state_or_resolve(state)
+        for batch in _tool_batches(parsed_calls, self.tool_executor, exposure=exposure):
             if state.tool_call_count + len(batch) > self.budget.max_tool_calls:
                 yield await self._mark_tool_budget_exceeded(state, attempted_count=len(batch))
                 return
             batch_events: list[AgentEvent] = []
-            async for event in self._stream_tool_batch_events(state, batch, batch_events):
+            async for event in self._stream_tool_batch_events(state, batch, batch_events, exposure=exposure):
                 yield event
             for call in batch:
                 result_block = _tool_result_from_event_slice(batch_events, call.id)
@@ -1571,6 +1724,8 @@ class AgentRuntime:
         state: LoopState,
         batch: list[ToolCall],
         batch_events: list[AgentEvent],
+        *,
+        exposure: CapabilityExposurePlan,
     ) -> AsyncIterator[AgentEvent]:
         tap = _ToolBatchTap({call.id for call in batch})
         self.runtime_session.publisher.subscribe(tap)
@@ -1581,12 +1736,18 @@ class AgentRuntime:
             runtime_session_id=self.runtime_session.runtime_session_id,
         )
         async def execute_call(call: ToolCall) -> ToolExecutionResult:
+            descriptor = exposure.descriptors_by_name.get(call.name)
             if executor.is_async(call):
-                return await executor.execute_async(call, event_context=self._event_context(state))
+                return await executor.execute_async(
+                    call,
+                    event_context=self._event_context(state),
+                    descriptor=descriptor,
+                )
             return await asyncio.to_thread(
                 executor.execute,
                 call,
                 event_context=self._event_context(state),
+                descriptor=descriptor,
             )
 
         tasks = [asyncio.create_task(execute_call(call)) for call in batch]
