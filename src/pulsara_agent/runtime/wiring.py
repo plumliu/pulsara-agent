@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from pulsara_agent.capability import LocalSkillCapabilityProvider
+from pulsara_agent.capability import LocalSkillCapabilityProvider, SkillBinaryLookupPath, SkillHealthResolver
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
@@ -377,7 +377,8 @@ def build_agent_runtime_wiring(
     runtime_wiring = _with_memory_governance_engine(runtime_wiring, llm_runtime=llm_runtime)
     effective_permission_policy = permission_policy or default_permission_policy()
     effective_capability_runtime = capability_runtime or _default_capability_runtime(
-        enable_workspace_skills=enable_workspace_skills
+        runtime_session=runtime_wiring.runtime_session,
+        enable_workspace_skills=enable_workspace_skills,
     )
     agent_runtime = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
@@ -403,9 +404,34 @@ def build_agent_runtime_wiring(
     )
 
 
-def _default_capability_runtime(*, enable_workspace_skills: bool) -> CapabilityRuntime:
-    providers = (LocalSkillCapabilityProvider(),) if enable_workspace_skills else ()
+def _default_capability_runtime(*, runtime_session: RuntimeSession, enable_workspace_skills: bool) -> CapabilityRuntime:
+    providers = (
+        LocalSkillCapabilityProvider(
+            skill_health_resolver=SkillHealthResolver(path_supplier=_terminal_path_supplier(runtime_session))
+        ),
+    ) if enable_workspace_skills else ()
     return CapabilityRuntime.with_default_providers(*providers)
+
+
+def _terminal_path_supplier(runtime_session: RuntimeSession):
+    def supplier() -> SkillBinaryLookupPath:
+        terminal_sessions = runtime_session.terminal_sessions
+        shell = terminal_sessions.shell
+        if shell is None:
+            return SkillBinaryLookupPath(path=None, source="Pulsara process PATH")
+        result = terminal_sessions.env_builder.build(
+            cwd=runtime_session.workspace_root,
+            workspace_root=runtime_session.workspace_root,
+            shell=shell,
+        )
+        source = (
+            "terminal PATH"
+            if not result.diagnostics.get("shell_snapshot_error")
+            else "terminal PATH with shell snapshot fallback"
+        )
+        return SkillBinaryLookupPath(path=result.env.get("PATH"), source=source)
+
+    return supplier
 
 
 def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime) -> RuntimeWiring:

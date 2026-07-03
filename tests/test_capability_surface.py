@@ -8,6 +8,7 @@ import pytest
 
 from tests.support.runtime_session import in_memory_runtime_session
 
+from pulsara_agent.capability import LocalSkillCapabilityProvider, LocalSkillProvider, SkillHealthResolver
 from pulsara_agent.capability.descriptor import (
     CapabilityAdvertisePolicy,
     CapabilityArtifactMode,
@@ -20,7 +21,7 @@ from pulsara_agent.capability.exposure import build_exposure_plan
 from pulsara_agent.capability.provider import CapabilityProviderOutput
 from pulsara_agent.capability.registry import CapabilityRegistry
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.capability.types import CapabilityResolveContext
+from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResolveContext
 from pulsara_agent.event import (
     AgentEvent,
     CustomEvent,
@@ -82,6 +83,7 @@ class DummyTool:
 @dataclass(frozen=True, slots=True)
 class StaticCapabilityProvider:
     descriptors: tuple[CapabilityDescriptor, ...]
+    active_injections: tuple[ActiveSkillInjection, ...] = ()
     provider_id: str = "static-test"
 
     def resolve(
@@ -91,7 +93,10 @@ class StaticCapabilityProvider:
         bound_tool_names: frozenset[str],
     ) -> CapabilityProviderOutput:
         del context, bound_tool_names
-        return CapabilityProviderOutput(descriptors=self.descriptors)
+        return CapabilityProviderOutput(
+            descriptors=self.descriptors,
+            active_injections=self.active_injections,
+        )
 
 
 def _descriptor(
@@ -99,6 +104,7 @@ def _descriptor(
     *,
     advertise_policy: CapabilityAdvertisePolicy = CapabilityAdvertisePolicy.DIRECT,
     availability: CapabilityAvailability = CapabilityAvailability.AVAILABLE,
+    permission_category: str = "general",
 ) -> CapabilityDescriptor:
     return CapabilityDescriptor(
         id=f"builtin:{name}",
@@ -111,7 +117,7 @@ def _descriptor(
         is_model_callable=True,
         is_read_only=True,
         is_concurrency_safe=True,
-        permission_category="general",
+        permission_category=permission_category,
         advertise_policy=advertise_policy,
         availability=availability,
     )
@@ -135,6 +141,29 @@ def _runtime_for_descriptors(*descriptors: CapabilityDescriptor) -> CapabilityRu
     return CapabilityRuntime(providers=(StaticCapabilityProvider(tuple(descriptors)),))
 
 
+def _runtime_for_provider(provider: StaticCapabilityProvider) -> CapabilityRuntime:
+    return CapabilityRuntime(providers=(provider,))
+
+
+def _firecrawl_active_injection(tmp_path: Path) -> ActiveSkillInjection:
+    skill_path = tmp_path / ".agents/skills/firecrawl-search/SKILL.md"
+    return ActiveSkillInjection(
+        name="firecrawl-search",
+        path=skill_path,
+        base_dir=skill_path.parent,
+        location=".agents/skills/firecrawl-search/SKILL.md",
+        content="# Firecrawl Search",
+        reason="explicit_user_mention",
+        suggested_tools=("terminal",),
+        required_binaries=("firecrawl",),
+        optional_binaries=("npx",),
+        external_services=("firecrawl",),
+        network_required=True,
+        auth_required="required",
+        cli_usage_kind="read",
+    )
+
+
 def test_builtin_provider_uses_explicit_descriptor_truth_for_bound_core_tools() -> None:
     output = BuiltinToolCapabilityProvider().resolve(
         CapabilityResolveContext(
@@ -154,6 +183,14 @@ def test_builtin_provider_uses_explicit_descriptor_truth_for_bound_core_tools() 
     assert descriptors["terminal_process"].is_open_world is True
     assert descriptors["exit_plan"].provider_kind is CapabilityProviderKind.WORKFLOW
     assert descriptors["exit_plan"].permission_category == "plan_workflow"
+
+
+def test_cli_route_has_no_provider_kind_or_typed_cli_tool() -> None:
+    assert "CLI" not in CapabilityProviderKind.__members__
+    assert "cli" not in {kind.value for kind in CapabilityProviderKind}
+
+    registry = ToolRegistry()
+    assert "CliCapabilityTool" not in {type(tool).__name__ for tool in registry.all()}
 
 
 def test_agent_runtime_requires_explicit_capability_runtime(tmp_path) -> None:
@@ -420,6 +457,214 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(tmp_path
     assert custom_events[1].value["tool_call_id"] == "call:noop"
     assert custom_events[1].value["descriptor_id"] == "builtin:noop"
     assert custom_events[1].value["decision"] == "allow"
+    assert "capability_context" not in custom_events[1].value
+
+
+def test_terminal_gate_decision_records_active_skill_capability_context(tmp_path) -> None:
+    transport = _ScriptedTransport(
+        [
+            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {"text": "done"},
+        ]
+    )
+    provider = StaticCapabilityProvider(
+        descriptors=(_descriptor("terminal", permission_category="terminal"),),
+        active_injections=(_firecrawl_active_injection(tmp_path),),
+    )
+    agent = AgentRuntime(
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=_llm_runtime(transport),
+        capability_runtime=_runtime_for_provider(provider),
+    )
+    registry = ToolRegistry()
+    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("search with $firecrawl-search"))
+
+    assert result.status is LoopStatus.FINISHED
+    gate_decision = next(
+        event.value
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, CustomEvent) and event.name == "capability_gate_decision"
+    )
+    assert gate_decision["decision"] == "allow"
+    assert gate_decision["capability_context"] == {
+        "active_skill_names": ["firecrawl-search"],
+        "context_kind": "active_skill_present",
+        "skill_suggested_tools": ["terminal"],
+        "cli_required_binaries": ["firecrawl"],
+        "cli_optional_binaries": ["npx"],
+        "cli_external_services": ["firecrawl"],
+        "cli_usage_kinds": ["read"],
+        "auth_required": "required",
+        "network_required": True,
+    }
+
+
+def test_terminal_gate_decision_has_no_active_skill_context_without_active_skill(tmp_path) -> None:
+    transport = _ScriptedTransport(
+        [
+            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=_llm_runtime(transport),
+        capability_runtime=_runtime_for_descriptors(_descriptor("terminal", permission_category="terminal")),
+    )
+    registry = ToolRegistry()
+    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("run terminal"))
+
+    assert result.status is LoopStatus.FINISHED
+    gate_decision = next(
+        event.value
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, CustomEvent) and event.name == "capability_gate_decision"
+    )
+    assert "capability_context" not in gate_decision
+
+
+def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(tmp_path) -> None:
+    transport = _ScriptedTransport(
+        [
+            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {"text": "done"},
+        ]
+    )
+    provider = StaticCapabilityProvider(
+        descriptors=(_descriptor("terminal", permission_category="terminal"),),
+        active_injections=(_firecrawl_active_injection(tmp_path),),
+    )
+    agent = AgentRuntime(
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=_llm_runtime(transport),
+        capability_runtime=_runtime_for_provider(provider),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.NEVER,
+            terminal=TerminalAccess.OFF,
+        ),
+    )
+    registry = ToolRegistry()
+    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("search with $firecrawl-search"))
+
+    assert result.status is LoopStatus.FINISHED
+    gate_decision = next(
+        event.value
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, CustomEvent) and event.name == "capability_gate_decision"
+    )
+    assert gate_decision["decision"] == "deny"
+    assert gate_decision["result_state"] == "denied"
+    assert gate_decision["capability_context"]["active_skill_names"] == ["firecrawl-search"]
+    assert gate_decision["capability_context"]["cli_required_binaries"] == ["firecrawl"]
+
+
+def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(tmp_path) -> None:
+    transport = _ScriptedTransport(
+        [{"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]}]
+    )
+    provider = StaticCapabilityProvider(
+        descriptors=(_descriptor("terminal", permission_category="terminal"),),
+        active_injections=(_firecrawl_active_injection(tmp_path),),
+    )
+    agent = AgentRuntime(
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=_llm_runtime(transport),
+        capability_runtime=_runtime_for_provider(provider),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.ASK,
+        ),
+    )
+    registry = ToolRegistry()
+    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("search with $firecrawl-search"))
+
+    assert result.status is LoopStatus.WAITING_USER
+    gate_decision = next(
+        event.value
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, CustomEvent) and event.name == "capability_gate_decision"
+    )
+    assert gate_decision["decision"] == "wait_for_user"
+    assert gate_decision["capability_context"]["active_skill_names"] == ["firecrawl-search"]
+
+
+def test_huggingface_local_skill_terminal_context_dogfood(tmp_path) -> None:
+    skill_dir = tmp_path / ".agents" / "skills" / "huggingface-local-models"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: huggingface-local-models
+description: Use Hugging Face CLI for local model workflows.
+suggested_tools: [terminal]
+required_binaries: [hf]
+optional_binaries: [git]
+external_services: [huggingface]
+auth_required: optional
+cli_usage_kind: read
+---
+# Hugging Face Local Models
+
+Use `hf` commands through the terminal when the user asks for Hugging Face local model workflows.
+""",
+        encoding="utf-8",
+    )
+    transport = _ScriptedTransport(
+        [
+            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {"text": "done"},
+        ]
+    )
+    provider = LocalSkillCapabilityProvider(
+        provider=LocalSkillProvider(include_user_skills=False),
+        skill_health_resolver=SkillHealthResolver(which=lambda binary: "/usr/bin/git" if binary == "git" else None),
+    )
+    agent = AgentRuntime(
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=_llm_runtime(transport),
+        capability_runtime=CapabilityRuntime.with_default_providers(provider),
+    )
+    registry = ToolRegistry()
+    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    agent.tool_executor.registry = registry
+
+    result = asyncio.run(agent.run_task("$huggingface-local-models list local model caches"))
+
+    assert result.status is LoopStatus.FINISHED
+    system_prompt = transport.contexts[0].system_prompt or ""
+    assert "Active Skill: huggingface-local-models" in system_prompt
+    assert "Required binaries: hf" in system_prompt
+    assert "Skill CLI hints are guidance only" in system_prompt
+    exposure_event = next(
+        event.value
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, CustomEvent) and event.name == "capability_exposure_resolved"
+    )
+    assert "skill_required_binary_missing" in [
+        diagnostic["code"] for diagnostic in exposure_event["diagnostics"]
+    ]
+    gate_decision = next(
+        event.value
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, CustomEvent) and event.name == "capability_gate_decision"
+    )
+    assert gate_decision["capability_context"]["active_skill_names"] == ["huggingface-local-models"]
+    assert gate_decision["capability_context"]["cli_required_binaries"] == ["hf"]
+    assert gate_decision["capability_context"]["cli_external_services"] == ["huggingface"]
+    assert gate_decision["capability_context"]["auth_required"] == "optional"
 
 
 def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(tmp_path) -> None:

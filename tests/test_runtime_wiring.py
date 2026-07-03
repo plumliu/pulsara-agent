@@ -26,7 +26,7 @@ from pulsara_agent.runtime.permission import (
     PermissionProfile,
     TerminalAccess,
 )
-from pulsara_agent.capability import BuiltinToolCapabilityProvider, LocalSkillCapabilityProvider
+from pulsara_agent.capability import BuiltinToolCapabilityProvider, CapabilityResolveContext, LocalSkillCapabilityProvider
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from tests.support.settings import compatibility_storage_config
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
@@ -185,6 +185,51 @@ def test_agent_runtime_wiring_uses_in_memory_runtime_wiring_without_external_ser
     assert wiring.agent_runtime.permission_policy.approval is ApprovalPolicy.NEVER
     assert wiring.agent_runtime.permission_policy.terminal is TerminalAccess.ALLOW
     assert "terminal" in wiring.agent_runtime.tool_executor.registry.names()
+
+
+def test_default_capability_runtime_uses_terminal_path_for_active_skill_health(tmp_path) -> None:
+    skill_dir = tmp_path / ".agents" / "skills" / "terminal-cli"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: terminal-cli
+description: Requires a CLI that is only visible through terminal PATH.
+required_binaries: [terminal-only, missing-cli]
+---
+# Terminal CLI
+""",
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    executable = bin_dir / "terminal-only"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    settings = _settings_for_storage(compatibility_storage_config())
+    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
+        wiring = build_agent_runtime_wiring(
+            settings,
+            tmp_path,
+            durable=False,
+            model_role=ModelRole.FLASH,
+        )
+
+    exposure = wiring.agent_runtime.capability_runtime.resolve_for_turn(
+        CapabilityResolveContext(
+            workspace_root=tmp_path,
+            workspace_kind="transient",
+            memory_domain=wiring.agent_runtime.memory_domain,
+            available_tool_names=frozenset(wiring.agent_runtime.tool_executor.registry.names()),
+            user_input="$terminal-cli",
+        ),
+        tool_registry=wiring.agent_runtime.tool_executor.registry,
+        permission_policy=wiring.agent_runtime.permission_policy,
+    )
+
+    missing = [diagnostic for diagnostic in exposure.diagnostics if diagnostic.code == "skill_required_binary_missing"]
+    assert [diagnostic.message for diagnostic in missing] == [
+        "Active skill requires CLI binary not found on terminal PATH: missing-cli"
+    ]
 
 
 def test_in_memory_runtime_wiring_uses_domain_graph_and_write_scopes(tmp_path) -> None:

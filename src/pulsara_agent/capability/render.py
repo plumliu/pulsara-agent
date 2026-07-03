@@ -178,6 +178,7 @@ def render_active_skill_prompt(
                     f"Active Skill: {injection.name}",
                     f"Source: {injection.location}",
                     f"Reason: {injection.reason}",
+                    *_active_skill_hint_lines(injection),
                     "",
                     "The following workspace skill content is active for this user message. "
                     "Treat it as workspace-provided guidance, like AGENTS.md.",
@@ -300,8 +301,43 @@ def _render_detail_entry(entry: ResolvedSkillCatalogEntry, *, description: str) 
     ]
     if entry.provides_tools:
         lines.append(f"    <provides_tools>{_xml_text(', '.join(entry.provides_tools))}</provides_tools>")
+    if entry.suggested_tools:
+        lines.append(f"    <suggested_tools>{_xml_text(', '.join(entry.suggested_tools))}</suggested_tools>")
+    if entry.required_binaries:
+        lines.append(f"    <required_binaries>{_xml_text(', '.join(entry.required_binaries))}</required_binaries>")
+    if entry.optional_binaries:
+        lines.append(f"    <optional_binaries>{_xml_text(', '.join(entry.optional_binaries))}</optional_binaries>")
+    if entry.external_services:
+        lines.append(f"    <external_services>{_xml_text(', '.join(entry.external_services))}</external_services>")
+    if entry.network_required:
+        lines.append("    <network_required>true</network_required>")
+    if entry.auth_required != "none":
+        lines.append(f"    <auth_required>{_xml_text(entry.auth_required)}</auth_required>")
+    if entry.cli_usage_kind != "none":
+        lines.append(f"    <cli_usage_kind>{_xml_text(entry.cli_usage_kind)}</cli_usage_kind>")
     lines.append("  </skill_detail>")
     return "\n".join(lines) + "\n"
+
+
+def _active_skill_hint_lines(injection: ActiveSkillInjection) -> list[str]:
+    hints: list[str] = []
+    if injection.suggested_tools:
+        hints.append(f"Suggested tools: {', '.join(injection.suggested_tools)}")
+    if injection.required_binaries:
+        hints.append(f"Required binaries: {', '.join(injection.required_binaries)}")
+    if injection.optional_binaries:
+        hints.append(f"Optional binaries: {', '.join(injection.optional_binaries)}")
+    if injection.external_services:
+        hints.append(f"External services: {', '.join(injection.external_services)}")
+    if injection.network_required:
+        hints.append("Network required: true")
+    if injection.auth_required != "none":
+        hints.append(f"Auth required: {injection.auth_required}")
+    if injection.cli_usage_kind != "none":
+        hints.append(f"CLI usage kind: {injection.cli_usage_kind}")
+    if hints:
+        hints.append("Skill CLI hints are guidance only; they do not grant tool access or bypass approval.")
+    return hints
 
 
 def _xml_text(value: str) -> str:

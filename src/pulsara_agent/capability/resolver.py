@@ -11,6 +11,7 @@ from pulsara_agent.capability.render import (
     render_active_skill_prompt,
     render_catalog_prompt,
 )
+from pulsara_agent.capability.skill_health import SkillHealthResolver
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityDiagnostic,
@@ -27,9 +28,11 @@ class LocalSkillCapabilityProvider:
         self,
         *,
         provider: LocalSkillProvider | None = None,
+        skill_health_resolver: SkillHealthResolver | None = None,
         catalog_budget_chars: int = DEFAULT_CATALOG_BUDGET_CHARS,
     ) -> None:
         self.provider = provider or LocalSkillProvider()
+        self.skill_health_resolver = skill_health_resolver or SkillHealthResolver()
         self.catalog_budget_chars = catalog_budget_chars
 
     def resolve(
@@ -53,9 +56,11 @@ class LocalSkillCapabilityProvider:
         )
         catalog = render_catalog_prompt(catalog_entries, budget_chars=self.catalog_budget_chars)
         active = render_active_skill_prompt(active_injections)
+        health_diagnostics = self.skill_health_resolver.diagnostics_for_active_skills(active_injections)
         diagnostics = (
             *discovery.diagnostics,
             *active_diagnostics,
+            *health_diagnostics,
             *catalog.diagnostics,
             *active.diagnostics,
         )
@@ -74,6 +79,13 @@ def _catalog_entry(skill: LocalSkillManifest) -> ResolvedSkillCatalogEntry:
         description=skill.description,
         location=skill.location,
         provides_tools=skill.provides_tools,
+        suggested_tools=skill.suggested_tools,
+        required_binaries=skill.required_binaries,
+        optional_binaries=skill.optional_binaries,
+        external_services=skill.external_services,
+        network_required=skill.network_required,
+        auth_required=skill.auth_required,
+        cli_usage_kind=skill.cli_usage_kind,
         when_to_use=skill.when_to_use,
     )
 
@@ -110,6 +122,13 @@ def _active_injections(
                 location=skill.location,
                 content=skill.content,
                 reason="host_command" if name in active_skill_names else "explicit_user_mention",
+                suggested_tools=skill.suggested_tools,
+                required_binaries=skill.required_binaries,
+                optional_binaries=skill.optional_binaries,
+                external_services=skill.external_services,
+                network_required=skill.network_required,
+                auth_required=skill.auth_required,
+                cli_usage_kind=skill.cli_usage_kind,
             )
         )
     return tuple(injections), tuple(diagnostics)

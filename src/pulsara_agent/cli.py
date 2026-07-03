@@ -14,6 +14,8 @@ from pulsara_agent.capability import (
     BUNDLED_OPT_OUT_MARKER_NAME,
     CapabilityResolveContext,
     LocalSkillCapabilityProvider,
+    SkillBinaryLookupPath,
+    SkillHealthResolver,
     bundled_skills_status,
     reset_bundled_skill,
     sync_bundled_skills,
@@ -872,7 +874,13 @@ async def _host_inspect(args) -> dict[str, object]:
             runtime_session,
             permission_state=PermissionState.from_policy(permission_policy),
         )
-        capability_runtime = CapabilityRuntime.with_default_providers(LocalSkillCapabilityProvider())
+        capability_runtime = CapabilityRuntime.with_default_providers(
+            LocalSkillCapabilityProvider(
+                skill_health_resolver=SkillHealthResolver(
+                    path_supplier=_terminal_path_supplier(runtime_session),
+                )
+            )
+        )
         exposure = capability_runtime.resolve_for_turn(
             CapabilityResolveContext(
                 workspace_root=workspace.workspace_root,
@@ -933,6 +941,7 @@ async def _host_inspect(args) -> dict[str, object]:
                 "when_to_use": entry.when_to_use,
                 "location": entry.location,
                 "provides_tools": list(entry.provides_tools),
+                **_skill_cli_hint_snapshot(entry),
             }
             for entry in exposure.catalog_entries
         ],
@@ -947,6 +956,46 @@ async def _host_inspect(args) -> dict[str, object]:
         "capability_diagnostics": [diagnostic.to_dict() for diagnostic in exposure.diagnostics],
         "bundled_skills": bundled_skills_status().to_dict(),
     }
+
+
+def _skill_cli_hint_snapshot(entry) -> dict[str, object]:
+    snapshot: dict[str, object] = {}
+    if entry.suggested_tools:
+        snapshot["suggested_tools"] = list(entry.suggested_tools)
+    if entry.required_binaries:
+        snapshot["required_binaries"] = list(entry.required_binaries)
+    if entry.optional_binaries:
+        snapshot["optional_binaries"] = list(entry.optional_binaries)
+    if entry.external_services:
+        snapshot["external_services"] = list(entry.external_services)
+    if entry.network_required:
+        snapshot["network_required"] = True
+    if entry.auth_required != "none":
+        snapshot["auth_required"] = entry.auth_required
+    if entry.cli_usage_kind != "none":
+        snapshot["cli_usage_kind"] = entry.cli_usage_kind
+    return snapshot
+
+
+def _terminal_path_supplier(runtime_session):
+    def supplier() -> SkillBinaryLookupPath:
+        terminal_sessions = runtime_session.terminal_sessions
+        shell = terminal_sessions.shell
+        if shell is None:
+            return SkillBinaryLookupPath(path=None, source="Pulsara process PATH")
+        result = terminal_sessions.env_builder.build(
+            cwd=runtime_session.workspace_root,
+            workspace_root=runtime_session.workspace_root,
+            shell=shell,
+        )
+        source = (
+            "terminal PATH"
+            if not result.diagnostics.get("shell_snapshot_error")
+            else "terminal PATH with shell snapshot fallback"
+        )
+        return SkillBinaryLookupPath(path=result.env.get("PATH"), source=source)
+
+    return supplier
 
 
 def _settings_from_host_args(args) -> PulsaraSettings:

@@ -18,6 +18,7 @@ from pulsara_agent.capability.local_skills import LocalSkillProvider
 from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
 from pulsara_agent.capability.render import render_active_skill_prompt, render_catalog_prompt
 from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
+from pulsara_agent.capability.skill_health import SkillBinaryLookupPath, SkillHealthResolver
 from pulsara_agent.capability.call_classifier import (
     CapabilityCallClassification,
     DefaultCapabilityCallClassifier,
@@ -69,6 +70,8 @@ __all__ = [
     "LocalSkillProvider",
     "RenderedCapabilityPrompt",
     "ResolvedSkillCatalogEntry",
+    "SkillHealthResolver",
+    "SkillBinaryLookupPath",
     "bundled_skills_status",
     "default_pulsara_home",
     "render_active_skill_prompt",

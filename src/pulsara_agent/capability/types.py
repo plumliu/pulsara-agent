@@ -16,6 +16,8 @@ WorkspaceKind = Literal["project", "transient"]
 CapabilityDiagnosticSeverity = Literal["info", "warning", "error"]
 SkillSource = Literal["workspace", "user", "bundled"]
 ActiveSkillReason = Literal["explicit_user_mention", "host_command"]
+SkillAuthRequired = Literal["none", "optional", "required"]
+SkillCliUsageKind = Literal["none", "read", "write", "mixed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +60,13 @@ class LocalSkillManifest:
     source: SkillSource = "workspace"
     when_to_use: str | None = None
     provides_tools: tuple[str, ...] = ()
+    suggested_tools: tuple[str, ...] = ()
+    required_binaries: tuple[str, ...] = ()
+    optional_binaries: tuple[str, ...] = ()
+    external_services: tuple[str, ...] = ()
+    network_required: bool = False
+    auth_required: SkillAuthRequired = "none"
+    cli_usage_kind: SkillCliUsageKind = "none"
     disable_model_invocation: bool = False
     user_invocable: bool = True
     body_too_large: bool = False
@@ -69,6 +78,13 @@ class ResolvedSkillCatalogEntry:
     description: str
     location: str
     provides_tools: tuple[str, ...] = ()
+    suggested_tools: tuple[str, ...] = ()
+    required_binaries: tuple[str, ...] = ()
+    optional_binaries: tuple[str, ...] = ()
+    external_services: tuple[str, ...] = ()
+    network_required: bool = False
+    auth_required: SkillAuthRequired = "none"
+    cli_usage_kind: SkillCliUsageKind = "none"
     when_to_use: str | None = None
 
 
@@ -80,6 +96,13 @@ class ActiveSkillInjection:
     location: str
     content: str
     reason: ActiveSkillReason
+    suggested_tools: tuple[str, ...] = ()
+    required_binaries: tuple[str, ...] = ()
+    optional_binaries: tuple[str, ...] = ()
+    external_services: tuple[str, ...] = ()
+    network_required: bool = False
+    auth_required: SkillAuthRequired = "none"
+    cli_usage_kind: SkillCliUsageKind = "none"
 
 
 @dataclass(frozen=True, slots=True)

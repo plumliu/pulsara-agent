@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.capability.types import CapabilityResolveContext
+from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResolveContext
 from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
@@ -101,6 +101,7 @@ from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutor
 WorkspaceKind = Literal["project", "transient"]
 
 _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME = "plan_revision_required_instruction"
+_TERMINAL_CAPABILITY_CONTEXT_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
 
 StopReason = Literal[
     "final",
@@ -112,6 +113,56 @@ StopReason = Literal[
     "waiting_user",
     "aborted",
 ]
+
+
+def _terminal_capability_context(
+    call: ToolCall,
+    exposure: CapabilityExposurePlan,
+) -> dict[str, object] | None:
+    if call.name not in _TERMINAL_CAPABILITY_CONTEXT_TOOL_NAMES:
+        return None
+    if not exposure.active_injections:
+        return None
+    active_skill_names = tuple(injection.name for injection in exposure.active_injections)
+    context: dict[str, object] = {
+        "active_skill_names": list(active_skill_names),
+        "context_kind": "active_skill_present",
+    }
+    suggested_tools = _merged_skill_values(exposure.active_injections, "suggested_tools")
+    if suggested_tools:
+        context["skill_suggested_tools"] = suggested_tools
+    required_binaries = _merged_skill_values(exposure.active_injections, "required_binaries")
+    if required_binaries:
+        context["cli_required_binaries"] = required_binaries
+    optional_binaries = _merged_skill_values(exposure.active_injections, "optional_binaries")
+    if optional_binaries:
+        context["cli_optional_binaries"] = optional_binaries
+    external_services = _merged_skill_values(exposure.active_injections, "external_services")
+    if external_services:
+        context["cli_external_services"] = external_services
+    cli_usage_kinds = sorted(
+        {injection.cli_usage_kind for injection in exposure.active_injections if injection.cli_usage_kind != "none"}
+    )
+    if cli_usage_kinds:
+        context["cli_usage_kinds"] = cli_usage_kinds
+    auth_required = _max_auth_required(exposure.active_injections)
+    if auth_required != "none":
+        context["auth_required"] = auth_required
+    if any(injection.network_required for injection in exposure.active_injections):
+        context["network_required"] = True
+    return context
+
+
+def _merged_skill_values(injections: tuple[ActiveSkillInjection, ...], field_name: str) -> list[str]:
+    values: set[str] = set()
+    for injection in injections:
+        values.update(getattr(injection, field_name))
+    return sorted(values)
+
+
+def _max_auth_required(injections: tuple[ActiveSkillInjection, ...]) -> str:
+    rank = {"none": 0, "optional": 1, "required": 2}
+    return max((injection.auth_required for injection in injections), key=lambda value: rank[value], default="none")
 
 
 def compose_system_prompt(
@@ -422,6 +473,9 @@ class AgentRuntime:
         }
         if result_state is not None:
             value["result_state"] = result_state.value
+        capability_context = _terminal_capability_context(call, exposure)
+        if capability_context is not None:
+            value["capability_context"] = capability_context
         yield await self.runtime_session.emit(
             CustomEvent(
                 **self._event_context(state).event_fields(),

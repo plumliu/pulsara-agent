@@ -973,7 +973,7 @@ def test_cli_host_inspect_prints_host_process_recovery_scope_and_skills(
     monkeypatch.setattr(
         cli,
         "LocalSkillCapabilityProvider",
-        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
+        lambda **kwargs: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False), **kwargs),
     )
     skill_dir = tmp_path / ".agents" / "skills" / "review-pr"
     skill_dir.mkdir(parents=True)
@@ -984,6 +984,15 @@ description: Review pull requests.
 provides_tools:
   - read_file
   - not_a_tool
+suggested_tools:
+  - terminal
+required_binaries:
+  - firecrawl
+external_services:
+  - firecrawl
+network_required: true
+auth_required: required
+cli_usage_kind: read
 ---
 # Review PR
 """,
@@ -1005,11 +1014,17 @@ provides_tools:
         {
             "name": "review-pr",
             "description": "Review pull requests.",
-            "when_to_use": None,
-            "location": ".agents/skills/review-pr/SKILL.md",
-            "provides_tools": ["read_file"],
-        }
-    ]
+                "when_to_use": None,
+                "location": ".agents/skills/review-pr/SKILL.md",
+                "provides_tools": ["read_file"],
+                "suggested_tools": ["terminal"],
+                "required_binaries": ["firecrawl"],
+                "external_services": ["firecrawl"],
+                "network_required": True,
+                "auth_required": "required",
+                "cli_usage_kind": "read",
+            }
+        ]
     assert "read_file" in snapshot["tools"]
     # Visible-but-blocked: gate is the sole authority, so even under the
     # read-only inspect mode the tools stay registered/visible.
@@ -1033,9 +1048,8 @@ provides_tools:
             "terminal": "off",
         },
     }
-    assert [diagnostic["code"] for diagnostic in snapshot["capability_diagnostics"]] == [
-        "skill_unknown_tool_reference"
-    ]
+    diagnostic_codes = [diagnostic["code"] for diagnostic in snapshot["capability_diagnostics"]]
+    assert "skill_unknown_tool_reference" in diagnostic_codes
     assert "bundled_skills" in snapshot
     assert not (tmp_path / "pulsara-home" / "skills").exists()
     assert FakeCore.instances == []
@@ -1048,7 +1062,7 @@ def test_cli_host_inspect_can_report_explicit_trusted_host_policy(
     monkeypatch.setattr(
         cli,
         "LocalSkillCapabilityProvider",
-        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
+        lambda **kwargs: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False), **kwargs),
     )
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -1082,7 +1096,7 @@ def test_cli_host_inspect_can_report_terminal_ask_policy(
     monkeypatch.setattr(
         cli,
         "LocalSkillCapabilityProvider",
-        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
+        lambda **kwargs: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False), **kwargs),
     )
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -1116,7 +1130,7 @@ def test_cli_host_inspect_can_report_on_request_with_terminal_allow(
     monkeypatch.setattr(
         cli,
         "LocalSkillCapabilityProvider",
-        lambda: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False)),
+        lambda **kwargs: LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False), **kwargs),
     )
     parser = cli.build_parser()
     args = parser.parse_args(
