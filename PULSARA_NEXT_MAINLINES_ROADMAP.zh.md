@@ -375,10 +375,7 @@ Compaction 的每个测试都应该能输出 Inspector report。
 - recovery note 重复。
 - vector recall trace 指向错误 graph。
 - terminal retained state 和 summary 冲突。
-
-## 4. 主线三:Unified Capability Surface
-
-### 4.1 目标
+## 4.1 目标
 
 把 built-in tools、skills、CLI adapters、MCP tools 统一成一套 capability protocol。
 

@@ -8,6 +8,7 @@
 - 先定义本地真值 `CapabilityDescriptor`，再由它派生模型可见 `ToolSpec`、执行 gate、artifact policy、inspector 解释。
 - 注册、广告、授权、执行必须分层；「注册存在」不等于「本轮广告」不等于「执行允许」。
 - V1 行为保持现有用户体验基本不变，但架构直接 hard cut：built-in tools 使用显式 descriptor truth，不从 `ToolRegistry` 或 `Tool` metadata 反推 descriptor。
+- CLI 与 MCP 不走同一条路线：CLI v1 是 skill/docs/prompt guidance + terminal execution；MCP 则是 server-configured typed tool surface，未来必须由 MCP provider 负责配置、连接、发现、暴露、授权和调用。
 
 ## 0. 当前关键接线点
 
@@ -111,7 +112,7 @@ Unified Surface 的 execution gate 有两个可选落点：
 这是 V0 必要的安全线，但它有几个问题：
 
 - 新工具必须手动更新多个 name set。
-- MCP/CLI/namespace tool 进入后，name set 会迅速漂移。
+- MCP/namespace tool 进入后，name set 会迅速漂移；CLI subcommand 若错误 typed 化，也会制造同类漂移。
 - `is_read_only` drift test 只能覆盖 built-in tool，不能覆盖 provider descriptor。
 - artifact、timeout、open-world、destructive 等分类不在 gate 的统一输入里。
 
@@ -179,7 +180,6 @@ class CapabilityProviderKind(StrEnum):
     WORKFLOW = "workflow"
     MEMORY = "memory"
     SKILL = "skill"
-    CLI = "cli"
     MCP = "mcp"
 
 class CapabilityAvailability(StrEnum):
@@ -238,7 +238,7 @@ class CapabilityDescriptor:
 
 - `id` 是内部稳定身份，例如 `builtin:terminal`、`memory:memory_search`、`mcp:github/issues.create`。
 - `name` 是模型 tool call name；V1 built-in 可以保持现有 name。
-- `namespace` 为未来 MCP/CLI namespace 预留。
+- `namespace` 为未来 MCP/plugin namespace 预留；CLI v1 不引入 typed namespace。
 - `is_model_callable=False` 可表达 skill catalog 这类 prompt capability。
 - `advertise_policy` 只决定模型是否看到；执行时仍必须 gate。
 - `availability != AVAILABLE` 时默认不 direct advertise，除非 exposure planner 明确降级展示。
@@ -329,14 +329,14 @@ class CapabilityCallClassifier(Protocol):
   - `effective_permission_category="terminal"`
   - `effective_read_only=False`
   - 继续走 terminal ask/on-request/hardline 规则。
-- 未来 CLI provider 可以按 subcommand / argv template 细分。
+- CLI 不按 subcommand / argv template 注册 typed tools；它通过 active skill / recipe 指导 terminal 调用，并让这条关系进入 capability diagnostics / inspector。
 - 未来 MCP provider 可以按 server tool annotations / destructive hints 细分；缺失 hints 时继承 fail-closed descriptor 默认。
 
 注意：call classifier 不能把 read-only profile 下的 `terminal_process` 整体打开。当前契约明确 read-only 下 `terminal_process` 仍整体被拦；action-level observe 豁免只适用于 profile 已允许 terminal 存在的非 read-only 模式。
 
 ### 1.4 Execution binding
 
-Descriptor 不是 executor。未来 CLI/MCP provider 如果只注册 descriptor，会出现「能被 advertise/gate，但 `ToolExecutor.registry.get(name)` 找不到可执行对象」的半吊子状态。
+Descriptor 不是 executor。未来 MCP provider 如果只注册 descriptor，会出现「能被 advertise/gate，但 `ToolExecutor.registry.get(name)` 找不到可执行对象」的半吊子状态。
 
 V1 明确采用现有 `ToolRegistry` 作为 execution binding registry：
 
@@ -349,11 +349,10 @@ V1 明确采用现有 `ToolRegistry` 作为 execution binding registry：
   - ToolRegistry 有、descriptor 没有：PR 0 以后视为 drift；短期可通过 mirror adapter 兜底，最终禁止。
   - schema 不一致：diagnostic + test failure。
 
-因此 PR 6/7 的 CLI/MCP provider 不是「只产 descriptor」：
+因此 typed provider 不是「只产 descriptor」：
 
-- CLI provider 产出一个 `CliCapabilityTool` / `AsyncCliCapabilityTool` adapter，并注册到 `ToolRegistry`。
 - MCP provider 产出一个 `McpCapabilityTool` / `AsyncMcpCapabilityTool` adapter，并注册到 `ToolRegistry`。
-- 这两个 adapter 仍由 `ToolExecutor` 调用；permission、artifact、trace 仍走统一 capability path。
+- adapter 仍由 `ToolExecutor` 调用；permission、artifact、trace 仍走统一 capability path。
 
 后续如果需要更干净的 `CapabilityExecutorRegistry`，可以在 descriptor/gate/artifact 稳定后迁移。但 V1 不引入第二套执行 registry，避免双执行路径。
 
@@ -413,7 +412,7 @@ V1 行为：
 - unavailable descriptors 不进 direct tool specs。
 - local skills 进入 catalog prompt，但 `is_model_callable=False`，不进 tool specs。
 - read-only / plan mode 暂不隐藏 mutating tools，继续 visible-but-blocked，以维持 prompt prefix cache 和现有权限契约。
-- future MCP/CLI 可选择 `DEFERRED`。
+- future MCP/plugin capability 可选择 `DEFERRED`；CLI recipes 通过 skill catalog/active injection 做摘要与按需展开。
 - `callable_names` 是执行 gate 的输入。V1 默认等于 `direct_names`；未来 deferred discovery / activation 可以把已激活的 deferred capability 加入 `callable_names`，但 hidden/unavailable capability 不得进入。
 
 ### 1.7 CapabilityRuntime
@@ -748,65 +747,71 @@ print:
 
 不要让 inspect 只显示当前静态 ToolRegistry，否则历史 exposure / gate 选择没有可视化。
 
-## 4. CLI adapter 设计边界
+## 4. CLI 的 v1 设计边界：skill + terminal 的 capability 化
 
-CLI adapter 不在第一批 PR 实装，但 descriptor 要能承载它。
+本地 agent 产品的主流做法不是把全局 CLI 大量封装成 typed tools，而是：
 
-CLI capability 必填 descriptor 字段：
-
-- `command`
-- `argv_template`
-- `cwd_policy`
-- `env_policy`
-- `stdin_policy`
-- `timeout_ms`
-- `max_inline_chars`
-- `artifact_mode`
-- `is_read_only`
-- `is_open_world`
-- `permission_category`
-
-CLI provider 还必须注册 execution adapter：
-
-```python
-class CliCapabilityTool:
-    name: str
-    description: str
-    parameters: dict[str, object]
-    is_read_only: bool
-    is_concurrency_safe: bool
-
-    def execute(self, call: ToolCall) -> ToolExecutionResult:
-        ...
+```text
+skill / instruction / recipe
+        +
+terminal / exec / shell tool
 ```
 
-要求：
+也就是模型读 `SKILL.md` 或 recipe，然后用 terminal 调用用户环境中真实存在的 `hf`、`gh`、`docker`、`npm`、`uv` 等 CLI。Pulsara v1 应跟随这个形态：CLI 不作为默认 provider 注册 typed tools，而是把「active skill 指导 terminal 调用」纳入 capability surface。
 
-- `CliCapabilityTool.name == CapabilityDescriptor.name`。
-- `CliCapabilityTool.parameters == CapabilityDescriptor.input_schema` 的 model-callable 投影。
-- tool 与 descriptor 必须由同一 config entry 生成，不能手写两份。
-- execution adapter 只执行固定 binary / argv template，不允许把任意 shell string 交给 `/bin/sh -c`，除非 descriptor 明确 `permission_category="terminal"` 且走 terminal hardline。
-- stdout/stderr 统一返回 `ToolExecutionResult` 和 artifact candidates，不直接写 event log。
+v1 目标：
 
-默认：
+- skill catalog / active skill 能声明 suggested terminal usage、required binaries、auth/network hints。
+- terminal call 保持唯一真实执行边界；permission gate、hardline、artifact、retained process 都继续由 terminal tool 负责。
+- event / inspector 能解释：
+  - 当前 terminal 调用是否发生在某个 active skill / CLI recipe 语境下；
+  - 该 skill 建议了哪些工具或外部 CLI；
+  - terminal 调用为什么 allow / ask / deny；
+  - 大输出为何进入 artifact。
+- skill frontmatter 只能提供 hints / diagnostics，不能直接新增 tool schema，也不能放宽 terminal 权限。
 
-- `is_read_only=False`
-- `is_concurrency_safe=False`
-- `is_open_world=True`
-- `requires_user_interaction=False`
-- `artifact_mode=LARGE_OUTPUT`
-- interactive stdin 禁止
+建议的 skill metadata 方向：
 
-重要边界：
+```yaml
+suggested_tools:
+  - terminal
+required_binaries:
+  - hf
+external_services:
+  - huggingface
+network_required: true
+auth_required: optional
+```
 
-- CLI adapter 不等于 terminal。
-- 不能因为 CLI command 看起来安全，就绕过 terminal hardline。
-- 如果 CLI adapter 执行 shell command，应视为 terminal category。
-- 如果 CLI adapter 执行固定 binary + fixed argv template，可是独立 category，但仍要 timeout/artifact/env/cwd policy。
+这些字段 v1 可先作为 diagnostic / inspector projection，不进入 permission 决策硬门槛。真正的硬门槛仍是 terminal permission policy。
+
+typed CLI provider / adapter 不属于当前路线。若未来确实需要把少数 CLI 子命令封装成 tool，必须另起设计并证明它不会绕过 terminal hardline；本实施文档不为它预留当前 PR。
 
 ## 5. MCP adapter 设计边界
 
-MCP adapter 也不建议第一批直接实装，但 descriptor 需预留：
+MCP 与 CLI 不同。普通 CLI 没有统一 schema / discovery / elicitation，v1 应作为 skill-guided terminal usage；MCP server 则通过 protocol 暴露 typed tools，因此未来需要真实 MCP provider 和 execution adapter。但 MCP adapter 也不建议第一批直接实装，当前只冻结边界。
+
+### 5.1 server config 是 provider 输入，不是 prompt 文本
+
+参考 Codex / Claude Code，MCP 至少有两类部署形态：
+
+- 本地 stdio server：`command / args / env / cwd`，由 host/session 启动并在 shutdown 时终止。
+- 远端 HTTP/SSE/server：`url / headers / bearer token / OAuth`，由 client 连接，可能进入 `needs-auth` 或 retry 状态。
+
+配置还需要表达：
+
+- `enabled / required`
+- startup timeout / tool timeout
+- server-level 和 tool-level approval mode
+- `enabled_tools / disabled_tools`
+- server health / auth state / diagnostics
+- namespace / model-visible name normalization
+
+这些配置不应作为 skill prompt 让模型“自己连接 MCP”；它们是 runtime control plane 的输入。
+
+### 5.2 descriptor snapshot
+
+MCP provider discovery 后应输出 descriptor snapshot：
 
 - server id
 - tool name
@@ -817,7 +822,7 @@ MCP adapter 也不建议第一批直接实装，但 descriptor 需预留：
 - elicitation support
 - provider lifecycle owner
 
-MCP provider 也必须注册 execution adapter：
+MCP provider 同时必须注册 execution adapter，或通过统一 execution binding registry 建立绑定；只有 descriptor 没有 binding 的 MCP tool 必须 hidden/degraded：
 
 ```python
 class McpCapabilityTool:
@@ -840,8 +845,10 @@ class McpCapabilityTool:
 
 - adapter 不拥有 MCP client；它只借用 provider-owned client/session。
 - provider owner 必须接入 HostSession / HostCore shutdown 链。
+- 本地 stdio MCP server 的进程归 HostSession/HostCore 或专门 MCP owner 关闭；远端 HTTP/SSE client 的连接池/session 也要进入同一 lifecycle。
 - adapter 将 MCP result 规范化为 `ToolExecutionResult`，大 payload 通过 artifact candidates 交给 `ToolResultArtifactService`。
 - MCP elicitation 不得在 adapter 内阻塞 stdin；必须转成 Pulsara pending interaction。
+- MCP server/tool 名称可能包含用户私有配置，event/telemetry 需要可脱敏；inspector 本地调试可保留更多 provenance。
 
 默认策略：
 
@@ -849,12 +856,15 @@ class McpCapabilityTool:
 - 数量多时 deferred。
 - unknown destructive/open-world classification 时 fail-closed：`is_read_only=False`、`is_open_world=True`。
 - MCP elicitation 走 pending interaction，不允许 provider 私下阻塞 CLI。
+- `required=true` server 启动失败是否 fail-fast，应在 HostSession/HostCore 启动策略中显式决定；非 required 默认 degraded/hidden，并进入 capability diagnostics。
 
 最重要的坑：
 
 - MCP client 是 async resource，必须归属于 HostSession/HostCore 或 provider owner。
 - 不能跨 worker thread/event loop 共享 async client。
 - shutdown 要幂等、有界 drain。
+- 不要每轮用户消息重新连接所有 MCP server；server health/tool snapshot 应有 generation / TTL / cached diagnostics。
+- 不要把普通 CLI 伪装成 MCP；如果某能力只是 `firecrawl search ...` 这种 shell recipe，它属于 skill-guided terminal route。
 
 ## 6. Skill 设计边界
 
@@ -979,7 +989,7 @@ skill_use(name, args?)
 
 - descriptor direct advertise 但 ToolRegistry 缺 execution binding：不 direct advertise，并产出 diagnostic。
 - ToolRegistry 有 tool 但 descriptor 缺失：PR 0 mirror adapter 可兜底；PR 5 后测试应 fail。
-- CLI fake provider 同一 config entry 生成 descriptor + `CliCapabilityTool`。
+- CLI v1 不注册 typed tool；测试 active skill / CLI recipe hints 能和 terminal call、permission reason、artifact 诊断关联。
 - MCP mock provider 同一 server snapshot 生成 descriptor + `McpCapabilityTool`。
 - schema drift：descriptor input schema 与 execution adapter parameters 不一致时 fail。
 
@@ -1137,35 +1147,37 @@ skill_use(name, args?)
 - `CapabilityExposureResolvedEvent` 或等价 typed event 可从 event log replay。
 - `CapabilityGateDecisionEvent` 或等价 typed event 可解释 tool call 被 allow/ask/deny 的历史原因。
 
-### PR 6：CLI provider prototype
+### PR 6：CLI skill-guided terminal observability
 
 目标：
 
-- 接一个最小 CLI provider，但默认不开。
-- 通过静态 config 同时注册固定命令 descriptor 和 `CliCapabilityTool` execution adapter。
-- 验证 cwd/env/timeout/artifact/read-only/open-world 策略。
+- 不做 typed CLI provider / adapter。
+- 扩展 local skill metadata / diagnostics，让 skill 可以声明 suggested terminal usage、required binaries、auth/network hints。
+- 在 runtime / inspector 中关联 active skill、terminal call、permission decision、artifact / retained process。
+- 验证 CLI 仍通过 terminal tool 执行，不能绕过 terminal permission / hardline。
 
 落点：
 
-- `src/pulsara_agent/capability/providers/cli.py`
-- `src/pulsara_agent/tools/adapters/cli.py` 或 provider 内部 adapter
-- config/settings
-- tests with fake command
+- `src/pulsara_agent/capability/local_skills.py`
+- `src/pulsara_agent/capability/resolver.py`
+- `src/pulsara_agent/runtime/agent.py`
+- `src/pulsara_agent/inspector/service.py`
+- tests with fake skill + terminal call
 
 完成标准：
 
-- CLI descriptor 与 `CliCapabilityTool` 由同一 config entry 生成。
-- advertised CLI capability 可真实执行。
-- CLI capability 不走 terminal tool name。
-- 但 open-world/terminal-like command 仍受 gate 约束。
-- timeout 和 artifact policy 生效。
+- skill 可声明 required binaries / network / auth / suggested terminal usage，并在 catalog / diagnostics 中可见。
+- active skill 下的 terminal call 仍显示为 terminal capability，不新增 CLI tool schema。
+- terminal permission / hardline / artifact 行为保持不变。
+- inspector 能解释「该 terminal 调用发生在某 active skill / CLI recipe 语境下」。
+- typed CLI provider / adapter 不属于 PR 6，也不是当前 capability surface 的默认后续项。
 
 ### PR 7：MCP provider design spike / mock provider
 
 目标：
 
 - 先做 mock MCP provider，不直接接真实外部 MCP server。
-- 验证 namespace、deferred exposure、health、schema mapping。
+- 验证 stdio/remote 两类 server config shape、namespace、deferred exposure、health、schema mapping。
 - 同时验证 descriptor 和 `McpCapabilityTool` execution adapter 的绑定关系。
 - 为真实 MCP client lifecycle 留 owner seam。
 
@@ -1182,15 +1194,17 @@ skill_use(name, args?)
 - unavailable MCP server 不 direct advertise。
 - mock MCP capability 可通过 ToolExecutor 执行。
 - MCP adapter 不拥有 client，只借用 provider-owned lifecycle resource。
+- mock local stdio server 与 mock remote server 的 provenance / health / timeout / auth state 都能进入 diagnostics。
+- 明确 Firecrawl 这类能力的两条路线：Firecrawl CLI skill 继续走 terminal；Firecrawl MCP server 才进入 MCP provider。
 
 ## 10. 为什么不先做 CLI/MCP
 
-因为 CLI/MCP 是最容易放大架构债的 provider：
+因为 CLI/MCP 是最容易放大架构债的外部能力入口：
 
 - CLI 会放大 terminal / cwd / env / stdout / timeout 问题。
 - MCP 会放大 async resource / lifecycle / namespace / auth / elicitation 问题。
 
-如果没有 descriptor/exposure/gate/artifact 这四层，CLI/MCP 接进来只会制造新的一批 name allowlist 和 provider 私有规则。先做 PR 0–5，是为了让 PR 6/7 不再开新洞。
+如果没有 descriptor/exposure/gate/artifact 这四层，MCP 接进来会制造新的一批 name allowlist 和 provider 私有规则；CLI 若被 typed 化，也会绕开 terminal 既有 hardline。先做 PR 0–5，是为了让 PR 6/7 不再开新洞。
 
 ## 11. 开工前需要明确的两个小决策
 
@@ -1232,4 +1246,4 @@ PR 0–5 完成后，系统应满足：
 8. inspector 能从 durable event log 解释 capability 来源、可见性和 gate 结果。
 9. 现有 built-in 行为不回退。
 
-这时再接 CLI/MCP，才是往统一 surface 上加 provider，而不是给 runtime 又挂两条旁路。
+这时再接 CLI skill-guided terminal observability 与 MCP provider，才是往统一 surface 上加能力来源，而不是给 runtime 又挂两条旁路。

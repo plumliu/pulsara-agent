@@ -12,7 +12,6 @@ class CapabilityProviderKind(StrEnum):
     WORKFLOW = "workflow"
     MEMORY = "memory"
     SKILL = "skill"
-    CLI = "cli"
     MCP = "mcp"
 
 

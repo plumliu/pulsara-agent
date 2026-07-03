@@ -6,7 +6,11 @@ import re
 
 from pulsara_agent.capability.local_skills import LocalSkillProvider
 from pulsara_agent.capability.provider import CapabilityProviderOutput
-from pulsara_agent.capability.render import render_active_skill_prompt, render_catalog_prompt
+from pulsara_agent.capability.render import (
+    DEFAULT_CATALOG_BUDGET_CHARS,
+    render_active_skill_prompt,
+    render_catalog_prompt,
+)
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityDiagnostic,
@@ -23,7 +27,7 @@ class LocalSkillCapabilityProvider:
         self,
         *,
         provider: LocalSkillProvider | None = None,
-        catalog_budget_chars: int = 8000,
+        catalog_budget_chars: int = DEFAULT_CATALOG_BUDGET_CHARS,
     ) -> None:
         self.provider = provider or LocalSkillProvider()
         self.catalog_budget_chars = catalog_budget_chars
