@@ -13,6 +13,7 @@ from pulsara_agent.event import (
     AgentEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionStartedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
@@ -37,15 +38,18 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.runtime.plan import (
+    McpElicitationResolution,
     PLAN_ACTIVE_INSTRUCTION,
     PLAN_ACTIVE_INSTRUCTION_NAME,
     PLAN_ENTRY_INSTRUCTION,
     PLAN_ENTRY_INSTRUCTION_NAME,
     PendingInteraction,
+    PendingMcpElicitation,
     PendingPlanInteraction,
     PlanInteractionResolution,
     PlanWorkflowState,
     pending_plan_interaction_from_state,
+    pending_mcp_elicitation_from_state,
     reduce_plan_workflow_state,
 )
 from pulsara_agent.runtime.recovery import AbortKind, StopRequest
@@ -316,6 +320,22 @@ class HostSession:
                 lambda: self.wiring.agent_runtime.resume_after_plan_interaction(state, resolution),
             )
 
+    async def resolve_mcp_elicitation(
+        self,
+        resolution: McpElicitationResolution,
+    ) -> AgentRunResult:
+        self._raise_if_not_open("resolving an MCP elicitation")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        pending = self._require_pending_mcp_elicitation(resolution.interaction_id)
+        self._raise_if_active_run()
+        async with self._run_lock:
+            state = self._resume_active_state(pending)
+            return await self._run_owned(
+                state,
+                lambda: self.wiring.agent_runtime.resume_after_mcp_elicitation(state, resolution),
+            )
+
     async def exit_plan_workflow(
         self,
         *,
@@ -511,6 +531,9 @@ class HostSession:
         await self._drain_auto_compaction(cancel=True)
         await self.drain_active_run(reason=reason, timeout_seconds=drain_timeout_seconds)
         await self._finalize_suspended_run(reason)
+        mcp_manager = self.wiring.runtime_wiring.mcp_manager
+        if mcp_manager is not None:
+            await mcp_manager.aclose(timeout_seconds=drain_timeout_seconds)
         self.close()
 
     async def drain_active_run(
@@ -682,14 +705,18 @@ class HostSession:
 
     async def _prepare_prior_messages_for_turn(self, user_input: str):
         await self._drain_auto_compaction()
+        prior_messages = self._prior_messages()
         service = self.wiring.runtime_wiring.compaction_service
         if service is not None:
-            await self._compact_if_needed_and_notify(
+            compacted = await self._compact_if_needed_and_notify(
                 service,
                 current_user_input=user_input,
+                model_visible_messages=prior_messages,
                 reason="preflight_context_threshold",
             )
-        return self._prior_messages()
+            if compacted:
+                prior_messages = self._prior_messages()
+        return prior_messages
 
     def _prior_messages(self):
         runtime_wiring = self.wiring.runtime_wiring
@@ -710,9 +737,7 @@ class HostSession:
         task = self._auto_compaction_task
         if task is not None and not task.done():
             return
-        self._auto_compaction_task = asyncio.create_task(
-            self._compact_if_needed_and_notify(service, reason="run_end_context_threshold")
-        )
+        self._auto_compaction_task = asyncio.create_task(self._compact_after_run_end(service))
 
     async def _drain_auto_compaction(self, *, cancel: bool = False) -> None:
         task = self._auto_compaction_task
@@ -727,19 +752,43 @@ class HostSession:
         except Exception:
             pass
 
+    async def _compact_after_run_end(self, service) -> bool:
+        prior_messages = await asyncio.to_thread(self._prior_messages)
+        return await self._compact_if_needed_and_notify(
+            service,
+            model_visible_messages=prior_messages,
+            reason="run_end_context_threshold",
+        )
+
     async def _compact_if_needed_and_notify(self, service, **kwargs) -> bool:
         event_log = self.wiring.runtime_wiring.event_log
         before_sequence = await asyncio.to_thread(event_log.next_sequence)
         compacted = await service.compact_if_needed(**kwargs)
-        terminal_event = await asyncio.to_thread(self._latest_terminal_compaction_event, before_sequence - 1)
+        compaction_events = await asyncio.to_thread(self._compaction_events_after, before_sequence - 1)
+        self.wiring.runtime_wiring.runtime_session.publish_stored_events(compaction_events)
+        terminal_event = self._latest_terminal_compaction_event(compaction_events)
         if terminal_event is not None:
             self._notify_compaction_listeners(terminal_event)
         return compacted
 
-    def _latest_terminal_compaction_event(self, after_sequence: int) -> AgentEvent | None:
-        terminal_events = [
+    def _compaction_events_after(self, after_sequence: int) -> list[AgentEvent]:
+        return [
             event
             for event in self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
+            if isinstance(
+                event,
+                (
+                    ContextCompactionStartedEvent,
+                    ContextCompactionCompletedEvent,
+                    ContextCompactionFailedEvent,
+                ),
+            )
+        ]
+
+    def _latest_terminal_compaction_event(self, events: list[AgentEvent]) -> AgentEvent | None:
+        terminal_events = [
+            event
+            for event in events
             if isinstance(event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent))
         ]
         return terminal_events[-1] if terminal_events else None
@@ -755,6 +804,8 @@ class HostSession:
         if state.status is LoopStatus.WAITING_USER:
             if state.pending_interaction_kind == "plan":
                 self.pending_interaction = pending_plan_interaction_from_state(state, self.host_session_id)
+            elif state.pending_interaction_kind == "mcp_elicitation":
+                self.pending_interaction = pending_mcp_elicitation_from_state(state, self.host_session_id)
             else:
                 self.pending_interaction = pending_approval_from_state(state, self.host_session_id)
             self._suspended_state = state
@@ -784,6 +835,14 @@ class HostSession:
             raise ValueError("host session has no pending plan interaction")
         if pending.interaction_id != interaction_id:
             raise ValueError("plan interaction id does not match the pending interaction")
+        return pending
+
+    def _require_pending_mcp_elicitation(self, interaction_id: str) -> PendingMcpElicitation:
+        pending = self.pending_interaction
+        if not isinstance(pending, PendingMcpElicitation):
+            raise ValueError("host session has no pending MCP elicitation")
+        if pending.interaction_id != interaction_id:
+            raise ValueError("MCP elicitation id does not match the pending interaction")
         return pending
 
     def _require_suspended_state(self, pending: PendingInteraction) -> LoopState:

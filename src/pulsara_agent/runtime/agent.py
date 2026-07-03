@@ -72,6 +72,7 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.runtime.plan import (
+    McpElicitationResolution,
     PlanExitResolution,
     PlanInteractionResolution,
     PlanQuestionResolution,
@@ -96,7 +97,7 @@ from pulsara_agent.runtime.tool_loop import (
     _tool_result_from_event_slice,
     build_tool_result_error_events,
 )
-from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutor
+from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutionSuspended, ToolExecutor, ToolRuntimeContext
 
 WorkspaceKind = Literal["project", "transient"]
 
@@ -322,12 +323,29 @@ class AgentRuntime:
             pass
         return self._run_result(state)
 
+    async def resume_after_mcp_elicitation(
+        self,
+        state: LoopState,
+        resolution: McpElicitationResolution,
+    ) -> AgentRunResult:
+        async for _event in self.stream_after_mcp_elicitation(state, resolution):
+            pass
+        return self._run_result(state)
+
     async def stream_after_plan_interaction(
         self,
         state: LoopState,
         resolution: PlanInteractionResolution,
     ) -> AsyncIterator[AgentEvent]:
         async for event in self._stream_plan_interaction_resolution(state, resolution):
+            yield event
+
+    async def stream_after_mcp_elicitation(
+        self,
+        state: LoopState,
+        resolution: McpElicitationResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        async for event in self._stream_mcp_elicitation_resolution(state, resolution):
             yield event
 
     async def abort_run(
@@ -784,6 +802,85 @@ class AgentRuntime:
         if state.status is LoopStatus.WAITING_USER:
             state.status = LoopStatus.RUNNING
             state.stop_reason = None
+
+        async for event in self._after_tool_results(state):
+            yield event
+        if state.status is not LoopStatus.RUNNING:
+            async for event in self._finalize_run(state):
+                yield event
+            return
+        state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
+        state.begin_next_turn()
+        exposure = self._exposure_from_state_or_resolve(state)
+        async for event in self._stream_model_loop(state, exposure):
+            yield event
+
+    async def _stream_mcp_elicitation_resolution(
+        self,
+        state: LoopState,
+        resolution: McpElicitationResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        if state.status is not LoopStatus.WAITING_USER:
+            raise ValueError("MCP elicitation resolution requires a waiting state")
+        if state.pending_interaction_kind != "mcp_elicitation":
+            raise ValueError("waiting state does not contain an MCP elicitation")
+        payload = dict(state.pending_interaction_payload)
+        if resolution.interaction_id != payload.get("interaction_id"):
+            raise ValueError("MCP elicitation interaction id does not match the pending interaction")
+
+        tool_call_id = str(payload["tool_call_id"])
+        tool_name = str(payload["tool_name"])
+        server_id = str(payload["server_id"])
+        request_id = str(payload["request_id"])
+        yield await self.runtime_session.emit(
+            CustomEvent(
+                **self._event_context(state).event_fields(),
+                name="mcp_elicitation_resolved",
+                value={
+                    "interaction_id": resolution.interaction_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "server_id": server_id,
+                    "request_id": request_id,
+                },
+            ),
+            state=state,
+        )
+        state.pending_interaction_kind = None
+        state.pending_interaction_payload = {}
+        state.status = LoopStatus.RUNNING
+        state.stop_reason = None
+
+        tool = self.tool_executor.registry.get(tool_name)
+        resume = getattr(tool, "resume_elicitation", None)
+        if resume is None:
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+                output=f"tool {tool_name!r} cannot resume MCP elicitation",
+                result_state=ToolResultState.ERROR,
+            ):
+                yield event
+        else:
+            answer = dict(resolution.answer)
+            answer["tool_call_id"] = tool_call_id
+            result = await resume(
+                request_id=request_id,
+                answer=answer,
+                runtime_context=ToolRuntimeContext(
+                    runtime_session_id=self.runtime_session.runtime_session_id,
+                    event_context=self._event_context(state),
+                ),
+            )
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+                output=result.output,
+                result_state=result.status,
+            ):
+                yield event
 
         async for event in self._after_tool_results(state):
             yield event
@@ -1764,6 +1861,8 @@ class AgentRuntime:
             batch_events: list[AgentEvent] = []
             async for event in self._stream_tool_batch_events(state, batch, batch_events, exposure=exposure):
                 yield event
+            if state.status is LoopStatus.WAITING_USER:
+                return
             for call in batch:
                 result_block = _tool_result_from_event_slice(batch_events, call.id)
                 _remember_tool_result_event_span(state, batch_events, call.id)
@@ -1789,7 +1888,7 @@ class AgentRuntime:
             artifact_service=self.tool_executor.artifact_service,
             runtime_session_id=self.runtime_session.runtime_session_id,
         )
-        async def execute_call(call: ToolCall) -> ToolExecutionResult:
+        async def execute_call(call: ToolCall) -> ToolExecutionResult | ToolExecutionSuspended:
             descriptor = exposure.descriptors_by_name.get(call.name)
             if executor.is_async(call):
                 return await executor.execute_async(
@@ -1819,7 +1918,14 @@ class AgentRuntime:
                 if pending:
                     done, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
-                        task.result()
+                        outcome = task.result()
+                        if isinstance(outcome, ToolExecutionSuspended):
+                            async for event in self._suspend_tool_execution(state, outcome):
+                                yield event
+                            for pending_task in pending:
+                                pending_task.cancel()
+                            pending = set()
+                            return
                     continue
                 if len(completed_tool_calls) < len(batch):
                     event = await tap.queue.get()
@@ -1832,6 +1938,35 @@ class AgentRuntime:
             for task in pending:
                 if not task.done():
                     task.cancel()
+
+    async def _suspend_tool_execution(
+        self,
+        state: LoopState,
+        suspended: ToolExecutionSuspended,
+    ) -> AsyncIterator[AgentEvent]:
+        payload = dict(suspended.payload)
+        payload.setdefault("interaction_id", f"{suspended.interaction_kind}:{uuid4().hex}")
+        payload.setdefault("tool_call_id", suspended.tool_call_id)
+        payload.setdefault("tool_name", suspended.tool_name)
+        state.pending_tool_calls = []
+        state.pending_interaction_kind = suspended.interaction_kind
+        state.pending_interaction_payload = payload
+        state.status = LoopStatus.WAITING_USER
+        state.stop_reason = "waiting_user"
+        state.transition(LoopTransition.WAIT_FOR_USER)
+        yield await self.runtime_session.emit(
+            CustomEvent(
+                **self._event_context(state).event_fields(),
+                name="tool_execution_suspended",
+                value={
+                    "interaction_kind": suspended.interaction_kind,
+                    "tool_call_id": suspended.tool_call_id,
+                    "tool_name": suspended.tool_name,
+                    "payload": payload,
+                },
+            ),
+            state=state,
+        )
 
     def _recover_or_fail_model(self, state: LoopState) -> bool:
         state.consecutive_model_failures += 1

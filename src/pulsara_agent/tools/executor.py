@@ -14,7 +14,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactService
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolExecutionSuspended, ToolRuntimeContext
 from pulsara_agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -41,7 +41,7 @@ class ToolExecutor:
         *,
         event_context: EventContext,
         descriptor: CapabilityDescriptor | None = None,
-    ) -> ToolExecutionResult:
+    ) -> ToolExecutionResult | ToolExecutionSuspended:
         self._append(
             ToolResultStartEvent(
                 **event_context.event_fields(),
@@ -105,6 +105,8 @@ class ToolExecutor:
                     event_context=event_context,
                 ),
             )
+            if isinstance(result, ToolExecutionSuspended):
+                return result
         except Exception as exc:
             result = ToolExecutionResult(
                 call_id=call.id,

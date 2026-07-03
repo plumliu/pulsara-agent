@@ -13,8 +13,16 @@ from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
+    ExceedMaxItersEvent,
     EventContext,
+    PlanExitRequestedEvent,
+    PlanExitResolvedEvent,
+    PlanModeEnteredEvent,
+    PlanModeExitedEvent,
+    PlanQuestionAnsweredEvent,
+    PlanQuestionAskedEvent,
     ModelCallEndEvent,
+    RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
     TextBlockDeltaEvent,
@@ -25,11 +33,21 @@ from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
-from pulsara_agent.message import Msg
+from pulsara_agent.message import (
+    AssistantMsg,
+    DataBlock,
+    HintBlock,
+    Msg,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+    UserMsg,
+)
+from pulsara_agent.message.assembler import BlockAssembler
 from pulsara_agent.runtime.compaction.planner import (
     SUMMARY_ARTIFACT_KIND,
     latest_completed_boundary,
-    message_text,
     strip_compaction_analysis,
 )
 
@@ -37,6 +55,9 @@ ContextCompactionTrigger = Literal["manual", "auto"]
 
 _PRODUCTION_PROMPT_PACKAGE = "pulsara_agent.runtime.compaction.prompts"
 _PRODUCTION_PROMPT_FILE = "context_compaction_prompt.md"
+_COMPACTION_TEXT_CLIP_CHARS = 4_000
+_COMPACTION_TOOL_INPUT_CLIP_CHARS = 2_000
+_COMPACTION_TOOL_RESULT_CLIP_CHARS = 4_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +85,7 @@ class CompactionPlan:
     through_sequence: int
     keep_after_sequence: int
     estimated_tokens_before: int
+    estimated_compaction_input_tokens_before: int
     estimated_tokens_after_replay_tail: int
     included_run_ids: tuple[str, ...]
     included_artifact_ids: tuple[str, ...]
@@ -85,13 +107,22 @@ class ContextCompactionService:
     model_role: ModelRole = ModelRole.FLASH
     _consecutive_failures: int = 0
 
-    def should_auto_compact(self, *, current_user_input: str = "") -> bool:
+    def should_auto_compact(
+        self,
+        *,
+        current_user_input: str = "",
+        model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
+    ) -> bool:
         if not self.policy.enabled or not self.policy.auto_enabled:
             return False
         if self._consecutive_failures >= self.policy.max_consecutive_failures:
             return False
         events = self.event_log.iter()
-        plan = self._build_plan(events, current_user_input=current_user_input)
+        plan = self._build_plan(
+            events,
+            current_user_input=current_user_input,
+            model_visible_messages=model_visible_messages,
+        )
         if plan is None:
             return False
         return plan.estimated_tokens_before >= self.policy.auto_threshold_tokens
@@ -100,11 +131,20 @@ class ContextCompactionService:
         self,
         *,
         current_user_input: str = "",
+        model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
         reason: str = "context_threshold",
     ) -> bool:
-        if not self.should_auto_compact(current_user_input=current_user_input):
+        if not self.should_auto_compact(
+            current_user_input=current_user_input,
+            model_visible_messages=model_visible_messages,
+        ):
             return False
-        return await self.compact(trigger="auto", reason=reason, current_user_input=current_user_input) is not None
+        return await self.compact(
+            trigger="auto",
+            reason=reason,
+            current_user_input=current_user_input,
+            model_visible_messages=model_visible_messages,
+        ) is not None
 
     async def compact(
         self,
@@ -112,6 +152,7 @@ class ContextCompactionService:
         trigger: ContextCompactionTrigger,
         reason: str,
         current_user_input: str = "",
+        model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
         force: bool = False,
     ) -> ContextCompactionCompletedEvent | None:
         if not self.policy.enabled:
@@ -124,7 +165,12 @@ class ContextCompactionService:
             return None
 
         events = self.event_log.iter()
-        plan = self._build_plan(events, current_user_input=current_user_input, force=force)
+        plan = self._build_plan(
+            events,
+            current_user_input=current_user_input,
+            model_visible_messages=model_visible_messages,
+            force=force,
+        )
         if plan is None:
             return None
         if not force and trigger == "auto" and plan.estimated_tokens_before < self.policy.auto_threshold_tokens:
@@ -145,6 +191,10 @@ class ContextCompactionService:
             through_sequence=plan.through_sequence,
             keep_after_sequence=plan.keep_after_sequence,
             force=force,
+            metadata={
+                "estimate_source": "model_visible_context",
+                "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
+            },
         )
         await asyncio.to_thread(self.event_log.append, started)
 
@@ -176,6 +226,8 @@ class ContextCompactionService:
                     "keep_after_sequence": plan.keep_after_sequence,
                     "included_run_ids": list(plan.included_run_ids),
                     "included_artifact_ids": list(plan.included_artifact_ids),
+                    "estimated_model_visible_tokens_before": plan.estimated_tokens_before,
+                    "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
                 },
             )
             estimated_after = estimate_post_compaction_tokens(
@@ -200,6 +252,10 @@ class ContextCompactionService:
                 keep_after_sequence=plan.keep_after_sequence,
                 included_run_ids=list(plan.included_run_ids),
                 included_artifact_ids=list(plan.included_artifact_ids),
+                metadata={
+                    "estimate_source": "model_visible_context",
+                    "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
+                },
             )
             stored = await asyncio.to_thread(self.event_log.append, completed)
             self._consecutive_failures = 0
@@ -220,6 +276,10 @@ class ContextCompactionService:
                 keep_after_sequence=plan.keep_after_sequence,
                 error_type=type(exc).__name__,
                 message=str(exc),
+                metadata={
+                    "estimate_source": "model_visible_context",
+                    "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
+                },
             )
             await asyncio.to_thread(self.event_log.append, failed)
             if trigger == "manual":
@@ -261,6 +321,7 @@ class ContextCompactionService:
         events: list[AgentEvent],
         *,
         current_user_input: str = "",
+        model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
         force: bool = False,
     ) -> CompactionPlan | None:
         if not events:
@@ -272,11 +333,18 @@ class ContextCompactionService:
         ]
         if not candidate_events:
             return None
-        estimated_before = estimate_compaction_window_tokens(
+        estimated_compaction_input_before = estimate_compaction_window_tokens(
             candidate_events,
-            current_user_input=current_user_input,
             policy=self.policy,
             previous_summary_text=latest_boundary.summary_text if latest_boundary is not None else None,
+        )
+        estimated_before = estimate_model_visible_tokens(
+            model_visible_messages if model_visible_messages is not None else model_visible_messages_from_events(candidate_events),
+            current_user_input=current_user_input,
+            policy=self.policy,
+            previous_summary_text=(
+                latest_boundary.summary_text if latest_boundary is not None and model_visible_messages is None else None
+            ),
         )
         if not force and len(candidate_events) < self.policy.min_events_after_last_compact:
             return None
@@ -292,7 +360,6 @@ class ContextCompactionService:
         through_sequence = max(event.sequence or 0 for event in compacted)
         estimated_tail = estimate_compaction_window_tokens(
             tail,
-            current_user_input=current_user_input,
             policy=self.policy,
             previous_summary_text=latest_boundary.summary_text if latest_boundary is not None else None,
         )
@@ -301,6 +368,7 @@ class ContextCompactionService:
             through_sequence=through_sequence,
             keep_after_sequence=through_sequence,
             estimated_tokens_before=estimated_before,
+            estimated_compaction_input_tokens_before=estimated_compaction_input_before,
             estimated_tokens_after_replay_tail=estimated_tail,
             included_run_ids=tuple(dict.fromkeys(event.run_id for event in compacted)),
             included_artifact_ids=tuple(_artifact_ids(compacted)),
@@ -328,6 +396,8 @@ def build_compaction_input(plan: CompactionPlan) -> str:
         f"keep_after_sequence: {plan.keep_after_sequence}",
         f"included_run_ids: {', '.join(plan.included_run_ids)}",
         f"included_artifact_ids: {', '.join(plan.included_artifact_ids) or '(none)'}",
+        f"estimated_model_visible_tokens_before: {plan.estimated_tokens_before}",
+        f"estimated_compaction_input_tokens_before: {plan.estimated_compaction_input_tokens_before}",
         "",
         "## Event-derived messages and observations",
         "",
@@ -348,8 +418,7 @@ def build_compaction_input(plan: CompactionPlan) -> str:
                 "",
             ]
         )
-    for event in plan.compacted_events:
-        lines.append(_event_line(event))
+    lines.append(build_compaction_observation_text(plan.compacted_events))
     return "\n".join(lines)
 
 
@@ -357,7 +426,7 @@ def estimate_context_tokens(text_or_messages: str | list[Msg], *, chars_per_toke
     if isinstance(text_or_messages, str):
         text = text_or_messages
     else:
-        text = "\n".join(message_text(message) for message in text_or_messages)
+        text = "\n".join(_message_text_for_estimate(message) for message in text_or_messages)
     if not text:
         return 0
     return max(1, int(len(text) / max(chars_per_token, 0.1)))
@@ -370,27 +439,41 @@ def estimate_compaction_window_tokens(
     policy: ContextCompactionPolicy = ContextCompactionPolicy(),
     previous_summary_text: str | None = None,
 ) -> int:
-    """Conservatively estimate model-visible compaction context size.
+    """Conservatively estimate compact-model input size.
 
-    Event-log lines are JSON-ish and token dense, so treating them like plain
-    prose (chars/4) underestimates right where compaction needs a safety fuse.
-    Current user input is ordinary text for estimation purposes and is never
-    included in the compact summary input itself.
+    The compact model receives a coalesced event-derived transcript, not raw
+    streaming deltas. Current user input is never included in that summary
+    input; it belongs only to the model-visible auto-trigger estimate.
     """
 
-    event_tokens = estimate_context_tokens(
-        _events_text_for_estimate(events),
+    compact_input_tokens = estimate_context_tokens(
+        build_compaction_observation_text(events),
         chars_per_token=policy.event_chars_per_token,
-    )
-    user_tokens = estimate_context_tokens(
-        current_user_input,
-        chars_per_token=policy.chars_per_token,
     )
     previous_summary_tokens = estimate_context_tokens(
         render_summary_for_estimate(previous_summary_text),
         chars_per_token=policy.chars_per_token,
     ) if previous_summary_text else 0
-    raw = previous_summary_tokens + event_tokens + user_tokens
+    raw = previous_summary_tokens + compact_input_tokens
+    if raw <= 0:
+        return 0
+    return max(1, int(raw * max(policy.estimate_safety_margin, 1.0)))
+
+
+def estimate_model_visible_tokens(
+    messages: list[Msg] | tuple[Msg, ...],
+    *,
+    current_user_input: str = "",
+    policy: ContextCompactionPolicy = ContextCompactionPolicy(),
+    previous_summary_text: str | None = None,
+) -> int:
+    message_tokens = estimate_context_tokens(list(messages), chars_per_token=policy.chars_per_token)
+    current_user_tokens = estimate_context_tokens(current_user_input, chars_per_token=policy.chars_per_token)
+    previous_summary_tokens = estimate_context_tokens(
+        render_summary_for_estimate(previous_summary_text),
+        chars_per_token=policy.chars_per_token,
+    ) if previous_summary_text else 0
+    raw = previous_summary_tokens + message_tokens + current_user_tokens
     if raw <= 0:
         return 0
     return max(1, int(raw * max(policy.estimate_safety_margin, 1.0)))
@@ -439,8 +522,172 @@ def _artifact_ids(events: tuple[AgentEvent, ...]) -> list[str]:
     artifact_ids: list[str] = []
     for event in events:
         if isinstance(event, ToolResultEndEvent):
-            artifact_ids.extend(artifact.id for artifact in event.artifacts)
+            artifact_ids.extend(artifact.artifact_id for artifact in event.artifacts)
     return list(dict.fromkeys(artifact_ids))
+
+
+def model_visible_messages_from_events(events: list[AgentEvent] | tuple[AgentEvent, ...]) -> list[Msg]:
+    """Build a lightweight model-visible transcript estimate without Host imports."""
+
+    messages: list[Msg] = []
+    assistant_blocks_by_reply: dict[str, list[object]] = {}
+    assembler = BlockAssembler()
+    for event in events:
+        if isinstance(event, RunStartEvent):
+            user_input = event.metadata.get("user_input")
+            if isinstance(user_input, str):
+                messages.append(
+                    UserMsg(
+                        name="user",
+                        content=user_input,
+                        id=f"user-message:{event.run_id}",
+                        created_at=event.created_at,
+                        metadata={"run_id": event.run_id},
+                    )
+                )
+            continue
+        for completion in assembler.append(event).completed:
+            block = completion.block
+            if isinstance(block, ThinkingBlock):
+                continue
+            assistant_blocks_by_reply.setdefault(completion.reply_id, []).append(block)
+        if hasattr(event, "type") and str(event.type) == "REPLY_END":
+            blocks = assistant_blocks_by_reply.pop(event.reply_id, [])
+            if blocks:
+                messages.append(
+                    AssistantMsg(
+                        name="assistant",
+                        content=blocks,
+                        id=event.reply_id,
+                        created_at=getattr(event, "created_at", None),
+                    )
+                )
+    for reply_id, blocks in assistant_blocks_by_reply.items():
+        if blocks:
+            messages.append(AssistantMsg(name="assistant", content=blocks, id=reply_id))
+    return messages
+
+
+def build_compaction_observation_text(events: list[AgentEvent] | tuple[AgentEvent, ...]) -> str:
+    lines: list[str] = []
+    assembler = BlockAssembler()
+    for event in events:
+        if isinstance(event, RunStartEvent):
+            user_input = event.metadata.get("user_input")
+            rendered = user_input if isinstance(user_input, str) else f"[user_input_chars={event.user_input_chars}]"
+            lines.append(f"[user run_id={event.run_id}] {_clip_text(rendered, _COMPACTION_TEXT_CLIP_CHARS)}")
+            continue
+        if isinstance(event, RunEndEvent):
+            if event.status != "finished" or event.abort_kind or event.error_message:
+                lines.append(
+                    "[run_end "
+                    f"run_id={event.run_id} status={event.status} "
+                    f"abort_kind={event.abort_kind or '(none)'} "
+                    f"error={_clip_text(event.error_message or '', 500)}]"
+                )
+            continue
+        if isinstance(event, RunErrorEvent):
+            lines.append(f"[run_error run_id={event.run_id} code={event.code}] {_clip_text(event.message, 1000)}")
+            continue
+        if isinstance(event, ExceedMaxItersEvent):
+            lines.append(f"[exceed_max_iters run_id={event.run_id} name={event.name} max_iters={event.max_iters}]")
+            continue
+        if isinstance(
+            event,
+            (
+                PlanModeEnteredEvent,
+                PlanQuestionAskedEvent,
+                PlanQuestionAnsweredEvent,
+                PlanExitRequestedEvent,
+                PlanExitResolvedEvent,
+                PlanModeExitedEvent,
+            ),
+        ):
+            lines.append(_event_line(event))
+            continue
+        for completion in assembler.append(event).completed:
+            rendered = _render_completed_block(completion.block)
+            if rendered:
+                lines.append(rendered)
+    return "\n".join(lines)
+
+
+def _render_completed_block(block: object) -> str:
+    if isinstance(block, TextBlock):
+        return f"[assistant] {_clip_text(block.text, _COMPACTION_TEXT_CLIP_CHARS)}"
+    if isinstance(block, ThinkingBlock):
+        return ""
+    if isinstance(block, ToolCallBlock):
+        return (
+            f"[tool_call id={block.id} name={block.name} state={block.state}] "
+            f"{_clip_text(block.input, _COMPACTION_TOOL_INPUT_CLIP_CHARS)}"
+        )
+    if isinstance(block, ToolResultBlock):
+        artifact_text = ""
+        if block.artifacts:
+            refs = ", ".join(
+                f"{artifact.artifact_id}({artifact.media_type}, {artifact.size_bytes} bytes)"
+                for artifact in block.artifacts
+            )
+            artifact_text = f" artifacts=[{refs}]"
+        output = "\n".join(_block_text(item) for item in block.output)
+        return (
+            f"[tool_result id={block.id} name={block.name} state={block.state}{artifact_text}] "
+            f"{_clip_text(output, _COMPACTION_TOOL_RESULT_CLIP_CHARS)}"
+        )
+    if isinstance(block, HintBlock):
+        return f"[hint source={block.source or '(unknown)'}] {_clip_text(_block_text(block), 1000)}"
+    if isinstance(block, DataBlock):
+        return _block_text(block)
+    return ""
+
+
+def _block_text(block: object) -> str:
+    if isinstance(block, TextBlock):
+        return block.text
+    if isinstance(block, ThinkingBlock):
+        return block.thinking
+    if isinstance(block, HintBlock):
+        if isinstance(block.hint, str):
+            return block.hint
+        return "\n".join(_block_text(item) for item in block.hint)
+    if isinstance(block, DataBlock):
+        source = block.source
+        media_type = getattr(source, "media_type", "application/octet-stream")
+        if hasattr(source, "url"):
+            return f"[data media_type={media_type} url={source.url}]"
+        data = getattr(source, "data", "")
+        return f"[data media_type={media_type} chars={len(data)}]"
+    return str(block)
+
+
+def _message_text_for_estimate(message: Msg) -> str:
+    parts = [f"[{message.role} name={message.name} id={message.id}]"]
+    for block in message.content:
+        if isinstance(block, TextBlock):
+            parts.append(block.text)
+        elif isinstance(block, ThinkingBlock):
+            parts.append(block.thinking)
+        elif isinstance(block, ToolCallBlock):
+            parts.append(f"[tool_call id={block.id} name={block.name} state={block.state}] {block.input}")
+        elif isinstance(block, ToolResultBlock):
+            artifacts = " ".join(artifact.artifact_id for artifact in block.artifacts)
+            output = "\n".join(_block_text(item) for item in block.output)
+            parts.append(f"[tool_result id={block.id} name={block.name} state={block.state} artifacts={artifacts}] {output}")
+        elif isinstance(block, HintBlock):
+            parts.append(f"[hint source={block.source or '(unknown)'}] {_block_text(block)}")
+        elif isinstance(block, DataBlock):
+            parts.append(_block_text(block))
+        else:
+            parts.append(str(block))
+    return "\n".join(part for part in parts if part)
+
+
+def _clip_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = f"\n[CLIPPED: kept {limit} of {len(text)} chars]"
+    return text[: max(0, limit - len(marker))] + marker
 
 
 def _events_text_for_estimate(events: list[AgentEvent] | tuple[AgentEvent, ...]) -> str:

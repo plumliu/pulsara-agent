@@ -17,6 +17,15 @@ from pulsara_agent.event import (
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
+    ThinkingBlockDeltaEvent,
+    ThinkingBlockEndEvent,
+    ThinkingBlockStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
+    ToolResultEndEvent,
+    ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.host import HostSession, HostWorkspaceInput, resolve_workspace
@@ -26,11 +35,13 @@ from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.capability.runtime import CapabilityRuntime
+from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.compaction.planner import strip_compaction_analysis
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionPolicy,
     ContextCompactionService,
+    build_compaction_input,
     _events_text_for_estimate,
     estimate_compaction_window_tokens,
     estimate_context_tokens,
@@ -169,6 +180,49 @@ class _FakeFailingAutoCompactionService:
         return False
 
 
+class _FakeWritingAutoCompactionService:
+    def __init__(self, event_log: InMemoryEventLog) -> None:
+        self.event_log = event_log
+
+    async def compact_if_needed(self, **kwargs) -> bool:
+        del kwargs
+        ctx = _ctx("compaction:auto:completed")
+        self.event_log.extend(
+            [
+                ContextCompactionStartedEvent(
+                    **ctx.event_fields(),
+                    compaction_id="context_compaction:completed",
+                    trigger="auto",
+                    reason="run_end_context_threshold",
+                    window_number=1,
+                    window_id="context_window:completed",
+                    estimated_tokens_before=200_001,
+                    threshold_tokens=200_000,
+                    context_window_tokens=256_000,
+                    through_sequence=10,
+                    keep_after_sequence=5,
+                ),
+                ContextCompactionCompletedEvent(
+                    **ctx.event_fields(),
+                    compaction_id="context_compaction:completed",
+                    trigger="auto",
+                    reason="run_end_context_threshold",
+                    window_number=1,
+                    window_id="context_window:completed",
+                    summary_artifact_id="context_compaction_completed:summary",
+                    summary_chars=12,
+                    estimated_tokens_before=200_001,
+                    estimated_tokens_after=4_000,
+                    threshold_tokens=200_000,
+                    context_window_tokens=256_000,
+                    through_sequence=10,
+                    keep_after_sequence=5,
+                ),
+            ]
+        )
+        return True
+
+
 def test_context_compaction_events_round_trip() -> None:
     ctx = _ctx("compaction:event")
     started = ContextCompactionStartedEvent(
@@ -218,9 +272,20 @@ def test_strip_compaction_analysis_rejects_unclosed_private_blocks() -> None:
     assert strip_compaction_analysis("<summary>official handoff with no close") == ""
 
 
-def test_compaction_estimate_treats_event_log_as_token_dense_with_margin() -> None:
+def test_compaction_input_estimate_uses_coalesced_observations_not_raw_delta_envelope() -> None:
     log = InMemoryEventLog()
     _append_turn(log, "dense", "plain user input", "assistant reply")
+    ctx = _ctx("dense")
+    log.extend(
+        [
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:one", tool_call_name="terminal"),
+            *[
+                ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:one", delta="{\"cmd\":\"echo hi\"}"[:1])
+                for _ in range(50)
+            ],
+            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:one"),
+        ]
+    )
     events = log.iter()
     event_text = _events_text_for_estimate(events)
     policy = ContextCompactionPolicy(
@@ -229,11 +294,44 @@ def test_compaction_estimate_treats_event_log_as_token_dense_with_margin() -> No
         estimate_safety_margin=1.25,
     )
 
-    plain_estimate = estimate_context_tokens(event_text, chars_per_token=policy.chars_per_token)
-    conservative_estimate = estimate_compaction_window_tokens(events, policy=policy)
+    raw_event_estimate = estimate_context_tokens(event_text, chars_per_token=policy.event_chars_per_token)
+    coalesced_estimate = estimate_compaction_window_tokens(events, policy=policy)
 
-    assert conservative_estimate > plain_estimate
-    assert conservative_estimate >= int(plain_estimate * 2 * policy.estimate_safety_margin * 0.9)
+    assert coalesced_estimate < raw_event_estimate
+
+
+def test_compaction_plan_collects_tool_result_artifact_ids() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    _append_turn(log, "artifact", "user asked for a web search", "tool produced a large artifact")
+    log.append(
+        ToolResultEndEvent(
+            **_ctx("artifact").event_fields(),
+            tool_call_id="call:firecrawl",
+            state=ToolResultState.SUCCESS,
+            artifacts=[
+                ToolResultArtifactRef(
+                    artifact_id="artifact:tool-result:run:call:firecrawl:output:0",
+                    role="output",
+                    media_type="text/markdown; charset=utf-8",
+                    size_bytes=1234,
+                )
+            ],
+        )
+    )
+    transport = CompactScriptedTransport("<summary>Search result was summarized.</summary>")
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(transport),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
+    )
+
+    event = asyncio.run(service.compact(trigger="manual", reason="user_requested", force=True))
+
+    assert event is not None
+    assert event.included_artifact_ids == ["artifact:tool-result:run:call:firecrawl:output:0"]
 
 
 def test_manual_context_compaction_writes_summary_artifact_and_events() -> None:
@@ -439,6 +537,123 @@ def test_auto_context_compaction_can_compact_single_huge_completed_run() -> None
     assert archive.get_text(completed[0].summary_artifact_id, session_id="runtime:test") == "Huge run summarized."
 
 
+def test_auto_context_compaction_uses_model_visible_messages_not_raw_streaming_events() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    ctx = _ctx("streamy")
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "short"}),
+            ReplyStartEvent(**ctx.event_fields(), name="assistant"),
+            TextBlockStartEvent(**ctx.event_fields(), block_id="text:streamy"),
+            *[
+                TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:streamy", delta="x")
+                for _ in range(500)
+            ],
+            TextBlockEndEvent(**ctx.event_fields(), block_id="text:streamy"),
+            ThinkingBlockStartEvent(**ctx.event_fields(), block_id="thinking:streamy"),
+            *[
+                ThinkingBlockDeltaEvent(**ctx.event_fields(), block_id="thinking:streamy", delta="private")
+                for _ in range(500)
+            ],
+            ThinkingBlockEndEvent(**ctx.event_fields(), block_id="thinking:streamy"),
+            ReplyEndEvent(**ctx.event_fields()),
+        ]
+    )
+    transport = CompactScriptedTransport("<summary>should not run</summary>")
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(transport),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(
+            min_events_after_last_compact=1,
+            auto_threshold_tokens=1_000,
+            chars_per_token=4.0,
+            event_chars_per_token=0.5,
+        ),
+    )
+
+    assert service.should_auto_compact(model_visible_messages=[]) is False
+    assert asyncio.run(service.compact_if_needed(reason="run_end_context_threshold", model_visible_messages=[])) is False
+    assert not [event for event in log.iter() if isinstance(event, ContextCompactionStartedEvent)]
+
+
+def test_auto_context_compaction_triggers_on_long_model_visible_messages() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    _append_turn(log, "tiny-events", "short", "ok")
+    transport = CompactScriptedTransport("<summary>Visible transcript was summarized.</summary>")
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(transport),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(
+            min_events_after_last_compact=1,
+            auto_threshold_tokens=100,
+            chars_per_token=1.0,
+        ),
+    )
+    visible = rebuild_prior_messages(log, archive=archive, session_id="runtime:test")
+    visible[0].content[0].text = "visible " * 200
+
+    assert service.should_auto_compact(model_visible_messages=visible) is True
+    assert asyncio.run(service.compact_if_needed(reason="preflight_context_threshold", model_visible_messages=visible))
+
+
+def test_compaction_input_coalesces_deltas_and_clips_large_tool_result() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    ctx = _ctx("coalesce")
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=11, metadata={"user_input": "search news"}),
+            ReplyStartEvent(**ctx.event_fields(), name="assistant"),
+            TextBlockStartEvent(**ctx.event_fields(), block_id="text:coalesce"),
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:coalesce", delta="hello "),
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:coalesce", delta="world"),
+            TextBlockEndEvent(**ctx.event_fields(), block_id="text:coalesce"),
+            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:search", tool_call_name="terminal"),
+            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:search", delta='{"cmd":"search"}'),
+            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:search"),
+            ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:search", tool_call_name="terminal"),
+            ToolResultTextDeltaEvent(**ctx.event_fields(), tool_call_id="call:search", delta="R" * 5_000),
+            ToolResultEndEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:search",
+                state=ToolResultState.SUCCESS,
+                artifacts=[
+                    ToolResultArtifactRef(
+                        artifact_id="artifact:search:full",
+                        role="output",
+                        media_type="text/plain",
+                        size_bytes=5000,
+                    )
+                ],
+            ),
+            ReplyEndEvent(**ctx.event_fields()),
+        ]
+    )
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("<summary>done</summary>")),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
+    )
+    plan = service._build_plan(log.iter(), force=True)
+    assert plan is not None
+
+    compact_input = build_compaction_input(plan)
+
+    assert "hello world" in compact_input
+    assert "artifact:search:full" in compact_input
+    assert "[CLIPPED:" in compact_input
+    assert "TEXT_BLOCK_DELTA" not in compact_input
+    assert "TOOL_RESULT_TEXT_DELTA" not in compact_input
+
+
 def test_auto_context_compaction_failure_trips_circuit_breaker_without_completed_boundary() -> None:
     log = InMemoryEventLog()
     archive = InMemoryArchiveStore()
@@ -503,7 +718,7 @@ def test_host_session_compact_now_uses_manual_force_entrypoint(tmp_path) -> None
         conversation_id="conversation:test",
         workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(), 
+            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
             ),
@@ -540,7 +755,7 @@ def test_host_session_invokes_compaction_at_preflight_and_run_end_safe_points(tm
         conversation_id="conversation:test",
         workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(), 
+            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(transport),
             ),
@@ -559,12 +774,13 @@ def test_host_session_invokes_compaction_at_preflight_and_run_end_safe_points(tm
 
     calls = asyncio.run(run())
 
-    assert {
-        "method": "compact_if_needed",
-        "current_user_input": "hello compaction",
-        "reason": "preflight_context_threshold",
-    } in calls
-    assert {"method": "compact_if_needed", "reason": "run_end_context_threshold"} in calls
+    preflight = next(call for call in calls if call.get("reason") == "preflight_context_threshold")
+    run_end = next(call for call in calls if call.get("reason") == "run_end_context_threshold")
+    assert preflight["method"] == "compact_if_needed"
+    assert preflight["current_user_input"] == "hello compaction"
+    assert preflight["model_visible_messages"] == []
+    assert run_end["method"] == "compact_if_needed"
+    assert "model_visible_messages" in run_end
 
 
 def test_host_session_notifies_auto_compaction_failure(tmp_path) -> None:
@@ -575,7 +791,8 @@ def test_host_session_notifies_auto_compaction_failure(tmp_path) -> None:
         conversation_id="conversation:test",
         workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
         wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(), 
+            agent_runtime=AgentRuntime(
+                capability_runtime=CapabilityRuntime(),
                 runtime_session=runtime_wiring.runtime_session,
                 llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
             ),
@@ -596,3 +813,42 @@ def test_host_session_notifies_auto_compaction_failure(tmp_path) -> None:
     assert len(observed) == 1
     assert isinstance(observed[0], ContextCompactionFailedEvent)
     assert observed[0].compaction_id == "context_compaction:failed"
+
+
+def test_host_session_publishes_directly_written_compaction_events_to_avoid_sequence_gap(tmp_path) -> None:
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    fake = _FakeWritingAutoCompactionService(runtime_wiring.event_log)
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(
+            agent_runtime=AgentRuntime(capability_runtime=CapabilityRuntime(),
+                runtime_session=runtime_wiring.runtime_session,
+                llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+            ),
+            runtime_wiring=runtime_wiring,
+        ),
+    )
+    observed = []
+    session.add_compaction_listener(observed.append)
+
+    async def run() -> None:
+        try:
+            await runtime_wiring.runtime_session.emit(
+                RunStartEvent(**_ctx("before-gap").event_fields(), user_input_chars=1)
+            )
+            assert await session._compact_if_needed_and_notify(fake, reason="run_end_context_threshold") is True
+            await asyncio.wait_for(
+                runtime_wiring.runtime_session.emit(
+                    RunStartEvent(**_ctx("after-gap").event_fields(), user_input_chars=1)
+                ),
+                timeout=1,
+            )
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
+
+    assert len(observed) == 1
+    assert isinstance(observed[0], ContextCompactionCompletedEvent)

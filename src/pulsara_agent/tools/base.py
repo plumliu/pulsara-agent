@@ -26,6 +26,14 @@ class ToolExecutionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolExecutionSuspended:
+    tool_call_id: str
+    tool_name: str
+    interaction_kind: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolRuntimeContext:
     runtime_session_id: str
     event_context: EventContext
@@ -77,5 +85,5 @@ class AsyncTool(Protocol):
         call: ToolCall,
         *,
         runtime_context: ToolRuntimeContext,
-    ) -> ToolExecutionResult:
+    ) -> ToolExecutionResult | ToolExecutionSuspended:
         """Execute a tool call on the agent runtime event loop."""

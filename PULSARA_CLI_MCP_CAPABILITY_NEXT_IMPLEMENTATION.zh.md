@@ -1002,3 +1002,22 @@ MCP mock 侧完成时：
 - CLI：先做 PR C1 + C2，C3 可跟随但不要阻塞。
 - MCP：按 M0 → M1 → M2 → M3 → M4 → M5 固定 seam 与 mock 执行，再分别接 M6 HTTP 和 M7 stdio。
 - 不要先接真实 MCP server。先把 config/status/descriptor/binding/lifecycle seam 固定，比一开始连 Firecrawl MCP 更重要。
+
+## 9. 当前 MCP 模块落地状态
+
+本轮已完成 PR M1–M7 的 runtime/code 落点，M0 DTO 也随同落地：
+
+- M0/M1：`src/pulsara_agent/runtime/mcp/types.py` 定义 MCP config / status / discovered tool DTO；`src/pulsara_agent/capability/providers/mcp.py` 定义 `McpCapabilityBindingBundle`、`McpCapabilityProvider` 与 `build_mcp_bundle()`。同一个 manager snapshot 同时产出 descriptors 与 execution bindings。
+- M2：`src/pulsara_agent/runtime/mcp/manager.py` 定义 session-owned manager protocol；mock/composite manager 具备 call / cancel / idempotent close / elicitation response 形状。`HostSession.aclose()` 会在 drain active/suspended run 后关闭 MCP manager。
+- M3：MCP descriptor 进入 unified capability surface，`provider_kind=MCP`，model-facing tool name deterministic mangle，超长名称使用 stable hash suffix；unknown annotation fail-closed。
+- M4：`src/pulsara_agent/tools/adapters/mcp.py` 提供 async MCP adapter；adapter 不拥有 client/process，只调用 manager。大结果仍由 `ToolResultArtifactService` 统一归档；approval resume 的 stale/crafted MCP call 会重新过 capability exposure gate。
+- M5：`ToolExecutionSuspended` 与 `pending_interaction_kind="mcp_elicitation"` 已接入 AgentRuntime / HostSession。MCP elicitation 不会被转换成普通 tool error；用户回答通过 `resolve_mcp_elicitation()` 路由回原 manager request。
+- M6：`src/pulsara_agent/runtime/mcp/client.py` 提供最小 streamable HTTP JSON-RPC manager，覆盖 `tools/list`、`tools/call`、bearer-token missing → `needs_auth`、HTTP failure → structured failed snapshot。
+- M7：`src/pulsara_agent/runtime/mcp/stdio.py` 提供最小 stdio JSON-RPC manager，使用 Content-Length framing，覆盖 process startup、`tools/list`、`tools/call`、bounded close/kill。
+
+测试主入口是 `tests/test_capability_mcp.py`，覆盖 config/filter、bundle 同源、exposure、read-only fail-closed、mock execution、large artifact、approval-resume fail-closed、HostSession-level elicitation、HTTP fixture、stdio fixture。
+
+仍未产品化的边界：
+
+- MCP 配置发现仍是 programmatic seam：调用方需要构造 `McpClientManager` 并通过 `build_agent_runtime_wiring(..., mcp_managers=(...))` 接入。尚未实现 CLI/env/plugin config discovery。
+- streamable HTTP / stdio 是 deterministic spike manager，不依赖官方 MCP SDK；后续若切 SDK，应该只替换 manager/client 层，不改 CapabilityProvider / ToolAdapter / HostSession pending seam。

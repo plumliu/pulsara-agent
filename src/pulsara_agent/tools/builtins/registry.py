@@ -8,6 +8,7 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.memory.canonical.query import MemoryQuery
 from pulsara_agent.memory.recall.service import MemoryRecallService
 from pulsara_agent.runtime.permission import PermissionState
+from pulsara_agent.tools.base import AsyncTool, Tool
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
@@ -43,6 +44,7 @@ def build_core_tool_registry(
     graph_id: str | None = None,
     memory_read_scopes: frozenset[str] | None = None,
     permission_state: PermissionState | None = None,
+    extra_tools: tuple[Tool | AsyncTool, ...] = (),
 ) -> ToolRegistry:
     if not isinstance(runtime_session, RuntimeSession):
         raise TypeError("build_core_tool_registry requires a RuntimeSession")
@@ -108,4 +110,6 @@ def build_core_tool_registry(
         registry.register(RememberObservationTool(sink=memory_proposal_sink))
         registry.register(RememberActionBoundaryTool(sink=memory_proposal_sink))
         registry.register(RememberDecisionTool(sink=memory_proposal_sink))
+    for tool in extra_tools:
+        registry.register(tool)
     return registry

@@ -23,6 +23,7 @@ from pulsara_agent.runtime.terminal import (
     TerminalSessionManager,
 )
 from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactIndex, ToolResultArtifactService
+from pulsara_agent.tools.base import AsyncTool, Tool
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class RuntimeSession:
     hook_manager: RuntimeHookManager = field(default_factory=RuntimeHookManager)
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
     terminal_binding: TerminalRuntimeBinding | None = None
+    extra_tool_bindings: tuple[Tool | AsyncTool, ...] = ()
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)
     artifact_service: ToolResultArtifactService = field(init=False)
@@ -187,6 +189,7 @@ class RuntimeSession:
                 graph_id=graph_id,
                 memory_read_scopes=memory_read_scopes,
                 permission_state=permission_state,
+                extra_tools=self.extra_tool_bindings,
             ),
             record_event=record_event,
             artifact_service=self.artifact_service,
