@@ -1595,7 +1595,7 @@ async def _run_real_host_core_plan_mode_smoke(tmp_path: Path) -> dict:
             "tool_names": [event.tool_call_name for event in first_run_events if isinstance(event, ToolCallStartEvent)],
             "registry_names": registry_names,
             "plan_entered_sources": [
-                event.source for event in first_run_events if isinstance(event, PlanModeEnteredEvent)
+                event.source for event in events if isinstance(event, PlanModeEnteredEvent)
             ],
             "exit_decisions": [
                 event.decision for event in first_run_events if isinstance(event, PlanExitResolvedEvent)

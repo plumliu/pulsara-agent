@@ -10,6 +10,11 @@ from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.permission import PermissionState, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
+from pulsara_agent.runtime.tool_artifacts import (
+    ToolResultArtifactOptions,
+    build_adaptive_preview,
+    effective_terminal_output_cap,
+)
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
@@ -342,7 +347,29 @@ class _StreamingTerminalJsonBuilder:
 
     def __init__(self, emit_delta: Callable[[str], None], *, max_output_chars: int) -> None:
         self._emit_delta = emit_delta
-        self._max_output_chars = max_output_chars
+        self._max_output_chars = effective_terminal_output_cap(max_output_chars) or DEFAULT_MAX_OUTPUT_CHARS
+        default_options = ToolResultArtifactOptions()
+        huge_preview = min(default_options.huge_preview_chars, self._max_output_chars)
+        options_seed = ToolResultArtifactOptions(
+            archive_threshold_bytes=default_options.effective_archive_threshold_bytes,
+            complete_preview_body_chars=min(default_options.complete_preview_body_chars, self._max_output_chars),
+            large_preview_chars=min(default_options.effective_large_preview_chars, self._max_output_chars),
+            huge_output_chars=default_options.huge_output_chars,
+            huge_preview_chars=huge_preview,
+            streaming_live_head_cap_chars=1,
+            tool_result_message_context_chars=default_options.effective_tool_result_message_context_chars,
+        )
+        huge_head_cap = build_adaptive_preview("x" * (default_options.huge_output_chars + 1), options_seed).visible_head_chars
+        self._options = ToolResultArtifactOptions(
+            archive_threshold_bytes=default_options.effective_archive_threshold_bytes,
+            complete_preview_body_chars=min(default_options.complete_preview_body_chars, self._max_output_chars),
+            large_preview_chars=min(default_options.effective_large_preview_chars, self._max_output_chars),
+            huge_output_chars=default_options.huge_output_chars,
+            huge_preview_chars=huge_preview,
+            streaming_live_head_cap_chars=max(1, min(default_options.streaming_live_head_cap_chars, huge_head_cap)),
+            tool_result_message_context_chars=default_options.effective_tool_result_message_context_chars,
+        )
+        self._live_head_cap_chars = min(self._max_output_chars, self._options.streaming_live_head_cap_chars)
         self._started = False
         self._output_chars = 0
         self._preview_parts: list[str] = []
@@ -354,33 +381,72 @@ class _StreamingTerminalJsonBuilder:
         if not self._started:
             self._emit_delta('{"output":"')
             self._started = True
-        remaining = max(self._max_output_chars - self._output_chars, 0)
+        remaining = max(self._live_head_cap_chars - self._output_chars, 0)
         if len(delta) <= remaining:
             self._emit_preview(delta)
             return
         if remaining:
             self._emit_preview(delta[:remaining])
-        self._emit_preview(self._TRUNCATION_NOTICE)
         self._overflowed = True
 
     def finish(self, result: ToolExecutionResult) -> ToolExecutionResult:
         payload = json.loads(result.output)
+        payload_output = str(payload.get("output") or "")
+        full_output = _primary_text_artifact_candidate(result) or str(payload.get("output") or "")
+        preview = build_adaptive_preview(full_output, self._options)
+        display_output = payload_output if preview.policy == "full" else preview.text
+        emitted_head = "".join(self._preview_parts)
+        output_suffix = ""
         if self._started:
-            if self._overflowed:
-                payload["output"] = "".join(self._preview_parts)
-                payload["truncated"] = True
+            if preview.policy == "full":
+                output_suffix = payload_output[len(emitted_head):]
+            else:
+                output_suffix = preview.text[len(emitted_head):] if preview.text.startswith(emitted_head) else (
+                    self._TRUNCATION_NOTICE + preview.text[-preview.visible_tail_chars:]
+                )
+            if output_suffix:
+                self._emit_delta(_json_string_fragment(output_suffix))
+            payload["output"] = emitted_head + output_suffix
+            payload["truncated"] = preview.omitted_middle_chars > 0 or bool(payload.get("truncated"))
+            payload["preview_policy"] = preview.policy
+            payload["output_preview_chars"] = len(payload["output"])
+            payload["output_original_chars"] = preview.original_chars
+            payload["output_original_bytes"] = preview.original_bytes
+            payload["omitted_middle_chars"] = preview.omitted_middle_chars
+            payload["visible_head_chars"] = preview.visible_head_chars
+            payload["visible_tail_chars"] = preview.visible_tail_chars
+            payload["preview"] = preview.to_metadata().model_dump()
             payload.pop("output", None)
-            suffix = json.dumps(payload, ensure_ascii=False)
-            self._emit_delta('",' + suffix[1:])
+            suffix_payload = json.dumps(payload, ensure_ascii=False)
+            self._emit_delta('",' + suffix_payload[1:])
         else:
-            self._emit_delta(result.output)
-        if self._overflowed:
-            final_payload = json.loads(result.output)
-            final_payload["output"] = "".join(self._preview_parts)
-            final_payload["truncated"] = True
-            output = json.dumps(final_payload, ensure_ascii=False)
-        else:
-            output = result.output
+            if preview.policy != "full":
+                payload["output"] = preview.text
+                payload["truncated"] = True
+                payload["preview_policy"] = preview.policy
+                payload["output_preview_chars"] = preview.preview_chars
+                payload["output_original_chars"] = preview.original_chars
+                payload["output_original_bytes"] = preview.original_bytes
+                payload["omitted_middle_chars"] = preview.omitted_middle_chars
+                payload["visible_head_chars"] = preview.visible_head_chars
+                payload["visible_tail_chars"] = preview.visible_tail_chars
+                payload["preview"] = preview.to_metadata().model_dump()
+                self._emit_delta(json.dumps(payload, ensure_ascii=False))
+            else:
+                self._emit_delta(result.output)
+
+        final_payload = json.loads(result.output)
+        final_payload["output"] = display_output
+        final_payload["truncated"] = preview.omitted_middle_chars > 0 or bool(final_payload.get("truncated"))
+        final_payload["preview_policy"] = preview.policy
+        final_payload["output_preview_chars"] = preview.preview_chars
+        final_payload["output_original_chars"] = preview.original_chars
+        final_payload["output_original_bytes"] = preview.original_bytes
+        final_payload["omitted_middle_chars"] = preview.omitted_middle_chars
+        final_payload["visible_head_chars"] = preview.visible_head_chars
+        final_payload["visible_tail_chars"] = preview.visible_tail_chars
+        final_payload["preview"] = preview.to_metadata().model_dump()
+        output = json.dumps(final_payload, ensure_ascii=False)
         return ToolExecutionResult(
             call_id=result.call_id,
             tool_name=result.tool_name,
@@ -401,3 +467,13 @@ class _StreamingTerminalJsonBuilder:
 def _json_string_fragment(value: str) -> str:
     encoded = json.dumps(value, ensure_ascii=False)
     return encoded[1:-1]
+
+
+def _primary_text_artifact_candidate(result: ToolExecutionResult) -> str | None:
+    for candidate in result.artifact_candidates:
+        if candidate.text is not None and candidate.role in {"combined_output", "output"}:
+            return candidate.text
+    for candidate in result.artifact_candidates:
+        if candidate.text is not None:
+            return candidate.text
+    return None

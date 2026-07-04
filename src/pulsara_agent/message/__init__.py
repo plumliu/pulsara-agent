@@ -11,6 +11,7 @@ from pulsara_agent.message.blocks import (
     ToolCallState,
     ToolResultArtifactRef,
     ToolResultBlock,
+    ToolResultPreviewMetadata,
     ToolResultState,
     URLSource,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "ToolCallState",
     "ToolResultArtifactRef",
     "ToolResultBlock",
+    "ToolResultPreviewMetadata",
     "ToolResultState",
     "URLSource",
     "Usage",

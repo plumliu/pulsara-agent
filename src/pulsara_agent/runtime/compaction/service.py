@@ -651,7 +651,7 @@ def _render_completed_block(block: object) -> str:
         artifact_text = ""
         if block.artifacts:
             refs = ", ".join(
-                f"{artifact.artifact_id}({artifact.media_type}, {artifact.size_bytes} bytes)"
+                _artifact_ref_summary(artifact)
                 for artifact in block.artifacts
             )
             artifact_text = f" artifacts=[{refs}]"
@@ -665,6 +665,20 @@ def _render_completed_block(block: object) -> str:
     if isinstance(block, DataBlock):
         return _block_text(block)
     return ""
+
+
+def _artifact_ref_summary(artifact) -> str:
+    base = f"{artifact.artifact_id}({artifact.media_type}, {artifact.size_bytes} bytes)"
+    preview = getattr(artifact, "preview", None)
+    if preview is None:
+        return base
+    read_more = getattr(preview, "read_more", {}) or {}
+    suggested_offset = read_more.get("suggested_offset_chars")
+    return (
+        f"{base}, preview_policy={preview.preview_policy}, "
+        f"visible_head_chars={preview.visible_head_chars}, visible_tail_chars={preview.visible_tail_chars}, "
+        f"suggested_offset_chars={suggested_offset}"
+    )
 
 
 def _block_text(block: object) -> str:

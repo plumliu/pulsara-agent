@@ -24,7 +24,7 @@ DEFAULT_ARTIFACT_READ_CHARS = 20_000
 DEFAULT_READ_LINES = 500
 MAX_READ_LINES = 2_000
 DEFAULT_SEARCH_LIMIT = 50
-DEFAULT_MAX_OUTPUT_CHARS = 20_000
+DEFAULT_MAX_OUTPUT_CHARS = 32_000
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 _SOURCE_AUTHORITIES = [
     "explicit_user_instruction",
@@ -235,7 +235,8 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         name="artifact_read",
         description=(
             "Read a retained tool result artifact by artifact_id. Use this when a tool result includes artifacts[] "
-            "and you need more than the inline output_preview."
+            "and you need details beyond the inline output_preview. Prefer preview.read_more.suggested_offset_chars "
+            "when present instead of rereading from 0."
         ),
         input_schema=object_schema(
             properties={

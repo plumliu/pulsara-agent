@@ -22,7 +22,8 @@ class ArtifactReadTool:
     name: str = "artifact_read"
     description: str = (
         "Read a retained tool result artifact by artifact_id. "
-        "Use this when a tool result includes artifacts[] and you need more than the inline output_preview. "
+        "Use this when a tool result includes artifacts[] and you need details beyond the inline output_preview. "
+        "If the artifact ref includes preview.read_more.suggested_offset_chars, prefer that offset instead of rereading from 0. "
         "Offsets are character offsets; use has_more to page through text."
     )
     parameters: dict[str, Any] = field(

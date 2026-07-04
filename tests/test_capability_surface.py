@@ -326,9 +326,9 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
         index=index,
         runtime_session_id="runtime:test",
         options=ToolResultArtifactOptions(
-            archive_threshold_chars=10,
-            inline_preview_chars=10,
-            tool_result_context_chars=20,
+            archive_threshold_bytes=10,
+            large_preview_chars=10,
+            tool_result_message_context_chars=20,
         ),
     )
     context = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")

@@ -23,12 +23,14 @@ from pulsara_agent.runtime.tool_artifacts import (
     InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
     ToolResultArtifactRecord,
+    ToolResultArtifactService,
 )
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import (
     ToolCall,
     ToolExecutionResult,
     ToolExecutor,
+    ToolResultArtifactCandidate,
     ToolRuntimeContext,
     build_core_tool_registry,
 )
@@ -1226,8 +1228,81 @@ def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
 
 
 def test_tool_result_artifact_options_reject_unrecoverable_threshold_band() -> None:
-    with pytest.raises(ValueError, match="archive_threshold_chars"):
-        ToolResultArtifactOptions(archive_threshold_chars=20_000, tool_result_context_chars=8_000)
+    with pytest.raises(ValueError, match="archive_threshold_bytes"):
+        ToolResultArtifactOptions(archive_threshold_bytes=20_000, tool_result_message_context_chars=8_000)
+
+
+def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_preview() -> None:
+    archive = InMemoryArchiveStore()
+    index = InMemoryToolResultArtifactIndex()
+    service = ToolResultArtifactService(
+        archive=archive,
+        index=index,
+        runtime_session_id="runtime:test",
+        options=ToolResultArtifactOptions(archive_threshold_bytes=10),
+    )
+    full_output = "HEAD-" + ("x" * 40_000) + "-TAIL"
+    result = ToolExecutionResult(
+        call_id="call:terminal",
+        tool_name="terminal",
+        status=ToolResultState.SUCCESS,
+        output=json.dumps({"status": "success", "output": "OLD_PREVIEW", "truncated": True}, ensure_ascii=False),
+        artifact_candidates=(
+            # Non-primary text artifact must not receive the primary output preview.
+            ToolResultArtifactCandidate(role="diagnostics", media_type="text/plain; charset=utf-8", text="diag" * 20),
+            ToolResultArtifactCandidate(role="combined_output", media_type="text/plain; charset=utf-8", text=full_output),
+        ),
+    )
+
+    processed, refs = service.process_result(
+        result,
+        event_context=CTX,
+        tool_call=ToolCall(id="call:terminal", name="terminal"),
+    )
+
+    payload = json.loads(processed.output)
+    assert payload["output"] != "OLD_PREVIEW"
+    assert payload["preview_policy"] == "head_tail"
+    assert payload["output"].startswith("HEAD-")
+    assert payload["output"].endswith("-TAIL")
+    assert "OUTPUT TRUNCATED" in payload["output"]
+    assert refs[0].preview is None
+    assert refs[1].preview is not None
+    assert refs[1].preview.read_more["artifact_id"] == refs[1].artifact_id
+    record = index.get_for_session(refs[1].artifact_id, session_id="runtime:test")
+    assert record is not None
+    assert record.metadata["preview"] == refs[1].preview.model_dump()
+
+
+def test_tool_result_artifact_service_archives_multibyte_text_by_bytes_but_previews_by_chars() -> None:
+    archive = InMemoryArchiveStore()
+    index = InMemoryToolResultArtifactIndex()
+    service = ToolResultArtifactService(
+        archive=archive,
+        index=index,
+        runtime_session_id="runtime:test",
+        options=ToolResultArtifactOptions(archive_threshold_bytes=8_000),
+    )
+    text = "界" * 3_000
+    processed, refs = service.process_result(
+        ToolExecutionResult(
+            call_id="call:tool",
+            tool_name="lookup",
+            status=ToolResultState.SUCCESS,
+            output=text,
+        ),
+        event_context=CTX,
+        tool_call=ToolCall(id="call:tool", name="lookup"),
+    )
+
+    assert len(text) < 8_000
+    assert len(text.encode("utf-8")) > 8_000
+    assert processed.output == text
+    assert len(refs) == 1
+    assert refs[0].preview is not None
+    assert refs[0].preview.preview_policy == "full"
+    assert refs[0].preview.original_chars == len(text)
+    assert refs[0].preview.original_bytes == len(text.encode("utf-8"))
 
 
 def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) -> None:
@@ -1300,6 +1375,103 @@ def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
 
     assert json.loads(streamed_json) == json.loads(result.output)
     assert json.loads(streamed_json)["output"] == "JSON_A\nJSON_B"
+
+
+def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(tmp_path) -> None:
+    runtime_session, executor = make_runtime_executor(tmp_path)
+
+    result = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={
+                "command": "python -c 'print(\"HEAD\"); print(\"z\" * 60000); print(\"TAIL\")'",
+            },
+        ),
+        event_context=CTX,
+    )
+    deltas = [
+        event.delta
+        for event in runtime_session.event_log.iter(reply_id="reply:tools")
+        if isinstance(event, ToolResultTextDeltaEvent)
+    ]
+    streamed_json = "".join(deltas)
+    streamed_payload = json.loads(streamed_json)
+    end_event = next(
+        event
+        for event in runtime_session.event_log.iter(reply_id="reply:tools")
+        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:terminal"
+    )
+
+    assert result.status is ToolResultState.SUCCESS
+    assert len(streamed_json) < 15_000
+    assert streamed_payload["preview_policy"] == "head_tail"
+    assert streamed_payload["output"].startswith("HEAD")
+    assert streamed_payload["output"].rstrip().endswith("TAIL")
+    assert "OUTPUT TRUNCATED" in streamed_payload["output"]
+    assert "artifact_id" not in streamed_payload["preview"]["read_more"]
+    assert end_event.artifacts
+    assert end_event.artifacts[0].preview is not None
+    assert end_event.artifacts[0].preview.read_more["artifact_id"] == end_event.artifacts[0].artifact_id
+
+
+def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(tmp_path) -> None:
+    runtime_session, executor = make_runtime_executor(tmp_path)
+
+    result = executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={
+                "command": "python -c 'print(\"HEAD\"); print(\"z\" * 50000); print(\"TAIL\")'",
+                "max_output_chars": 1,
+            },
+        ),
+        event_context=CTX,
+    )
+
+    payload = json.loads(result.output)
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["truncated"] is True
+    end_event = next(
+        event
+        for event in runtime_session.event_log.iter(reply_id="reply:tools")
+        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:terminal"
+    )
+    assert end_event.artifacts
+    assert end_event.artifacts[0].preview is not None
+
+
+def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None:
+    runtime_session, executor = make_runtime_executor(tmp_path)
+
+    executor.execute(
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={
+                "command": "python -c 'print(\"H\" * 210000); print(\"TAIL\")'",
+            },
+        ),
+        event_context=CTX,
+    )
+    streamed_json = "".join(
+        event.delta
+        for event in runtime_session.event_log.iter(reply_id="reply:tools")
+        if isinstance(event, ToolResultTextDeltaEvent)
+    )
+    payload = json.loads(streamed_json)
+
+    assert payload["preview_policy"] == "head_tail_huge"
+    visible_head_chars = payload["preview"]["visible_head_chars"]
+    assert payload["output"][visible_head_chars:].startswith("\n\n[OUTPUT TRUNCATED / PREVIEW")
+    end_event = next(
+        event
+        for event in runtime_session.event_log.iter(reply_id="reply:tools")
+        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:terminal"
+    )
+    assert end_event.artifacts[0].preview is not None
+    assert end_event.artifacts[0].preview.visible_head_chars == visible_head_chars
 
 
 def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -> None:

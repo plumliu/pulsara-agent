@@ -205,7 +205,10 @@ def test_large_mcp_result_uses_tool_artifact_service(tmp_path: Path) -> None:
 
     assert result.status is ToolResultState.SUCCESS
     assert wiring.runtime_session.tool_result_artifacts.records
-    assert len(result.output) < 9_000
+    assert len(result.output) == 9_000
+    record = next(iter(wiring.runtime_session.tool_result_artifacts.records.values()))
+    assert record.metadata["preview"]["preview_policy"] == "full"
+    assert record.metadata["preview"]["original_chars"] == 9_000
 
 
 def test_mcp_tools_fail_closed_under_read_only_profile(tmp_path: Path) -> None:

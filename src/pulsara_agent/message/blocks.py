@@ -76,6 +76,19 @@ class ToolResultState(StrEnum):
     RUNNING = "running"
 
 
+class ToolResultPreviewMetadata(BaseModel):
+    """Durable metadata for a model-facing preview of a retained artifact."""
+
+    preview_policy: Literal["full", "head_tail", "head_tail_huge"]
+    preview_chars: int
+    original_chars: int
+    original_bytes: int
+    omitted_middle_chars: int
+    visible_head_chars: int
+    visible_tail_chars: int
+    read_more: dict[str, object] = Field(default_factory=dict)
+
+
 class ToolResultArtifactRef(BaseModel):
     """Structured reference to a persisted artifact produced by a tool result."""
 
@@ -85,6 +98,7 @@ class ToolResultArtifactRef(BaseModel):
     size_bytes: int
     stored_complete: bool = True
     loss_reason: str | None = None
+    preview: ToolResultPreviewMetadata | None = None
 
     def to_model_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -97,6 +111,8 @@ class ToolResultArtifactRef(BaseModel):
         }
         if self.loss_reason is not None:
             payload["loss_reason"] = self.loss_reason
+        if self.preview is not None:
+            payload["preview"] = self.preview.model_dump()
         return payload
 
 

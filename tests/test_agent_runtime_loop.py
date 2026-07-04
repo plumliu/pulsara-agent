@@ -56,6 +56,7 @@ from pulsara_agent.message import (
     ToolCallState,
     ToolResultArtifactRef,
     ToolResultBlock,
+    ToolResultPreviewMetadata,
     ToolResultState,
     UserMsg,
 )
@@ -260,6 +261,148 @@ def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> Non
     assert envelope["output_truncated"] is True
     assert "TOOL RESULT TRUNCATED" in envelope["output_preview"]
     assert envelope["artifacts"][0]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
+
+
+def test_msg_to_llm_messages_uses_aggregate_tool_result_budget() -> None:
+    messages = [
+        Msg(
+            role="tool_result",
+            name="first",
+            content=[
+                ToolResultBlock(
+                    id="call:first",
+                    name="first",
+                    output=[TextBlock(text="A" * 18)],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        ),
+        Msg(
+            role="tool_result",
+            name="second",
+            content=[
+                ToolResultBlock(
+                    id="call:second",
+                    name="second",
+                    output=[TextBlock(text="B" * 18)],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        ),
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=30))
+    first = "\n".join(llm_messages[0].content)
+    second = "\n".join(llm_messages[1].content)
+
+    assert "A" * 18 in first
+    assert "TOOL RESULT TRUNCATED" in second
+
+
+def test_msg_to_llm_messages_bounds_artifact_envelopes_after_budget_exhaustion() -> None:
+    noisy_preview = ToolResultPreviewMetadata(
+        preview_policy="head_tail",
+        preview_chars=8_000,
+        original_chars=80_000,
+        original_bytes=80_000,
+        omitted_middle_chars=72_000,
+        visible_head_chars=5_000,
+        visible_tail_chars=3_000,
+        read_more={
+            "tool": "artifact_read",
+            "artifact_id": "artifact:huge",
+            "suggested_offset_chars": 5_000,
+            "suggested_max_chars": 20_000,
+            "noise": "N" * 5_000,
+        },
+    )
+    messages = [
+        Msg(
+            role="tool_result",
+            name=f"terminal-{idx}",
+            content=[
+                ToolResultBlock(
+                    id=f"call:{idx}",
+                    name="terminal",
+                    output=[TextBlock(text="x" * 100)],
+                    state=ToolResultState.SUCCESS,
+                    artifacts=[
+                        ToolResultArtifactRef(
+                            artifact_id=f"artifact:{idx}",
+                            role="combined_output",
+                            media_type="text/plain; charset=utf-8",
+                            size_bytes=80_000,
+                            preview=noisy_preview,
+                        )
+                    ],
+                )
+            ],
+        )
+        for idx in range(5)
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=500))
+    rendered = "\n".join("\n".join(message.content) for message in llm_messages)
+
+    assert "aggregate context budget exhausted" in rendered
+    assert len(rendered) < 3_000
+    assert '"noise"' not in rendered
+
+
+def test_msg_to_llm_messages_compact_envelope_keeps_primary_preview_artifact() -> None:
+    preview = ToolResultPreviewMetadata(
+        preview_policy="head_tail",
+        preview_chars=8_000,
+        original_chars=80_000,
+        original_bytes=80_000,
+        omitted_middle_chars=72_000,
+        visible_head_chars=5_000,
+        visible_tail_chars=3_000,
+        read_more={
+            "tool": "artifact_read",
+            "artifact_id": "artifact:combined",
+            "suggested_offset_chars": 5_000,
+            "suggested_max_chars": 20_000,
+        },
+    )
+    messages = [
+        Msg(
+            role="tool_result",
+            name="terminal",
+            content=[
+                ToolResultBlock(
+                    id="call:terminal",
+                    name="terminal",
+                    output=[TextBlock(text="x" * 100)],
+                    state=ToolResultState.SUCCESS,
+                    artifacts=[
+                        ToolResultArtifactRef(
+                            artifact_id="artifact:diagnostics",
+                            role="diagnostics",
+                            media_type="application/json",
+                            size_bytes=512,
+                        ),
+                        ToolResultArtifactRef(
+                            artifact_id="artifact:combined",
+                            role="combined_output",
+                            media_type="text/plain; charset=utf-8",
+                            size_bytes=80_000,
+                            preview=preview,
+                        ),
+                    ],
+                )
+            ],
+        )
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=1))
+    rendered = "\n".join("\n".join(message.content) for message in llm_messages)
+    envelope = json.loads(rendered.split("\n", 1)[1])
+
+    assert envelope["artifacts"][0]["artifact_id"] == "artifact:combined"
+    assert envelope["artifacts"][0]["preview"]["read_more"]["artifact_id"] == "artifact:combined"
+    assert envelope["artifact_refs_omitted"] == 1
+    assert "artifact:diagnostics" not in rendered
 
 
 def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
