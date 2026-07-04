@@ -7,6 +7,7 @@ from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
+    CustomEvent,
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
@@ -35,9 +36,21 @@ from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
-from pulsara_agent.runtime.agent import AgentRuntime
+from pulsara_agent.message import (
+    AssistantMsg,
+    Msg,
+    TextBlock,
+    ToolCallBlock,
+    ToolCallState,
+    ToolResultArtifactRef,
+    ToolResultBlock,
+    ToolResultState,
+    UserMsg,
+)
+from pulsara_agent.runtime.agent import AgentRunResult, AgentRuntime
+from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval, ToolApprovalDecision
 from pulsara_agent.runtime.compaction.planner import strip_compaction_analysis
+from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionPolicy,
     ContextCompactionService,
@@ -45,7 +58,11 @@ from pulsara_agent.runtime.compaction.service import (
     _events_text_for_estimate,
     estimate_compaction_window_tokens,
     estimate_context_tokens,
+    production_compaction_prompt,
 )
+from pulsara_agent.runtime.plan import McpElicitationResolution, PendingMcpElicitation, PendingPlanInteraction, PlanQuestionResolution
+from pulsara_agent.runtime.state import LoopState, LoopStatus, LoopTransition
+from pulsara_agent.runtime.transcript import rebuild_prior_messages_before_sequence
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring, build_in_memory_runtime_wiring
 
 
@@ -118,6 +135,74 @@ def _append_turn(log: InMemoryEventLog, label: str, user_input: str, assistant_t
             ReplyEndEvent(**ctx.event_fields()),
         ]
     )
+
+
+async def _emit_turn(runtime_session, label: str, user_input: str, assistant_text: str) -> None:
+    ctx = _ctx(label)
+    for event in [
+        RunStartEvent(**ctx.event_fields(), user_input_chars=len(user_input), metadata={"user_input": user_input}),
+        ReplyStartEvent(**ctx.event_fields(), name="assistant"),
+        TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
+        TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{label}", delta=assistant_text),
+        TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{label}"),
+        ReplyEndEvent(**ctx.event_fields()),
+    ]:
+        await runtime_session.emit(event)
+
+
+def _current_tail_state(runtime_session_id: str, *, run_id: str = "run:current") -> LoopState:
+    state = LoopState(session_id=runtime_session_id, run_id=run_id)
+    state.messages = [
+        UserMsg(
+            name="user",
+            content="current request",
+            id=f"user-message:{run_id}",
+            metadata={"run_id": run_id},
+        ),
+        AssistantMsg(
+            name="assistant",
+            id=state.reply_id,
+            content=[
+                ToolCallBlock(
+                    id="call:current",
+                    name="terminal",
+                    input='{"command":"printf current"}',
+                    state=ToolCallState.FINISHED,
+                )
+            ],
+        ),
+        Msg(
+            role="tool_result",
+            name="terminal",
+            id="tool-result-message:call:current",
+            content=[
+                ToolResultBlock(
+                    id="call:current",
+                    name="terminal",
+                    state=ToolResultState.SUCCESS,
+                    output=[TextBlock(text="current tool result")],
+                )
+            ],
+        ),
+    ]
+    state.pending_tool_calls = [
+        ToolCallBlock(
+            id="call:current",
+            name="terminal",
+            input='{"command":"printf current"}',
+            state=ToolCallState.FINISHED,
+        )
+    ]
+    state.tool_results = [
+        ToolResultBlock(
+            id="call:current",
+            name="terminal",
+            state=ToolResultState.SUCCESS,
+            output=[TextBlock(text="current tool result")],
+        )
+    ]
+    state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
+    return state
 
 
 def _llm_runtime(transport: CompactScriptedTransport) -> LLMRuntime:
@@ -193,7 +278,7 @@ class _FakeWritingAutoCompactionService:
                     **ctx.event_fields(),
                     compaction_id="context_compaction:completed",
                     trigger="auto",
-                    reason="run_end_context_threshold",
+                    reason="preflight_context_threshold",
                     window_number=1,
                     window_id="context_window:completed",
                     estimated_tokens_before=200_001,
@@ -206,7 +291,7 @@ class _FakeWritingAutoCompactionService:
                     **ctx.event_fields(),
                     compaction_id="context_compaction:completed",
                     trigger="auto",
-                    reason="run_end_context_threshold",
+                    reason="preflight_context_threshold",
                     window_number=1,
                     window_id="context_window:completed",
                     summary_artifact_id="context_compaction_completed:summary",
@@ -219,6 +304,136 @@ class _FakeWritingAutoCompactionService:
                     keep_after_sequence=5,
                 ),
             ]
+        )
+        return True
+
+
+class _FakeWritingManualCompactionService:
+    def __init__(self, event_log: InMemoryEventLog) -> None:
+        self.event_log = event_log
+
+    async def compact(self, **kwargs):
+        ctx = _ctx("compaction:manual:completed")
+        self.event_log.extend(
+            [
+                ContextCompactionStartedEvent(
+                    **ctx.event_fields(),
+                    compaction_id="context_compaction:manual",
+                    trigger="manual",
+                    reason=str(kwargs.get("reason", "user_requested")),
+                    window_number=1,
+                    window_id="context_window:manual",
+                    estimated_tokens_before=200_001,
+                    threshold_tokens=200_000,
+                    context_window_tokens=256_000,
+                    through_sequence=10,
+                    keep_after_sequence=5,
+                    force=bool(kwargs.get("force", False)),
+                ),
+                ContextCompactionCompletedEvent(
+                    **ctx.event_fields(),
+                    compaction_id="context_compaction:manual",
+                    trigger="manual",
+                    reason=str(kwargs.get("reason", "user_requested")),
+                    window_number=1,
+                    window_id="context_window:manual",
+                    summary_artifact_id="context_compaction_manual:summary",
+                    summary_chars=12,
+                    estimated_tokens_before=200_001,
+                    estimated_tokens_after=4_000,
+                    threshold_tokens=200_000,
+                    context_window_tokens=256_000,
+                    through_sequence=10,
+                    keep_after_sequence=5,
+                ),
+            ]
+        )
+        return SimpleNamespace(
+            compaction_id="context_compaction:manual",
+            summary_artifact_id="context_compaction_manual:summary",
+            window_id="context_window:manual",
+            through_sequence=10,
+            keep_after_sequence=5,
+        )
+
+
+class _FakeFailingManualCompactionService:
+    def __init__(self, event_log: InMemoryEventLog) -> None:
+        self.event_log = event_log
+
+    async def compact(self, **kwargs):
+        ctx = _ctx("compaction:manual:failed")
+        self.event_log.extend(
+            [
+                ContextCompactionStartedEvent(
+                    **ctx.event_fields(),
+                    compaction_id="context_compaction:manual_failed",
+                    trigger="manual",
+                    reason=str(kwargs.get("reason", "user_requested")),
+                    window_number=1,
+                    window_id="context_window:manual_failed",
+                    estimated_tokens_before=200_001,
+                    threshold_tokens=200_000,
+                    context_window_tokens=256_000,
+                    through_sequence=10,
+                    keep_after_sequence=5,
+                    force=bool(kwargs.get("force", False)),
+                ),
+                ContextCompactionFailedEvent(
+                    **ctx.event_fields(),
+                    compaction_id="context_compaction:manual_failed",
+                    trigger="manual",
+                    reason=str(kwargs.get("reason", "user_requested")),
+                    window_number=1,
+                    window_id="context_window:manual_failed",
+                    estimated_tokens_before=200_001,
+                    threshold_tokens=200_000,
+                    context_window_tokens=256_000,
+                    through_sequence=10,
+                    keep_after_sequence=5,
+                    error_type="RuntimeError",
+                    message="manual compact exploded",
+                ),
+            ]
+        )
+        raise RuntimeError("manual compact exploded")
+
+
+class _FakePreflightBoundaryCompactionService:
+    def __init__(self, event_log: InMemoryEventLog, archive: InMemoryArchiveStore, runtime_session_id: str) -> None:
+        self.event_log = event_log
+        self.archive = archive
+        self.runtime_session_id = runtime_session_id
+        self.calls: list[dict[str, object]] = []
+
+    async def compact_if_needed(self, **kwargs) -> bool:
+        self.calls.append({"method": "compact_if_needed", **kwargs})
+        ctx = _ctx("compaction:preflight:completed")
+        artifact_id = "context_compaction_preflight:summary"
+        self.archive.put_text(
+            artifact_id,
+            "Preflight summary sentinel.",
+            session_id=self.runtime_session_id,
+            metadata={"kind": "context_compaction_summary", "do_not_write_back": True},
+        )
+        through_sequence = self.event_log.next_sequence() - 1
+        self.event_log.append(
+            ContextCompactionCompletedEvent(
+                **ctx.event_fields(),
+                compaction_id="context_compaction:preflight",
+                trigger="auto",
+                reason=str(kwargs.get("reason", "preflight_context_threshold")),
+                window_number=1,
+                window_id="context_window:preflight",
+                summary_artifact_id=artifact_id,
+                summary_chars=27,
+                estimated_tokens_before=200_001,
+                estimated_tokens_after=4_000,
+                threshold_tokens=200_000,
+                context_window_tokens=256_000,
+                through_sequence=through_sequence,
+                keep_after_sequence=through_sequence,
+            )
         )
         return True
 
@@ -270,6 +485,15 @@ def test_strip_compaction_analysis_keeps_summary_only() -> None:
 def test_strip_compaction_analysis_rejects_unclosed_private_blocks() -> None:
     assert strip_compaction_analysis("<analysis>private checklist with no close") == ""
     assert strip_compaction_analysis("<summary>official handoff with no close") == ""
+
+
+def test_compaction_prompt_preserves_yielded_terminal_process_continuation() -> None:
+    prompt = production_compaction_prompt()
+
+    assert "process_id" in prompt
+    assert "long-running or background process" in prompt
+    assert "continue with terminal_process" in prompt
+    assert "rather than restarting the command" in prompt
 
 
 def test_compaction_input_estimate_uses_coalesced_observations_not_raw_delta_envelope() -> None:
@@ -464,6 +688,183 @@ def test_rebuild_prior_messages_uses_completed_boundary_and_replays_tail() -> No
     assert "old request" not in rendered
 
 
+def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_replaying_current_run() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    _append_turn(log, "old", "old request", "old reply")
+    current = _ctx("current")
+    current_start = log.append(
+        RunStartEvent(
+            **current.event_fields(),
+            user_input_chars=len("current request"),
+            metadata={"user_input": "current request"},
+        )
+    )
+    assert current_start.sequence is not None
+    transport = CompactScriptedTransport("<summary>Old request was compacted mid-turn.</summary>")
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(transport),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(min_events_after_last_compact=1, keep_recent_runs=1),
+    )
+    completed = asyncio.run(
+        service.compact(
+            trigger="auto",
+            reason="mid_turn_context_threshold",
+            force=True,
+            max_compactable_sequence=current_start.sequence - 1,
+            keep_recent_runs_override=1,
+            event_metadata={"phase": "mid_turn"},
+        )
+    )
+    assert completed is not None
+    assert completed.sequence is not None
+    assert completed.sequence > current_start.sequence
+    compact_input = transport.contexts[-1].messages[1].content[0]
+    assert "old request" in compact_input
+    assert "current request" not in compact_input
+
+    messages = rebuild_prior_messages_before_sequence(
+        log,
+        archive=archive,
+        session_id="runtime:test",
+        before_sequence=current_start.sequence,
+    )
+    rendered = "\n".join(block.text for message in messages for block in message.content if hasattr(block, "text"))
+
+    assert "Old request was compacted mid-turn." in rendered
+    assert "current request" not in rendered
+
+
+def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tail(tmp_path) -> None:
+    async def run():
+        wiring = build_in_memory_runtime_wiring(tmp_path)
+        runtime_session = wiring.runtime_session
+        await _emit_turn(runtime_session, "old-a", "old-a request", "old-a reply")
+        await _emit_turn(runtime_session, "old-b", "old-b request", "old-b reply")
+        state = _current_tail_state(runtime_session.runtime_session_id)
+        current_start = await runtime_session.emit(
+            RunStartEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                user_input_chars=len("current request"),
+                metadata={"user_input": "current request"},
+            ),
+            state=state,
+        )
+        transport = CompactScriptedTransport("<summary>Old request was summarized.</summary>")
+        service = ContextCompactionService(
+            event_log=wiring.event_log,
+            archive=wiring.archive,
+            llm_runtime=_llm_runtime(transport),
+            runtime_session_id=runtime_session.runtime_session_id,
+            policy=ContextCompactionPolicy(min_events_after_last_compact=1, auto_threshold_tokens=1),
+        )
+        compactor = RuntimeContextCompactor(
+            event_log=wiring.event_log,
+            archive=wiring.archive,
+            runtime_session=runtime_session,
+            service=service,
+        )
+
+        result = await compactor.maybe_compact_before_followup(
+            state=state,
+            model_visible_messages=state.messages,
+        )
+
+        assert result.compacted is True
+        assert current_start.sequence is not None
+        compact_input = transport.contexts[-1].messages[1].content[0]
+        assert "old-a request" in compact_input
+        assert "old-b request" not in compact_input
+        assert "current request" not in compact_input
+        assert result.rewritten_messages is not None
+        rendered = "\n".join(
+            block.text
+            for message in result.rewritten_messages
+            for block in message.content
+            if hasattr(block, "text")
+        )
+        assert "Old request was summarized." in rendered
+        assert "old-a request" not in rendered
+        assert "old-b request" in rendered
+        assert "current request" in rendered
+        assert any(
+            isinstance(block, ToolResultBlock)
+            and any(isinstance(item, TextBlock) and item.text == "current tool result" for item in block.output)
+            for message in result.rewritten_messages
+            for block in message.content
+        )
+        completed = [event for event in result.events if isinstance(event, ContextCompactionCompletedEvent)]
+        assert completed
+        assert completed[-1].metadata["phase"] == "mid_turn"
+        assert completed[-1].metadata["current_run_start_sequence"] == current_start.sequence
+        assert state.scratchpad["mid_turn_compaction"]["compaction_id"] == completed[-1].compaction_id
+
+    asyncio.run(run())
+
+
+def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_messages(tmp_path) -> None:
+    async def run():
+        wiring = build_in_memory_runtime_wiring(tmp_path)
+        runtime_session = wiring.runtime_session
+        await _emit_turn(runtime_session, "old-a", "old-a request", "old-a reply")
+        await _emit_turn(runtime_session, "old-b", "old-b request", "old-b reply")
+        state = _current_tail_state(runtime_session.runtime_session_id)
+        await runtime_session.emit(
+            RunStartEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                user_input_chars=len("current request"),
+                metadata={"user_input": "current request"},
+            ),
+            state=state,
+        )
+        original_message_ids = [message.id for message in state.messages]
+        service = ContextCompactionService(
+            event_log=wiring.event_log,
+            archive=wiring.archive,
+            llm_runtime=_llm_runtime(CompactErrorAfterTextTransport("<summary>partial</summary>")),
+            runtime_session_id=runtime_session.runtime_session_id,
+            policy=ContextCompactionPolicy(min_events_after_last_compact=1, auto_threshold_tokens=1),
+        )
+        compactor = RuntimeContextCompactor(
+            event_log=wiring.event_log,
+            archive=wiring.archive,
+            runtime_session=runtime_session,
+            service=service,
+        )
+
+        result = await compactor.maybe_compact_before_followup(
+            state=state,
+            model_visible_messages=state.messages,
+        )
+
+        assert result.compacted is False
+        assert [message.id for message in state.messages] == original_message_ids
+        assert any(isinstance(event, ContextCompactionFailedEvent) for event in result.events)
+        emitted = await asyncio.wait_for(
+            runtime_session.emit(
+                CustomEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    name="after_failed_mid_turn_compaction",
+                    value={},
+                ),
+                state=state,
+            ),
+            timeout=1,
+        )
+        assert emitted.name == "after_failed_mid_turn_compaction"
+
+    asyncio.run(run())
+
+
 def test_missing_summary_artifact_falls_back_to_full_event_replay() -> None:
     log = InMemoryEventLog()
     archive = InMemoryArchiveStore()
@@ -506,7 +907,7 @@ def test_auto_context_compaction_is_threshold_driven_not_run_end_unconditional()
     )
 
     assert service.should_auto_compact() is False
-    assert asyncio.run(service.compact_if_needed(reason="run_end_context_threshold")) is False
+    assert asyncio.run(service.compact_if_needed(reason="preflight_context_threshold")) is False
     assert not any(isinstance(stored, ContextCompactionStartedEvent) for stored in log.iter())
 
 
@@ -575,7 +976,7 @@ def test_auto_context_compaction_uses_model_visible_messages_not_raw_streaming_e
     )
 
     assert service.should_auto_compact(model_visible_messages=[]) is False
-    assert asyncio.run(service.compact_if_needed(reason="run_end_context_threshold", model_visible_messages=[])) is False
+    assert asyncio.run(service.compact_if_needed(reason="preflight_context_threshold", model_visible_messages=[])) is False
     assert not [event for event in log.iter() if isinstance(event, ContextCompactionStartedEvent)]
 
 
@@ -745,7 +1146,7 @@ def test_host_session_compact_now_uses_manual_force_entrypoint(tmp_path) -> None
     assert calls == [{"trigger": "manual", "reason": "user_requested", "force": True}]
 
 
-def test_host_session_invokes_compaction_at_preflight_and_run_end_safe_points(tmp_path) -> None:
+def test_host_session_invokes_compaction_at_preflight_only(tmp_path) -> None:
     transport = CompactScriptedTransport("final answer")
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
@@ -767,7 +1168,6 @@ def test_host_session_invokes_compaction_at_preflight_and_run_end_safe_points(tm
         try:
             result = await session.run_turn("hello compaction")
             assert result.final_text == "final answer"
-            await session._drain_auto_compaction()
             return fake.calls
         finally:
             await session.aclose()
@@ -775,15 +1175,89 @@ def test_host_session_invokes_compaction_at_preflight_and_run_end_safe_points(tm
     calls = asyncio.run(run())
 
     preflight = next(call for call in calls if call.get("reason") == "preflight_context_threshold")
-    run_end = next(call for call in calls if call.get("reason") == "run_end_context_threshold")
     assert preflight["method"] == "compact_if_needed"
     assert preflight["current_user_input"] == "hello compaction"
     assert preflight["model_visible_messages"] == []
-    assert run_end["method"] == "compact_if_needed"
-    assert "model_visible_messages" in run_end
+    assert [call.get("reason") for call in calls] == ["preflight_context_threshold"]
 
 
-def test_host_session_notifies_auto_compaction_failure(tmp_path) -> None:
+def test_host_session_does_not_notify_compaction_listener_after_run_end(tmp_path) -> None:
+    transport = CompactScriptedTransport("final answer")
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    fake = _FakeHostCompactionService()
+    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(
+            agent_runtime=AgentRuntime(
+                capability_runtime=CapabilityRuntime(),
+                runtime_session=runtime_wiring.runtime_session,
+                llm_runtime=_llm_runtime(transport),
+            ),
+            runtime_wiring=runtime_wiring,
+        ),
+    )
+    observed = []
+    session.add_compaction_listener(observed.append)
+
+    async def run() -> None:
+        try:
+            result = await session.run_turn("hello compaction")
+            assert result.final_text == "final answer"
+            await asyncio.sleep(0)
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
+
+    assert observed == []
+    assert [call.get("reason") for call in fake.calls] == ["preflight_context_threshold"]
+
+
+def test_preflight_compaction_rebuilds_prior_messages_and_continues_original_user_input(tmp_path) -> None:
+    transport = CompactScriptedTransport("final answer")
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    _append_turn(runtime_wiring.event_log, "old-host", "old host request", "old host reply")
+    fake = _FakePreflightBoundaryCompactionService(
+        runtime_wiring.event_log,
+        runtime_wiring.archive,
+        runtime_wiring.runtime_session.runtime_session_id,
+    )
+    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(
+            agent_runtime=AgentRuntime(
+                capability_runtime=CapabilityRuntime(),
+                runtime_session=runtime_wiring.runtime_session,
+                llm_runtime=_llm_runtime(transport),
+            ),
+            runtime_wiring=runtime_wiring,
+        ),
+    )
+
+    async def run() -> None:
+        try:
+            result = await session.run_turn("CURRENT_USER_INPUT")
+            assert result.final_text == "final answer"
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
+
+    assert fake.calls[0]["current_user_input"] == "CURRENT_USER_INPUT"
+    assert transport.contexts
+    rendered = "\n".join(part for message in transport.contexts[0].messages for part in message.content)
+    assert "Preflight summary sentinel." in rendered
+    assert "CURRENT_USER_INPUT" in rendered
+    assert "old host request" not in rendered
+
+
+def test_host_session_notifies_preflight_auto_compaction_failure(tmp_path) -> None:
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     fake = _FakeFailingAutoCompactionService(runtime_wiring.event_log)
     session = HostSession(
@@ -804,7 +1278,7 @@ def test_host_session_notifies_auto_compaction_failure(tmp_path) -> None:
 
     async def run() -> None:
         try:
-            await session._compact_if_needed_and_notify(fake, reason="run_end_context_threshold")
+            await session._compact_if_needed_and_notify(fake, reason="preflight_context_threshold")
         finally:
             await session.aclose()
 
@@ -815,7 +1289,7 @@ def test_host_session_notifies_auto_compaction_failure(tmp_path) -> None:
     assert observed[0].compaction_id == "context_compaction:failed"
 
 
-def test_host_session_publishes_directly_written_compaction_events_to_avoid_sequence_gap(tmp_path) -> None:
+def test_host_session_publishes_directly_written_preflight_compaction_events_to_avoid_sequence_gap(tmp_path) -> None:
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     fake = _FakeWritingAutoCompactionService(runtime_wiring.event_log)
     session = HostSession(
@@ -838,7 +1312,7 @@ def test_host_session_publishes_directly_written_compaction_events_to_avoid_sequ
             await runtime_wiring.runtime_session.emit(
                 RunStartEvent(**_ctx("before-gap").event_fields(), user_input_chars=1)
             )
-            assert await session._compact_if_needed_and_notify(fake, reason="run_end_context_threshold") is True
+            assert await session._compact_if_needed_and_notify(fake, reason="preflight_context_threshold") is True
             await asyncio.wait_for(
                 runtime_wiring.runtime_session.emit(
                     RunStartEvent(**_ctx("after-gap").event_fields(), user_input_chars=1)
@@ -852,3 +1326,278 @@ def test_host_session_publishes_directly_written_compaction_events_to_avoid_sequ
 
     assert len(observed) == 1
     assert isinstance(observed[0], ContextCompactionCompletedEvent)
+
+
+def test_host_session_compact_now_publishes_directly_written_events_without_notifying_listener(tmp_path) -> None:
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    fake = _FakeWritingManualCompactionService(runtime_wiring.event_log)
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(
+            agent_runtime=AgentRuntime(
+                capability_runtime=CapabilityRuntime(),
+                runtime_session=runtime_wiring.runtime_session,
+                llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+            ),
+            runtime_wiring=replace(runtime_wiring, compaction_service=fake),
+        ),
+    )
+    observed = []
+    session.add_compaction_listener(observed.append)
+
+    async def run() -> dict[str, object]:
+        try:
+            await runtime_wiring.runtime_session.emit(
+                RunStartEvent(**_ctx("manual-before-gap").event_fields(), user_input_chars=1)
+            )
+            result = await session.compact_now()
+            await asyncio.wait_for(
+                runtime_wiring.runtime_session.emit(
+                    RunStartEvent(**_ctx("manual-after-gap").event_fields(), user_input_chars=1)
+                ),
+                timeout=1,
+            )
+            return result
+        finally:
+            await session.aclose()
+
+    result = asyncio.run(run())
+
+    assert result["compacted"] is True
+    assert result["compaction_id"] == "context_compaction:manual"
+    assert observed == []
+
+
+def test_host_session_compact_now_failure_publishes_events_to_avoid_sequence_gap(tmp_path) -> None:
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    fake = _FakeFailingManualCompactionService(runtime_wiring.event_log)
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(
+            agent_runtime=AgentRuntime(
+                capability_runtime=CapabilityRuntime(),
+                runtime_session=runtime_wiring.runtime_session,
+                llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+            ),
+            runtime_wiring=replace(runtime_wiring, compaction_service=fake),
+        ),
+    )
+    observed = []
+    session.add_compaction_listener(observed.append)
+
+    async def run() -> None:
+        try:
+            await runtime_wiring.runtime_session.emit(
+                RunStartEvent(**_ctx("manual-fail-before-gap").event_fields(), user_input_chars=1)
+            )
+            try:
+                await session.compact_now()
+            except RuntimeError as exc:
+                assert str(exc) == "manual compact exploded"
+            else:
+                raise AssertionError("manual compact failure did not propagate")
+            await asyncio.wait_for(
+                runtime_wiring.runtime_session.emit(
+                    RunStartEvent(**_ctx("manual-fail-after-gap").event_fields(), user_input_chars=1)
+                ),
+                timeout=1,
+            )
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
+
+    failed = [event for event in runtime_wiring.event_log.iter() if isinstance(event, ContextCompactionFailedEvent)]
+    assert len(failed) == 1
+    assert failed[0].compaction_id == "context_compaction:manual_failed"
+    assert observed == []
+
+
+def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    fake = _FakeHostCompactionService()
+    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_wiring.runtime_session,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+    )
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
+    )
+    state = agent.new_state()
+    state.status = LoopStatus.WAITING_USER
+    pending = PendingApproval(
+        approval_id="approval:test",
+        host_session_id=session.host_session_id,
+        runtime_session_id=session.runtime_session_id,
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        tool_calls=(ToolCallBlock(id="call:test", name="terminal", state=ToolCallState.ASKING),),
+    )
+    session.pending_interaction = pending
+    session._suspended_state = state
+    session.suspended_run_id = state.run_id
+
+    async def fake_resume(resume_state, resolution):
+        resume_state.status = LoopStatus.FINISHED
+        resume_state.stop_reason = "final"
+        return AgentRunResult(
+            status=resume_state.status,
+            stop_reason=resume_state.stop_reason,
+            state=resume_state,
+            messages=resume_state.messages,
+            final_text="resumed",
+        )
+
+    agent.resume_after_approval = fake_resume
+
+    async def run() -> None:
+        try:
+            await session.resolve_approval(
+                ApprovalResolution(
+                    approval_id="approval:test",
+                    decisions=(ToolApprovalDecision(tool_call_id="call:test", confirmed=False),),
+                )
+            )
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
+
+    assert fake.calls == []
+
+
+def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    fake = _FakeHostCompactionService()
+    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_wiring.runtime_session,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+    )
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
+    )
+    state = agent.new_state()
+    state.status = LoopStatus.WAITING_USER
+    state.pending_interaction_kind = "plan"
+    state.pending_interaction_payload = {"interaction_id": "plan:test", "kind": "question", "tool_call_id": "call:plan"}
+    pending = PendingPlanInteraction(
+        interaction_id="plan:test",
+        kind="question",
+        host_session_id=session.host_session_id,
+        runtime_session_id=session.runtime_session_id,
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        tool_call_id="call:plan",
+        question="choose",
+    )
+    session.pending_interaction = pending
+    session._suspended_state = state
+    session.suspended_run_id = state.run_id
+
+    async def fake_resume(resume_state, resolution):
+        resume_state.status = LoopStatus.FINISHED
+        resume_state.stop_reason = "final"
+        return AgentRunResult(
+            status=resume_state.status,
+            stop_reason=resume_state.stop_reason,
+            state=resume_state,
+            messages=resume_state.messages,
+            final_text="resumed",
+        )
+
+    agent.resume_after_plan_interaction = fake_resume
+
+    async def run() -> None:
+        try:
+            await session.resolve_plan_interaction(PlanQuestionResolution(interaction_id="plan:test", answer_text="A"))
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
+
+    assert fake.calls == []
+
+
+def test_mcp_elicitation_resume_does_not_auto_compact(tmp_path) -> None:
+    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
+    fake = _FakeHostCompactionService()
+    runtime_wiring = replace(runtime_wiring, compaction_service=fake)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_wiring.runtime_session,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+    )
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
+    )
+    state = agent.new_state()
+    state.status = LoopStatus.WAITING_USER
+    state.pending_interaction_kind = "mcp_elicitation"
+    state.pending_interaction_payload = {
+        "interaction_id": "mcp:test",
+        "tool_call_id": "call:mcp",
+        "tool_name": "mcp__docs__lookup",
+        "server_id": "docs",
+        "request_id": "request:test",
+    }
+    pending = PendingMcpElicitation(
+        interaction_id="mcp:test",
+        kind="mcp_elicitation",
+        host_session_id=session.host_session_id,
+        runtime_session_id=session.runtime_session_id,
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        tool_call_id="call:mcp",
+        tool_name="mcp__docs__lookup",
+        server_id="docs",
+        request_id="request:test",
+        prompt="secret?",
+    )
+    session.pending_interaction = pending
+    session._suspended_state = state
+    session.suspended_run_id = state.run_id
+
+    async def fake_resume(resume_state, resolution):
+        resume_state.status = LoopStatus.FINISHED
+        resume_state.stop_reason = "final"
+        return AgentRunResult(
+            status=resume_state.status,
+            stop_reason=resume_state.stop_reason,
+            state=resume_state,
+            messages=resume_state.messages,
+            final_text="resumed",
+        )
+
+    agent.resume_after_mcp_elicitation = fake_resume
+
+    async def run() -> None:
+        try:
+            await session.resolve_mcp_elicitation(
+                McpElicitationResolution(interaction_id="mcp:test", answer={"value": "secret"})
+            )
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
+
+    assert fake.calls == []

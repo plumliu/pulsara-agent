@@ -450,6 +450,11 @@ def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorSt
                 "compaction_id": event.compaction_id,
                 "trigger": event.trigger,
                 "reason": event.reason,
+                "phase": event.metadata.get("phase", _phase_from_reason(event.reason)),
+                "safe_point": event.metadata.get("safe_point"),
+                "current_run_id": event.metadata.get("current_run_id"),
+                "max_compactable_sequence": event.metadata.get("max_compactable_sequence"),
+                "tail_message_count": event.metadata.get("tail_message_count"),
                 "window_number": event.window_number,
                 "window_id": event.window_id,
                 "summary_artifact_id": event.summary_artifact_id,
@@ -465,6 +470,16 @@ def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorSt
             }
         )
     return windows
+
+
+def _phase_from_reason(reason: str) -> str:
+    if reason.startswith("mid_turn_"):
+        return "mid_turn"
+    if reason.startswith("preflight_") or reason == "context_threshold":
+        return "preflight"
+    if reason.startswith("run_end_"):
+        return "run_end"
+    return "unknown"
 
 
 def _latest_compaction_window(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> dict[str, Any] | None:

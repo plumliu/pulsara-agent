@@ -46,6 +46,7 @@ from pulsara_agent.message import (
 )
 from pulsara_agent.runtime.context import build_llm_context
 from pulsara_agent.runtime.approval import ApprovalResolution
+from pulsara_agent.runtime.compaction.inline import NoopRuntimeContextCompactor, RuntimeContextCompactorProtocol
 from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
 from pulsara_agent.runtime.loop_helpers import (
     _accumulate_usage,
@@ -210,6 +211,7 @@ class AgentRuntime:
         memory_domain: MemoryDomainContext | None = None,
         workspace_kind: WorkspaceKind = "transient",
         permission_policy: EffectivePermissionPolicy | None = None,
+        context_compactor: RuntimeContextCompactorProtocol | None = None,
     ) -> None:
         if capability_runtime is None:
             raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
@@ -231,6 +233,7 @@ class AgentRuntime:
         self.budget = budget or LoopBudget()
         self.system_prompt = system_prompt
         self.capability_runtime = capability_runtime
+        self.context_compactor = context_compactor or NoopRuntimeContextCompactor()
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
         self.tool_executor = runtime_session.create_tool_executor(
@@ -394,7 +397,14 @@ class AgentRuntime:
         active_skill_names: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         state.messages.extend(message.model_copy(deep=True) for message in (prior_messages or []))
-        state.messages.append(UserMsg(name="user", content=user_input))
+        state.messages.append(
+            UserMsg(
+                name="user",
+                content=user_input,
+                id=f"user-message:{state.run_id}",
+                metadata={"run_id": state.run_id},
+            )
+        )
         yield await self.runtime_session.emit(
             RunStartEvent(
                 **self._event_context(state).event_fields(),
@@ -694,8 +704,8 @@ class AgentRuntime:
                 break
             if state.status is not LoopStatus.RUNNING:
                 break
-            state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
-            state.begin_next_turn()
+            async for event in self._continue_after_tool_before_followup(state):
+                yield event
 
         if state.status is LoopStatus.WAITING_USER:
             return
@@ -765,8 +775,8 @@ class AgentRuntime:
             async for event in self._finalize_run(state):
                 yield event
             return
-        state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
-        state.begin_next_turn()
+        async for event in self._continue_after_tool_before_followup(state):
+            yield event
         exposure = self._exposure_from_state_or_resolve(state)
         async for event in self._stream_model_loop(state, exposure):
             yield event
@@ -809,8 +819,8 @@ class AgentRuntime:
             async for event in self._finalize_run(state):
                 yield event
             return
-        state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
-        state.begin_next_turn()
+        async for event in self._continue_after_tool_before_followup(state):
+            yield event
         exposure = self._exposure_from_state_or_resolve(state)
         async for event in self._stream_model_loop(state, exposure):
             yield event
@@ -888,11 +898,34 @@ class AgentRuntime:
             async for event in self._finalize_run(state):
                 yield event
             return
-        state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
-        state.begin_next_turn()
+        async for event in self._continue_after_tool_before_followup(state):
+            yield event
         exposure = self._exposure_from_state_or_resolve(state)
         async for event in self._stream_model_loop(state, exposure):
             yield event
+
+    async def _maybe_compact_mid_turn_before_followup(
+        self,
+        state: LoopState,
+    ) -> AsyncIterator[AgentEvent]:
+        model_visible_messages = [message.model_copy(deep=True) for message in state.messages]
+        result = await self.context_compactor.maybe_compact_before_followup(
+            state=state,
+            model_visible_messages=model_visible_messages,
+        )
+        if result.rewritten_messages is not None:
+            state.messages = [message.model_copy(deep=True) for message in result.rewritten_messages]
+        for event in result.events:
+            yield event
+
+    async def _continue_after_tool_before_followup(
+        self,
+        state: LoopState,
+    ) -> AsyncIterator[AgentEvent]:
+        state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
+        async for event in self._maybe_compact_mid_turn_before_followup(state):
+            yield event
+        state.begin_next_turn()
 
     async def _resolve_plan_question(
         self,

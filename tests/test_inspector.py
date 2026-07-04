@@ -172,8 +172,8 @@ def test_inspect_run_prior_messages_use_context_compaction_boundary(tmp_path: Pa
             ContextCompactionCompletedEvent(
                 **old.event_fields(),
                 compaction_id=f"context_compaction:{uuid4().hex}",
-                trigger="manual",
-                reason="user_requested",
+                trigger="auto",
+                reason="mid_turn_context_threshold",
                 window_number=1,
                 window_id="context_window:test",
                 summary_artifact_id=summary_artifact_id,
@@ -185,6 +185,13 @@ def test_inspect_run_prior_messages_use_context_compaction_boundary(tmp_path: Pa
                 through_sequence=7,
                 keep_after_sequence=7,
                 included_run_ids=[old.run_id],
+                metadata={
+                    "phase": "mid_turn",
+                    "safe_point": "before_followup_model_call",
+                    "current_run_id": target.run_id,
+                    "max_compactable_sequence": 7,
+                    "tail_message_count": 3,
+                },
             )
         )
         log.extend(_simple_run_events(target, user_input="target user", text="TARGET_ASSISTANT"))
@@ -193,6 +200,11 @@ def test_inspect_run_prior_messages_use_context_compaction_boundary(tmp_path: Pa
         prior_text = str(report["prior_messages_as_seen"])
 
         assert report["compaction_boundary_as_seen"]["summary_artifact_id"] == summary_artifact_id
+        assert report["compaction_boundary_as_seen"]["phase"] == "mid_turn"
+        assert report["compaction_boundary_as_seen"]["safe_point"] == "before_followup_model_call"
+        assert report["compaction_boundary_as_seen"]["current_run_id"] == target.run_id
+        assert report["compaction_boundary_as_seen"]["max_compactable_sequence"] == 7
+        assert report["compaction_boundary_as_seen"]["tail_message_count"] == 3
         assert "COMPACTED_OLD_CONTEXT_SUMMARY" in prior_text
         assert "<context-compaction-summary" in prior_text
         assert "old user text" not in prior_text

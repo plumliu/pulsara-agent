@@ -737,6 +737,24 @@ def test_cli_host_repl_compact_command_invokes_session_compaction(monkeypatch, t
     assert "context_compaction:fake" in out
 
 
+def test_cli_host_repl_normal_turn_does_not_print_background_compaction_notice(monkeypatch, tmp_path, capsys) -> None:
+    FakeCore.instances.clear()
+    inputs = iter(["hello", "quit"])
+    monkeypatch.setattr(cli, "HostCore", FakeCore)
+    monkeypatch.setattr(cli, "_best_effort_sync_bundled_skills", lambda: None)
+    monkeypatch.setattr(cli.PulsaraSettings, "from_env", classmethod(lambda cls, prefix="PULSARA": object()))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "repl", "--workspace", str(tmp_path)])
+
+    asyncio.run(cli._host_repl(args))
+
+    out = capsys.readouterr().out
+    assert "fake final" in out
+    assert "context compaction completed:" not in out
+    assert "context compaction failed:" not in out
+
+
 def test_cli_context_compaction_event_notices(capsys) -> None:
     ctx = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
     cli._print_context_compaction_event(
@@ -744,7 +762,7 @@ def test_cli_context_compaction_event_notices(capsys) -> None:
             **ctx.event_fields(),
             compaction_id="context_compaction:done",
             trigger="auto",
-            reason="run_end_context_threshold",
+            reason="preflight_context_threshold",
             window_number=1,
             window_id="context_window:1",
             summary_artifact_id="context_compaction_done:summary",
@@ -762,7 +780,7 @@ def test_cli_context_compaction_event_notices(capsys) -> None:
             **ctx.event_fields(),
             compaction_id="context_compaction:fail",
             trigger="auto",
-            reason="run_end_context_threshold",
+            reason="preflight_context_threshold",
             window_number=1,
             window_id="context_window:1",
             estimated_tokens_before=200_001,

@@ -112,6 +112,8 @@ class ContextCompactionService:
         *,
         current_user_input: str = "",
         model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
+        max_compactable_sequence: int | None = None,
+        keep_recent_runs_override: int | None = None,
     ) -> bool:
         if not self.policy.enabled or not self.policy.auto_enabled:
             return False
@@ -122,6 +124,8 @@ class ContextCompactionService:
             events,
             current_user_input=current_user_input,
             model_visible_messages=model_visible_messages,
+            max_compactable_sequence=max_compactable_sequence,
+            keep_recent_runs_override=keep_recent_runs_override,
         )
         if plan is None:
             return False
@@ -133,10 +137,15 @@ class ContextCompactionService:
         current_user_input: str = "",
         model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
         reason: str = "context_threshold",
+        max_compactable_sequence: int | None = None,
+        keep_recent_runs_override: int | None = None,
+        event_metadata: dict[str, object] | None = None,
     ) -> bool:
         if not self.should_auto_compact(
             current_user_input=current_user_input,
             model_visible_messages=model_visible_messages,
+            max_compactable_sequence=max_compactable_sequence,
+            keep_recent_runs_override=keep_recent_runs_override,
         ):
             return False
         return await self.compact(
@@ -144,6 +153,9 @@ class ContextCompactionService:
             reason=reason,
             current_user_input=current_user_input,
             model_visible_messages=model_visible_messages,
+            max_compactable_sequence=max_compactable_sequence,
+            keep_recent_runs_override=keep_recent_runs_override,
+            event_metadata=event_metadata,
         ) is not None
 
     async def compact(
@@ -154,6 +166,9 @@ class ContextCompactionService:
         current_user_input: str = "",
         model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
         force: bool = False,
+        max_compactable_sequence: int | None = None,
+        keep_recent_runs_override: int | None = None,
+        event_metadata: dict[str, object] | None = None,
     ) -> ContextCompactionCompletedEvent | None:
         if not self.policy.enabled:
             return None
@@ -170,6 +185,8 @@ class ContextCompactionService:
             current_user_input=current_user_input,
             model_visible_messages=model_visible_messages,
             force=force,
+            max_compactable_sequence=max_compactable_sequence,
+            keep_recent_runs_override=keep_recent_runs_override,
         )
         if plan is None:
             return None
@@ -178,6 +195,11 @@ class ContextCompactionService:
 
         compaction_id = f"context_compaction:{uuid4().hex}"
         context = _event_context_for_compaction(events)
+        metadata = {
+            "estimate_source": "model_visible_context",
+            "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
+            **(event_metadata or {}),
+        }
         started = ContextCompactionStartedEvent(
             **context.event_fields(),
             compaction_id=compaction_id,
@@ -191,10 +213,7 @@ class ContextCompactionService:
             through_sequence=plan.through_sequence,
             keep_after_sequence=plan.keep_after_sequence,
             force=force,
-            metadata={
-                "estimate_source": "model_visible_context",
-                "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
-            },
+            metadata=metadata,
         )
         await asyncio.to_thread(self.event_log.append, started)
 
@@ -228,6 +247,7 @@ class ContextCompactionService:
                     "included_artifact_ids": list(plan.included_artifact_ids),
                     "estimated_model_visible_tokens_before": plan.estimated_tokens_before,
                     "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
+                    **(event_metadata or {}),
                 },
             )
             estimated_after = estimate_post_compaction_tokens(
@@ -252,10 +272,7 @@ class ContextCompactionService:
                 keep_after_sequence=plan.keep_after_sequence,
                 included_run_ids=list(plan.included_run_ids),
                 included_artifact_ids=list(plan.included_artifact_ids),
-                metadata={
-                    "estimate_source": "model_visible_context",
-                    "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
-                },
+                metadata=metadata,
             )
             stored = await asyncio.to_thread(self.event_log.append, completed)
             self._consecutive_failures = 0
@@ -276,10 +293,7 @@ class ContextCompactionService:
                 keep_after_sequence=plan.keep_after_sequence,
                 error_type=type(exc).__name__,
                 message=str(exc),
-                metadata={
-                    "estimate_source": "model_visible_context",
-                    "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
-                },
+                metadata=metadata,
             )
             await asyncio.to_thread(self.event_log.append, failed)
             if trigger == "manual":
@@ -323,13 +337,19 @@ class ContextCompactionService:
         current_user_input: str = "",
         model_visible_messages: list[Msg] | tuple[Msg, ...] | None = None,
         force: bool = False,
+        max_compactable_sequence: int | None = None,
+        keep_recent_runs_override: int | None = None,
     ) -> CompactionPlan | None:
         if not events:
             return None
         latest_boundary = latest_completed_boundary(events, archive=self.archive, session_id=self.runtime_session_id)
         last_keep_after = latest_boundary.keep_after_sequence if latest_boundary is not None else 0
         candidate_events = [
-            event for event in events if event.sequence is not None and event.sequence > last_keep_after
+            event
+            for event in events
+            if event.sequence is not None
+            and event.sequence > last_keep_after
+            and (max_compactable_sequence is None or event.sequence <= max_compactable_sequence)
         ]
         if not candidate_events:
             return None
@@ -348,8 +368,13 @@ class ContextCompactionService:
         )
         if not force and len(candidate_events) < self.policy.min_events_after_last_compact:
             return None
-        keep_after_sequence = _keep_after_sequence_for_recent_runs(candidate_events, self.policy.keep_recent_runs)
+        keep_recent_runs = (
+            keep_recent_runs_override if keep_recent_runs_override is not None else self.policy.keep_recent_runs
+        )
+        keep_after_sequence = _keep_after_sequence_for_recent_runs(candidate_events, keep_recent_runs)
         if keep_after_sequence <= last_keep_after:
+            if keep_recent_runs_override is not None and not force:
+                return None
             if not force and estimated_before < self.policy.auto_threshold_tokens:
                 return None
             keep_after_sequence = max(event.sequence or 0 for event in candidate_events)

@@ -24,7 +24,12 @@ from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.llm import build_llm_runtime
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
+from pulsara_agent.message import AssistantMsg, Msg, TextBlock, ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState, UserMsg
+from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.compaction.service import ContextCompactionPolicy, ContextCompactionService
+from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.state import LoopState, LoopTransition
+from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -220,6 +225,104 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
         _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
+def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Path) -> None:
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+    if os.getenv("PULSARA_RUN_DOGFOOD_COMPACTION_MID_TURN") != "1":
+        pytest.skip("Set PULSARA_RUN_DOGFOOD_COMPACTION_MID_TURN=1 to run mid-turn compaction dogfood.")
+    settings = _load_settings()
+    _connect_or_skip(settings.storage.postgres_dsn).close()
+
+    runtime_session_id = f"runtime:real-compaction-midturn:{uuid4().hex}"
+    try:
+        log = PostgresEventLog(
+            dsn=settings.storage.postgres_dsn,
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        archive = PostgresArtifactStore(settings.storage.postgres_dsn)
+        _append_turn(
+            log,
+            "midturn-old-a",
+            "Historical requirement A: mid-turn compaction may summarize old prefix facts.",
+            "Acknowledged historical requirement A.",
+        )
+        _append_turn(
+            log,
+            "midturn-old-b",
+            "Recent requirement B: keep the latest complete historical run outside the mid-turn summary.",
+            "Acknowledged recent requirement B.",
+        )
+        runtime_session = RuntimeSession(
+            tmp_path,
+            runtime_session_id=runtime_session_id,
+            event_log=log,
+            archive=archive,
+            tool_result_artifacts=PostgresToolResultArtifactIndex(settings.storage.postgres_dsn),
+        )
+        state = _mid_turn_state(runtime_session_id)
+        current_start = asyncio.run(
+            runtime_session.emit(
+                RunStartEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    user_input_chars=len("Current request: inspect the just-finished tool output."),
+                    metadata={"user_input": "Current request: inspect the just-finished tool output."},
+                ),
+                state=state,
+            )
+        )
+        capture = _CapturingLLMRuntime(build_llm_runtime(settings.llm))
+        service = ContextCompactionService(
+            event_log=log,
+            archive=archive,
+            llm_runtime=capture,
+            runtime_session_id=runtime_session_id,
+            policy=ContextCompactionPolicy(
+                min_events_after_last_compact=1,
+                auto_threshold_tokens=1,
+                summary_max_output_tokens=2048,
+            ),
+        )
+        compactor = RuntimeContextCompactor(
+            event_log=log,
+            archive=archive,
+            runtime_session=runtime_session,
+            service=service,
+        )
+
+        result = asyncio.run(
+            compactor.maybe_compact_before_followup(
+                state=state,
+                model_visible_messages=state.messages,
+            )
+        )
+
+        assert result.compacted is True
+        assert current_start.sequence is not None
+        completed = next(event for event in result.events if isinstance(event, ContextCompactionCompletedEvent))
+        summary = archive.get_text(completed.summary_artifact_id, session_id=runtime_session_id)
+        compact_input = capture.contexts[0].messages[1].content[0]
+        assert "Historical requirement A" in compact_input
+        assert "Recent requirement B" not in compact_input
+        assert "Current request" not in compact_input
+        assert "historical requirement" in summary.casefold()
+        assert result.rewritten_messages is not None
+        rendered = "\n".join(
+            block.text
+            for message in result.rewritten_messages
+            for block in message.content
+            if hasattr(block, "text")
+        )
+        assert "Recent requirement B" in rendered
+        assert "Current request" in rendered
+        assert completed.metadata["phase"] == "mid_turn"
+        assert completed.metadata["current_run_start_sequence"] == current_start.sequence
+    finally:
+        _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
+
+
 def _append_turn(log: PostgresEventLog, label: str, user_input: str, assistant_text: str) -> None:
     ctx = EventContext(
         run_id=f"run:real-compaction:{label}:{uuid4().hex}",
@@ -237,6 +340,61 @@ def _append_turn(log: PostgresEventLog, label: str, user_input: str, assistant_t
             RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
         ]
     )
+
+
+def _mid_turn_state(runtime_session_id: str) -> LoopState:
+    state = LoopState(session_id=runtime_session_id, run_id=f"run:midturn-current:{uuid4().hex}")
+    state.messages = [
+        UserMsg(
+            name="user",
+            content="Current request: inspect the just-finished tool output.",
+            id=f"user-message:{state.run_id}",
+            metadata={"run_id": state.run_id},
+        ),
+        AssistantMsg(
+            name="assistant",
+            id=state.reply_id,
+            content=[
+                ToolCallBlock(
+                    id="call:midturn",
+                    name="terminal",
+                    input='{"command":"printf CURRENT_TOOL_SENTINEL"}',
+                    state=ToolCallState.FINISHED,
+                )
+            ],
+        ),
+        Msg(
+            role="tool_result",
+            name="terminal",
+            id="tool-result-message:call:midturn",
+            content=[
+                ToolResultBlock(
+                    id="call:midturn",
+                    name="terminal",
+                    state=ToolResultState.SUCCESS,
+                    output=[TextBlock(text="CURRENT_TOOL_SENTINEL")],
+                )
+            ],
+        ),
+    ]
+    state.pending_tool_calls = [
+        ToolCallBlock(
+            id="call:midturn",
+            name="terminal",
+            input='{"command":"printf CURRENT_TOOL_SENTINEL"}',
+            state=ToolCallState.FINISHED,
+        )
+    ]
+    state.tool_results = [
+        ToolResultBlock(
+            id="call:midturn",
+            name="terminal",
+            state=ToolResultState.SUCCESS,
+            output=[TextBlock(text="CURRENT_TOOL_SENTINEL")],
+        )
+    ]
+    state.transition(LoopTransition.CONTINUE_AFTER_TOOL)
+    return state
 
 
 def _append_pr4_style_long_dogfood_transcript(log: PostgresEventLog) -> None:

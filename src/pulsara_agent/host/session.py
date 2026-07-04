@@ -130,7 +130,6 @@ class HostSession:
     _suspended_state: LoopState | None = None
     _active_state: LoopState | None = None
     _active_task: asyncio.Task[Any] | None = None
-    _auto_compaction_task: asyncio.Task[Any] | None = None
     _compaction_listeners: list[Callable[[AgentEvent], None]] = field(default_factory=list, init=False, repr=False)
     _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -480,8 +479,12 @@ class HostSession:
         if service is None:
             raise RuntimeError("context compaction is not configured for this session")
         async with self._run_lock:
-            await self._drain_auto_compaction()
-            event = await service.compact(trigger="manual", reason="user_requested", force=True)
+            event_log = self.wiring.runtime_wiring.event_log
+            before_sequence = await asyncio.to_thread(event_log.next_sequence)
+            try:
+                event = await service.compact(trigger="manual", reason="user_requested", force=True)
+            finally:
+                await self._publish_compaction_events_after(before_sequence)
             return {
                 "compacted": event is not None,
                 "compaction_id": event.compaction_id if event is not None else None,
@@ -507,8 +510,6 @@ class HostSession:
         self._suspended_state = None
         self._active_state = None
         self._active_task = None
-        if self._auto_compaction_task is not None and not self._auto_compaction_task.done():
-            self._auto_compaction_task.cancel()
         self.stopping_run_id = None
         self.suspended_run_id = None
         self.wiring.agent_runtime.close()
@@ -528,7 +529,6 @@ class HostSession:
         if self._lifecycle is HostSessionLifecycle.CLOSED:
             return
         self.begin_close()
-        await self._drain_auto_compaction(cancel=True)
         await self.drain_active_run(reason=reason, timeout_seconds=drain_timeout_seconds)
         await self._finalize_suspended_run(reason)
         mcp_manager = self.wiring.runtime_wiring.mcp_manager
@@ -701,10 +701,8 @@ class HostSession:
         self.active_run_id = None
         self.stopping_run_id = None
         self.last_active_at = time.monotonic()
-        self._schedule_auto_compaction_after_run()
 
     async def _prepare_prior_messages_for_turn(self, user_input: str):
-        await self._drain_auto_compaction()
         prior_messages = self._prior_messages()
         service = self.wiring.runtime_wiring.compaction_service
         if service is not None:
@@ -726,50 +724,20 @@ class HostSession:
             session_id=runtime_wiring.runtime_session.runtime_session_id,
         )
 
-    def _schedule_auto_compaction_after_run(self) -> None:
-        if self._lifecycle is not HostSessionLifecycle.OPEN:
-            return
-        if self.pending_interaction is not None:
-            return
-        service = self.wiring.runtime_wiring.compaction_service
-        if service is None:
-            return
-        task = self._auto_compaction_task
-        if task is not None and not task.done():
-            return
-        self._auto_compaction_task = asyncio.create_task(self._compact_after_run_end(service))
-
-    async def _drain_auto_compaction(self, *, cancel: bool = False) -> None:
-        task = self._auto_compaction_task
-        if task is None or task.done() or task is asyncio.current_task():
-            return
-        if cancel:
-            task.cancel()
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-    async def _compact_after_run_end(self, service) -> bool:
-        prior_messages = await asyncio.to_thread(self._prior_messages)
-        return await self._compact_if_needed_and_notify(
-            service,
-            model_visible_messages=prior_messages,
-            reason="run_end_context_threshold",
-        )
-
     async def _compact_if_needed_and_notify(self, service, **kwargs) -> bool:
         event_log = self.wiring.runtime_wiring.event_log
         before_sequence = await asyncio.to_thread(event_log.next_sequence)
         compacted = await service.compact_if_needed(**kwargs)
-        compaction_events = await asyncio.to_thread(self._compaction_events_after, before_sequence - 1)
-        self.wiring.runtime_wiring.runtime_session.publish_stored_events(compaction_events)
+        compaction_events = await self._publish_compaction_events_after(before_sequence)
         terminal_event = self._latest_terminal_compaction_event(compaction_events)
         if terminal_event is not None:
             self._notify_compaction_listeners(terminal_event)
         return compacted
+
+    async def _publish_compaction_events_after(self, before_sequence: int) -> list[AgentEvent]:
+        compaction_events = await asyncio.to_thread(self._compaction_events_after, before_sequence - 1)
+        self.wiring.runtime_wiring.runtime_session.publish_stored_events(compaction_events)
+        return compaction_events
 
     def _compaction_events_after(self, after_sequence: int) -> list[AgentEvent]:
         return [

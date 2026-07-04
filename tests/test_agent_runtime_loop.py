@@ -71,6 +71,7 @@ from pulsara_agent.runtime import (
     build_tool_result_error_events,
     msg_to_llm_messages,
 )
+from pulsara_agent.runtime.compaction.inline import MidTurnCompactionResult
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
@@ -134,6 +135,15 @@ class ScriptedTransport:
             )
             yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
         yield ModelCallEndEvent(**event_context.event_fields())
+
+
+class RecordingContextCompactor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[LoopTransition, int, int]] = []
+
+    async def maybe_compact_before_followup(self, *, state: LoopState, model_visible_messages: list[Msg]):
+        self.calls.append((state.last_transition, len(state.pending_tool_calls), len(model_visible_messages)))
+        return MidTurnCompactionResult(compacted=False, skipped_reason="test")
 
 
 def make_llm_runtime(transport: ScriptedTransport) -> LLMRuntime:
@@ -360,6 +370,40 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
     assert len(transport.contexts) == 2
     second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
     assert "hello from file" in second_context_text
+
+
+def test_agent_runtime_runs_context_compactor_before_tool_followup(tmp_path) -> None:
+    (tmp_path / "note.txt").write_text("hello from file", encoding="utf-8")
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
+                ]
+            },
+            {"text": "I read it."},
+        ]
+    )
+    compactor = RecordingContextCompactor()
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+        context_compactor=compactor,
+    )
+
+    result = asyncio.run(agent.run_task("Read note.txt"))
+
+    assert result.status is LoopStatus.FINISHED
+    assert len(compactor.calls) == 1
+    transition, pending_count, visible_count = compactor.calls[0]
+    assert transition is LoopTransition.CONTINUE_AFTER_TOOL
+    assert pending_count == 1
+    assert visible_count >= 3
 
 
 def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:

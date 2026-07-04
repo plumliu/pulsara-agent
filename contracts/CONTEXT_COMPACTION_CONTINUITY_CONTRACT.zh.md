@@ -18,11 +18,12 @@ V1 固定阈值:
 
 阈值判断必须使用保守估算。Event-log / JSON-ish / tool-result-shaped 内容不得按普通自然语言 `chars/4` 乐观估算；V1 至少按 event-log `chars/2`、普通文本 `chars/4`，并保留约 20%-30% 安全余量。
 
-Run-end / run-start 只是安全执行点:
+Auto compact 的 UI 可见执行点有两个:
 
-- run-end: 作为后台 safe-point，为下一轮准备。
-- run-start preflight: 在下一次模型调用前兜底，防止 resume、超长输入、上轮 compact 失败导致本轮直接超窗。
-- V1 不做 mid-turn compact，不在 tool call、approval、plan interaction、pending user interaction 中途替换 `LoopState.messages`。
+- run-start preflight: 用户提交新的普通 user turn 后、下一次模型调用前触发；若 compact 成功，HostSession 必须继续消费同一个 user input，不得要求用户再次输入。
+- mid-turn inline: active run 内工具结果已完成、runtime 准备发起 follow-up model call 前触发。该路径只允许 compact current run 之前的历史 prefix；current run 的 user input、assistant tool call、tool result tail 必须原样保留在 `LoopState.messages`。
+- run-end: 不得调度后台 auto compact；`pulsara>` 提示符显示后，不得再由 auto compaction 向 REPL 输入区写入 completed / failed notice。
+- suspended-run resume 路径不得触发 HostSession preflight auto compact；但 approval / plan interaction / MCP elicitation resolution 若已经完成 pending payload、状态回到 `RUNNING`、并准备进入 follow-up model call，可走同一个 mid-turn inline safe point。abort / stop / host teardown recovery 不得触发 compact。
 
 ## 2. Canonical truth
 
@@ -80,6 +81,16 @@ context compaction summary system message
 + normal runtime projections / plan instructions / recovery notes
 ```
 
+Mid-turn inline compaction 的 completed boundary event 可以出现在 current run events 之后，但其 `keep_after_sequence` 必须指向 current run `RUN_START` 之前。运行中重写必须使用 prefix-only rehydration:
+
+```text
+context compaction summary system message
++ replayed events where keep_after_sequence < sequence < current_run_start_sequence
++ current run tail copied from LoopState.messages
+```
+
+不得全量 rebuild 后再 append current tail，避免重复 current user/tool messages。
+
 Compaction summary 必须带 no-write-back fence，并明确区分:
 
 - user message;
@@ -92,11 +103,14 @@ Compaction summary 必须带 no-write-back fence，并明确区分:
 
 ## 6. Safety boundaries
 
-V1 必须满足:
+必须满足:
 
 - 当前用户输入不得被 preflight compact 吞进 summary。
-- pending approval / pending plan interaction / active run 不得自动 compact。
+- mid-turn compact 不得把 current run 的 `RUN_START`、current user input、assistant tool call、tool result、pending approval、pending plan interaction 或 pending MCP elicitation payload 写入 summary。
+- pending approval / pending plan interaction / pending MCP elicitation 状态下不得自动 compact；必须等 resolution 后回到 tool-follow-up safe point。
 - 手动 `:compact` 只允许 idle session。
+- 手动 `:compact` 直接写入的 compaction events 必须 publish 到 `RuntimeSession.publisher`，避免后续 runtime event 出现 sequence gap；但不得同时触发 REPL compaction listener 双输出。
+- mid-turn compact 直接写入的 started/completed/failed events 也必须 publish 到 `RuntimeSession.publisher`，并作为 active run event stream 的一部分可观察；不得通过 HostSession idle listener 在 REPL prompt 后后台打印。
 - Missing summary artifact 必须 fail-open 到 full event replay。
 - Repeated auto compact failure 必须有 circuit breaker，避免每轮重复烧模型。
 - Compact model 不得获得工具 schema；compact prompt 必须强制 text-only/no-tools。
@@ -109,6 +123,7 @@ Inspector 必须能解释:
 
 - session compact windows;
 - run 看到的 compaction boundary;
+- compaction phase (`preflight` / `mid_turn` / legacy `run_end`)、safe point、current run id、max compactable sequence、tail message count;
 - summary artifact metadata/payload;
 - dangling started-without-completed/failed;
 - completed boundary referencing missing artifact。
@@ -123,7 +138,14 @@ Inspector 必须能解释:
 - rehydration uses boundary and replays tail;
 - missing artifact fallback;
 - manual `:compact` / HostSession API;
-- auto threshold 不无条件 run-end compact;
-- single huge completed run 可触发 auto compact;
+- run-end 不得调度后台 auto compact;
+- single huge completed run 可在下一轮 preflight 触发 auto compact;
+- preflight compact 后继续消费原始 current user input;
+- manual `:compact` publishes direct-written compaction events without duplicate listener notice;
+- approval / plan / MCP suspended-run resume 不触发 auto compact;
+- mid-turn compact 只压 current run 前的历史 prefix;
+- current run assistant tool call 和 tool result 保留在 rewritten `LoopState.messages` tail;
+- mid-turn compact failed event publish 后，后续 runtime event 不得因 sequence gap 卡住;
+- inspector windows 显示 mid-turn phase/safe-point metadata;
 - inspector windows/diagnostics;
 - real LLM dogfood 覆盖 long-session compact/resume。

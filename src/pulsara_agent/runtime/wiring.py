@@ -65,6 +65,7 @@ from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
 from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.compaction import ContextCompactionPolicy, ContextCompactionService
+from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
 from pulsara_agent.runtime.mcp.manager import CompositeMcpClientManager, McpClientManager
 from pulsara_agent.runtime.session import RuntimeSession
@@ -401,6 +402,16 @@ def build_agent_runtime_wiring(
         enable_workspace_skills=enable_workspace_skills,
         mcp_bundle=mcp_bundle,
     )
+    context_compactor = (
+        RuntimeContextCompactor(
+            event_log=runtime_wiring.event_log,
+            archive=runtime_wiring.archive,
+            runtime_session=runtime_wiring.runtime_session,
+            service=runtime_wiring.compaction_service,
+        )
+        if runtime_wiring.compaction_service is not None
+        else None
+    )
     agent_runtime = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=llm_runtime,
@@ -418,6 +429,7 @@ def build_agent_runtime_wiring(
         memory_domain=runtime_wiring.memory_domain,
         workspace_kind=runtime_wiring.memory_domain.workspace_kind if runtime_wiring.memory_domain is not None else "transient",
         permission_policy=effective_permission_policy,
+        context_compactor=context_compactor,
     )
     return AgentRuntimeWiring(
         agent_runtime=agent_runtime,

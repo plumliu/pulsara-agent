@@ -42,6 +42,7 @@ Then write a <summary> block with the exact sections below.
 4. Tools, Commands, and Runtime State
    - Summarize important tool calls, terminal commands, tests, and their outcomes.
    - Preserve terminal/session/host lifecycle facts needed to continue safely.
+   - If a terminal call yielded a long-running or background process, preserve the exact process_id, command, status, owner/session clues if available, and the safe continuation action. Tell the next agent to continue with terminal_process (poll/log/wait/submit/kill as appropriate) rather than restarting the command.
    - If a run was aborted, failed, detached, resumed, or recovered, state that as runtime state, not as a user preference.
 
 5. Memory and Projection Boundary
@@ -74,6 +75,7 @@ Rules:
 
 - Be precise and complete enough for continuation, but do not include irrelevant old history.
 - Prefer stable identifiers: run_id, turn_id, artifact_id, memory_id, file path, command, test name.
+- For live terminal processes, process_id is a stable runtime identifier. Preserve it when present and say whether it can be resumed via terminal_process.
 - Do not overclaim. If the compaction input only says a tool was requested but not completed, preserve that uncertainty.
 - Do not claim a file was modified unless the event/timeline says it was modified.
 - Do not claim a test passed unless the test output says it passed.
