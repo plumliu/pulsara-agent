@@ -94,7 +94,9 @@ class EffectivePermissionPolicy:
             "execution_boundary": self.execution_boundary,
             "network_isolated": self.network_isolated,
             "filesystem": {
-                "file_tools": "workspace_only",
+                "read_file_scope": "host_local_text",
+                "search_files_scope": "host_local_text_guarded_broad_roots",
+                "write_file_scope": "workspace_only",
                 "terminal": "host_shell" if self.terminal is not TerminalAccess.OFF else "off",
             },
         }
@@ -103,7 +105,9 @@ class EffectivePermissionPolicy:
 TERMINAL_PROCESS_READ_ONLY_ACTIONS = frozenset({"list", "log", "poll", "wait"})
 
 # read-only profile allowlist (PERMISSION_POLICY_CONTRACT §3): only tools that
-# cause no user-workspace / external / terminal / durable-memory side effect.
+# cause no user-workspace write / terminal / durable-memory write side effect.
+# read_file/search_files are host-local ordinary-text read capabilities, not
+# workspace-only capabilities; this is an intentional read-only/plan-mode grant.
 # read-only is fail-closed — anything not listed here is denied, so a new
 # side-effecting tool is blocked under read-only by default. This set must stay
 # in sync with the built-in tools whose is_read_only is True (enforced by a

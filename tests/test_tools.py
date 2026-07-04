@@ -1,5 +1,6 @@
 import asyncio
 import json
+import tempfile
 import threading
 import time
 
@@ -223,26 +224,71 @@ def test_terminal_tool_schema_uses_yield_model_hard_cut(tmp_path) -> None:
     assert "max_lifetime_seconds" not in properties
 
 
-def test_read_file_reads_workspace_file_and_blocks_path_escape(tmp_path) -> None:
+def test_read_file_reads_workspace_and_host_local_text_files(tmp_path) -> None:
     target = tmp_path / "note.txt"
     target.write_text("hello Pulsara\nsecond line\n", encoding="utf-8")
 
     _, result = execute_tool(tmp_path, "read_file", {"path": "note.txt", "offset": 2, "limit": 1})
 
     assert result.status is ToolResultState.SUCCESS
+    assert result.metadata["access_scope"] == "workspace"
+    assert result.metadata["workspace_relative"] is True
     payload = json.loads(result.output)
     assert payload["status"] == "ok"
     assert payload["path"] == "note.txt"
+    assert payload["access_scope"] == "workspace"
+    assert payload["workspace_relative"] is True
     assert payload["offset"] == 2
     assert payload["total_lines"] == 2
     assert payload["content"] == "2|second line"
 
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret", encoding="utf-8")
-    _, escaped = execute_tool(tmp_path, "read_file", {"path": str(outside)})
+    _, outside_result = execute_tool(tmp_path, "read_file", {"path": str(outside)})
 
-    assert escaped.status is ToolResultState.ERROR
-    assert "escapes workspace root" in escaped.output
+    assert outside_result.status is ToolResultState.SUCCESS
+    assert outside_result.metadata["workspace_relative"] is False
+    outside_payload = json.loads(outside_result.output)
+    assert outside_payload["status"] == "ok"
+    assert outside_payload["path"] == str(outside.resolve())
+    assert outside_payload["access_scope"] in {"home", "temp", "external_absolute"}
+    assert outside_payload["workspace_relative"] is False
+    assert outside_payload["content"] == "1|secret"
+
+    _, relative_escape = execute_tool(tmp_path, "read_file", {"path": "../outside.txt"})
+    assert relative_escape.status is ToolResultState.ERROR
+    assert "escapes workspace root" in relative_escape.output
+
+
+def test_read_file_allows_explicit_host_local_sensitive_text_path_by_design(tmp_path) -> None:
+    env_file = tmp_path.parent / f"{tmp_path.name}.env"
+    env_file.write_text("TOKEN=plain-text-secret\n", encoding="utf-8")
+
+    _, result = execute_tool(tmp_path, "read_file", {"path": str(env_file)})
+
+    assert result.status is ToolResultState.SUCCESS
+    assert result.metadata["workspace_relative"] is False
+    payload = json.loads(result.output)
+    assert payload["workspace_relative"] is False
+    assert payload["content"] == "1|TOKEN=plain-text-secret"
+
+
+def test_write_and_edit_file_still_block_path_escape(tmp_path) -> None:
+    outside = tmp_path.parent / "outside-write.txt"
+    outside.write_text("before", encoding="utf-8")
+
+    _, write_result = execute_tool(tmp_path, "write_file", {"path": str(outside), "content": "after"})
+    _, edit_result = execute_tool(
+        tmp_path,
+        "edit_file",
+        {"path": str(outside), "old_text": "before", "new_text": "after"},
+    )
+
+    assert write_result.status is ToolResultState.ERROR
+    assert "escapes workspace root" in write_result.output
+    assert edit_result.status is ToolResultState.ERROR
+    assert "escapes workspace root" in edit_result.output
+    assert outside.read_text(encoding="utf-8") == "before"
 
 
 def test_read_file_deduplicates_unchanged_repeated_reads(tmp_path) -> None:
@@ -274,10 +320,50 @@ def test_search_files_finds_matching_text(tmp_path) -> None:
     )
 
     assert result.status is ToolResultState.SUCCESS
+    assert result.metadata["workspace_relative"] is True
     payload = json.loads(result.output)
     assert payload["total_count"] == 1
+    assert payload["access_scope"] == "workspace"
+    assert payload["workspace_relative"] is True
     assert payload["matches"][0]["path"].endswith("memory.md")
     assert payload["matches"][0]["content"] == "JSON-LD memory"
+
+
+def test_search_files_can_search_specific_host_local_directory_and_blocks_broad_roots(tmp_path) -> None:
+    external_dir = tmp_path.parent / f"{tmp_path.name}-external-search"
+    external_dir.mkdir()
+    (external_dir / "skill.md").write_text("HOST_LOCAL_SEARCH_SENTINEL\n", encoding="utf-8")
+
+    _, result = execute_tool(
+        tmp_path,
+        "search_files",
+        {"pattern": "HOST_LOCAL_SEARCH_SENTINEL", "path": str(external_dir), "limit": 5},
+    )
+
+    assert result.status is ToolResultState.SUCCESS
+    assert result.metadata["workspace_relative"] is False
+    payload = json.loads(result.output)
+    assert payload["total_count"] == 1
+    assert payload["access_scope"] in {"home", "temp", "external_absolute"}
+    assert payload["workspace_relative"] is False
+    assert payload["matches"][0]["path"] == str((external_dir / "skill.md").resolve())
+
+    _, broad = execute_tool(
+        tmp_path,
+        "search_files",
+        {"pattern": "SHOULD_NOT_SCAN_TEMP_ROOT", "path": tempfile.gettempdir(), "limit": 1},
+    )
+
+    assert broad.status is ToolResultState.ERROR
+    assert "refusing broad recursive search root outside workspace" in broad.output
+
+    _, relative_escape = execute_tool(
+        tmp_path,
+        "search_files",
+        {"pattern": "HOST_LOCAL_SEARCH_SENTINEL", "path": "..", "limit": 1},
+    )
+    assert relative_escape.status is ToolResultState.ERROR
+    assert "escapes workspace root" in relative_escape.output
 
 
 def test_search_files_can_find_files_by_name(tmp_path) -> None:

@@ -1062,7 +1062,9 @@ cli_usage_kind: read
         "execution_boundary": "host",
         "network_isolated": False,
         "filesystem": {
-            "file_tools": "workspace_only",
+            "read_file_scope": "host_local_text",
+            "search_files_scope": "host_local_text_guarded_broad_roots",
+            "write_file_scope": "workspace_only",
             "terminal": "off",
         },
     }

@@ -45,6 +45,17 @@ def test_default_permission_policy_keeps_inspect_read_only() -> None:
     assert policy.terminal is TerminalAccess.OFF
 
 
+def test_permission_policy_dict_reports_read_and_write_filesystem_scopes() -> None:
+    payload = preset_to_policy(PermissionMode.READ_ONLY).to_dict()
+
+    assert payload["filesystem"] == {
+        "read_file_scope": "host_local_text",
+        "search_files_scope": "host_local_text_guarded_broad_roots",
+        "write_file_scope": "workspace_only",
+        "terminal": "off",
+    }
+
+
 @pytest.mark.parametrize(
     "mode,expected",
     [

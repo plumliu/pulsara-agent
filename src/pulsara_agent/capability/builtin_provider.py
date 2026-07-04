@@ -253,10 +253,16 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "read_file": _descriptor(
         name="read_file",
-        description="Read a UTF-8 text file from the workspace with line numbers and pagination.",
+        description=(
+            "Read a UTF-8 text file with line numbers and pagination. Relative paths resolve from "
+            "workspace_root; absolute paths and ~ may read host-local ordinary text files."
+        ),
         input_schema=object_schema(
             properties={
-                "path": {"type": "string", "description": "Workspace-relative or absolute file path."},
+                "path": {
+                    "type": "string",
+                    "description": "Relative paths resolve from workspace_root; absolute paths and ~ are allowed for text reads.",
+                },
                 "offset": {"type": "integer", "default": 1},
                 "limit": {"type": "integer", "default": DEFAULT_READ_LINES, "maximum": MAX_READ_LINES},
             },
@@ -268,12 +274,19 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "search_files": _descriptor(
         name="search_files",
-        description="Search file contents or find files by name.",
+        description=(
+            "Search text files or find files by name. Relative paths resolve from workspace_root; "
+            "absolute paths and ~ are allowed, but broad host roots are rejected outside the workspace."
+        ),
         input_schema=object_schema(
             properties={
                 "pattern": {"type": "string"},
                 "target": {"type": "string", "enum": ["content", "files"], "default": "content"},
-                "path": {"type": "string", "default": "."},
+                "path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Relative paths resolve from workspace_root. Outside workspace, use a specific file or subdirectory, not broad roots like ~, /, /Users, or /tmp.",
+                },
                 "file_glob": {"type": "string"},
                 "limit": {"type": "integer", "default": DEFAULT_SEARCH_LIMIT},
                 "offset": {"type": "integer", "default": 0},

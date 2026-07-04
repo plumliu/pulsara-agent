@@ -20,6 +20,9 @@ class WorkspaceTool:
         self.workspace_root = self.workspace_root.expanduser().resolve()
 
     def _resolve_path(self, raw_path: str | None) -> Path:
+        return self._resolve_workspace_path(raw_path)
+
+    def _resolve_workspace_path(self, raw_path: str | None) -> Path:
         if not raw_path or not raw_path.strip():
             raise ValueError("path is required")
         path = Path(raw_path).expanduser()
@@ -29,6 +32,17 @@ class WorkspaceTool:
         if resolved != self.workspace_root and self.workspace_root not in resolved.parents:
             raise ValueError(f"path escapes workspace root: {raw_path}")
         return resolved
+
+    def _resolve_read_path(self, raw_path: str | None) -> Path:
+        if not raw_path or not raw_path.strip():
+            raise ValueError("path is required")
+        raw = raw_path.strip()
+        if raw.startswith("~"):
+            return Path(raw).expanduser().resolve()
+        path = Path(raw)
+        if path.is_absolute():
+            return path.expanduser().resolve()
+        return self._resolve_workspace_path(raw)
 
     def _result(
         self,

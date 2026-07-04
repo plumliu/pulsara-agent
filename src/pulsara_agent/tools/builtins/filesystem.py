@@ -134,12 +134,15 @@ def _state_for_workspace(workspace_root: Path) -> _WorkspaceFileState:
 class ReadFileTool(WorkspaceTool):
     name: str = "read_file"
     description: str = (
-        "Read a UTF-8 text file from the workspace with line numbers and "
-        "pagination. Use offset and limit for large files."
+        "Read a UTF-8 text file with line numbers and pagination. Relative paths "
+        "resolve from workspace_root; absolute paths and ~ may read host-local ordinary text files."
     )
     parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
         properties={
-            "path": {"type": "string", "description": "Workspace-relative or absolute file path."},
+            "path": {
+                "type": "string",
+                "description": "Relative paths resolve from workspace_root; absolute paths and ~ are allowed for text reads.",
+            },
             "offset": {
                 "type": "integer",
                 "description": "1-indexed line number to start reading from.",
@@ -157,7 +160,9 @@ class ReadFileTool(WorkspaceTool):
     is_concurrency_safe: bool = True
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
-        path = self._resolve_path(str_arg(call.arguments, "path"))
+        path = self._resolve_read_path(str_arg(call.arguments, "path"))
+        access_scope = _path_access_scope(path, self.workspace_root)
+        workspace_relative = access_scope == "workspace"
         offset = _normalize_offset(int_arg(call.arguments, "offset", 1))
         limit = _normalize_limit(int_arg(call.arguments, "limit", DEFAULT_READ_LINES), MAX_READ_LINES)
         if _is_blocked_device(path):
@@ -186,9 +191,16 @@ class ReadFileTool(WorkspaceTool):
                                 "been returned and the file has not changed."
                             ),
                             "path": _relpath(path, self.workspace_root),
+                            "access_scope": access_scope,
+                            "workspace_relative": workspace_relative,
                             "already_read": record.dedup_hits + 1,
                         }),
-                        metadata={"path": str(path), "dedup": True},
+                        metadata={
+                            "path": str(path),
+                            "dedup": True,
+                            "access_scope": access_scope,
+                            "workspace_relative": workspace_relative,
+                        },
                     )
                 return self._result(
                     call,
@@ -197,10 +209,17 @@ class ReadFileTool(WorkspaceTool):
                         "status": "unchanged",
                         "message": READ_DEDUP_MESSAGE,
                         "path": _relpath(path, self.workspace_root),
+                        "access_scope": access_scope,
+                        "workspace_relative": workspace_relative,
                         "content_returned": False,
                         "dedup": True,
                     }),
-                    metadata={"path": str(path), "dedup": True},
+                    metadata={
+                        "path": str(path),
+                        "dedup": True,
+                        "access_scope": access_scope,
+                        "workspace_relative": workspace_relative,
+                    },
                 )
 
         raw_text = path.read_text(encoding="utf-8", errors="replace")
@@ -224,9 +243,16 @@ class ReadFileTool(WorkspaceTool):
                         f"the safety limit of {MAX_READ_CHARS:,}. Use a smaller limit."
                     ),
                     "path": _relpath(path, self.workspace_root),
+                    "access_scope": access_scope,
+                    "workspace_relative": workspace_relative,
                     "total_lines": total_lines,
                 }),
-                metadata={"path": str(path), "chars": len(content)},
+                metadata={
+                    "path": str(path),
+                    "chars": len(content),
+                    "access_scope": access_scope,
+                    "workspace_relative": workspace_relative,
+                },
             )
 
         truncated = end_index < total_lines
@@ -239,6 +265,8 @@ class ReadFileTool(WorkspaceTool):
         payload: dict[str, Any] = {
             "status": "ok",
             "path": _relpath(path, self.workspace_root),
+            "access_scope": access_scope,
+            "workspace_relative": workspace_relative,
             "offset": offset,
             "limit": limit,
             "total_lines": total_lines,
@@ -259,7 +287,13 @@ class ReadFileTool(WorkspaceTool):
             call,
             status=ToolResultState.SUCCESS,
             output=json_text(payload),
-            metadata={"path": str(path), "truncated": truncated, "lines": len(selected)},
+            metadata={
+                "path": str(path),
+                "truncated": truncated,
+                "lines": len(selected),
+                "access_scope": access_scope,
+                "workspace_relative": workspace_relative,
+            },
         )
 
 
@@ -267,8 +301,8 @@ class ReadFileTool(WorkspaceTool):
 class SearchFilesTool(WorkspaceTool):
     name: str = "search_files"
     description: str = (
-        "Search file contents or find files by name. Use target='content' for "
-        "regex content search, target='files' for file-name search."
+        "Search text files or find files by name. Relative paths resolve from workspace_root; "
+        "absolute paths and ~ are allowed, but broad host roots are rejected outside the workspace."
     )
     parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
         properties={
@@ -279,7 +313,11 @@ class SearchFilesTool(WorkspaceTool):
                 "description": "'content' searches text; 'files' finds paths.",
                 "default": "content",
             },
-            "path": {"type": "string", "default": "."},
+            "path": {
+                "type": "string",
+                "default": ".",
+                "description": "Relative paths resolve from workspace_root. Outside workspace, use a specific file or subdirectory, not broad roots like ~, /, /Users, or /tmp.",
+            },
             "file_glob": {"type": "string", "description": "Optional file glob for content search."},
             "limit": {"type": "integer", "default": DEFAULT_SEARCH_LIMIT},
             "offset": {"type": "integer", "default": 0},
@@ -303,7 +341,9 @@ class SearchFilesTool(WorkspaceTool):
         target = raw_target
         if target not in {"content", "files"}:
             raise ValueError(f"unsupported search target: {raw_target}")
-        path = self._resolve_path(str_arg(call.arguments, "path") or ".")
+        path = self._resolve_read_path(str_arg(call.arguments, "path") or ".")
+        access_scope = _path_access_scope(path, self.workspace_root)
+        workspace_relative = access_scope == "workspace"
         limit = int_arg(call.arguments, "limit", DEFAULT_SEARCH_LIMIT)
         limit = _normalize_limit(limit, MAX_SEARCH_LIMIT)
         offset = max(0, int_arg(call.arguments, "offset", 0))
@@ -314,6 +354,11 @@ class SearchFilesTool(WorkspaceTool):
             raise ValueError(f"unsupported output_mode: {output_mode}")
         if not path.exists():
             raise FileNotFoundError(f"path not found: {path}")
+        if _is_broad_search_root(path, self.workspace_root):
+            raise ValueError(
+                f"refusing broad recursive search root outside workspace: {path}. "
+                "Use a specific file or subdirectory."
+            )
 
         state = _state_for_workspace(self.workspace_root)
         search_key = ("search", pattern, target, path, file_glob or "", limit, offset, output_mode, context)
@@ -327,9 +372,16 @@ class SearchFilesTool(WorkspaceTool):
                 output=json_text({
                     "error": "Repeated search blocked: this exact search has already been returned.",
                     "pattern": pattern,
+                    "access_scope": access_scope,
+                    "workspace_relative": workspace_relative,
                     "already_searched": consecutive,
                 }),
-                metadata={"path": str(path), "pattern": pattern},
+                metadata={
+                    "path": str(path),
+                    "pattern": pattern,
+                    "access_scope": access_scope,
+                    "workspace_relative": workspace_relative,
+                },
             )
 
         if target == "files":
@@ -351,11 +403,19 @@ class SearchFilesTool(WorkspaceTool):
             )
         if payload.get("truncated"):
             payload["_hint"] = f"Results truncated. Continue with offset={offset + limit}."
+        payload["access_scope"] = access_scope
+        payload["workspace_relative"] = workspace_relative
         return self._result(
             call,
             status=ToolResultState.SUCCESS,
             output=json_text(payload),
-            metadata={"path": str(path), "pattern": pattern, "total_count": payload.get("total_count", 0)},
+            metadata={
+                "path": str(path),
+                "pattern": pattern,
+                "total_count": payload.get("total_count", 0),
+                "access_scope": access_scope,
+                "workspace_relative": workspace_relative,
+            },
         )
 
     def _search_files(self, pattern: str, *, path: Path, limit: int, offset: int) -> dict[str, Any]:
@@ -734,6 +794,54 @@ def _relpath(path: Path, root: Path) -> str:
         return str(path.resolve().relative_to(root.resolve()))
     except ValueError:
         return str(path)
+
+
+def _path_access_scope(path: Path, workspace_root: Path) -> str:
+    resolved = path.resolve()
+    root = workspace_root.resolve()
+    if resolved == root or root in resolved.parents:
+        return "workspace"
+    home = Path.home().resolve()
+    if resolved == home or home in resolved.parents:
+        return "home"
+    temp_roots = _temp_roots()
+    if any(resolved == temp_root or temp_root in resolved.parents for temp_root in temp_roots):
+        return "temp"
+    return "external_absolute"
+
+
+def _is_broad_search_root(path: Path, workspace_root: Path) -> bool:
+    resolved = path.resolve()
+    root = workspace_root.resolve()
+    if resolved == root or root in resolved.parents:
+        return False
+    if resolved.is_file():
+        return False
+    return resolved in _broad_search_roots(root)
+
+
+def _broad_search_roots(workspace_root: Path) -> set[Path]:
+    roots = {Path("/").resolve()}
+    home = Path.home().resolve()
+    roots.add(home)
+    for candidate in ("/Users", "/home", "/System", "/Library", "/Applications", "/var", "/usr", "/bin", "/sbin", "/etc"):
+        candidate_path = Path(candidate)
+        if candidate_path.exists():
+            roots.add(candidate_path.resolve())
+    roots.update(_temp_roots())
+    parent = workspace_root.resolve().parent
+    if parent in {home, *(_temp_roots())}:
+        roots.add(parent)
+    return roots
+
+
+def _temp_roots() -> set[Path]:
+    roots = {Path(tempfile.gettempdir()).resolve()}
+    for candidate in ("/tmp", "/private/tmp"):
+        candidate_path = Path(candidate)
+        if candidate_path.exists():
+            roots.add(candidate_path.resolve())
+    return roots
 
 
 def _sort_paths_by_mtime(paths: list[Path]) -> list[Path]:
