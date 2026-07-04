@@ -14,6 +14,8 @@ _Created: 2026-07-04_
 
 ## 1. Runtime 主循环与会话
 
+- [APP_SETTINGS_CLI_ENTRY_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/APP_SETTINGS_CLI_ENTRY_CONTRACT.zh.md)
+  - 覆盖 settings/env-file、CLI 命令面、Host run/repl/inspect、REPL plan/approval/resume/compaction UI、bundled skills 管理入口。
 - [AGENT_RUNTIME_LOOP_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/AGENT_RUNTIME_LOOP_CONTRACT.zh.md)
   - 覆盖 `AgentRuntime` 的 run start、capability exposure、model/tool loop、pending state、plan workflow、MCP elicitation、mid-turn compact safe point、run finalization。
 - [LLM_TRANSPORT_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/LLM_TRANSPORT_CONTRACT.zh.md)
@@ -45,11 +47,15 @@ _Created: 2026-07-04_
   - 覆盖 terminal env builder、shell snapshot、PATH/env merge、diagnostics。
 - [TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/TERMINAL_OUTPUT_THREE_LAYER_CONTRACT.zh.md)
   - 覆盖 terminal streaming preview、tool-result artifact、terminal completion event、adaptive preview/read-more。
+- [ARTIFACT_STORE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/ARTIFACT_STORE_CONTRACT.zh.md)
+  - 覆盖 artifact payload store、session/run ownership、tool-result artifact index、`artifact_read` read-side 边界。
 
 ---
 
 ## 3. Memory / compaction / continuity
 
+- [GRAPH_JSONLD_STORAGE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/GRAPH_JSONLD_STORAGE_CONTRACT.zh.md)
+  - 覆盖 JSON-LD entity、ontology registry、GraphStore named graph 语义、Postgres projection、Oxigraph materialization substrate。
 - [MEMORY_SURFACES_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/MEMORY_SURFACES_CONTRACT.zh.md)
   - 覆盖 governed canonical memory graph、runtime semantic graph、recall/reflection/run timeline、relatedness、Postgres substrate、outbox surface。
 - [GOVERNANCE_WRITE_OUTBOX_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/GOVERNANCE_WRITE_OUTBOX_CONTRACT.zh.md)
@@ -58,14 +64,24 @@ _Created: 2026-07-04_
   - 覆盖 embedding/rerank/tokenizer provider protocols、HostCore-owned retrieval resources、workers、bounded shutdown。
 - [CONTEXT_COMPACTION_CONTINUITY_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/CONTEXT_COMPACTION_CONTINUITY_CONTRACT.zh.md)
   - 覆盖 typed compaction events、summary artifact、rehydration、mid-turn inline compact、manual/preflight safe point。
+- [RUNTIME_SEMANTIC_GRAPH_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/RUNTIME_SEMANTIC_GRAPH_CONTRACT.zh.md)
+  - 覆盖 run timeline persistence、execution evidence ledger、runtime semantic outbox lane、working_context 非记忆投影边界。
+- [EVAL_DOGFOOD_GATE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/EVAL_DOGFOOD_GATE_CONTRACT.zh.md)
+  - 覆盖 deterministic recall/relatedness eval gate、real-LLM dogfood opt-in、发布前证据与禁止事项。
 
 ---
 
-## 4. 仍需继续补齐的契约主题
+## 4. 后续契约维护规则
 
-以下模块已有代码与测试，但尚未完全独立成契约；后续收口时应优先补：
+截至 2026-07-04，本索引已覆盖当前主要 runtime / host / capability / permission / terminal / memory / compaction / eval 契约。
 
-- Runtime semantic graph / run timeline persistence hook 的更细粒度写入契约。
-- LLM/Memory eval gate 与 real-LLM dogfood 的发布门槛契约。
+后续若新增以下类别能力，必须同步新增或更新契约：
 
-这些不是“可以忽略”的模块，而是下一批契约化候选。
+- 新的 persisted runtime event 类型或 transcript reconstruction 规则；
+- 新的 capability provider / MCP transport / tool execution binding；
+- 新的 memory mutation lane / async surface / recall channel；
+- 新的 permission mode 或 tool access scope；
+- 新的 context compaction safe point 或 summary format；
+- 新的 eval gate / dogfood 发布门槛。
+
+不要把根目录实施文档中的“下一步计划”默认为契约；只有进入本目录并与代码/测试对齐后才算冻结。

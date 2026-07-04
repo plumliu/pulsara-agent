@@ -1,6 +1,7 @@
 # Terminal 输出三层契约
 
 _Created: 2026-06-24_
+_Amended: 2026-07-04 — align adaptive preview / aggregate context budget implementation_
 
 这份文档定义 terminal 输出的长期产品契约。它不是单个 PR 的 implementation plan，而是后续 hard cut 的目标形状：让 terminal 输出不再继续长出第四、第五条侧路，同时和统一 Tool Result Artifact 协议、completion event、transcript recovery 保持一致。
 
@@ -382,21 +383,27 @@ yielded/background terminal 的路径不同：
 
 ## 9. 当前实现对齐状态
 
-已经接近契约的部分：
+当前代码已经以 adaptive preview + artifact ref + aggregate context budget 的方式落到三层契约：
 
-- `ToolResultArtifactService` 已经是 executor 路径的 artifact 归档入口。
-- `ToolResultEndEvent` 已经可以携带 `artifacts`。
-- `ToolResultBlock.artifacts` 已经是 list。
-- `artifact_read` 已经提供显式读侧工具。
-- ledger 已开始从 artifact refs 建 graph node，而不是自行归档大输出。
-- threshold 已统一到 8KB。
+- `ToolResultArtifactService` 是 executor 路径的 artifact 归档入口。
+- `ToolResultEndEvent` 携带 `artifacts`。
+- `ToolResultBlock.artifacts` 是 list。
+- `ToolResultArtifactRef.preview` 是 durable preview metadata。
+- primary text artifact 才挂 preview；multi-artifact 场景不把同一 preview 复制到所有 ref。
+- artifact index metadata 与 event ref preview 使用同一份 final preview。
+- `artifact_read` 是显式读侧工具。
+- foreground terminal huge output 使用 head/tail adaptive preview，而不是把 32k live head 全塞进模型上下文。
+- streaming terminal live head 使用保守 cap；final suffix 可以补齐中等输出或补 marker + tail。
+- context renderer 使用 per-context aggregate tool-result budget，并在预算耗尽后输出有界 compact artifact envelope。
+- compact envelope 优先保留带 preview 的 primary artifact ref。
+- ledger 从 artifact refs 建 graph node，不对大输出自行 `put_text()`。
+- terminal tool description 明确 inline output 是 bounded preview，不是完整 retained output。
 
-仍需继续收口的部分：
+仍然保持开放但已被约束的未来扩展：
 
-- yielded/background process completion path 不应自己归档；如果要自动归档最终日志，需要接入 `ToolResultArtifactService`。
-- transcript completion note 仍是自然语言投影，未来应尽量消费结构化 recovery / completion state。
-- terminal preview / artifact / completion event 的 wording 需要在 tool descriptions 和 prompt 中统一。
-- external execution / 非 executor 产生的大 `ToolResultBlock` 必须带 artifact refs；否则 persistence hook 应拒绝而不是重开归档路径。
+- yielded/background completion path 如果要自动归档最终日志，必须接入 `ToolResultArtifactService`，不得直接写 archive。
+- completion note 可以继续是轻量自然语言投影，但其事实源必须是结构化 `TerminalProcessCompletedEvent`，且不能承载完整 output body。
+- external execution / 非 executor 产生的大 `ToolResultBlock` 必须带 artifact refs；persistence hook / ledger 不得因此恢复二次归档路径。
 
 ---
 
@@ -419,13 +426,16 @@ yielded/background terminal 的路径不同：
 
 ---
 
-## 11. 推荐下一步
+## 11. 变更规则
 
-下一步不应该直接新增 terminal feature，而应先做一次 terminal contract hardening：
+后续修改 terminal 输出路径时，必须保持以下规则：
 
-1. 审核 terminal / terminal_process tool description，把 preview / artifact / completion event 的边界写清楚。
-2. 审核 transcript note，避免把 preview 说成 full output。
-3. 审核 yielded process 的最终日志路径，确认 `terminal_process log` 是唯一完整日志读取入口。
-4. 如需 completion 自动归档最终日志，先写 implementation plan，明确如何把 process reader 接到 `ToolResultArtifactService`，并禁止直接 `archive.put_text()`。
+1. 不新增第四条完整输出存储侧路。
+2. 不把 preview 命名为 full output。
+3. 不让 completion event 承载完整 stdout/stderr。
+4. 不让 ledger / recovery / transcript 自行读取或归档完整输出。
+5. 调整阈值时必须同时更新 artifact service、terminal streaming builder、context renderer 与测试。
+6. 修改 `ToolResultArtifactRef.preview` schema 时必须覆盖旧 event replay / inspect / compact 兼容测试。
+7. 修改 `max_output_chars` 解释时必须保持 terminal 执行层与 artifact service 使用同一 bounds 语义。
 
 这份三层契约的目标不是减少 terminal 能力，而是让每一层只做自己的事。
