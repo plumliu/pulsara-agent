@@ -1,0 +1,19 @@
+services:
+  oxigraph:
+    image: oxigraph/oxigraph:latest
+    command: ["serve", "--location", "/data", "--bind", "0.0.0.0:7878"]
+    ports:
+      - "7878:7878"
+    volumes:
+      - ./.pulsara/oxigraph:/data
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: pulsara
+      POSTGRES_USER: pulsara
+      POSTGRES_PASSWORD: pulsara
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./.pulsara/postgres:/var/lib/postgresql/data

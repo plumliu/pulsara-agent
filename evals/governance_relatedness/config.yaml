@@ -1,0 +1,16 @@
+fixture_version: "governance-relatedness-fixture:v1"
+fixture_path: "evals/governance_relatedness/fixtures/v1_semantic.jsonl"
+relatedness_policy_version: "governance-relatedness:v1"
+alias_policy_version: "governance-aliases:v1"
+embedding_fingerprint: "openai_compatible:text-embedding-v4:1024"
+embedded_text_builder_version: "memory-embedded-text:v1"
+candidate_limit: 5
+rerank_top_m: 20
+dense_candidate_min_score: 0.30
+rerank_candidate_min_score: 0.20
+max_inline_gap_embeds: 20
+gates:
+  overall_recall_at_k_min: 0.95
+  positive_slice_recall_at_k_min: 0.90
+  overall_miss_rate_max: 0.05
+  destructive_action_false_positive_max: 0
