@@ -14,6 +14,8 @@ _Created: 2026-07-04_
 
 ## 1. Runtime 主循环与会话
 
+- [PACKAGE_FACADE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/PACKAGE_FACADE_CONTRACT.zh.md)
+  - 覆盖 Python package facade、lazy import 边界、public `__all__`、CLI script import 边界。
 - [APP_SETTINGS_CLI_ENTRY_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/APP_SETTINGS_CLI_ENTRY_CONTRACT.zh.md)
   - 覆盖 settings/env-file、CLI 命令面、Host run/repl/inspect、REPL plan/approval/resume/compaction UI、bundled skills 管理入口。
 - [AGENT_RUNTIME_LOOP_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/AGENT_RUNTIME_LOOP_CONTRACT.zh.md)
@@ -22,6 +24,8 @@ _Created: 2026-07-04_
   - 覆盖 LLM role/model selection、provider-neutral request、transport event translation、usage、retry、provider profiles。
 - [EVENT_LOG_STORAGE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/EVENT_LOG_STORAGE_CONTRACT.zh.md)
   - 覆盖 typed event log、Postgres runtime truth schema、sequence、parent rows、run projection、artifact storage。
+- [RUNTIME_EVENT_PUBLISHING_HOOKS_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/RUNTIME_EVENT_PUBLISHING_HOOKS_CONTRACT.zh.md)
+  - 覆盖 post-commit runtime event publisher、ordered subscriber delivery、RuntimeHookManager、observer hook isolation、tool-result error event helpers。
 - [MESSAGE_TRANSCRIPT_CONTEXT_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/MESSAGE_TRANSCRIPT_CONTEXT_CONTRACT.zh.md)
   - 覆盖 message blocks、event replay、prior transcript reconstruction、LLM context render、tool-result aggregate budget。
 - [INSPECTOR_PROJECTION_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/INSPECTOR_PROJECTION_CONTRACT.zh.md)
@@ -39,6 +43,8 @@ _Created: 2026-07-04_
 
 - [CAPABILITY_SURFACE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/CAPABILITY_SURFACE_CONTRACT.zh.md)
   - 覆盖 unified capability surface、descriptor、provider、exposure plan、skill progressive disclosure、active skill attribution、capability gate。
+- [BUILTIN_TOOLS_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/BUILTIN_TOOLS_CONTRACT.zh.md)
+  - 覆盖 Tool/AsyncTool 协议、ToolRegistry、ToolExecutor、core registry、filesystem built-ins、todo、plan workflow tool fallback。
 - [MCP_CAPABILITY_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/MCP_CAPABILITY_CONTRACT.zh.md)
   - 覆盖 MCP manager、snapshot、binding bundle、tool name mangling、adapter、elicitation。
 - [PERMISSION_POLICY_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/PERMISSION_POLICY_CONTRACT.zh.md)
