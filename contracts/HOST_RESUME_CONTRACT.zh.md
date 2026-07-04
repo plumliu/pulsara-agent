@@ -1,0 +1,205 @@
+# Host Resume / Durable Conversation Contract
+
+_Created: 2026-07-04_
+
+本文档冻结 Pulsara durable conversation resume 的长期契约。它与 [WORKSPACE_TERMINAL_LIFECYCLE_CONTRACT.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/contracts/WORKSPACE_TERMINAL_LIFECYCLE_CONTRACT.zh.md) 互补：后者描述 host/session/terminal ownership，本文件描述关闭进程后如何重新打开同一个 runtime conversation。
+
+相关代码：
+
+- [src/pulsara_agent/host/core.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/host/core.py)
+- [src/pulsara_agent/host/resume.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/host/resume.py)
+- [src/pulsara_agent/host/session_manifest.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/host/session_manifest.py)
+- [src/pulsara_agent/host/transcript.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/host/transcript.py)
+- [src/pulsara_agent/runtime/session.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/session.py)
+- [tests/test_host_resume.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_host_resume.py)
+- [tests/test_cli_host.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_cli_host.py)
+
+---
+
+## 1. 核心立场
+
+Resume 不是恢复旧 Python coroutine。
+
+Resume 的语义是：
+
+```text
+same runtime_session_id
++ same durable event log
++ same durable manifest/conversation identity
++ fresh HostSession / RuntimeSession process objects
++ replayed prior messages
+```
+
+不会恢复：
+
+- in-process `LoopState`；
+- Python tasks；
+- old ToolExecutor；
+- old terminal manager process handles（workspace supervisor 可按其自身契约保留 shared terminal pool）；
+- transient scratchpad。
+
+---
+
+## 2. Canonical truth
+
+Resume 的 canonical truth 是：
+
+- Postgres `agent_events`；
+- Postgres runtime projection tables；
+- artifact store；
+- `sessions.metadata` 中的 manifest；
+- typed compaction boundary / summary artifact（若存在且有效）。
+
+任何 resume UI 或 inspector 不得以根目录设计文档、JSONL transcript、stdout buffer 或 transient scratchpad 作为事实源。
+
+---
+
+## 3. Session manifest
+
+V1 manifest 存在 `sessions.metadata`，schema version 为 `resume_schema_version = 1`。
+
+Manifest 必须记录：
+
+- runtime session id；
+- conversation id；
+- workspace kind；
+- workspace root；
+- display label；
+- memory domain id；
+- model role；
+- permission mode；
+- serialized permission policy；
+- lifecycle created_by / created_at / last_active_at / closed_at / archived。
+
+`SessionManifest.resumable` 的语义：
+
+```text
+not archived and closed_at is null
+```
+
+Manifest 是 query/index 层，不是 transcript 真源。缺失或损坏 manifest 时，不得伪造完整对话历史；必须 fail clearly 或要求用户显式选择可修复路径。
+
+---
+
+## 4. Open / detach / close
+
+`HostCore.start_session()` 创建或打开一个 runtime conversation，并 upsert manifest。
+
+`HostSession` detach 的语义：
+
+- 不关闭 durable conversation；
+- 不标记 manifest closed；
+- 允许之后通过 `--resume` / `--continue` 重新打开。
+
+Explicit close 的语义：
+
+- 关闭 HostSession；
+- 终结 active/suspended run（若有）；
+- 标记 manifest `closed_at`；
+- 默认不删除 event log / artifacts。
+
+`HostCore.shutdown()` 是 host process teardown，不等价于用户关闭 conversation。它必须按照 workspace terminal lifecycle 契约 finalization active/suspended runs，但不得擅自 archive durable conversation。
+
+---
+
+## 5. Resume open flow
+
+`HostCore.resume_session(runtime_session_id, ...)` 必须：
+
+1. 要求 durable wiring；in-memory runtime 不提供生产 resume。
+2. 读取 manifest。
+3. 若用户没有显式 workspace override，使用 manifest workspace。
+4. 若用户有 workspace override，按 HostCore workspace identity 规则重新解析。
+5. 在重放 transcript 前调用 dangling run repair。
+6. 用相同 `runtime_session_id` 构造新的 `RuntimeSession`。
+7. 用新的 `HostSession` 承载该 runtime conversation。
+
+`--continue` / resume most recent 必须从 manifest store 查询最新 resumable session；没有可恢复 session 时应给用户友好错误，不应泄露 KeyError。
+
+---
+
+## 6. Dangling run repair
+
+如果上一个 host 进程崩溃、被杀或机器重启，Postgres projection 里可能存在 `runs.status='running'` 且没有 `RUN_END` 的 run。
+
+Resume 前必须执行 `repair_dangling_runs_for_resume()`：
+
+- 读取该 runtime session 中 running 且没有 RUN_END 的 runs。
+- 找到每个 run 最新 event 的 turn/reply context。
+- append typed `RunEndEvent(status="aborted", abort_kind="host_teardown")`。
+- metadata 写入 `recovered_by="resume"` 与 `resume_stop_reason="resume_recovered_interrupted"`。
+- 然后修复 projection rows。
+
+禁止只更新 `runs.status` 而不写 `RUN_END` 事件。事件优先是为了让 transcript/recovery/inspector 都能解释中断。
+
+---
+
+## 7. Transcript replay
+
+Resume 后重建模型上下文必须走 `rebuild_prior_messages()`。
+
+规则：
+
+- 使用 event log，而不是 manifest metadata。
+- 尊重最新有效 context compaction completed boundary。
+- 过滤/终结未完成工具调用，避免把 dangling assistant tool call 原样喂给模型。
+- 注入 recovery guidance，使模型知道上次 run 被中断而不是继续等待旧 tool result。
+- 系统提示、runtime context、capability exposure、active skills 不从旧 summary 恢复；每个新 turn fresh resolve。
+
+---
+
+## 8. Permission / workspace restoration
+
+Resume 必须恢复 manifest 中的 permission mode / permission policy，除非用户在本次 resume 命令中显式 override。
+
+Workspace 规则：
+
+- `project` workspace resume 默认回到 manifest workspace root。
+- `transient` workspace resume 默认回到 manifest transient root。
+- 显式 `--workspace` override 只改变新 HostSession 的 workspace binding；不得改写历史 event truth。
+
+恢复 permission mode 不得绕过当前 `PERMISSION_POLICY_CONTRACT`，也不得恢复旧版本已经删除的 mode / alias。
+
+---
+
+## 9. Interaction boundaries
+
+Resume 不能恢复旧 pending approval / pending plan interaction / pending MCP elicitation 的 in-memory continuation，除非该 pending state 有 durable representation 且当前代码显式支持。
+
+当前 V1 语义：
+
+- dangling active run 先被 repair 为 aborted；
+- 新 turn 从 repaired transcript 继续；
+- 用户需要重新发出需要执行的意图；
+- 不自动重放未完成工具调用。
+
+这条边界优先保证 correctness，而不是“自动续跑一半的工具批次”。
+
+---
+
+## 10. 禁止事项
+
+- 不允许把 resume 实现成 JSONL transcript append/replay。
+- 不允许恢复旧 coroutine / old LoopState。
+- 不允许在没有 durable event log 的生产路径声称支持 resume。
+- 不允许直接修改 projection 表来“补齐”中断，而不写 typed `RUN_END`。
+- 不允许把 manifest 当成 transcript 真源。
+- 不允许 resume 时吞掉有效 compaction boundary。
+- 不允许 old pending tool call 在未经 capability/permission gate 的情况下自动执行。
+
+---
+
+## 11. 测试守护
+
+最低测试门槛：
+
+- resume reopens same `runtime_session_id` with a new `host_session_id`。
+- resume replays prior messages from durable event log。
+- resume restores manifest permission mode when not overridden。
+- resume with workspace override uses override only for new binding。
+- dangling running run is repaired with typed aborted `RUN_END` before replay。
+- repair is idempotent when another process repaired first。
+- `--continue` chooses most recent resumable session。
+- no resumable session returns friendly CLI error。
+- closed/archived sessions are excluded by default.
+- resumed turn still resolves fresh capability exposure and permission gate.
