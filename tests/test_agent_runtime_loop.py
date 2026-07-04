@@ -418,6 +418,29 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     assert agent.runtime_session.event_log.replay(result.state.reply_id).content[0].text == "done"
 
 
+def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    runtime_session = in_memory_runtime_session(tmp_path)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        workspace_kind="project",
+    )
+
+    result = asyncio.run(agent.run_task("Say done"))
+
+    assert result.status is LoopStatus.FINISHED
+    system_prompt = transport.contexts[0].system_prompt or ""
+    assert "<runtime-context>" in system_prompt
+    assert f"Workspace root: {tmp_path.resolve()}" in system_prompt
+    assert "Workspace kind: project" in system_prompt
+    assert f"Terminal current cwd: {tmp_path.resolve()}" in system_prompt
+    assert "Terminal workdir, when provided, must stay inside workspace_root" in system_prompt
+    assert "Read-only filesystem tools may read ordinary text files outside workspace_root" in system_prompt
+    assert runtime_session.terminal_sessions.session_count() == 0
+
+
 def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     state = LoopState(session_id=runtime_session.runtime_session_id)

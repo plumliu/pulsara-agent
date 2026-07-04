@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import AsyncIterator, Literal
 from uuid import uuid4
 
@@ -170,11 +171,12 @@ def _max_auth_required(injections: tuple[ActiveSkillInjection, ...]) -> str:
 def compose_system_prompt(
     base: str | None,
     *,
+    runtime_context_prompt: str | None = None,
     memory_prompt: str | None = None,
     capability_prompt: str | None = None,
     active_skill_prompt: str | None = None,
 ) -> str | None:
-    parts = [part for part in (base, memory_prompt, capability_prompt, active_skill_prompt) if part]
+    parts = [part for part in (base, runtime_context_prompt, memory_prompt, capability_prompt, active_skill_prompt) if part]
     if not parts:
         return None
     return "\n\n".join(parts)
@@ -182,6 +184,37 @@ def compose_system_prompt(
 
 def _with_memory_context_prompt(system_prompt: str | None, memory_prompt: str | None) -> str | None:
     return compose_system_prompt(system_prompt, memory_prompt=memory_prompt)
+
+
+def render_runtime_context_prompt(
+    *,
+    workspace_root: str,
+    workspace_kind: WorkspaceKind,
+    terminal_current_cwd: str,
+) -> str:
+    now = datetime.now().astimezone()
+    offset = now.strftime("%z")
+    offset_text = f"UTC{offset[:3]}:{offset[3:]}" if offset else "UTC offset unknown"
+    timezone_name = now.tzname() or offset_text
+    workspace_mode = (
+        "project workspace; treat workspace facts as durable project context."
+        if workspace_kind == "project"
+        else "transient scratch workspace; do not treat workspace facts as durable project context."
+    )
+    return "\n".join(
+        [
+            "<runtime-context>",
+            f"Current date: {now.date().isoformat()}",
+            f"Local timezone: {timezone_name} ({offset_text})",
+            f"Workspace kind: {workspace_kind} ({workspace_mode})",
+            f"Workspace root: {workspace_root}",
+            f"Terminal current cwd: {terminal_current_cwd}",
+            "Terminal workdir, when provided, must stay inside workspace_root; when unsure, omit workdir or run pwd.",
+            "Relative terminal workdir values resolve from workspace_root.",
+            "Read-only filesystem tools may read ordinary text files outside workspace_root, but write/edit tools and terminal workdir remain workspace-scoped.",
+            "</runtime-context>",
+        ]
+    )
 
 
 @dataclass(slots=True)
@@ -615,6 +648,15 @@ class AgentRuntime:
                 tools=exposure.direct_tool_specs,
                 system_prompt=compose_system_prompt(
                     self.system_prompt,
+                    runtime_context_prompt=render_runtime_context_prompt(
+                        workspace_root=str(self.runtime_session.workspace_root),
+                        workspace_kind=self.workspace_kind,
+                        terminal_current_cwd=str(
+                            self.runtime_session.terminal_sessions.current_cwd(
+                                owner_host_session_id=self.runtime_session.terminal_owner_host_session_id
+                            )
+                        ),
+                    ),
                     memory_prompt=getattr(self.memory_hooks, "memory_context_prompt", lambda: None)(),
                     capability_prompt=exposure.catalog_prompt,
                     active_skill_prompt=exposure.active_skill_prompt,

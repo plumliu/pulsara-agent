@@ -99,6 +99,19 @@ class TerminalSessionManager:
         with self._lock:
             return sorted(session_id for _owner, session_id in self._sessions)
 
+    def current_cwd(
+        self,
+        session_id: str | None = None,
+        *,
+        owner_host_session_id: str | None = None,
+    ) -> Path:
+        normalized = self._normalize_session_id(session_id)
+        with self._lock:
+            session = self._sessions.get((owner_host_session_id, normalized))
+            if session is None:
+                return self.workspace_root
+            return session.current_cwd
+
     def session_count(self) -> int:
         with self._lock:
             return len(self._sessions)
