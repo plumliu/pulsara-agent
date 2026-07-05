@@ -101,13 +101,19 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
         collect_events(
             runtime,
             ModelRole.FLASH,
-            LLMContext(messages=(LLMMessage.user("Say hi"),)),
+            LLMContext(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:test",
+                model_call_index=3,
+            ),
         )
     )
 
     assert isinstance(events[0], ReplyStartEvent)
     assert isinstance(events[1], ModelCallStartEvent)
     assert events[1].model_name == "flash"
+    assert events[1].context_id == "context:test"
+    assert events[1].model_call_index == 3
     assert isinstance(events[2], TextBlockStartEvent)
     assert isinstance(events[3], TextBlockDeltaEvent)
     assert events[3].block_id == events[2].block_id

@@ -30,6 +30,7 @@ class EventType(StrEnum):
 
     MODEL_CALL_START = "MODEL_CALL_START"
     MODEL_CALL_END = "MODEL_CALL_END"
+    CONTEXT_COMPILED = "CONTEXT_COMPILED"
 
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
     TEXT_BLOCK_DELTA = "TEXT_BLOCK_DELTA"
@@ -157,6 +158,23 @@ class ModelCallStartEvent(EventBase):
     model_name: str
     model_role: str
     provider: str
+    context_id: str | None = None
+    model_call_index: int | None = None
+
+
+class ContextCompiledEvent(EventBase):
+    type: Literal[EventType.CONTEXT_COMPILED] = EventType.CONTEXT_COMPILED
+    context_id: str
+    model_role: str
+    model_call_index: int
+    estimated_tokens: int
+    context_window_tokens: int
+    reserved_output_tokens: int
+    tools_estimated_tokens: int
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    tool_specs: list[dict[str, Any]] = Field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    lifecycle_decisions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ModelCallEndEvent(EventBase):
@@ -587,6 +605,7 @@ AgentEvent: TypeAlias = (
     | ReplyEndEvent
     | RunErrorEvent
     | ExceedMaxItersEvent
+    | ContextCompiledEvent
     | ModelCallStartEvent
     | ModelCallEndEvent
     | TextBlockStartEvent

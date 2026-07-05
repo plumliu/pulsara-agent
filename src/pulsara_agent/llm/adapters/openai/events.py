@@ -31,6 +31,8 @@ from pulsara_agent.llm.usage import Usage
 class AgentEventBuilder:
     model: ModelProfile
     event_context: EventContext
+    context_id: str | None = None
+    model_call_index: int | None = None
     text_block_id: str | None = None
     thinking_block_id: str | None = None
     active_tool_call_ids: set[str] = field(default_factory=set)
@@ -47,6 +49,8 @@ class AgentEventBuilder:
             model_name=self.model.id,
             model_role=self.model.role.value,
             provider=self.model.provider,
+            context_id=self.context_id,
+            model_call_index=self.model_call_index,
         )
 
     def model_end(self, usage: Usage | None = None) -> ModelCallEndEvent:

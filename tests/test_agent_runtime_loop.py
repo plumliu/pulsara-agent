@@ -10,6 +10,7 @@ from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
     AgentEvent,
+    ContextCompiledEvent,
     EventContext,
     EventType,
     ModelCallEndEvent,
@@ -181,6 +182,44 @@ def test_loop_state_initializes_from_runtime_session(tmp_path) -> None:
     assert state.turn_id != first_turn
     assert state.last_transition is LoopTransition.CONTINUE_AFTER_MODEL
     assert state.status is LoopStatus.RUNNING
+
+
+def test_agent_runtime_emits_context_compiled_event_before_model_call(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    async def collect() -> list[AgentEvent]:
+        return [event async for event in agent.stream_task("hello")]
+
+    events = asyncio.run(collect())
+
+    compiled_events = [event for event in events if isinstance(event, ContextCompiledEvent)]
+    assert len(compiled_events) == 1
+    compiled = compiled_events[0]
+    assert compiled.context_id == transport.contexts[0].context_id
+    assert compiled.model_call_index == transport.contexts[0].model_call_index == 1
+    assert compiled.tools_estimated_tokens > 0
+    assert any(section["channel"] == "current_user" for section in compiled.sections)
+
+
+def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "should not be called"}])
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    result = asyncio.run(agent.run_task("x" * 900_000))
+
+    assert result.status is LoopStatus.FAILED
+    assert result.error_message is not None
+    assert "Current user input exceeds" in result.error_message
+    assert transport.contexts == []
 
 
 def test_msg_to_llm_messages_compresses_context_blocks() -> None:
@@ -432,12 +471,14 @@ def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
 
     assert result.status is LoopStatus.FINISHED
     system_prompt = transport.contexts[0].system_prompt or ""
-    assert "<runtime-context>" in system_prompt
-    assert f"Workspace root: {tmp_path.resolve()}" in system_prompt
-    assert "Workspace kind: project" in system_prompt
-    assert f"Terminal current cwd: {tmp_path.resolve()}" in system_prompt
-    assert "Terminal workdir, when provided, must stay inside workspace_root" in system_prompt
-    assert "Read-only filesystem tools may read ordinary text files outside workspace_root" in system_prompt
+    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    assert "<runtime-context>" not in system_prompt
+    assert "<runtime-context>" in context_text
+    assert f"Workspace root: {tmp_path.resolve()}" in context_text
+    assert "Workspace kind: project" in context_text
+    assert f"Terminal current cwd: {tmp_path.resolve()}" in context_text
+    assert "Terminal workdir, when provided, must stay inside workspace_root" in context_text
+    assert "Read-only filesystem tools may read ordinary text files outside workspace_root" in context_text
     assert runtime_session.terminal_sessions.session_count() == 0
 
 
@@ -1474,7 +1515,8 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     events = agent.runtime_session.event_log.iter()
     assert any(event.type is EventType.PROJECTION_REQUESTED for event in events)
     assert any(event.type is EventType.PROJECTION_READY for event in events)
-    assert "Recalled Memory" in (transport.contexts[0].system_prompt or "")
+    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    assert "Recalled Memory" in context_text
 
 
 def test_capability_runtime_resolves_once_per_user_message_and_exposure_is_stable(tmp_path) -> None:
@@ -1529,7 +1571,8 @@ Use the review checklist.
     assert provider.calls[0].available_tool_names == frozenset({"noop"})
     assert len(transport.contexts) == 2
     assert transport.contexts[0].system_prompt == transport.contexts[1].system_prompt
-    assert "Available Skills:" in (transport.contexts[0].system_prompt or "")
+    first_context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    assert "Available Skills:" in first_context_text
     assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")
     assert "# Review PR" in (transport.contexts[0].system_prompt or "")
     assert [[tool.name for tool in context.tools] for context in transport.contexts] == [["noop"], ["noop"]]
@@ -1613,9 +1656,9 @@ def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) 
         "fallback": "baseline_projection",
     }
     assert not any(event.type is EventType.PROJECTION_FAILED for event in events)
-    system_prompt = transport.contexts[0].system_prompt or ""
-    assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in system_prompt
-    assert "empty memory_search result does not invalidate" in system_prompt
+    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in context_text
+    assert "empty memory_search result does not invalidate" in context_text
 
 
 class FailingHook(NoopMemoryHooks):

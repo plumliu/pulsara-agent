@@ -8,10 +8,12 @@ from typing import Any, Iterable
 
 from pulsara_agent.event import (
     AgentEvent,
+    ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
     CustomEvent,
+    ModelCallStartEvent,
     ProjectionReadyEvent,
     ReplyStartEvent,
     RunStartEvent,
@@ -80,6 +82,7 @@ class InspectorService:
                 for row in self.store.working_context_for_session(session_id)
             ],
             "capability_surface_as_seen": _capability_surface_projection(events),
+            "context_compilations": _context_compilation_projection(events),
             "compaction_windows": _compaction_windows(events, self.store),
             "events": _event_summaries(events[:limit_events], include_payload=include_payload),
             "event_count": len(events),
@@ -144,6 +147,7 @@ class InspectorService:
             "prior_messages_as_seen": [_message_to_dict(message) for message in prior_messages],
             "projections_as_seen": [_projection_to_dict(event) for event in run_events if isinstance(event, ProjectionReadyEvent)],
             "capability_surface_as_seen": _capability_surface_projection(run_events),
+            "contexts_as_seen": _context_compilation_projection(run_events),
             "assistant_replies": _assistant_replies(run_events),
             "tool_result_artifacts": [_json_safe(row) for row in tool_artifacts],
             "recall_traces": [_json_safe(row) for row in self.store.recall_traces_for_run(run_id)],
@@ -373,6 +377,10 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "estimated_tokens_after",
         "threshold_tokens",
         "context_window_tokens",
+        "context_id",
+        "model_call_index",
+        "estimated_tokens",
+        "tools_estimated_tokens",
         "name",
     ):
         if key in payload:
@@ -406,6 +414,83 @@ def _capability_surface_projection(events: Iterable[AgentEvent]) -> dict[str, An
         "latest_exposure": exposures[-1] if exposures else None,
         "exposures": exposures,
         "gate_decisions": gate_decisions,
+    }
+
+
+def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, Any]:
+    context_events: list[ContextCompiledEvent] = []
+    model_starts: list[ModelCallStartEvent] = []
+    for event in events:
+        if isinstance(event, ContextCompiledEvent):
+            context_events.append(event)
+        elif isinstance(event, ModelCallStartEvent):
+            model_starts.append(event)
+    contexts_by_id = {event.context_id: event for event in context_events}
+    joins: list[dict[str, Any]] = []
+    for start in model_starts:
+        compiled = contexts_by_id.get(start.context_id or "")
+        joins.append(
+            {
+                "context_id": start.context_id,
+                "model_call_index": start.model_call_index,
+                "model_call_sequence": start.sequence,
+                "context_compiled_sequence": compiled.sequence if compiled is not None else None,
+                "join_status": "matched" if compiled is not None else "missing_context_compiled",
+                "model_name": start.model_name,
+                "model_role": start.model_role,
+                "provider": start.provider,
+            }
+        )
+    diagnostics: list[dict[str, Any]] = []
+    for join in joins:
+        if join["join_status"] != "matched":
+            diagnostics.append(
+                {
+                    "code": "context_compiled_missing_for_model_call",
+                    "severity": "warning",
+                    "message": "A model call start event did not have a matching ContextCompiledEvent.",
+                    "details": {
+                        "context_id": join["context_id"],
+                        "model_call_sequence": join["model_call_sequence"],
+                    },
+                }
+            )
+    return {
+        "latest": _context_compiled_to_dict(context_events[-1]) if context_events else None,
+        "contexts": [_context_compiled_to_dict(event) for event in context_events],
+        "model_call_joins": joins,
+        "diagnostics": diagnostics,
+    }
+
+
+def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
+    sections = [_json_safe(section) for section in event.sections]
+    omitted = [
+        section
+        for section in sections
+        if isinstance(section, dict) and section.get("included") is False
+    ]
+    return {
+        "sequence": event.sequence,
+        "context_id": event.context_id,
+        "run_id": event.run_id,
+        "turn_id": event.turn_id,
+        "reply_id": event.reply_id,
+        "model_role": event.model_role,
+        "model_call_index": event.model_call_index,
+        "estimated_tokens": event.estimated_tokens,
+        "context_window_tokens": event.context_window_tokens,
+        "reserved_output_tokens": event.reserved_output_tokens,
+        "tools_estimated_tokens": event.tools_estimated_tokens,
+        "section_count": len(event.sections),
+        "included_section_count": len(event.sections) - len(omitted),
+        "omitted_section_count": len(omitted),
+        "sections": sections,
+        "tool_specs": [_json_safe(tool) for tool in event.tool_specs],
+        "diagnostics": [_json_safe(diagnostic) for diagnostic in event.diagnostics],
+        "lifecycle_decisions": [
+            _json_safe(decision) for decision in event.lifecycle_decisions
+        ],
     }
 
 

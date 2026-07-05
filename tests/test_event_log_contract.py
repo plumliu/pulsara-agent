@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
+    ContextCompiledEvent,
     EventContext,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
@@ -255,6 +256,39 @@ def test_terminal_process_completed_event_round_trips_through_agent_event_serial
         output_preview="ok",
         tool_call_id="call:terminal",
         completion_reason="user_tool_kill",
+    )
+
+    assert load_agent_event(dump_agent_event(event)) == event
+
+
+def test_context_compiled_event_round_trips_through_agent_event_serialization() -> None:
+    event = ContextCompiledEvent(
+        **_ctx("contract:context-compiled").event_fields(),
+        context_id="context:1",
+        model_role="pro",
+        model_call_index=1,
+        estimated_tokens=123,
+        context_window_tokens=256_000,
+        reserved_output_tokens=8_000,
+        tools_estimated_tokens=42,
+        sections=[
+            {
+                "id": "transcript:current_user",
+                "source_id": "current_user",
+                "channel": "current_user",
+                "included": True,
+            }
+        ],
+        tool_specs=[{"name": "read_file", "estimated_tokens": 10, "included": True}],
+        diagnostics=[],
+        lifecycle_decisions=[
+            {
+                "source_id": "transcript",
+                "section_id": "transcript:prior_history",
+                "decision": "invalidated",
+                "reason": "dependency_fingerprint_changed",
+            }
+        ],
     )
 
     assert load_agent_event(dump_agent_event(event)) == event

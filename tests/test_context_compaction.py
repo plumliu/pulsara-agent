@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import AsyncIterator
 
 from pulsara_agent.event import (
+    ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
@@ -1001,6 +1002,148 @@ def test_auto_context_compaction_triggers_on_long_model_visible_messages() -> No
 
     assert service.should_auto_compact(model_visible_messages=visible) is True
     assert asyncio.run(service.compact_if_needed(reason="preflight_context_threshold", model_visible_messages=visible))
+
+
+def test_auto_context_compaction_can_use_context_compiled_estimate() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    ctx = _ctx("compiled-estimate")
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+            ContextCompiledEvent(
+                **ctx.event_fields(),
+                context_id="context:compiled-estimate",
+                model_role="pro",
+                model_call_index=1,
+                estimated_tokens=250,
+                context_window_tokens=256_000,
+                reserved_output_tokens=8_000,
+                tools_estimated_tokens=30,
+                sections=[],
+                tool_specs=[],
+                diagnostics=[],
+                lifecycle_decisions=[],
+            ),
+            ReplyStartEvent(**ctx.event_fields(), name="assistant"),
+            TextBlockStartEvent(**ctx.event_fields(), block_id="text:compiled-estimate"),
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:compiled-estimate", delta="ok"),
+            TextBlockEndEvent(**ctx.event_fields(), block_id="text:compiled-estimate"),
+            ReplyEndEvent(**ctx.event_fields()),
+        ]
+    )
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("<summary>Compiled estimate summarized.</summary>")),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(
+            min_events_after_last_compact=1,
+            auto_threshold_tokens=200,
+            chars_per_token=1.0,
+        ),
+    )
+
+    assert service.should_auto_compact() is True
+    assert asyncio.run(service.compact_if_needed(reason="preflight_context_threshold")) is True
+    completed = [event for event in log.iter() if isinstance(event, ContextCompactionCompletedEvent)]
+    assert completed[-1].metadata["estimate_source"] == "compiled_context_event"
+    assert completed[-1].estimated_tokens_before > 250
+
+
+def test_auto_context_compaction_compiled_prefix_uses_safety_margin() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    ctx = _ctx("compiled-margin")
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+            ContextCompiledEvent(
+                **ctx.event_fields(),
+                context_id="context:compiled-margin",
+                model_role="pro",
+                model_call_index=1,
+                estimated_tokens=90,
+                context_window_tokens=256_000,
+                reserved_output_tokens=8_000,
+                tools_estimated_tokens=0,
+                sections=[],
+                tool_specs=[],
+                diagnostics=[],
+                lifecycle_decisions=[],
+            ),
+            ReplyStartEvent(**ctx.event_fields(), name="assistant"),
+            TextBlockStartEvent(**ctx.event_fields(), block_id="text:compiled-margin"),
+            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:compiled-margin", delta="ok"),
+            TextBlockEndEvent(**ctx.event_fields(), block_id="text:compiled-margin"),
+            ReplyEndEvent(**ctx.event_fields()),
+        ]
+    )
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("<summary>Compiled margin.</summary>")),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(
+            min_events_after_last_compact=1,
+            auto_threshold_tokens=100,
+            chars_per_token=1.0,
+            estimate_safety_margin=1.25,
+        ),
+    )
+
+    assert service.should_auto_compact() is True
+
+
+def test_auto_context_compaction_compiled_estimate_includes_post_model_output() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    ctx = _ctx("compiled-post-output")
+    log.extend(
+        [
+            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+            ContextCompiledEvent(
+                **ctx.event_fields(),
+                context_id="context:compiled-post-output",
+                model_role="pro",
+                model_call_index=1,
+                estimated_tokens=10,
+                context_window_tokens=256_000,
+                reserved_output_tokens=8_000,
+                tools_estimated_tokens=0,
+                sections=[],
+                tool_specs=[],
+                diagnostics=[],
+                lifecycle_decisions=[],
+            ),
+            ReplyStartEvent(**ctx.event_fields(), name="assistant"),
+            TextBlockStartEvent(**ctx.event_fields(), block_id="text:compiled-post-output"),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(),
+                block_id="text:compiled-post-output",
+                delta="POST_COMPILED_OUTPUT_SENTINEL " + ("x" * 250),
+            ),
+            TextBlockEndEvent(**ctx.event_fields(), block_id="text:compiled-post-output"),
+            ReplyEndEvent(**ctx.event_fields()),
+        ]
+    )
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("<summary>Compiled estimate plus output.</summary>")),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(
+            min_events_after_last_compact=1,
+            auto_threshold_tokens=100,
+            chars_per_token=1.0,
+        ),
+    )
+
+    assert service.should_auto_compact() is True
+    assert asyncio.run(service.compact_if_needed(reason="preflight_context_threshold")) is True
+    completed = [event for event in log.iter() if isinstance(event, ContextCompactionCompletedEvent)]
+    assert completed[-1].metadata["estimate_source"] == "compiled_context_event"
+    assert completed[-1].estimated_tokens_before > 100
 
 
 def test_compaction_input_coalesces_deltas_and_clips_large_tool_result() -> None:

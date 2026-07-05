@@ -15,6 +15,7 @@ from pulsara_agent.event.candidates import (
 from pulsara_agent.event.events import (
     AgentEvent,
     ConfirmResult,
+    ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
@@ -81,6 +82,7 @@ __all__ = [
     "CandidatePayload",
     "ClaimCandidate",
     "ConfirmResult",
+    "ContextCompiledEvent",
     "ContextCompactionCompletedEvent",
     "ContextCompactionFailedEvent",
     "ContextCompactionStartedEvent",

@@ -8,9 +8,11 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.event import (
+    ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     CustomEvent,
     EventContext,
+    ModelCallStartEvent,
     ProjectionReadyEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -209,6 +211,78 @@ def test_inspect_run_prior_messages_use_context_compaction_boundary(tmp_path: Pa
         assert "<context-compaction-summary" in prior_text
         assert "old user text" not in prior_text
         assert "OLD_ASSISTANT_TEXT" not in prior_text
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx("context-compiled")
+        context_id = f"context:{uuid4().hex}"
+        log.extend(
+            [
+                RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+                ContextCompiledEvent(
+                    **ctx.event_fields(),
+                    context_id=context_id,
+                    model_role="pro",
+                    model_call_index=1,
+                    estimated_tokens=321,
+                    context_window_tokens=256_000,
+                    reserved_output_tokens=8_000,
+                    tools_estimated_tokens=42,
+                    sections=[
+                        {
+                            "id": "transcript:current_user",
+                            "source_id": "current_user",
+                            "channel": "current_user",
+                            "included": True,
+                            "render_mode": "full",
+                            "estimated_tokens": 2,
+                        }
+                    ],
+                    tool_specs=[{"name": "read_file", "estimated_tokens": 42, "included": True}],
+                    diagnostics=[],
+                    lifecycle_decisions=[
+                        {
+                            "source_id": "transcript",
+                            "section_id": "transcript:prior_history",
+                            "decision": "invalidated",
+                            "reason": "dependency_fingerprint_changed",
+                        }
+                    ],
+                ),
+                ModelCallStartEvent(
+                    **ctx.event_fields(),
+                    model_name="pro",
+                    model_role="pro",
+                    provider="scripted",
+                    context_id=context_id,
+                    model_call_index=1,
+                ),
+                ReplyStartEvent(**ctx.event_fields(), name="assistant"),
+                TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+                TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta="done"),
+                TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+                ReplyEndEvent(**ctx.event_fields()),
+                RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
+            ]
+        )
+
+        report = _service(dsn).inspect_run(ctx.run_id)
+
+        contexts = report["contexts_as_seen"]
+        assert contexts["latest"]["context_id"] == context_id
+        assert contexts["latest"]["tools_estimated_tokens"] == 42
+        assert contexts["latest"]["sections"][0]["channel"] == "current_user"
+        assert contexts["latest"]["lifecycle_decisions"][0]["decision"] == "invalidated"
+        assert contexts["model_call_joins"][0]["join_status"] == "matched"
+        assert contexts["model_call_joins"][0]["context_compiled_sequence"] is not None
+        assert contexts["diagnostics"] == []
     finally:
         _cleanup_session(dsn, runtime_session_id)
 

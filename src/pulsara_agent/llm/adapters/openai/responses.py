@@ -65,7 +65,12 @@ class OpenAIResponsesTransport(LLMTransport):
         event_context: EventContext,
         options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        builder = AgentEventBuilder(model=model, event_context=event_context)
+        builder = AgentEventBuilder(
+            model=model,
+            event_context=event_context,
+            context_id=context.context_id,
+            model_call_index=context.model_call_index,
+        )
         yield builder.model_start()
 
         if self._mock_events:

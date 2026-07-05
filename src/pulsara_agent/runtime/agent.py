@@ -15,6 +15,7 @@ from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResol
 from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
+    ContextCompiledEvent,
     CustomEvent,
     EventContext,
     ExceedMaxItersEvent,
@@ -45,7 +46,8 @@ from pulsara_agent.message import (
     ToolResultState,
     UserMsg,
 )
-from pulsara_agent.runtime.context import build_llm_context
+from pulsara_agent.runtime.context import build_compiled_context
+from pulsara_agent.runtime.context_engine import ContextBudgetExceeded, ContextLifecycleCoordinator
 from pulsara_agent.runtime.approval import ApprovalResolution
 from pulsara_agent.runtime.compaction.inline import NoopRuntimeContextCompactor, RuntimeContextCompactorProtocol
 from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
@@ -267,6 +269,7 @@ class AgentRuntime:
         self.system_prompt = system_prompt
         self.capability_runtime = capability_runtime
         self.context_compactor = context_compactor or NoopRuntimeContextCompactor()
+        self.context_lifecycle = ContextLifecycleCoordinator()
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
         self.tool_executor = runtime_session.create_tool_executor(
@@ -643,26 +646,78 @@ class AgentRuntime:
             async for event in self._project_memory(state):
                 yield event
 
-            context = build_llm_context(
-                state=state,
-                tools=exposure.direct_tool_specs,
-                system_prompt=compose_system_prompt(
-                    self.system_prompt,
-                    runtime_context_prompt=render_runtime_context_prompt(
-                        workspace_root=str(self.runtime_session.workspace_root),
-                        workspace_kind=self.workspace_kind,
-                        terminal_current_cwd=str(
-                            self.runtime_session.terminal_sessions.current_cwd(
-                                owner_host_session_id=self.runtime_session.terminal_owner_host_session_id
-                            )
-                        ),
-                    ),
-                    memory_prompt=getattr(self.memory_hooks, "memory_context_prompt", lambda: None)(),
-                    capability_prompt=exposure.catalog_prompt,
-                    active_skill_prompt=exposure.active_skill_prompt,
+            model_call_index = _next_model_call_index(state)
+            runtime_context_prompt = render_runtime_context_prompt(
+                workspace_root=str(self.runtime_session.workspace_root),
+                workspace_kind=self.workspace_kind,
+                terminal_current_cwd=str(
+                    self.runtime_session.terminal_sessions.current_cwd(
+                        owner_host_session_id=self.runtime_session.terminal_owner_host_session_id
+                    )
                 ),
-                budget=self.budget,
             )
+            memory_prompt = getattr(self.memory_hooks, "memory_context_prompt", lambda: None)()
+            try:
+                compiled_context = build_compiled_context(
+                    state=state,
+                    tools=exposure.direct_tool_specs,
+                    system_prompt=self.system_prompt,
+                    budget=self.budget,
+                    context_id=f"context:{uuid4().hex}",
+                    model_call_index=model_call_index,
+                    model_role=self.model_role,
+                    exposure=exposure,
+                    current_user_anchor=f"user-message:{state.run_id}",
+                    runtime_session_id=self.runtime_session.runtime_session_id,
+                    component_prompts=tuple(
+                        (component_id, text)
+                        for component_id, text in (
+                            ("runtime_context", runtime_context_prompt),
+                            ("memory:hook_prompt", memory_prompt),
+                            ("capability:catalog", exposure.catalog_prompt),
+                            ("capability:active_skill", exposure.active_skill_prompt),
+                        )
+                        if text
+                    ),
+                    lifecycle_coordinator=self.context_lifecycle,
+                )
+            except ContextBudgetExceeded as exc:
+                state.status = LoopStatus.FAILED
+                state.stop_reason = "model_error"
+                state.error_message = str(exc)
+                state.transition(LoopTransition.FAIL)
+                yield await self.runtime_session.emit(
+                    RunErrorEvent(
+                        **self._event_context(state).event_fields(),
+                        message=str(exc),
+                        code="context_budget_exceeded",
+                    ),
+                    state=state,
+                )
+                break
+            yield await self.runtime_session.emit(
+                ContextCompiledEvent(
+                    **self._event_context(state).event_fields(),
+                    context_id=compiled_context.context_id,
+                    model_role=self.model_role.value,
+                    model_call_index=model_call_index,
+                    estimated_tokens=compiled_context.estimated_tokens,
+                    context_window_tokens=compiled_context.budget.context_window_tokens,
+                    reserved_output_tokens=compiled_context.budget.reserved_output_tokens,
+                    tools_estimated_tokens=compiled_context.budget.tools_estimated_tokens,
+                    sections=[section.to_event_value() for section in compiled_context.sections],
+                    tool_specs=[tool.to_event_value() for tool in compiled_context.tool_specs],
+                    diagnostics=[
+                        diagnostic.to_event_value() for diagnostic in compiled_context.diagnostics
+                    ],
+                    lifecycle_decisions=[
+                        decision.to_event_value()
+                        for decision in compiled_context.lifecycle_decisions
+                    ],
+                ),
+                state=state,
+            )
+            context = compiled_context.llm_context
 
             reply_had_run_error = False
             try:
@@ -2060,6 +2115,15 @@ class AgentRuntime:
 
     def _event_context(self, state: LoopState) -> EventContext:
         return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+
+
+def _next_model_call_index(state: LoopState) -> int:
+    value = state.scratchpad.get("model_call_index")
+    if not isinstance(value, int):
+        value = 0
+    value += 1
+    state.scratchpad["model_call_index"] = value
+    return value
 
 
 def _is_overridden_hook(instance: object, name: str, base: type) -> bool:
