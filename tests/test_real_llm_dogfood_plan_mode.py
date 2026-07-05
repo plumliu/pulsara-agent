@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import tempfile
 import tomllib
 from dataclasses import dataclass, field
@@ -36,7 +37,6 @@ from pulsara_agent.settings import PulsaraSettings
 
 pytestmark = pytest.mark.real_llm
 
-MQ_WORKSPACE_ROOT = Path("/Users/plumliu/Desktop/python_workspace/pulsara_mq_test")
 TEST_COMMAND = "uv run pytest tests/test_visibility_timeout.py -q"
 PLAN_SENTINEL = "PULSARA_PLAN_QUEUE_DOGFOOD_OK"
 PLAN_REASON = "visibility timeout dogfood"
@@ -90,8 +90,9 @@ def test_real_plan_mode_job_queue_long_dogfood(monkeypatch: pytest.MonkeyPatch) 
 async def _run_real_plan_mode_job_queue_long_dogfood(
     monkeypatch: pytest.MonkeyPatch,
 ) -> dict[str, object]:
-    _prepare_mq_workspace(MQ_WORKSPACE_ROOT)
     temp_root = Path(tempfile.mkdtemp(prefix="pulsara-plan-dogfood-"))
+    workspace_root = temp_root / "pulsara_mq_test"
+    _prepare_mq_workspace(workspace_root)
     temp_home = temp_root / "home"
     pulsara_home = temp_root / "pulsara-home"
     temp_home.mkdir(parents=True)
@@ -101,7 +102,7 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
 
     policy = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
     evidence = PlanDogfoodEvidence(
-        workspace_root=str(MQ_WORKSPACE_ROOT),
+        workspace_root=str(workspace_root),
         policy=policy.to_dict(),
     )
     settings = _load_settings_for_real_llm()
@@ -112,7 +113,7 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
         session = await core.open_session(
             HostWorkspaceInput(
                 workspace_kind="project",
-                workspace_root=MQ_WORKSPACE_ROOT,
+                workspace_root=workspace_root,
                 memory_domain_id=f"plan_dogfood_queue_{uuid4().hex[:12]}",
             ),
             host_session_id=f"host:plan-dogfood-queue:{uuid4().hex[:12]}",
@@ -187,12 +188,12 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
         _require(exit_count == 1, "plan dogfood did not request exit_plan exactly once", evidence)
 
         events = session.replay_events()
-        _collect_artifacts(MQ_WORKSPACE_ROOT, evidence)
+        _collect_artifacts(workspace_root, evidence)
         _assert_plan_trajectory(events, session, last_result.final_text.strip(), evidence)
         return {"ok": True, "evidence": evidence.to_json()}
     except Exception as exc:  # pragma: no cover - diagnostics for real-provider dogfood.
         failed = True
-        _collect_artifacts(MQ_WORKSPACE_ROOT, evidence)
+        _collect_artifacts(workspace_root, evidence)
         return {
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
@@ -203,8 +204,8 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
             await core.close_session(session.host_session_id)
         else:
             await core.shutdown()
-        if not failed and os.getenv("PULSARA_DOGFOOD_RESET_WORKSPACE_ON_SUCCESS") == "1":
-            _prepare_mq_workspace(MQ_WORKSPACE_ROOT)
+        if not failed and os.getenv("PULSARA_DOGFOOD_KEEP_WORKSPACE") != "1":
+            shutil.rmtree(temp_root, ignore_errors=True)
 
 
 async def _await_with_plan_trace(session, awaitable, evidence: PlanDogfoodEvidence, round_name: str):
@@ -256,13 +257,10 @@ async def _await_with_plan_trace(session, awaitable, evidence: PlanDogfoodEviden
 
 
 def _prepare_mq_workspace(workspace_root: Path) -> None:
-    if not workspace_root.exists():
-        raise AssertionError(f"workspace does not exist: {workspace_root}")
+    workspace_root.mkdir(parents=True, exist_ok=True)
     pyproject = workspace_root / "pyproject.toml"
     if not pyproject.exists():
-        raise AssertionError(f"workspace is missing pyproject.toml: {workspace_root}")
-    if not (workspace_root / ".venv").exists():
-        raise AssertionError(f"workspace is missing .venv: {workspace_root}")
+        pyproject.write_text(_FIXTURE_PYPROJECT, encoding="utf-8")
     project = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     dependencies = _dependency_names(project.get("project", {}).get("dependencies", []))
     dev_dependencies = _dependency_names(project.get("dependency-groups", {}).get("dev", []))
@@ -270,7 +268,7 @@ def _prepare_mq_workspace(workspace_root: Path) -> None:
     if missing:
         raise AssertionError(f"workspace dependencies missing: {sorted(missing)}")
     if "pytest" not in dev_dependencies:
-        raise AssertionError("workspace dev dependencies missing pytest; run `uv add --dev pytest` in pulsara_mq_test")
+        raise AssertionError("workspace dev dependencies missing pytest")
 
     (workspace_root / "tests").mkdir(parents=True, exist_ok=True)
     (workspace_root / "README.md").write_text(_FIXTURE_README, encoding="utf-8")
@@ -354,7 +352,11 @@ def _assert_plan_trajectory(events: list[AgentEvent], session, final_text: str, 
         for call in post_exit_calls
         if call["name"] == "terminal" and isinstance(call["arguments"], dict)
     ]
-    _require(TEST_COMMAND in terminal_commands, f"missing exact terminal test command: {terminal_commands}", evidence)
+    _require(
+        any(isinstance(command, str) and TEST_COMMAND in command for command in terminal_commands),
+        f"missing terminal test command: {terminal_commands}",
+        evidence,
+    )
     _require(session.plan_state.active is False, "plan state remained active after approval", evidence)
     _require(
         session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS,
@@ -362,7 +364,7 @@ def _assert_plan_trajectory(events: list[AgentEvent], session, final_text: str, 
         evidence,
     )
     _require(PLAN_SENTINEL in final_text, "final answer omitted plan dogfood sentinel", evidence)
-    _assert_fixture_static_shape(MQ_WORKSPACE_ROOT, evidence)
+    _assert_fixture_static_shape(Path(evidence.workspace_root), evidence)
 
 
 def _assert_fixture_static_shape(workspace_root: Path, evidence: PlanDogfoodEvidence) -> None:
@@ -558,6 +560,23 @@ Validation rules:
 
 Do not inspect secrets. Do not modify files outside this workspace.
 """.strip()
+
+
+_FIXTURE_PYPROJECT = """
+[project]
+name = "pulsara-mq-test"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+""".lstrip()
 
 
 _FIXTURE_README = """

@@ -156,7 +156,22 @@ source ~/.zshrc && proxy_on >/dev/null 2>&1 || true
 ```
 
 After downloading, verify at least `README.md` exists, list the downloaded files, delete `{DOWNLOAD_DIR}`,
-verify the directory no longer exists, and print both sentinels:
+verify the directory no longer exists, and print both sentinels from the terminal command itself.
+The terminal output is the evidence source for this dogfood. Do not only mention the sentinels in
+your final answer.
+
+Recommended shell shape:
+
+```bash
+hf download {REPO_ID} --local-dir {DOWNLOAD_DIR} && \
+test -f {DOWNLOAD_DIR}/README.md && \
+echo {DOWNLOAD_SENTINEL} && \
+rm -rf {DOWNLOAD_DIR} && \
+test ! -d {DOWNLOAD_DIR} && \
+echo {DELETE_SENTINEL}
+```
+
+Terminal output must contain:
 
 - `{DOWNLOAD_SENTINEL}`
 - `{DELETE_SENTINEL}`
@@ -177,7 +192,11 @@ Rules:
 - Verify the download happened before deleting it.
 - Delete {DOWNLOAD_DIR}/ before your final answer.
 - Do not use terminal_process for this dogfood.
-- In the final answer, include exactly these evidence markers if the terminal command succeeded:
+- The terminal command output itself must contain these exact evidence markers after successful verification:
+  {DOWNLOAD_SENTINEL}
+  {DELETE_SENTINEL}
+- Do not invent these markers in the final answer unless they appeared in terminal output.
+- In the final answer, repeat these evidence markers if the terminal command succeeded:
   {DOWNLOAD_SENTINEL}
   {DELETE_SENTINEL}
 """.strip()

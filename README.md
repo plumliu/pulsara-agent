@@ -1,183 +1,297 @@
-# Pulsara
+# 🪐 Pulsara — An Agent Runtime That Remembers You Better
 
-Pulsara is a backend runtime for a Python agent built around JSON-LD grounded memory.
+<p align="center">
+  <img src="assets/banner.png" alt="Pulsara" width="100%">
+</p>
 
-The MVP combines:
+<p align="center">
+  <strong>FEEL FREE TO VIBE WITH PULSARA</strong>
+</p>
 
-- a Claude Code-style hand-written main loop and tool execution boundary;
-- a narrowed Hermes-style tool/provider registry;
-- a pro/flash LLM runtime with an OpenAI Responses-compatible adapter;
-- an AgentScope-like `AgentEvent` / message reducer runtime stream;
-- Pulsara's own `Execution Evidence Ledger` and durable semantic memory model.
+<p align="center">
+  <img src="https://img.shields.io/badge/PostgreSQL-runtime%20truth-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
+  <img src="https://img.shields.io/badge/Oxigraph-semantic%20graph-5b21b6?style=for-the-badge" alt="Oxigraph">
+  <img src="https://img.shields.io/badge/Python-3.12+-111827?style=for-the-badge&logo=python" alt="Python 3.12+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+</p>
 
-The first milestone is not a frontend and not a full task graph. It is the smallest memory substrate that can prove:
+**Pulsara** is a _local-first Agent Runtime_ for long-horizon work.
+It lets an assistant deeply inhabit real projects, handle long conversations,
+preserve essential context, and reconstruct what happened when the task becomes
+complex.
+
+It is built for durable workflows: an agent reads files, executes terminal
+commands, follows skill logic, resumes historical sessions, compacts context,
+and persists long-term memory so every interaction compounds instead of fading
+into an old chat window.
+
+**Pulsara is still under active development. It is not a mature product yet, and
+you should expect bugs, rough edges, and fast-moving interfaces. Today the main
+surface is a terminal REPL; a graphical interface may come later. If you try it,
+please open issues, share what breaks, and help us learn together.**
+
+[English](README.md) · [简体中文](README.zh-CN.md) · [Core Idea](#core-idea-redefining-long-horizon-agent-work) · [Architecture](#architecture-layered-replayable-and-auditable) · [Memory](#memory-as-an-asset-for-future-decisions) · [Quick Start](#quick-start)
+
+---
+
+## Core Idea: Redefining Long-Horizon Agent Work
+
+Many agents shine in the first ten minutes. Pulsara is built to protect the next
+ten hours.
+
+Long-horizon agent work has become a living runtime lifecycle:
+
+- The model plans, asks for confirmation, and resumes suspended work.
+- Toolchains continuously produce logs, files, intermediate state, artifacts,
+  and errors.
+- Context keeps growing, so the system must compact it while preserving the
+  thread of the task.
+- Important facts become long-term memory instead of getting buried in a long
+  transcript.
+- Future operations remain traceable, answering both “what happened?” and “why
+  did it happen?”
+
+Pulsara treats this complete lifecycle as the product.
+
+| Common experience | Pulsara experience |
+| --- | --- |
+| Sessions fade when the window closes | **Persistent Runtime**: sessions, runs, turns, replies, and resume are first-class. |
+| Conversation history is hard to reconstruct | **Replayable event stream**: typed runtime facts with inspectable projections. |
+| Context gets heavier with every turn | **Elegant context compaction**: coherent handoff summaries for future model interactions. |
+| Memory lacks a source trail | **Grounded long-term memory**: memories are tied to evidence, artifacts, relations, and conflicts. |
+| Tool calls are hard to explain | **Auditable tool execution**: permission decisions, artifact creation, and skill attribution stay transparent. |
+| Capabilities live in static prompts | **Progressive capability surface**: tools, skills, MCP-style interfaces, and local workflows share one runtime surface. |
+
+Pulsara goes beyond a conventional model API wrapper and grows toward a full
+agent operating system: conversation, tools, memory, permissions, events,
+storage, compaction, and recovery fused into a unified runtime.
+
+## Architecture: Layered, Replayable, and Auditable
+
+Agent context deserves structure. Pulsara organizes long-horizon work with a
+three-layer storage architecture so runtime facts, execution artifacts, and
+semantic memory can each do their job.
 
 ```text
-ToolResult -> Artifact -> Evidence -> Claim / Decision
+┌──────────────────────────────────────────────────────────────┐
+│                         Agent Runtime                         │
+│  model loop · tool execution · plan mode · permission gate     │
+│  capability exposure · streaming · resume · compaction         │
+└──────────────────────────────┬───────────────────────────────┘
+                               │ typed events
+┌──────────────────────────────▼───────────────────────────────┐
+│                    Layer 1 — Runtime Ledger                   │
+│  sessions · runs · turns · replies · tool calls · plan state   │
+│  context compaction events · capability decisions · inspector  │
+└──────────────────────────────┬───────────────────────────────┘
+                               │ artifacts + evidence
+┌──────────────────────────────▼───────────────────────────────┐
+│                  Layer 2 — Artifact & Evidence Store          │
+│  large tool outputs · adaptive previews · archived refs        │
+│  compaction summaries · execution evidence · replay anchors    │
+└──────────────────────────────┬───────────────────────────────┘
+                               │ governed memory writes
+┌──────────────────────────────▼───────────────────────────────┐
+│                   Layer 3 — Semantic Memory Surface           │
+│  canonical memories · search index · conflicts · relations     │
+│  PostgreSQL truth · Oxigraph semantic graph · recall traces    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## MVP Layout
+### The three storage layers tell one complete story
+
+| Layer | What it stores | Why it exists |
+| --- | --- | --- |
+| **Runtime Ledger** | Sessions, turns, replies, plan transitions, tool calls, capability decisions, compaction boundaries. | Keeps the agent resumable and explainable. The system can locate the root of an interruption, approval, compaction, or failure. |
+| **Artifact & Evidence Store** | Large terminal output, scraped pages, generated files, tool previews, compaction summaries, evidence anchors. | Gives the model compact previews, gives humans full recovery, and gives memory a grounded source trail. |
+| **Semantic Memory Surface** | Canonical memories, conflict markers, supersession, search indexes, graph relations, recall traces. | Lets long-term memory be queried by meaning, relation, scope, and provenance, beyond simple nearest-neighbor text. |
+
+Each layer has a clear responsibility. Runtime records facts, artifacts preserve
+recoverability, and memory guides future decisions. Stable event IDs and
+evidence IDs bind the layers together.
+
+## Event System: The Runtime Skeleton
+
+Pulsara's event system forms the factual skeleton of the agent. The runtime emits
+typed events for key transitions:
+
+- model text generation and tool-call streaming;
+- tool results, artifacts, and adaptive previews;
+- permission decisions and capability gate outcomes;
+- plan mode entry, questions, revisions, approval, and cancellation;
+- context compaction started, completed, or failed;
+- durable session and run boundaries;
+- memory recall traces and governance outcomes.
+
+This event engine powers three essential capabilities:
+
+1. **Resume** — restart a session and rebuild the model-visible conversation
+   with precision.
+2. **Inspect** — reconstruct historical operations without guesswork or terminal
+   archaeology.
+3. **Compaction** — summarize long context from real runtime history, keeping the
+   handoff coherent and grounded.
+
+## Memory as an Asset for Future Decisions
+
+Pulsara's memory pipeline is grounded in runtime evidence:
 
 ```text
-src/pulsara_agent/
-  jsonld/
-    entity.py
-    iri.py
-    namespace.py
-    node_ref.py
-    term.py
-    value.py
-  ontology/
-    memory.py
-  runtime/
-    state.py
-  event/
-    events.py
-    log.py
-  message/
-    blocks.py
-    message.py
-    reducer.py
-  llm/
-    config.py
-    factory.py
-    input.py
-    models.py
-    registry.py
-    request.py
-    runtime.py
-    transport.py
-    usage.py
-    adapters/
-      mock.py
-      openai/
-        responses.py
-  settings.py
-  graph/
-    store.py
-    in_memory.py
-    oxigraph.py
-  tools/
-    base.py
-    registry.py
-  memory/
-    archive.py
-    ledger.py
-    entities/
-      artifact.py
-      claim.py
-      evidence.py
-      tool_result.py
-      turn.py
-    records.py
-    write_gate.py
-  cli.py
-tests/
-  test_event_message_system.py
-  test_execution_evidence_ledger.py
-  test_llm_runtime.py
-  test_real_llm_integration.py
-  test_settings.py
+conversation → tool results → artifacts → evidence → memories → recall
 ```
 
-## Run
+The system focuses on information that changes future behavior:
+
+- durable user preferences and working context;
+- decision chains made during a project;
+- factual claims supported by explicit evidence;
+- contradictions and superseded states;
+- relationships between memories, artifacts, and historical work.
+
+### Recall that understands structure
+
+Pulsara recall combines multiple signals and returns structured results:
+
+- **lexical and semantic retrieval** for direct access to relevant facts;
+- **contradiction companions** so safety-critical conflicts surface together;
+- **multi-hop explicit search** for evidence, dependencies, and derived memory
+  paths;
+- **trace recording** for evaluation, debugging, and replay;
+- **scope and status filtering** to keep hidden, invalid, or stale memories out
+  of the wrong context.
+
+Automatic recall stays disciplined so every turn is not flooded with memory.
+Explicit search opens the deeper semantic graph when the task needs it.
+
+## Capability Matrix
+
+### Tool flow for local work
+
+Pulsara integrates filesystem operations, terminal execution, long-running
+process polling, large-output artifacts, and memory search. Real tool calls flow
+through the permission gate, event log, and inspector rather than disappearing
+behind the final answer.
+
+### Skills and Capability Surface
+
+Skills in Pulsara are part of progressive capability exposure. The system
+resolves capabilities per turn, evaluates them through policy, exposes available
+actions to the model, and records the relevant decision as a runtime fact.
+
+When a skill guides a terminal call, or when a capability is hidden, denied,
+approved, or unavailable, Pulsara preserves the explanation chain.
+
+### Plan Mode
+
+For high-risk tasks, the agent can first explore in read-only mode, ask
+structured human-in-the-loop questions, produce a draft plan, and execute only
+after approval. Planning is integrated with the permission model and the event
+log.
+
+### Context handoff
+
+Pulsara treats compaction as a core runtime event and writes a durable handoff
+summary. The summary describes what happened, where execution should continue,
+which tools or processes still matter, and which facts deserve preservation.
+Failures are surfaced explicitly, avoiding silent state pollution.
+
+## Quick Start
+
+Pulsara is currently source-first. Clone the repository, initialize the
+environment with `uv`, start local durable services, and open the REPL.
 
 ```bash
-uv run pulsara --version
-uv run pulsara demo-ledger
-uv run pulsara config-check
-uv run python -m pytest
-```
+git clone <your-pulsara-repo-url>
+cd pulsara_agent
 
-Start local semantic storage services for Oxigraph-backed graph tests and future
-durable archive/session work:
+uv sync
+docker compose up -d postgres oxigraph
 
-```bash
-docker compose up -d oxigraph postgres
-```
-
-Oxigraph is exposed at `http://localhost:7878`, matching
-`PULSARA_OXIGRAPH_URL`. Postgres is exposed at
-`postgresql://pulsara:pulsara@localhost:5432/pulsara`, matching
-`PULSARA_POSTGRES_DSN`. The current runtime uses Oxigraph through
-`OxigraphGraphStore`; Postgres is configured as the future durable
-archive/session boundary and is not yet used by runtime code.
-
-Run the opt-in real LLM harness smoke test:
-
-```bash
-PULSARA_RUN_REAL_LLM=1 uv run python -m pytest -m real_llm
-```
-
-## LLM Configuration
-
-Pulsara exposes two model slots:
-
-- `pro`: the main reasoning model;
-- `flash`: the cheaper/faster side model for compacting, projection, and small helper work.
-
-For the MVP, users provide one credential set and two model names:
-
-```bash
-export PULSARA_API_KEY="..."
-export PULSARA_BASE_URL="https://api.openai.com/v1"
-export PULSARA_PRO_MODEL="gpt-5"
-export PULSARA_FLASH_MODEL="gpt-5-mini"
-```
-
-Or create a local `.env` file from the example:
-
-```bash
 cp .env.example .env
+$EDITOR .env
+
+uv run pulsara config-check --env-file .env
+uv run pulsara host repl --env-file .env --workspace .
 ```
 
-Then edit `.env`:
+Inside the REPL:
+
+```text
+pulsara> hello
+pulsara> :help
+pulsara> :plan
+pulsara> :compact
+pulsara> :close
+```
+
+Use the CLI to resume historical sessions or inspect runtime state:
+
+```bash
+uv run pulsara host repl --env-file .env --workspace . --continue
+uv run pulsara host repl --env-file .env --workspace . --list-sessions
+uv run pulsara inspect health --env-file .env
+```
+
+## Configuration
+
+Pulsara uses two model roles:
+
+- `pro` handles the main reasoning path;
+- `flash` handles fast compaction, governance, and helper work.
+
+Minimal `.env`:
 
 ```dotenv
 PULSARA_API_KEY=sk-your-api-key
 PULSARA_BASE_URL=https://api.openai.com/v1
 PULSARA_PRO_MODEL=gpt-5
 PULSARA_FLASH_MODEL=gpt-5-mini
+
+PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
+PULSARA_OXIGRAPH_URL=http://localhost:7878
 ```
 
-Verify that the runtime can see the configuration:
+The main path targets OpenAI-compatible Responses APIs today. Other compatible
+providers can work when their wire behavior matches the configured API mode.
+
+## Local Skills
+
+Pulsara can load local skills from Pulsara / agent skill directories and expose
+them as compact routing hints. When a task matches a skill, the agent can read
+the full `SKILL.md` with normal read-only file tools, then act through terminal
+or other built-in tools.
 
 ```bash
-uv run pulsara config-check
+uv run pulsara skills status
+uv run pulsara skills sync-bundled
+uv run pulsara host repl --env-file .env --workspace . --skill hf-cli
 ```
 
-For `.env`:
+Skills provide guidance; the runtime remains the source of fact. Pulsara records
+tool calls, permission decisions, artifacts, and active-skill attribution.
+
+## Status
+
+Pulsara is early, sharp-edged, active, and moving quickly.
+
+It is built for people comfortable running a local Python project, editing
+`.env`, starting Docker services, and reading inspector output when necessary.
+If you want real tool execution, semantic recall, resumable long sessions, and
+deep explainability, welcome aboard.
+
+## Development
 
 ```bash
-uv run pulsara config-check --env-file .env
+uv run ruff check src tests
+uv run pytest -q
 ```
 
-The command prints redacted configuration metadata and never prints the API key.
+Opt-in real model tests:
 
-The current real adapter is OpenAI Responses-compatible and lives under
-`llm/adapters/openai/responses.py`. Other wire formats, such as Anthropic or
-Google, should be added as separate adapter packages rather than leaking their
-event names into Pulsara's main loop.
+```bash
+PULSARA_RUN_REAL_LLM=1 uv run pytest -m real_llm
+```
 
-LLM adapters emit Pulsara `AgentEvent` objects, not provider-native stream
-events and not a separate public `LLMEvent` protocol.
+## License
 
-## Current Boundary
-
-`Turn`, `ToolResult`, `Artifact`, and `Evidence` are runtime provenance and can be appended by the runtime.
-
-`Claim` and `Decision` are conclusion nodes. They must pass `MemoryWriteGate` before becoming active or durable.
-
-`AgentEvent` is the public runtime stream. `InMemoryEventLog` can replay a
-`reply_id` into a `Msg` through `MessageReducer`. Memory and projection changes
-are first-class events, but only accepted semantic facts are promoted into
-`GraphStore`.
-
-The LLM layer does not know about `GraphStore`, `ArchiveStore`, memory gates, or
-tool execution internals. It only translates provider APIs into Pulsara's
-internal request objects and runtime events.
-
-## Design Notes
-
-See [PULSARA_MVP_BOOTSTRAP.zh.md](PULSARA_MVP_BOOTSTRAP.zh.md) for the Chinese MVP bootstrap rationale.
-See [RUNTIME_STORAGE_ARCHITECTURE.zh.md](RUNTIME_STORAGE_ARCHITECTURE.zh.md) for the PostgreSQL runtime truth and Oxigraph semantic truth split.
+Pulsara is released under the [MIT License](LICENSE).
