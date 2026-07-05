@@ -35,6 +35,8 @@ from pulsara_agent.runtime.terminal import (
     TerminalOwnerContext,
     WorkspaceTerminalLease,
 )
+from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
+from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources, build_retrieval_runtime_resources
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
@@ -229,8 +231,10 @@ class HostCore:
         reservation = await self.registry.reserve(host_session_id, conversation_id)
         lease: WorkspaceTerminalLease | None = None
         wiring = None
+        mcp_supervisor: McpServerSupervisor | None = None
         try:
             lease = await self._attach_supervisor(workspace, host_session_id, conversation_id)
+            mcp_supervisor = await self._build_mcp_supervisor(workspace)
             wiring = build_agent_runtime_wiring(
                 self.settings,
                 workspace.workspace_root,
@@ -250,7 +254,8 @@ class HostCore:
                 ),
                 permission_policy=permission_policy,
                 retrieval_resources=await self._get_retrieval_resources() if self.durable else None,
-                    governance_coordinator=self._governance_coordinator if self.durable else None,
+                governance_coordinator=self._governance_coordinator if self.durable else None,
+                mcp_managers=(mcp_supervisor,),
             )
             if self.durable:
                 self._manifest_store().upsert_open_manifest(
@@ -267,6 +272,7 @@ class HostCore:
                 workspace=workspace,
                 wiring=wiring,
                 terminal_lease=lease,
+                mcp_supervisor=mcp_supervisor,
             )
             # Publish under the lifecycle lock and re-check state: this is the
             # linearization point against shutdown/close. If shutdown won the
@@ -293,6 +299,10 @@ class HostCore:
                 await self._release_supervisor_lease(lease)
             if wiring is not None:
                 wiring.agent_runtime.close()
+                if wiring.runtime_wiring.mcp_manager is not None:
+                    await wiring.runtime_wiring.mcp_manager.aclose()
+            elif mcp_supervisor is not None:
+                await mcp_supervisor.aclose()
             raise
 
     # -- Read facades (allowed during CLOSING for diagnostics) ----------------
@@ -548,6 +558,12 @@ class HostCore:
                     self._retrieval_resources.attach_worker(vector_worker)
                 self._retrieval_resources.start()
             return self._retrieval_resources
+
+    async def _build_mcp_supervisor(self, workspace: ResolvedWorkspace) -> McpServerSupervisor:
+        configs = load_mcp_server_configs(workspace_root=workspace.workspace_root)
+        supervisor = McpServerSupervisor()
+        await supervisor.sync_servers(configs)
+        return supervisor
 
     async def _attach_supervisor(
         self,

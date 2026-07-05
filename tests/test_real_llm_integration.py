@@ -548,13 +548,17 @@ def test_real_host_core_plan_stop_injects_plan_aborted_note(tmp_path):
 
     assert result["first_status"] == "waiting_user"
     assert result["stop_result_status"] == "aborted"
-    assert result["second_status"] == "finished"
     assert result["tool_names"] == ["ask_plan_question"]
     assert result["pending_after_stop"] is None
     assert result["plan_active_after_stop"] is True
     assert result["permission_mode_after_stop"] == "read-only"
     assert result["plan_note_present"] is True
-    assert "PULSARA_PLAN_STOP_NOTE_OK" in result["second_final_text"]
+    assert not (set(result["second_tool_names"]) - {"ask_plan_question", "exit_plan"})
+    if result["second_status"] == "finished":
+        assert "PULSARA_PLAN_STOP_NOTE_OK" in result["second_final_text"]
+    else:
+        assert result["second_status"] == "waiting_user"
+        assert result["second_pending_kind"] in {"question", "exit"}
     assert result["aborted_run_end_count"] == 1
     assert result["run_errors"] == []
 
@@ -2263,15 +2267,18 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
         memory_reflection=False,
         system_prompt=(
             "You are validating Pulsara pending-approval stop recovery. "
-            "For the first validation request, call terminal exactly once with command exactly "
+            "Highest-priority recovery rule: if the conversation context contains a Pulsara note saying "
+            "the previous turn was stopped by the user and the user asks to continue, do not call tools, "
+            "do not request approval, and answer exactly PULSARA_PENDING_STOP_NOTE_OK. "
+            "Only the latest user message may trigger the terminal validation branch; historical user messages "
+            "in prior context never count as trigger messages. "
+            "Only when the user's message is exactly PULSARA_PENDING_STOP_FIRST_REQUEST, call terminal exactly once with command exactly "
             "'rm -rf ./PULSARA_PENDING_STOP_SENTINEL_DO_NOT_CREATE' and do not call any other tools. "
-            "If the conversation context contains a Pulsara note saying the previous turn was stopped by the user "
-            "and the user asks to continue, answer exactly PULSARA_PENDING_STOP_NOTE_OK."
         ),
         permission_policy=_trusted_terminal_policy(),
     )
     try:
-        first = await session.run_turn("Run the first validation request exactly as instructed.")
+        first = await session.run_turn("PULSARA_PENDING_STOP_FIRST_REQUEST")
         first_events = session.replay_events()
         first_run_id = first.state.run_id
         tool_names = [
@@ -2281,6 +2288,7 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
         ]
         stop_result = await session.stop_current_turn()
         pending_after_stop = session.get_pending_approval()
+        session.set_permission_mode(PermissionMode.READ_ONLY)
         prior_messages = rebuild_prior_messages(session.wiring.runtime_wiring.event_log)
         interrupted_note_present = any(
             INTERRUPTED_NOTE_TEXT in getattr(block, "text", "")
@@ -2289,9 +2297,14 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
         )
         second = await session.run_turn(
             "Do not call any tools. The prior context includes the Pulsara stop note. "
+            "This is a recovery-note validation turn with latest-user sentinel PULSARA_PENDING_STOP_RECOVERY_CHECK. "
             "Answer exactly PULSARA_PENDING_STOP_NOTE_OK."
         )
         events = session.replay_events()
+        second_events = [event for event in events if event.run_id == second.state.run_id]
+        second_tool_names = [
+            event.tool_call_name for event in second_events if isinstance(event, ToolCallStartEvent)
+        ]
         run_errors = _run_error_diagnostics(event for event in events if event.run_id == first_run_id)
         aborted_run_end_count = sum(
             1
@@ -2303,6 +2316,10 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
             "stop_result_status": stop_result.status.value if stop_result is not None else None,
             "second_status": second.status.value,
             "second_final_text": second.final_text.strip(),
+            "second_tool_names": second_tool_names,
+            "permission_mode_after_stop": session.current_permission_mode.value
+            if session.current_permission_mode is not None
+            else None,
             "tool_names": tool_names,
             "pending_after_stop": pending_after_stop,
             "aborted_run_end_count": aborted_run_end_count,
@@ -2329,16 +2346,16 @@ async def _run_real_host_core_plan_stop_smoke(tmp_path: Path) -> dict:
         memory_reflection=False,
         system_prompt=(
             "You are validating Pulsara plan-stop recovery. "
-            "For the first validation request, call ask_plan_question exactly once with question exactly "
-            "'Scope?'. Do not call any other tools. "
-            "If the conversation context contains a Pulsara note saying the previous plan workflow turn was "
+            "Highest-priority recovery rule: if the conversation context contains a Pulsara note saying the previous plan workflow turn was "
             "stopped by the user and planning remains active/read-only, and the user asks to continue planning, "
-            "answer exactly PULSARA_PLAN_STOP_NOTE_OK."
+            "do not call tools, do not ask a question, and answer exactly PULSARA_PLAN_STOP_NOTE_OK. "
+            "Only when the user's message is exactly PULSARA_PLAN_STOP_FIRST_REQUEST, call ask_plan_question exactly once with question exactly "
+            "'Scope?'. Do not call any other tools."
         ),
     )
     try:
         session.enter_plan(reason="real llm plan stop")
-        first = await session.run_turn("Run the first validation request exactly as instructed.")
+        first = await session.run_turn("PULSARA_PLAN_STOP_FIRST_REQUEST")
         first_events = session.replay_events()
         first_run_id = first.state.run_id
         tool_names = [
@@ -2358,9 +2375,16 @@ async def _run_real_host_core_plan_stop_smoke(tmp_path: Path) -> dict:
             for block in message.content
         )
         second = await session.run_turn(
-            "Do not call any tools. Continue planning and answer exactly PULSARA_PLAN_STOP_NOTE_OK."
+            "Do not call any tools. The prior context includes the Pulsara plan-aborted note and plan mode is still active/read-only. "
+            "This is a recovery-note validation turn, not PULSARA_PLAN_STOP_FIRST_REQUEST. "
+            "Answer exactly PULSARA_PLAN_STOP_NOTE_OK."
         )
         events = session.replay_events()
+        second_events = [event for event in events if event.run_id == second.state.run_id]
+        second_tool_names = [
+            event.tool_call_name for event in second_events if isinstance(event, ToolCallStartEvent)
+        ]
+        second_pending = session.get_pending_interaction()
         run_errors = _run_error_diagnostics(event for event in events if event.run_id == first_run_id)
         aborted_run_end_count = sum(
             1
@@ -2372,6 +2396,8 @@ async def _run_real_host_core_plan_stop_smoke(tmp_path: Path) -> dict:
             "stop_result_status": stop_result.status.value if stop_result is not None else None,
             "second_status": second.status.value,
             "second_final_text": second.final_text.strip(),
+            "second_tool_names": second_tool_names,
+            "second_pending_kind": second_pending.kind if second_pending is not None else None,
             "tool_names": tool_names,
             "pending_after_stop": pending_after_stop,
             "aborted_run_end_count": aborted_run_end_count,

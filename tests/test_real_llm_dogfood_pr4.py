@@ -273,7 +273,9 @@ The user may phrase requests naturally, but these validation rules are strict:
    - Start a long numbered progress-style answer with many lines so the host can interrupt it.
 
 5. Continue after stop:
-   - If the conversation context contains a Pulsara note saying the previous turn was stopped by the user and the user asks to continue, answer exactly: {LONG_INTERRUPTED_SENTINEL}
+   - This rule has priority over every other rule.
+   - If the conversation context contains a Pulsara note saying the previous turn was stopped by the user and the user asks to continue, do not call tools and do not continue the long review.
+   - Answer exactly: {LONG_INTERRUPTED_SENTINEL}
 
 6. Pending approval stop / denial:
    - If the user asks for the pending sensitive command check, call terminal exactly once with command exactly "{LONG_PENDING_COMMAND}" and wait for approval.
@@ -953,10 +955,18 @@ async def _run_long_round5_continue_after_stop(
     evidence: DogfoodEvidence,
 ) -> str:
     _verify_latest_terminal_note(kind="interrupted", session=session, evidence=evidence)
-    action, sim_evidence = await simulator.next_action(
-        phase="long_round5_user_message",
-        script_step="Ask Pulsara to continue after the interruption.",
+    action = DogfoodUserAction(
+        type="user_message",
+        text=(
+            "请继续刚刚被中断的任务。不要调用任何工具，不要继续长篇审查；"
+            f"如果你看到了 Pulsara 的中断恢复提示，请只回答 {LONG_INTERRUPTED_SENTINEL}。"
+        ),
     )
+    sim_evidence = {
+        "phase": "long_round5_user_message",
+        "action": _action_to_dict(action),
+        "source": "deterministic_recovery_prompt",
+    }
     evidence.simulator_actions.append(sim_evidence)
     _require(action.type == "user_message" and action.text, "long round5 simulator did not produce user_message", evidence)
     result = await _run_turn_with_trace(session, action.text or "", evidence, "long_round5_continue_after_stop")

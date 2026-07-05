@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pulsara_agent.event import (
     AgentEvent,
+    ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionStartedEvent,
@@ -85,6 +86,7 @@ class CompactionPlan:
     through_sequence: int
     keep_after_sequence: int
     estimated_tokens_before: int
+    estimated_tokens_source: str
     estimated_compaction_input_tokens_before: int
     estimated_tokens_after_replay_tail: int
     included_run_ids: tuple[str, ...]
@@ -196,7 +198,7 @@ class ContextCompactionService:
         compaction_id = f"context_compaction:{uuid4().hex}"
         context = _event_context_for_compaction(events)
         metadata = {
-            "estimate_source": "model_visible_context",
+            "estimate_source": plan.estimated_tokens_source,
             "estimated_compaction_input_tokens_before": plan.estimated_compaction_input_tokens_before,
             **(event_metadata or {}),
         }
@@ -358,9 +360,10 @@ class ContextCompactionService:
             policy=self.policy,
             previous_summary_text=latest_boundary.summary_text if latest_boundary is not None else None,
         )
-        estimated_before = estimate_model_visible_tokens(
-            model_visible_messages if model_visible_messages is not None else model_visible_messages_from_events(candidate_events),
+        estimated_before, estimate_source = _estimate_model_visible_tokens_for_plan(
+            candidate_events,
             current_user_input=current_user_input,
+            model_visible_messages=model_visible_messages,
             policy=self.policy,
             previous_summary_text=(
                 latest_boundary.summary_text if latest_boundary is not None and model_visible_messages is None else None
@@ -393,6 +396,7 @@ class ContextCompactionService:
             through_sequence=through_sequence,
             keep_after_sequence=through_sequence,
             estimated_tokens_before=estimated_before,
+            estimated_tokens_source=estimate_source,
             estimated_compaction_input_tokens_before=estimated_compaction_input_before,
             estimated_tokens_after_replay_tail=estimated_tail,
             included_run_ids=tuple(dict.fromkeys(event.run_id for event in compacted)),
@@ -502,6 +506,79 @@ def estimate_model_visible_tokens(
     if raw <= 0:
         return 0
     return max(1, int(raw * max(policy.estimate_safety_margin, 1.0)))
+
+
+def _estimate_model_visible_tokens_for_plan(
+    candidate_events: list[AgentEvent],
+    *,
+    current_user_input: str,
+    model_visible_messages: list[Msg] | tuple[Msg, ...] | None,
+    policy: ContextCompactionPolicy,
+    previous_summary_text: str | None,
+) -> tuple[int, str]:
+    if model_visible_messages is not None:
+        return (
+            estimate_model_visible_tokens(
+                model_visible_messages,
+                current_user_input=current_user_input,
+                policy=policy,
+                previous_summary_text=None,
+            ),
+            "model_visible_messages",
+        )
+    compiled = _latest_context_compiled_event(candidate_events)
+    if compiled is not None:
+        current_user_tokens = estimate_context_tokens(
+            current_user_input,
+            chars_per_token=policy.chars_per_token,
+        )
+        post_compiled_events = _events_after(candidate_events, compiled)
+        post_compiled_tokens = estimate_model_visible_tokens(
+            model_visible_messages_from_events(post_compiled_events),
+            policy=policy,
+            previous_summary_text=None,
+        )
+        prefix_tokens = int(compiled.estimated_tokens * max(policy.estimate_safety_margin, 1.0))
+        return (
+            prefix_tokens
+            + post_compiled_tokens
+            + max(0, int(current_user_tokens * max(policy.estimate_safety_margin, 1.0))),
+            "compiled_context_event",
+        )
+    return (
+        estimate_model_visible_tokens(
+            model_visible_messages_from_events(candidate_events),
+            current_user_input=current_user_input,
+            policy=policy,
+            previous_summary_text=previous_summary_text,
+        ),
+        "event_replay_messages",
+    )
+
+
+def _latest_context_compiled_event(events: list[AgentEvent] | tuple[AgentEvent, ...]) -> ContextCompiledEvent | None:
+    compiled = [
+        event
+        for event in events
+        if isinstance(event, ContextCompiledEvent)
+    ]
+    return compiled[-1] if compiled else None
+
+
+def _events_after(
+    events: list[AgentEvent] | tuple[AgentEvent, ...],
+    marker: AgentEvent,
+) -> list[AgentEvent]:
+    try:
+        index = list(events).index(marker)
+    except ValueError:
+        marker_sequence = marker.sequence or -1
+        return [
+            event
+            for event in events
+            if event.sequence is not None and event.sequence > marker_sequence
+        ]
+    return list(events)[index + 1 :]
 
 
 def estimate_post_compaction_tokens(

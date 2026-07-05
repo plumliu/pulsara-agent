@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "jieba>=0.42.1",
+    "mcp[cli]==2.0.0b1",
+    # Lockstep guard for the MCP SDK v2 beta: keep this equal to mcp's declared dependency.
+    "mcp-types==2.0.0b1",
     "openai>=2.43.0",
     "prompt-toolkit>=3.0.52",
     "psycopg[binary]>=3.3.4",

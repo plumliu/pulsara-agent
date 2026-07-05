@@ -132,6 +132,13 @@ class McpElicitationResolution:
     answer: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class McpInputRequiredInteractionResolution:
+    interaction_id: str
+    responses: dict[str, dict[str, Any]] = field(default_factory=dict)
+    cancelled: bool = False
+
+
 @dataclass(slots=True)
 class PendingMcpElicitation:
     interaction_id: str
@@ -166,6 +173,50 @@ class PendingMcpElicitation:
             "schema": dict(self.schema),
             "created_at": self.created_at,
         }
+
+
+@dataclass(slots=True)
+class PendingMcpInputRequired:
+    interaction_id: str
+    kind: Literal["mcp_input_required"]
+    host_session_id: str
+    runtime_session_id: str
+    run_id: str
+    turn_id: str
+    reply_id: str
+    tool_call_id: str
+    tool_name: str
+    server_id: str
+    protocol_version: str | None
+    request_state: str | None
+    input_requests: tuple[dict[str, Any], ...]
+    original_request: dict[str, Any]
+    round_count: int = 1
+    deadline_monotonic: float | None = None
+    created_at: float = field(default_factory=time.monotonic)
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "interaction_id": self.interaction_id,
+            "kind": self.kind,
+            "host_session_id": self.host_session_id,
+            "runtime_session_id": self.runtime_session_id,
+            "run_id": self.run_id,
+            "turn_id": self.turn_id,
+            "reply_id": self.reply_id,
+            "tool_call_id": self.tool_call_id,
+            "tool_name": self.tool_name,
+            "server_id": self.server_id,
+            "protocol_version": self.protocol_version,
+            "request_state": self.request_state,
+            "input_requests": [dict(item) for item in self.input_requests],
+            "original_request": dict(self.original_request),
+            "round_count": self.round_count,
+            "created_at": self.created_at,
+        }
+        if self.deadline_monotonic is not None:
+            payload["deadline_monotonic"] = self.deadline_monotonic
+        return payload
 
 
 @dataclass(slots=True)
@@ -210,7 +261,7 @@ class PendingPlanInteraction:
         }
 
 
-PendingInteraction: TypeAlias = PendingApproval | PendingPlanInteraction | PendingMcpElicitation
+PendingInteraction: TypeAlias = PendingApproval | PendingPlanInteraction | PendingMcpElicitation | PendingMcpInputRequired
 
 
 def pending_plan_interaction_from_state(state: LoopState, host_session_id: str) -> PendingPlanInteraction:
@@ -262,6 +313,36 @@ def pending_mcp_elicitation_from_state(state: LoopState, host_session_id: str) -
         request_id=str(payload["request_id"]),
         prompt=str(payload.get("prompt") or ""),
         schema=dict(payload.get("schema") or {}),
+    )
+
+
+def pending_mcp_input_required_from_state(state: LoopState, host_session_id: str) -> PendingMcpInputRequired:
+    if state.status is not LoopStatus.WAITING_USER:
+        raise ValueError("cannot create pending MCP input-required from a non-waiting state")
+    if state.pending_interaction_kind != "mcp_input_required":
+        raise ValueError("waiting state does not contain an MCP input-required interaction")
+    payload = dict(state.pending_interaction_payload)
+    return PendingMcpInputRequired(
+        interaction_id=str(payload["interaction_id"]),
+        kind="mcp_input_required",
+        host_session_id=host_session_id,
+        runtime_session_id=state.session_id,
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        tool_call_id=str(payload["tool_call_id"]),
+        tool_name=str(payload["tool_name"]),
+        server_id=str(payload["server_id"]),
+        protocol_version=(
+            str(payload["protocol_version"]) if payload.get("protocol_version") is not None else None
+        ),
+        request_state=str(payload["request_state"]) if payload.get("request_state") is not None else None,
+        input_requests=tuple(dict(item) for item in payload.get("input_requests") or ()),
+        original_request=dict(payload.get("original_request") or {}),
+        round_count=int(payload.get("round_count") or 1),
+        deadline_monotonic=(
+            float(payload["deadline_monotonic"]) if payload.get("deadline_monotonic") is not None else None
+        ),
     )
 
 

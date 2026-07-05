@@ -6,7 +6,11 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
-from pulsara_agent.runtime.mcp.types import McpServerSnapshot
+from pulsara_agent.runtime.mcp.types import (
+    McpInputRequiredResolution,
+    McpOriginalRequest,
+    McpServerSnapshot,
+)
 
 
 class McpClientManager(Protocol):
@@ -30,9 +34,16 @@ class McpClientManager(Protocol):
     def cancel_active(self) -> None:
         """Best-effort cancellation signal for active MCP calls."""
 
-    async def respond_elicitation(self, server_id: str, request_id: str, answer: dict[str, Any]) -> Any:
-        """Route a user response back to an MCP elicitation request."""
-
+    async def resume_suspended_request(
+        self,
+        *,
+        server_id: str,
+        original_request: McpOriginalRequest,
+        request_state: str | None,
+        resolution: McpInputRequiredResolution,
+        timeout_ms: int,
+    ) -> Any:
+        """Resume a modern MCP InputRequiredResult through Pulsara-owned DTOs."""
 
 McpToolHandler = Callable[[dict[str, Any]], Any | Awaitable[Any]]
 
@@ -95,6 +106,27 @@ class MockMcpClientManager:
         self.elicitation_responses.append((server_id, request_id, dict(answer)))
         return {"elicitation_response": answer, "request_id": request_id}
 
+    async def resume_suspended_request(
+        self,
+        *,
+        server_id: str,
+        original_request: McpOriginalRequest,
+        request_state: str | None,
+        resolution: McpInputRequiredResolution,
+        timeout_ms: int,
+    ) -> Any:
+        del request_state
+        if resolution.cancelled:
+            return {"cancelled": True, "interaction_id": resolution.interaction_id}
+        if original_request.tool_name is None:
+            raise RuntimeError("mock MCP manager only resumes tool calls")
+        return await self.call_tool(
+            server_id,
+            original_request.tool_name,
+            original_request.arguments or {},
+            timeout_ms=timeout_ms,
+        )
+
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
         if self._closed:
             return
@@ -145,10 +177,24 @@ class CompositeMcpClientManager:
         for manager in self.managers:
             manager.cancel_active()
 
-    async def respond_elicitation(self, server_id: str, request_id: str, answer: dict[str, Any]) -> Any:
+    async def resume_suspended_request(
+        self,
+        *,
+        server_id: str,
+        original_request: McpOriginalRequest,
+        request_state: str | None,
+        resolution: McpInputRequiredResolution,
+        timeout_ms: int,
+    ) -> Any:
         for manager in self.managers:
             if any(snapshot.config.server_id == server_id for snapshot in manager.snapshots):
-                return await manager.respond_elicitation(server_id, request_id, answer)
+                return await manager.resume_suspended_request(
+                    server_id=server_id,
+                    original_request=original_request,
+                    request_state=request_state,
+                    resolution=resolution,
+                    timeout_ms=timeout_ms,
+                )
         raise KeyError(f"Unknown MCP server: {server_id}")
 
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:

@@ -397,7 +397,7 @@ def build_agent_runtime_wiring(
     llm_runtime = build_llm_runtime(settings.llm)
     runtime_wiring = _with_memory_governance_engine(runtime_wiring, llm_runtime=llm_runtime)
     effective_permission_policy = permission_policy or default_permission_policy()
-    effective_capability_runtime = capability_runtime or _default_capability_runtime(
+    effective_capability_runtime = capability_runtime or build_default_capability_runtime(
         runtime_session=runtime_wiring.runtime_session,
         enable_workspace_skills=enable_workspace_skills,
         mcp_bundle=mcp_bundle,
@@ -444,7 +444,7 @@ def _build_mcp_bundle(managers: tuple[McpClientManager, ...]) -> McpCapabilityBi
     return build_mcp_bundle(manager)
 
 
-def _default_capability_runtime(
+def build_default_capability_runtime(
     *,
     runtime_session: RuntimeSession,
     enable_workspace_skills: bool,

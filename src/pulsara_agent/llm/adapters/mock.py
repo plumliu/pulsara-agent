@@ -39,6 +39,8 @@ class MockTransport:
             model_name=model.id,
             model_role=model.role.value,
             provider=model.provider,
+            context_id=context.context_id,
+            model_call_index=context.model_call_index,
         )
         yield TextBlockStartEvent(**event_context.event_fields(), block_id=block_id)
         yield TextBlockDeltaEvent(

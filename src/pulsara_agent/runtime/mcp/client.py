@@ -12,6 +12,8 @@ import httpx
 from pulsara_agent.runtime.mcp.manager import McpClientManager
 from pulsara_agent.runtime.mcp.types import (
     McpDiscoveredTool,
+    McpInputRequiredResolution,
+    McpOriginalRequest,
     McpServerConfig,
     McpServerSnapshot,
     McpServerStatus,
@@ -124,13 +126,25 @@ class HttpMcpClientManager(McpClientManager):
         # httpx request cancellation is owned by the awaiting task.
         return None
 
-    async def respond_elicitation(self, server_id: str, request_id: str, answer: dict[str, Any]) -> Any:
-        config = self._configs[server_id]
-        return await self._json_rpc(
-            config,
-            "elicitation/respond",
-            {"requestId": request_id, "answer": answer},
-            timeout_ms=config.tool_timeout_ms,
+    async def resume_suspended_request(
+        self,
+        *,
+        server_id: str,
+        original_request: McpOriginalRequest,
+        request_state: str | None,
+        resolution: McpInputRequiredResolution,
+        timeout_ms: int,
+    ) -> Any:
+        del request_state
+        if resolution.cancelled:
+            return {"cancelled": True, "interaction_id": resolution.interaction_id}
+        if original_request.tool_name is None:
+            raise RuntimeError("legacy HTTP MCP manager only resumes tool calls")
+        return await self.call_tool(
+            server_id,
+            original_request.tool_name,
+            original_request.arguments or {},
+            timeout_ms=timeout_ms,
         )
 
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
@@ -163,4 +177,3 @@ def _format_call_result(result: dict[str, Any]) -> Any:
         if texts:
             return "\n".join(texts)
     return result
-

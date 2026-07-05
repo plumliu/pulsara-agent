@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
 from pulsara_agent.llm.input import ToolSpec
+from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import (
     Base64Source,
@@ -19,8 +22,18 @@ from pulsara_agent.message import (
     ToolResultBlock,
     URLSource,
 )
-from pulsara_agent.runtime.recovery import project_recovery_from_state, render_recovery_text
+from pulsara_agent.runtime.context_engine import (
+    CompiledContext,
+    ContextCompileInputs,
+    ContextCompileRequest,
+    ContextLifecycleCoordinator,
+    compile_context,
+)
+from pulsara_agent.runtime.context_engine.compiler import build_recovery_message
 from pulsara_agent.runtime.state import LoopBudget, LoopState
+
+if TYPE_CHECKING:
+    from pulsara_agent.capability.exposure import CapabilityExposurePlan
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -35,38 +48,142 @@ def build_llm_context(
     tools: tuple[ToolSpec, ...],
     system_prompt: str | None,
     budget: LoopBudget,
+    context_id: str | None = None,
+    model_call_index: int = 0,
+    model_role: ModelRole = ModelRole.PRO,
+    exposure: "CapabilityExposurePlan | None" = None,
+    current_user_anchor: str | None = None,
+    runtime_session_id: str | None = None,
+    component_prompts: tuple[tuple[str, str], ...] = (),
+    lifecycle_coordinator: ContextLifecycleCoordinator | None = None,
 ) -> LLMContext:
-    prompt = _system_prompt_with_projection(system_prompt or DEFAULT_SYSTEM_PROMPT, state.memory_projection)
-    messages = list(msg_to_llm_messages(state.messages, budget))
-    recovery = project_recovery_from_state(state)
-    if recovery is not None:
-        messages.append(
-            LLMMessage.user(render_recovery_text(recovery, audience="prompt"))
-        )
-    return LLMContext(
-        system_prompt=prompt,
-        messages=tuple(messages),
+    return build_compiled_context(
+        state=state,
         tools=tools,
+        system_prompt=system_prompt,
+        budget=budget,
+        context_id=context_id,
+        model_call_index=model_call_index,
+        model_role=model_role,
+        exposure=exposure,
+        current_user_anchor=current_user_anchor,
+        runtime_session_id=runtime_session_id,
+        component_prompts=component_prompts,
+        lifecycle_coordinator=lifecycle_coordinator,
+    ).llm_context
+
+
+def build_compiled_context(
+    state: LoopState,
+    *,
+    tools: tuple[ToolSpec, ...],
+    system_prompt: str | None,
+    budget: LoopBudget,
+    context_id: str | None = None,
+    model_call_index: int = 0,
+    model_role: ModelRole = ModelRole.PRO,
+    exposure: "CapabilityExposurePlan | None" = None,
+    current_user_anchor: str | None = None,
+    runtime_session_id: str | None = None,
+    component_prompts: tuple[tuple[str, str], ...] = (),
+    lifecycle_coordinator: ContextLifecycleCoordinator | None = None,
+) -> CompiledContext:
+    projection = _projection_component(state.memory_projection)
+    prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+    anchor = current_user_anchor or _current_user_anchor_for_state(state)
+    segmented_messages = _segmented_llm_messages_for_anchor(state.messages, budget, anchor)
+    messages = segmented_messages.full_messages
+    current_user = _message_by_id(state, anchor) if anchor is not None else None
+    current_user_input = _message_text(current_user) if current_user is not None else ""
+    request = ContextCompileRequest(
+        context_id=context_id or f"context:{uuid4().hex}",
+        runtime_session_id=runtime_session_id or state.session_id,
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        model_call_index=model_call_index,
+        model_role=model_role,
+        state=state,
+        current_user_message=current_user,
+        current_user_input=current_user_input,
+        current_user_anchor=anchor,
+        tools=tools,
+        exposure=exposure,
+        budget=budget,
+    )
+    return compile_context(
+        request,
+        inputs=ContextCompileInputs(
+            system_prompt=prompt,
+            prior_messages=messages,
+            prior_history_messages=segmented_messages.prior_history_messages,
+            current_user_messages=segmented_messages.current_user_messages,
+            current_run_tail_messages=segmented_messages.current_run_tail_messages,
+            recovery_message=build_recovery_message(request),
+            component_prompts=(*component_prompts, *((("memory:projection", projection),) if projection else ())),
+        ),
+        lifecycle_coordinator=lifecycle_coordinator,
     )
 
 
 def msg_to_llm_messages(messages: list[Msg], budget: LoopBudget) -> tuple[LLMMessage, ...]:
+    return _segmented_llm_messages_for_anchor(messages, budget, anchor=None).full_messages
+
+
+@dataclass(frozen=True, slots=True)
+class _SegmentedLLMMessages:
+    full_messages: tuple[LLMMessage, ...]
+    prior_history_messages: tuple[LLMMessage, ...] | None
+    current_user_messages: tuple[LLMMessage, ...] | None
+    current_run_tail_messages: tuple[LLMMessage, ...] | None
+
+
+def _segmented_llm_messages_for_anchor(
+    messages: list[Msg],
+    budget: LoopBudget,
+    anchor: str | None,
+) -> _SegmentedLLMMessages:
     llm_messages: list[LLMMessage] = []
+    prior_messages: list[LLMMessage] = []
+    current_user_messages: list[LLMMessage] = []
+    tail_messages: list[LLMMessage] = []
+    anchor_index: int | None = None
+    if anchor is not None:
+        matches = [index for index, message in enumerate(messages) if message.id == anchor and message.role == "user"]
+        if len(matches) == 1:
+            anchor_index = matches[0]
     tool_budget = _ToolResultRenderBudget(budget.tool_result_context_chars)
-    for message in messages:
-        if message.role == "user":
-            parts = _textual_parts(message, tool_budget)
-            if parts:
-                llm_messages.append(LLMMessage.user("\n".join(parts)))
-        elif message.role == "assistant":
-            llm_messages.extend(_assistant_messages(message, tool_budget))
-        elif message.role == "system":
-            parts = _textual_parts(message, tool_budget)
-            if parts:
-                llm_messages.append(LLMMessage.system("\n".join(parts)))
-        elif message.role == "tool_result":
-            llm_messages.extend(_tool_result_messages(message, tool_budget))
-    return tuple(llm_messages)
+    for index, message in enumerate(messages):
+        converted = _message_to_llm_messages(message, tool_budget)
+        llm_messages.extend(converted)
+        if anchor_index is None:
+            continue
+        if index < anchor_index:
+            prior_messages.extend(converted)
+        elif index == anchor_index:
+            current_user_messages.extend(converted)
+        else:
+            tail_messages.extend(converted)
+    return _SegmentedLLMMessages(
+        full_messages=tuple(llm_messages),
+        prior_history_messages=tuple(prior_messages) if anchor_index is not None else None,
+        current_user_messages=tuple(current_user_messages) if anchor_index is not None else None,
+        current_run_tail_messages=tuple(tail_messages) if anchor_index is not None else None,
+    )
+
+
+def _message_to_llm_messages(message: Msg, tool_budget: "_ToolResultRenderBudget") -> list[LLMMessage]:
+    if message.role == "user":
+        parts = _textual_parts(message, tool_budget)
+        return [LLMMessage.user("\n".join(parts))] if parts else []
+    if message.role == "assistant":
+        return _assistant_messages(message, tool_budget)
+    if message.role == "system":
+        parts = _textual_parts(message, tool_budget)
+        return [LLMMessage.system("\n".join(parts))] if parts else []
+    if message.role == "tool_result":
+        return _tool_result_messages(message, tool_budget)
+    return []
 
 
 def _assistant_messages(message: Msg, tool_budget: "_ToolResultRenderBudget") -> list[LLMMessage]:
@@ -309,3 +426,46 @@ def _projection_text(projection: dict[str, Any]) -> str:
     if isinstance(items, list):
         return "\n".join(f"- {item}" for item in items)
     return str(projection)
+
+
+def _projection_component(projection: dict[str, Any] | None) -> str | None:
+    if not projection:
+        return None
+    projection_kind = projection.get("projection_kind")
+    if projection_kind in {"working_context", "mixed"}:
+        heading = (
+            "Recalled Memory and Recent Working Context "
+            "(source=fenced_memory_context; do not write it back as new memory):\n"
+            "Recent Working Context is independent from canonical memory search. "
+            "An empty memory_search result does not invalidate recent activity shown here."
+        )
+    else:
+        heading = "Recalled Memory (source=fenced_recalled_memory; do not write it back as new memory):"
+    return "\n\n".join([heading, _projection_text(projection)])
+
+
+def _current_user_anchor_for_state(state: LoopState) -> str | None:
+    expected = f"user-message:{state.run_id}"
+    if any(message.id == expected for message in state.messages):
+        return expected
+    return None
+
+
+def _message_by_id(state: LoopState, message_id: str | None) -> Msg | None:
+    if message_id is None:
+        return None
+    matches = [message for message in state.messages if message.id == message_id]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _message_text(message: Msg | None) -> str:
+    if message is None:
+        return ""
+    parts: list[str] = []
+    for block in message.content:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(parts)

@@ -181,13 +181,14 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
         assert "pr4" in summary_lower
         assert "skill" in summary_lower
         assert "controlled" in summary_lower or "provider failure" in summary_lower
-        assert "final" in summary_lower and "inspect" in summary_lower
         assert completed.estimated_tokens_after < completed.estimated_tokens_before
 
         compact_context = capture.contexts[0]
         compact_user_input = compact_context.messages[1].content[0]
         raw_output = "".join(capture.raw_parts)
         assert "long_round1_orientation" in compact_user_input
+        # keep_recent_runs=2 intentionally leaves the final inspection round in
+        # the recent tail rather than asking the compact summary to duplicate it.
         assert "long_round10_final_inspect" not in compact_user_input
         assert "<analysis>" in raw_output.casefold()
         assert "<analysis>" not in summary.casefold()

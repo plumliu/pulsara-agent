@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncIterator, Literal
@@ -15,6 +16,7 @@ from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResol
 from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
+    ContextCompiledEvent,
     CustomEvent,
     EventContext,
     ExceedMaxItersEvent,
@@ -45,7 +47,8 @@ from pulsara_agent.message import (
     ToolResultState,
     UserMsg,
 )
-from pulsara_agent.runtime.context import build_llm_context
+from pulsara_agent.runtime.context import build_compiled_context
+from pulsara_agent.runtime.context_engine import ContextBudgetExceeded, ContextLifecycleCoordinator
 from pulsara_agent.runtime.approval import ApprovalResolution
 from pulsara_agent.runtime.compaction.inline import NoopRuntimeContextCompactor, RuntimeContextCompactorProtocol
 from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
@@ -75,11 +78,18 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.plan import (
     McpElicitationResolution,
+    McpInputRequiredInteractionResolution,
     PlanExitResolution,
     PlanInteractionResolution,
     PlanQuestionResolution,
     PlanWorkflowState,
     normalize_plan_question_options,
+)
+from pulsara_agent.runtime.mcp.types import (
+    MAX_MCP_INPUT_REQUIRED_ROUNDS,
+    McpInputRequestDTO,
+    McpInputRequiredResolution,
+    redact_mcp_error_message,
 )
 from pulsara_agent.runtime.recovery import (
     AbortKind,
@@ -166,6 +176,37 @@ def _merged_skill_values(injections: tuple[ActiveSkillInjection, ...], field_nam
 def _max_auth_required(injections: tuple[ActiveSkillInjection, ...]) -> str:
     rank = {"none": 0, "optional": 1, "required": 2}
     return max((injection.auth_required for injection in injections), key=lambda value: rank[value], default="none")
+
+
+def _mcp_input_requests_from_payload(value: object) -> tuple[McpInputRequestDTO, ...]:
+    if not isinstance(value, list):
+        return ()
+    requests: list[McpInputRequestDTO] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "")
+        method = str(item.get("method") or "")
+        params = item.get("params")
+        if not key or not method:
+            continue
+        requests.append(
+            McpInputRequestDTO(
+                key=key,
+                method=method,
+                params=dict(params) if isinstance(params, dict) else {},
+            )
+        )
+    return tuple(requests)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def compose_system_prompt(
@@ -267,9 +308,29 @@ class AgentRuntime:
         self.system_prompt = system_prompt
         self.capability_runtime = capability_runtime
         self.context_compactor = context_compactor or NoopRuntimeContextCompactor()
+        self.context_lifecycle = ContextLifecycleCoordinator()
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
         self.tool_executor = runtime_session.create_tool_executor(
+            memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
+            memory_recall_service=getattr(self.memory_hooks, "recall", None),
+            memory_query=getattr(self.memory_hooks, "memory_query", None),
+            graph_id=getattr(self.memory_hooks, "graph_id", None),
+            memory_read_scopes=getattr(self.memory_hooks, "read_scopes", None),
+            permission_state=self._permission_state,
+        )
+
+    def refresh_capability_runtime(self, capability_runtime: CapabilityRuntime) -> None:
+        """Replace per-turn capability facts and rebuild the executor registry.
+
+        MCP descriptors and execution bindings are session-owned and may change
+        after a reconnect/backoff sync.  Rebuilding here keeps the model-facing
+        exposure plan and the executable ToolRegistry on the same snapshot.
+        """
+        if capability_runtime is None:
+            raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
+        self.capability_runtime = capability_runtime
+        self.tool_executor = self.runtime_session.create_tool_executor(
             memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
             memory_recall_service=getattr(self.memory_hooks, "recall", None),
             memory_query=getattr(self.memory_hooks, "memory_query", None),
@@ -368,6 +429,15 @@ class AgentRuntime:
             pass
         return self._run_result(state)
 
+    async def resume_after_mcp_input_required(
+        self,
+        state: LoopState,
+        resolution: McpInputRequiredInteractionResolution,
+    ) -> AgentRunResult:
+        async for _event in self.stream_after_mcp_input_required(state, resolution):
+            pass
+        return self._run_result(state)
+
     async def stream_after_plan_interaction(
         self,
         state: LoopState,
@@ -382,6 +452,14 @@ class AgentRuntime:
         resolution: McpElicitationResolution,
     ) -> AsyncIterator[AgentEvent]:
         async for event in self._stream_mcp_elicitation_resolution(state, resolution):
+            yield event
+
+    async def stream_after_mcp_input_required(
+        self,
+        state: LoopState,
+        resolution: McpInputRequiredInteractionResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        async for event in self._stream_mcp_input_required_resolution(state, resolution):
             yield event
 
     async def abort_run(
@@ -643,26 +721,78 @@ class AgentRuntime:
             async for event in self._project_memory(state):
                 yield event
 
-            context = build_llm_context(
-                state=state,
-                tools=exposure.direct_tool_specs,
-                system_prompt=compose_system_prompt(
-                    self.system_prompt,
-                    runtime_context_prompt=render_runtime_context_prompt(
-                        workspace_root=str(self.runtime_session.workspace_root),
-                        workspace_kind=self.workspace_kind,
-                        terminal_current_cwd=str(
-                            self.runtime_session.terminal_sessions.current_cwd(
-                                owner_host_session_id=self.runtime_session.terminal_owner_host_session_id
-                            )
-                        ),
-                    ),
-                    memory_prompt=getattr(self.memory_hooks, "memory_context_prompt", lambda: None)(),
-                    capability_prompt=exposure.catalog_prompt,
-                    active_skill_prompt=exposure.active_skill_prompt,
+            model_call_index = _next_model_call_index(state)
+            runtime_context_prompt = render_runtime_context_prompt(
+                workspace_root=str(self.runtime_session.workspace_root),
+                workspace_kind=self.workspace_kind,
+                terminal_current_cwd=str(
+                    self.runtime_session.terminal_sessions.current_cwd(
+                        owner_host_session_id=self.runtime_session.terminal_owner_host_session_id
+                    )
                 ),
-                budget=self.budget,
             )
+            memory_prompt = getattr(self.memory_hooks, "memory_context_prompt", lambda: None)()
+            try:
+                compiled_context = build_compiled_context(
+                    state=state,
+                    tools=exposure.direct_tool_specs,
+                    system_prompt=self.system_prompt,
+                    budget=self.budget,
+                    context_id=f"context:{uuid4().hex}",
+                    model_call_index=model_call_index,
+                    model_role=self.model_role,
+                    exposure=exposure,
+                    current_user_anchor=f"user-message:{state.run_id}",
+                    runtime_session_id=self.runtime_session.runtime_session_id,
+                    component_prompts=tuple(
+                        (component_id, text)
+                        for component_id, text in (
+                            ("runtime_context", runtime_context_prompt),
+                            ("memory:hook_prompt", memory_prompt),
+                            ("capability:catalog", exposure.catalog_prompt),
+                            ("capability:active_skill", exposure.active_skill_prompt),
+                        )
+                        if text
+                    ),
+                    lifecycle_coordinator=self.context_lifecycle,
+                )
+            except ContextBudgetExceeded as exc:
+                state.status = LoopStatus.FAILED
+                state.stop_reason = "model_error"
+                state.error_message = str(exc)
+                state.transition(LoopTransition.FAIL)
+                yield await self.runtime_session.emit(
+                    RunErrorEvent(
+                        **self._event_context(state).event_fields(),
+                        message=str(exc),
+                        code="context_budget_exceeded",
+                    ),
+                    state=state,
+                )
+                break
+            yield await self.runtime_session.emit(
+                ContextCompiledEvent(
+                    **self._event_context(state).event_fields(),
+                    context_id=compiled_context.context_id,
+                    model_role=self.model_role.value,
+                    model_call_index=model_call_index,
+                    estimated_tokens=compiled_context.estimated_tokens,
+                    context_window_tokens=compiled_context.budget.context_window_tokens,
+                    reserved_output_tokens=compiled_context.budget.reserved_output_tokens,
+                    tools_estimated_tokens=compiled_context.budget.tools_estimated_tokens,
+                    sections=[section.to_event_value() for section in compiled_context.sections],
+                    tool_specs=[tool.to_event_value() for tool in compiled_context.tool_specs],
+                    diagnostics=[
+                        diagnostic.to_event_value() for diagnostic in compiled_context.diagnostics
+                    ],
+                    lifecycle_decisions=[
+                        decision.to_event_value()
+                        for decision in compiled_context.lifecycle_decisions
+                    ],
+                ),
+                state=state,
+            )
+            context = compiled_context.llm_context
 
             reply_had_run_error = False
             try:
@@ -934,6 +1064,217 @@ class AgentRuntime:
             ):
                 yield event
 
+        async for event in self._after_tool_results(state):
+            yield event
+        if state.status is not LoopStatus.RUNNING:
+            async for event in self._finalize_run(state):
+                yield event
+            return
+        async for event in self._continue_after_tool_before_followup(state):
+            yield event
+        exposure = self._exposure_from_state_or_resolve(state)
+        async for event in self._stream_model_loop(state, exposure):
+            yield event
+
+    async def _stream_mcp_input_required_resolution(
+        self,
+        state: LoopState,
+        resolution: McpInputRequiredInteractionResolution,
+    ) -> AsyncIterator[AgentEvent]:
+        if state.status is not LoopStatus.WAITING_USER:
+            raise ValueError("MCP input-required resolution requires a waiting state")
+        if state.pending_interaction_kind != "mcp_input_required":
+            raise ValueError("waiting state does not contain MCP input-required")
+        payload = dict(state.pending_interaction_payload)
+        if resolution.interaction_id != payload.get("interaction_id"):
+            raise ValueError("MCP input-required interaction id does not match the pending interaction")
+
+        tool_call_id = str(payload["tool_call_id"])
+        tool_name = str(payload["tool_name"])
+        server_id = str(payload["server_id"])
+        original_request = dict(payload.get("original_request") or {})
+        request_state = str(payload["request_state"]) if payload.get("request_state") is not None else None
+        input_requests = _mcp_input_requests_from_payload(payload.get("input_requests"))
+        round_count = int(payload.get("round_count") or 1)
+        deadline_monotonic = _optional_float(payload.get("deadline_monotonic"))
+        original_pending_payload = dict(state.pending_interaction_payload)
+
+        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+            yield await self.runtime_session.emit(
+                CustomEvent(
+                    **self._event_context(state).event_fields(),
+                    name="mcp_input_required_expired",
+                    value={
+                        "interaction_id": resolution.interaction_id,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "server_id": server_id,
+                        "round_count": round_count,
+                    },
+                ),
+                state=state,
+            )
+            state.pending_interaction_kind = None
+            state.pending_interaction_payload = {}
+            state.status = LoopStatus.RUNNING
+            state.stop_reason = None
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+                output="MCP input-required interaction expired before it was resumed.",
+                result_state=ToolResultState.ERROR,
+            ):
+                yield event
+            async for event in self._after_mcp_resume_terminal_result(state):
+                yield event
+            return
+
+        yield await self.runtime_session.emit(
+            CustomEvent(
+                **self._event_context(state).event_fields(),
+                name="mcp_input_required_resolved",
+                value={
+                    "interaction_id": resolution.interaction_id,
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "server_id": server_id,
+                    "cancelled": resolution.cancelled,
+                    "response_keys": sorted(resolution.responses),
+                    "round_count": round_count,
+                },
+            ),
+            state=state,
+        )
+
+        gate_call = ToolCall(
+            id=tool_call_id,
+            name=tool_name,
+            arguments=dict(original_request.get("arguments") or {}),
+        )
+        exposure = self._exposure_from_state_or_resolve(state)
+        exposure_decision = evaluate_capability_exposure_access(gate_call, exposure)
+        if exposure_decision is not None:
+            state.pending_interaction_kind = None
+            state.pending_interaction_payload = {}
+            state.status = LoopStatus.RUNNING
+            state.stop_reason = None
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+                output=exposure_decision.reason or "MCP tool is no longer callable",
+                result_state=ToolResultState.ERROR,
+            ):
+                yield event
+        else:
+            permission_decision = await self.permission_gate.evaluate([gate_call], exposure=exposure)
+            if permission_decision.kind is not PermissionDecisionKind.ALLOW:
+                state.pending_interaction_kind = None
+                state.pending_interaction_payload = {}
+                state.status = LoopStatus.RUNNING
+                state.stop_reason = None
+                async for event in self._emit_tool_result_and_record(
+                    state,
+                    tool_call_id=tool_call_id,
+                    tool_call_name=tool_name,
+                    output=permission_decision.reason or "MCP tool resume was blocked by permission policy",
+                    result_state=ToolResultState.ERROR,
+                ):
+                    yield event
+            else:
+                tool = self.tool_executor.registry.get(tool_name)
+                resume = getattr(tool, "resume_input_required", None)
+                if resume is None:
+                    state.pending_interaction_kind = None
+                    state.pending_interaction_payload = {}
+                    state.status = LoopStatus.RUNNING
+                    state.stop_reason = None
+                    async for event in self._emit_tool_result_and_record(
+                        state,
+                        tool_call_id=tool_call_id,
+                        tool_call_name=tool_name,
+                        output=f"tool {tool_name!r} cannot resume MCP input-required",
+                        result_state=ToolResultState.ERROR,
+                    ):
+                        yield event
+                else:
+                    try:
+                        result = await resume(
+                            original_request=original_request,
+                            request_state=request_state,
+                            resolution=McpInputRequiredResolution(
+                                interaction_id=resolution.interaction_id,
+                                responses={key: dict(value) for key, value in resolution.responses.items()},
+                                cancelled=resolution.cancelled,
+                                tool_call_id=tool_call_id,
+                                input_requests=input_requests,
+                                round_count=round_count,
+                                deadline_monotonic=deadline_monotonic,
+                            ),
+                            runtime_context=ToolRuntimeContext(
+                                runtime_session_id=self.runtime_session.runtime_session_id,
+                                event_context=self._event_context(state),
+                            ),
+                        )
+                    except Exception as exc:
+                        state.pending_interaction_kind = "mcp_input_required"
+                        state.pending_interaction_payload = original_pending_payload
+                        state.status = LoopStatus.WAITING_USER
+                        state.stop_reason = "waiting_user"
+                        yield await self.runtime_session.emit(
+                            CustomEvent(
+                                **self._event_context(state).event_fields(),
+                                name="mcp_input_required_resume_failed",
+                                value={
+                                    "interaction_id": resolution.interaction_id,
+                                    "tool_call_id": tool_call_id,
+                                    "tool_name": tool_name,
+                                    "server_id": server_id,
+                                    "error_type": type(exc).__name__,
+                                    "message": redact_mcp_error_message(exc),
+                                },
+                            ),
+                            state=state,
+                        )
+                        return
+                    state.pending_interaction_kind = None
+                    state.pending_interaction_payload = {}
+                    state.status = LoopStatus.RUNNING
+                    state.stop_reason = None
+                    if isinstance(result, ToolExecutionSuspended):
+                        next_round = int(result.payload.get("round_count") or (round_count + 1))
+                        if next_round > MAX_MCP_INPUT_REQUIRED_ROUNDS:
+                            async for event in self._emit_tool_result_and_record(
+                                state,
+                                tool_call_id=tool_call_id,
+                                tool_call_name=tool_name,
+                                output="MCP input-required interaction exceeded the maximum round count.",
+                                result_state=ToolResultState.ERROR,
+                            ):
+                                yield event
+                            async for event in self._after_mcp_resume_terminal_result(state):
+                                yield event
+                            return
+                        async for event in self._suspend_tool_execution(state, result):
+                            yield event
+                        return
+                    async for event in self._emit_tool_result_and_record(
+                        state,
+                        tool_call_id=tool_call_id,
+                        tool_call_name=tool_name,
+                        output=result.output,
+                        result_state=result.status,
+                    ):
+                        yield event
+
+        async for event in self._after_mcp_resume_terminal_result(state):
+            yield event
+
+    async def _after_mcp_resume_terminal_result(
+        self,
+        state: LoopState,
+    ) -> AsyncIterator[AgentEvent]:
         async for event in self._after_tool_results(state):
             yield event
         if state.status is not LoopStatus.RUNNING:
@@ -2060,6 +2401,15 @@ class AgentRuntime:
 
     def _event_context(self, state: LoopState) -> EventContext:
         return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+
+
+def _next_model_call_index(state: LoopState) -> int:
+    value = state.scratchpad.get("model_call_index")
+    if not isinstance(value, int):
+        value = 0
+    value += 1
+    state.scratchpad["model_call_index"] = value
+    return value
 
 
 def _is_overridden_hook(instance: object, name: str, base: type) -> bool:

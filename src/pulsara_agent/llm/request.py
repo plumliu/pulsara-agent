@@ -20,3 +20,5 @@ class LLMContext:
     messages: tuple[LLMMessage, ...]
     tools: tuple[ToolSpec, ...] = field(default_factory=tuple)
     system_prompt: str | None = None
+    context_id: str | None = None
+    model_call_index: int | None = None
