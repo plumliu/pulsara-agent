@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, AsyncIterator, Awaitable, Callable
 from uuid import uuid4
@@ -39,23 +39,31 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.plan import (
     McpElicitationResolution,
+    McpInputRequiredInteractionResolution,
     PLAN_ACTIVE_INSTRUCTION,
     PLAN_ACTIVE_INSTRUCTION_NAME,
     PLAN_ENTRY_INSTRUCTION,
     PLAN_ENTRY_INSTRUCTION_NAME,
     PendingInteraction,
     PendingMcpElicitation,
+    PendingMcpInputRequired,
     PendingPlanInteraction,
     PlanInteractionResolution,
     PlanWorkflowState,
     pending_plan_interaction_from_state,
     pending_mcp_elicitation_from_state,
+    pending_mcp_input_required_from_state,
     reduce_plan_workflow_state,
 )
 from pulsara_agent.runtime.recovery import AbortKind, StopRequest
 from pulsara_agent.runtime.state import LoopState, LoopStatus
+from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
+from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
+from pulsara_agent.capability.providers.mcp import McpCapabilityBindingBundle, McpCapabilityProvider, build_mcp_bundle
+from pulsara_agent.capability.runtime import CapabilityRuntime
+from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 
 
 class HostSessionBusyError(RuntimeError):
@@ -85,6 +93,31 @@ class _StreamError:
 
 _STREAM_DONE = object()
 _STREAM_QUEUE_MAX_ITEMS = 128
+
+
+def _replace_mcp_tool_bindings(current: tuple[object, ...], mcp_tools: tuple[object, ...]) -> tuple[object, ...]:
+    return (
+        *(tool for tool in current if not isinstance(tool, McpCapabilityTool)),
+        *mcp_tools,
+    )
+
+
+def _replace_mcp_capability_provider(
+    current: CapabilityRuntime,
+    mcp_bundle: McpCapabilityBindingBundle | None,
+) -> CapabilityRuntime:
+    providers = []
+    inserted = False
+    for provider in current.providers:
+        if isinstance(provider, McpCapabilityProvider):
+            if mcp_bundle is not None and not inserted:
+                providers.append(McpCapabilityProvider(mcp_bundle))
+                inserted = True
+            continue
+        providers.append(provider)
+    if mcp_bundle is not None and not inserted:
+        providers.append(McpCapabilityProvider(mcp_bundle))
+    return CapabilityRuntime(providers=tuple(providers))
 
 
 class _StreamObserver:
@@ -119,6 +152,7 @@ class HostSession:
     workspace: ResolvedWorkspace
     wiring: AgentRuntimeWiring
     terminal_lease: WorkspaceTerminalLease | None = None
+    mcp_supervisor: McpServerSupervisor | None = None
     created_at: float = field(default_factory=time.monotonic)
     last_active_at: float = field(default_factory=time.monotonic)
     active_run_id: str | None = None
@@ -178,6 +212,41 @@ class HostSession:
             "processes": [process.to_payload() for process in processes],
         }
 
+    async def _sync_mcp_servers_for_turn(self) -> None:
+        """Refresh session-owned MCP descriptors and bindings at safe points.
+
+        The supervisor owns reconnect/backoff state.  Each turn/resume uses the
+        latest supervisor snapshot and then atomically rebuilds both surfaces:
+        the model-facing capability provider and the ToolRegistry execution
+        bindings.  A failed/disabled server remains visible as diagnostics.
+        """
+        supervisor = self.mcp_supervisor
+        if supervisor is None:
+            return
+        configs = load_mcp_server_configs(workspace_root=self.workspace.workspace_root)
+        manager = await supervisor.sync_servers(configs)
+        mcp_bundle = build_mcp_bundle(manager) if manager is not None else None
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        runtime_session.extra_tool_bindings = _replace_mcp_tool_bindings(
+            runtime_session.extra_tool_bindings,
+            mcp_bundle.tools if mcp_bundle is not None else (),
+        )
+        self.wiring = replace(
+            self.wiring,
+            runtime_wiring=replace(
+                self.wiring.runtime_wiring,
+                mcp_manager=manager,
+                mcp_bundle=mcp_bundle,
+            ),
+        )
+        self.wiring.agent_runtime.refresh_capability_runtime(
+            _replace_mcp_capability_provider(self.wiring.agent_runtime.capability_runtime, mcp_bundle)
+        )
+        if self._suspended_state is not None:
+            self._suspended_state.scratchpad.pop("capability_exposure", None)
+        if self._active_state is not None:
+            self._active_state.scratchpad.pop("capability_exposure", None)
+
     # -- Run entry points -----------------------------------------------------
     # run_turn / stream_turn / approval resume / plan resume all flow through one
     # internal execution handle (_run_owned / _stream_owned). The HostSession owns
@@ -197,6 +266,7 @@ class HostSession:
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
         async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
             prior_messages = await self._prepare_prior_messages_for_turn(user_input)
             prior_messages.extend(self._plan_runtime_messages())
             state = self._begin_active_state()
@@ -222,6 +292,7 @@ class HostSession:
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
         async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
             prior_messages = await self._prepare_prior_messages_for_turn(user_input)
             prior_messages.extend(self._plan_runtime_messages())
             state = self._begin_active_state()
@@ -279,6 +350,7 @@ class HostSession:
         pending = self._require_pending_approval(resolution.approval_id)
         self._raise_if_active_run()
         async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
             state = self._resume_active_state(pending)
             return await self._run_owned(
                 state,
@@ -295,6 +367,7 @@ class HostSession:
         pending = self._require_pending_approval(resolution.approval_id)
         self._raise_if_active_run()
         async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
             state = self._resume_active_state(pending)
             async for event in self._stream_owned(
                 state,
@@ -312,6 +385,7 @@ class HostSession:
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
         self._raise_if_active_run()
         async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
             state = self._resume_active_state(pending)
             self._prepare_state_for_plan(state)
             return await self._run_owned(
@@ -329,10 +403,28 @@ class HostSession:
         pending = self._require_pending_mcp_elicitation(resolution.interaction_id)
         self._raise_if_active_run()
         async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
             state = self._resume_active_state(pending)
             return await self._run_owned(
                 state,
                 lambda: self.wiring.agent_runtime.resume_after_mcp_elicitation(state, resolution),
+            )
+
+    async def resolve_mcp_input_required(
+        self,
+        resolution: McpInputRequiredInteractionResolution,
+    ) -> AgentRunResult:
+        self._raise_if_not_open("resolving MCP input-required")
+        if self.stopping_run_id is not None:
+            raise HostSessionBusyError("host session is stopping an active run")
+        pending = self._require_pending_mcp_input_required(resolution.interaction_id)
+        self._raise_if_active_run()
+        async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
+            state = self._resume_active_state(pending)
+            return await self._run_owned(
+                state,
+                lambda: self.wiring.agent_runtime.resume_after_mcp_input_required(state, resolution),
             )
 
     async def exit_plan_workflow(
@@ -402,6 +494,7 @@ class HostSession:
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
         self._raise_if_active_run()
         async with self._run_lock:
+            await self._sync_mcp_servers_for_turn()
             state = self._resume_active_state(pending)
             self._prepare_state_for_plan(state)
             async for event in self._stream_owned(
@@ -774,6 +867,8 @@ class HostSession:
                 self.pending_interaction = pending_plan_interaction_from_state(state, self.host_session_id)
             elif state.pending_interaction_kind == "mcp_elicitation":
                 self.pending_interaction = pending_mcp_elicitation_from_state(state, self.host_session_id)
+            elif state.pending_interaction_kind == "mcp_input_required":
+                self.pending_interaction = pending_mcp_input_required_from_state(state, self.host_session_id)
             else:
                 self.pending_interaction = pending_approval_from_state(state, self.host_session_id)
             self._suspended_state = state
@@ -811,6 +906,14 @@ class HostSession:
             raise ValueError("host session has no pending MCP elicitation")
         if pending.interaction_id != interaction_id:
             raise ValueError("MCP elicitation id does not match the pending interaction")
+        return pending
+
+    def _require_pending_mcp_input_required(self, interaction_id: str) -> PendingMcpInputRequired:
+        pending = self.pending_interaction
+        if not isinstance(pending, PendingMcpInputRequired):
+            raise ValueError("host session has no pending MCP input-required interaction")
+        if pending.interaction_id != interaction_id:
+            raise ValueError("MCP input-required id does not match the pending interaction")
         return pending
 
     def _require_suspended_state(self, pending: PendingInteraction) -> LoopState:

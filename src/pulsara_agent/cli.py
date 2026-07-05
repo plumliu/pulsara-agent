@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pulsara_agent import __version__
 from pulsara_agent.capability import (
@@ -41,6 +42,14 @@ from pulsara_agent.runtime import (
     PlanQuestionResolution,
     ToolApprovalDecision,
     build_durable_runtime_wiring,
+)
+from pulsara_agent.runtime.mcp import McpServerConfig, McpStdioConfig, McpStreamableHttpConfig, SdkMcpClientManager
+from pulsara_agent.runtime.mcp.store import (
+    DEFAULT_USER_MCP_CONFIG,
+    McpConfigStore,
+    WORKSPACE_MCP_CONFIG,
+    load_mcp_server_configs,
+    mcp_config_sources,
 )
 from pulsara_agent.runtime.permission import (
     PermissionMode,
@@ -100,6 +109,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_skills_common_args(skills_subcommands.add_parser("status", help="Print bundled skill status."))
     reset = _add_skills_common_args(skills_subcommands.add_parser("reset", help="Reset a bundled skill from package source."))
     reset.add_argument("name", help="Bundled skill name to reset.")
+    mcp = subcommands.add_parser("mcp", help="Manage MCP server configuration and diagnostics.")
+    mcp_subcommands = mcp.add_subparsers(dest="mcp_command")
+    _add_mcp_common_args(mcp_subcommands.add_parser("list", help="List configured MCP servers."))
+    mcp_add = _add_mcp_store_args(mcp_subcommands.add_parser("add", help="Add or replace an MCP server."))
+    mcp_add.add_argument("server_id", help="Stable MCP server id.")
+    transport = mcp_add.add_mutually_exclusive_group(required=True)
+    transport.add_argument("--url", default=None, help="Streamable HTTP MCP endpoint.")
+    transport.add_argument("--command", dest="mcp_stdio_command", default=None, help="Stdio MCP command.")
+    mcp_add.add_argument("--arg", action="append", default=[], help="Stdio command argument. May be repeated.")
+    mcp_add.add_argument("--cwd", default=None, help="Optional stdio working directory.")
+    mcp_add.add_argument("--env", action="append", default=[], help="Stdio KEY=VALUE env var. May be repeated.")
+    mcp_add.add_argument("--header", action="append", default=[], help="HTTP Header=Value. Stored redacted by inspect/list.")
+    mcp_add.add_argument("--env-header", action="append", default=[], help="HTTP Header=ENV_VAR. May be repeated.")
+    mcp_add.add_argument("--bearer-token-env-var", default=None, help="Env var containing a bearer token.")
+    mcp_add.add_argument("--follow-redirects", action="store_true", help="Allow HTTP redirects for this server.")
+    mcp_add.add_argument("--disabled", action="store_true", help="Add the server disabled.")
+    mcp_add.add_argument("--required", action="store_true", help="Treat startup failure as an error diagnostic.")
+    mcp_add.add_argument("--startup-timeout-ms", type=int, default=10_000)
+    mcp_add.add_argument("--tool-timeout-ms", type=int, default=30_000)
+    mcp_add.add_argument("--parallel-tools", action="store_true", help="Mark server tools concurrency-safe.")
+    mcp_add.add_argument("--enabled-tool", action="append", default=[], help="Allow only this original MCP tool. May be repeated.")
+    mcp_add.add_argument("--disabled-tool", action="append", default=[], help="Hide this original MCP tool. May be repeated.")
+    mcp_remove = _add_mcp_store_args(mcp_subcommands.add_parser("remove", help="Remove an MCP server."))
+    mcp_remove.add_argument("server_id")
+    mcp_enable = _add_mcp_store_args(mcp_subcommands.add_parser("enable", help="Enable an MCP server."))
+    mcp_enable.add_argument("server_id")
+    mcp_disable = _add_mcp_store_args(mcp_subcommands.add_parser("disable", help="Disable an MCP server."))
+    mcp_disable.add_argument("server_id")
+    _add_mcp_common_args(mcp_subcommands.add_parser("doctor", help="Connect to configured MCP servers and list capabilities."))
+    _add_mcp_common_args(mcp_subcommands.add_parser("reconnect", help="Reconnect configured MCP servers and print capabilities."))
     config_check = subcommands.add_parser(
         "config-check",
         help="Load Pulsara configuration from environment variables.",
@@ -221,6 +260,25 @@ def _add_inspect_common_args(parser: argparse.ArgumentParser) -> argparse.Argume
     return parser
 
 
+def _add_mcp_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--env-file", default=None, help="Load a .env file before resolving MCP env vars.")
+    parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
+    parser.add_argument("--workspace", default=None, help="Workspace path for workspace MCP config merge.")
+    parser.add_argument("--config", default=None, help="Override user MCP config path.")
+    return parser
+
+
+def _add_mcp_store_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    _add_mcp_common_args(parser)
+    parser.add_argument(
+        "--scope",
+        default="user",
+        choices=("user", "workspace"),
+        help="Config file to mutate. Defaults to user (~/.pulsara/mcp.yaml).",
+    )
+    return parser
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -298,6 +356,14 @@ def main() -> None:
             print(json.dumps(result.to_dict(), indent=2))
             return
         parser.error("skills requires a subcommand")
+
+    if args.command == "mcp":
+        try:
+            report = asyncio.run(_mcp_command(args))
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        return
 
     parser.print_help()
 
@@ -509,6 +575,26 @@ def _format_manual_compaction_result(result: dict[str, object]) -> str:
     return "context compaction skipped: no eligible compact window"
 
 
+def _format_repl_mcp_startup_notice(session) -> str | None:
+    wiring = getattr(session, "wiring", None)
+    runtime_wiring = getattr(wiring, "runtime_wiring", None)
+    manager = getattr(runtime_wiring, "mcp_manager", None)
+    if manager is None:
+        return None
+    snapshots = getattr(manager, "snapshots", ())
+    if not snapshots:
+        return None
+    parts: list[str] = []
+    for snapshot in snapshots:
+        server_id = snapshot.config.server_id
+        status = snapshot.status.value
+        detail = f"{len(snapshot.tools)} tools" if snapshot.tools else (snapshot.message or "no tools")
+        if snapshot.diagnostics:
+            detail = f"{detail}; {len(snapshot.diagnostics)} diagnostics"
+        parts.append(f"{server_id}={status} ({detail})")
+    return "MCP servers: " + "; ".join(parts)
+
+
 async def _host_repl(args) -> None:
     settings = _settings_from_host_args(args)
     permission_policy = _permission_policy_from_host_args(args, intent="run")
@@ -533,6 +619,9 @@ async def _host_repl(args) -> None:
         )
         _attach_repl_compaction_notifications(session)
         print("Pulsara REPL · :help 查看命令 · Ctrl-D detach · :close 关闭对话")
+        mcp_notice = _format_repl_mcp_startup_notice(session)
+        if mcp_notice:
+            print(mcp_notice)
         while True:
             try:
                 prompt = await repl_prompt.read_line(_repl_prompt_message(session))
@@ -975,6 +1064,241 @@ def _skill_cli_hint_snapshot(entry) -> dict[str, object]:
     if entry.cli_usage_kind != "none":
         snapshot["cli_usage_kind"] = entry.cli_usage_kind
     return snapshot
+
+
+async def _mcp_command(args) -> dict[str, object]:
+    _load_env_file_from_args(args)
+    command = args.mcp_command
+    if command is None:
+        raise ValueError("mcp requires a subcommand")
+    if command == "list":
+        workspace_root = _mcp_workspace_root(args)
+        configs = load_mcp_server_configs(
+            workspace_root=workspace_root,
+            user_config_path=_mcp_user_config_path(args),
+        )
+        return {
+            "mcp": "list",
+            "sources": [_mcp_source_to_dict(source) for source in mcp_config_sources(
+                workspace_root=workspace_root,
+                user_config_path=_mcp_user_config_path(args),
+            )],
+            "servers": [_mcp_config_to_dict(config) for config in configs],
+        }
+    if command == "add":
+        store = McpConfigStore(_mcp_mutation_config_path(args))
+        config = _mcp_config_from_add_args(args)
+        store.upsert(config)
+        return {
+            "mcp": "add",
+            "path": str(store.path.expanduser()),
+            "server": _mcp_config_to_dict(config),
+        }
+    if command in {"remove", "enable", "disable"}:
+        store = McpConfigStore(_mcp_mutation_config_path(args))
+        if command == "remove":
+            changed = store.remove(args.server_id)
+        else:
+            changed = store.set_enabled(args.server_id, command == "enable")
+        return {
+            "mcp": command,
+            "path": str(store.path.expanduser()),
+            "server_id": args.server_id,
+            "changed": changed,
+        }
+    if command in {"doctor", "reconnect"}:
+        workspace_root = _mcp_workspace_root(args)
+        configs = load_mcp_server_configs(
+            workspace_root=workspace_root,
+            user_config_path=_mcp_user_config_path(args),
+        )
+        manager = await SdkMcpClientManager.start(configs)
+        try:
+            snapshots = manager.snapshots
+            return {
+                "mcp": command,
+                "workspace_root": str(workspace_root),
+                "sources": [_mcp_source_to_dict(source) for source in mcp_config_sources(
+                    workspace_root=workspace_root,
+                    user_config_path=_mcp_user_config_path(args),
+                )],
+                "servers": [_mcp_snapshot_to_dict(snapshot) for snapshot in snapshots],
+                "ready_count": sum(1 for snapshot in snapshots if snapshot.status.value == "ready"),
+                "failed_count": sum(1 for snapshot in snapshots if snapshot.status.value in {"failed", "needs_auth", "degraded"}),
+                "cache_policy": {
+                    "sdk_cache": False,
+                    "snapshot_discovery": "refresh/no-cache",
+                    "inspectable_hit_miss": "not_applicable_until_pulsara_owned_cache",
+                },
+            }
+        finally:
+            await manager.aclose()
+    raise ValueError(f"unsupported mcp command: {command}")
+
+
+def _mcp_user_config_path(args) -> Path:
+    raw = getattr(args, "config", None)
+    return Path(raw).expanduser() if raw else DEFAULT_USER_MCP_CONFIG
+
+
+def _mcp_workspace_root(args) -> Path:
+    raw = getattr(args, "workspace", None)
+    return Path(raw or ".").expanduser().resolve()
+
+
+def _mcp_mutation_config_path(args) -> Path:
+    if args.scope == "workspace":
+        return _mcp_workspace_root(args) / WORKSPACE_MCP_CONFIG
+    return _mcp_user_config_path(args)
+
+
+def _mcp_config_from_add_args(args) -> McpServerConfig:
+    if args.mcp_stdio_command:
+        transport = McpStdioConfig(
+            command=args.mcp_stdio_command,
+            args=tuple(args.arg or ()),
+            env=_parse_key_value_pairs(args.env, option_name="--env"),
+            cwd=Path(args.cwd).expanduser() if args.cwd else None,
+        )
+    else:
+        transport = McpStreamableHttpConfig(
+            url=args.url,
+            bearer_token_env_var=args.bearer_token_env_var,
+            headers=_parse_key_value_pairs(args.header, option_name="--header"),
+            env_headers=_parse_key_value_pairs(args.env_header, option_name="--env-header"),
+            follow_redirects=bool(args.follow_redirects),
+        )
+    return McpServerConfig(
+        server_id=args.server_id,
+        transport=transport,
+        enabled=not args.disabled,
+        required=bool(args.required),
+        startup_timeout_ms=int(args.startup_timeout_ms),
+        tool_timeout_ms=int(args.tool_timeout_ms),
+        supports_parallel_tool_calls=bool(args.parallel_tools),
+        enabled_tools=tuple(args.enabled_tool) if args.enabled_tool else None,
+        disabled_tools=tuple(args.disabled_tool or ()),
+    )
+
+
+def _parse_key_value_pairs(raw_items: list[str], *, option_name: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in raw_items or ():
+        if "=" not in raw:
+            raise ValueError(f"{option_name} expects KEY=VALUE, got {raw!r}")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"{option_name} key cannot be empty")
+        values[key] = value
+    return values
+
+
+def _mcp_source_to_dict(source) -> dict[str, object]:
+    return {
+        "scope": source.scope,
+        "path": str(source.path.expanduser()),
+        "exists": source.path.expanduser().exists(),
+    }
+
+
+def _mcp_config_to_dict(config: McpServerConfig) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "server_id": config.server_id,
+        "enabled": config.enabled,
+        "required": config.required,
+        "transport_kind": config.transport_kind.value,
+        "startup_timeout_ms": config.startup_timeout_ms,
+        "tool_timeout_ms": config.tool_timeout_ms,
+        "supports_parallel_tool_calls": config.supports_parallel_tool_calls,
+        "enabled_tools": list(config.enabled_tools or ()),
+        "disabled_tools": list(config.disabled_tools),
+    }
+    transport = config.transport
+    if isinstance(transport, McpStdioConfig):
+        payload["transport"] = {
+            "command": transport.command,
+            "args": list(transport.args),
+            "cwd": str(transport.cwd) if transport.cwd is not None else None,
+            "env_keys": sorted(transport.env),
+        }
+    else:
+        payload["transport"] = {
+            "url": _redact_url(transport.url),
+            "follow_redirects": transport.follow_redirects,
+            "bearer_token_env_var": transport.bearer_token_env_var,
+            "header_keys": sorted(transport.headers),
+            "env_headers": dict(transport.env_headers),
+        }
+    return payload
+
+
+def _mcp_snapshot_to_dict(snapshot) -> dict[str, object]:
+    return {
+        "server": _mcp_config_to_dict(snapshot.config),
+        "status": snapshot.status.value,
+        "message": snapshot.message,
+        "generation": snapshot.generation,
+        "protocol_version": snapshot.protocol_version,
+        "server_info": dict(snapshot.server_info),
+        "instructions": snapshot.instructions,
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+                "annotations": tool.annotations.to_dict(),
+            }
+            for tool in snapshot.tools
+        ],
+        "resources": [
+            {
+                "uri": resource.uri,
+                "name": resource.name,
+                "description": resource.description,
+                "mime_type": resource.mime_type,
+                "size": resource.size,
+            }
+            for resource in snapshot.resources
+        ],
+        "resource_templates": [
+            {
+                "uri_template": template.uri_template,
+                "name": template.name,
+                "description": template.description,
+                "mime_type": template.mime_type,
+            }
+            for template in snapshot.resource_templates
+        ],
+        "prompts": [
+            {
+                "name": prompt.name,
+                "description": prompt.description,
+                "arguments": list(prompt.arguments),
+            }
+            for prompt in snapshot.prompts
+        ],
+        "diagnostics": [dict(item) for item in snapshot.diagnostics],
+    }
+
+
+def _redact_url(url: str) -> str:
+    parsed = urlsplit(url)
+    host = parsed.hostname or ""
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    if parsed.username or parsed.password:
+        host = f"<redacted-userinfo>@{host}"
+    suffix = "<redacted-query-or-fragment>" if parsed.query or parsed.fragment else ""
+    return urlunsplit(
+        SplitResult(
+            scheme=parsed.scheme,
+            netloc=host,
+            path=parsed.path,
+            query="",
+            fragment="",
+        )
+    ) + suffix
 
 
 def _terminal_path_supplier(runtime_session):

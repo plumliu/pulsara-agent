@@ -2270,6 +2270,8 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
             "Highest-priority recovery rule: if the conversation context contains a Pulsara note saying "
             "the previous turn was stopped by the user and the user asks to continue, do not call tools, "
             "do not request approval, and answer exactly PULSARA_PENDING_STOP_NOTE_OK. "
+            "Only the latest user message may trigger the terminal validation branch; historical user messages "
+            "in prior context never count as trigger messages. "
             "Only when the user's message is exactly PULSARA_PENDING_STOP_FIRST_REQUEST, call terminal exactly once with command exactly "
             "'rm -rf ./PULSARA_PENDING_STOP_SENTINEL_DO_NOT_CREATE' and do not call any other tools. "
         ),
@@ -2286,6 +2288,7 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
         ]
         stop_result = await session.stop_current_turn()
         pending_after_stop = session.get_pending_approval()
+        session.set_permission_mode(PermissionMode.READ_ONLY)
         prior_messages = rebuild_prior_messages(session.wiring.runtime_wiring.event_log)
         interrupted_note_present = any(
             INTERRUPTED_NOTE_TEXT in getattr(block, "text", "")
@@ -2294,7 +2297,7 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
         )
         second = await session.run_turn(
             "Do not call any tools. The prior context includes the Pulsara stop note. "
-            "This is a recovery-note validation turn, not PULSARA_PENDING_STOP_FIRST_REQUEST. "
+            "This is a recovery-note validation turn with latest-user sentinel PULSARA_PENDING_STOP_RECOVERY_CHECK. "
             "Answer exactly PULSARA_PENDING_STOP_NOTE_OK."
         )
         events = session.replay_events()
@@ -2314,6 +2317,9 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
             "second_status": second.status.value,
             "second_final_text": second.final_text.strip(),
             "second_tool_names": second_tool_names,
+            "permission_mode_after_stop": session.current_permission_mode.value
+            if session.current_permission_mode is not None
+            else None,
             "tool_names": tool_names,
             "pending_after_stop": pending_after_stop,
             "aborted_run_end_count": aborted_run_end_count,

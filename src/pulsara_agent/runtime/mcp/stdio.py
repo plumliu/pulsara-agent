@@ -11,7 +11,14 @@ from typing import Any
 
 from pulsara_agent.runtime.mcp.client import _format_call_result, _tool_from_payload
 from pulsara_agent.runtime.mcp.manager import McpClientManager
-from pulsara_agent.runtime.mcp.types import McpServerConfig, McpServerSnapshot, McpServerStatus, McpStdioConfig
+from pulsara_agent.runtime.mcp.types import (
+    McpInputRequiredResolution,
+    McpOriginalRequest,
+    McpServerConfig,
+    McpServerSnapshot,
+    McpServerStatus,
+    McpStdioConfig,
+)
 
 
 @dataclass(slots=True)
@@ -119,13 +126,25 @@ class StdioMcpClientManager(McpClientManager):
         result = payload.get("result")
         return result if isinstance(result, dict) else {"value": result}
 
-    async def respond_elicitation(self, server_id: str, request_id: str, answer: dict[str, Any]) -> Any:
-        config = self._processes[server_id].config
-        return await self._json_rpc(
+    async def resume_suspended_request(
+        self,
+        *,
+        server_id: str,
+        original_request: McpOriginalRequest,
+        request_state: str | None,
+        resolution: McpInputRequiredResolution,
+        timeout_ms: int,
+    ) -> Any:
+        del request_state
+        if resolution.cancelled:
+            return {"cancelled": True, "interaction_id": resolution.interaction_id}
+        if original_request.tool_name is None:
+            raise RuntimeError("legacy stdio MCP manager only resumes tool calls")
+        return await self.call_tool(
             server_id,
-            "elicitation/respond",
-            {"requestId": request_id, "answer": answer},
-            timeout_ms=config.tool_timeout_ms,
+            original_request.tool_name,
+            original_request.arguments or {},
+            timeout_ms=timeout_ms,
         )
 
     def cancel_active(self) -> None:
