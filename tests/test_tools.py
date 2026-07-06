@@ -1227,6 +1227,53 @@ def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
     assert "not a text artifact" in text_payload["error"]
 
 
+def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(tmp_path) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    artifact_id = "artifact:tool-result:run-tools:call-large:output:0"
+    content = "ARTIFACT_HEAD\n" + ("x" * 12_000) + "\nARTIFACT_TAIL"
+    write = runtime_session.archive.put_text(
+        artifact_id,
+        content,
+        session_id=runtime_session.runtime_session_id,
+        run_id="run:source",
+        media_type="text/plain; charset=utf-8",
+    )
+    runtime_session.tool_result_artifacts.put(
+        ToolResultArtifactRecord(
+            id="tool-result-artifact:run-tools:call-large:output:0",
+            session_id=runtime_session.runtime_session_id,
+            run_id="run:source",
+            turn_id="turn:source",
+            reply_id="reply:source",
+            tool_call_id="call:large",
+            tool_name="terminal",
+            artifact_id=write.id,
+            role="output",
+            ordinal=0,
+            media_type="text/plain; charset=utf-8",
+            size_bytes=write.size_bytes,
+        )
+    )
+    executor = runtime_session.create_tool_executor(record_event=runtime_session.make_thread_recorder())
+
+    result = executor.execute(
+        ToolCall(
+            id="call:artifact-read",
+            name="artifact_read",
+            arguments={"artifact_id": artifact_id, "max_chars": 20_000},
+        ),
+        event_context=CTX,
+    )
+    msg = runtime_session.event_log.replay("reply:tools")
+    block = msg.content[0]
+
+    assert result.status is ToolResultState.SUCCESS
+    assert len(result.output) > 8_000
+    assert isinstance(block, ToolResultBlock)
+    assert [artifact.artifact_id for artifact in block.artifacts] == [artifact_id]
+    assert len(runtime_session.archive.blobs) == 1
+
+
 def test_tool_result_artifact_options_reject_unrecoverable_threshold_band() -> None:
     with pytest.raises(ValueError, match="archive_threshold_bytes"):
         ToolResultArtifactOptions(archive_threshold_bytes=20_000, tool_result_message_context_chars=8_000)

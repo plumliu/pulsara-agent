@@ -307,6 +307,43 @@ def test_context_compiled_event_round_trips_through_agent_event_serialization() 
     assert load_agent_event(dump_agent_event(event)) == event
 
 
+def test_context_compiled_pressure_event_round_trips_through_agent_event_serialization() -> None:
+    event = ContextCompiledEvent(
+        **_ctx("contract:context-pressure").event_fields(),
+        status="pressure",
+        context_id="context:pressure",
+        model_role="pro",
+        model_call_index=2,
+        compile_attempt_index=1,
+        context_retry_index=0,
+        estimated_tokens=0,
+        context_window_tokens=256_000,
+        reserved_output_tokens=8_000,
+        tools_estimated_tokens=0,
+        diagnostics=[
+            {
+                "severity": "error",
+                "code": "tool_result_total_budget_unsatisfied",
+                "message": "context pressure",
+            }
+        ],
+        tool_result_render_decisions=[
+            {
+                "tool_call_id": "call:terminal",
+                "unit_fingerprint": "sha256:abc",
+                "body_policy": "metadata_only",
+            }
+        ],
+        tool_result_budget_report={
+            "caps": {"tool_result_total_context_chars": 36_000},
+            "used": {"total": 37_000},
+            "diagnostics": [{"code": "tool_result_total_budget_unsatisfied"}],
+        },
+    )
+
+    assert load_agent_event(dump_agent_event(event)) == event
+
+
 @pytest.mark.parametrize(
     "event",
     [

@@ -35,6 +35,7 @@ from pulsara_agent.capability import (
     LocalSkillCapabilityProvider,
     LocalSkillProvider,
 )
+from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.capability.descriptor import CapabilityDescriptor, CapabilityProviderKind
 from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
 from pulsara_agent.capability.provider import CapabilityProviderOutput
@@ -85,6 +86,7 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
+from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactRecord
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
@@ -148,6 +150,17 @@ class RecordingContextCompactor:
         return MidTurnCompactionResult(compacted=False, skipped_reason="test")
 
 
+class RewritingContextCompactor:
+    def __init__(self, rewritten_messages: tuple[Msg, ...]) -> None:
+        self.rewritten_messages = rewritten_messages
+        self.calls = 0
+
+    async def maybe_compact_before_followup(self, *, state: LoopState, model_visible_messages: list[Msg]):
+        self.calls += 1
+        state.scratchpad["mid_turn_compaction"] = {"compaction_id": f"fake:{self.calls}"}
+        return MidTurnCompactionResult(compacted=True, rewritten_messages=self.rewritten_messages)
+
+
 def make_llm_runtime(transport: ScriptedTransport) -> LLMRuntime:
     config = LLMConfig(
         api_key="sk-test",
@@ -159,6 +172,10 @@ def make_llm_runtime(transport: ScriptedTransport) -> LLMRuntime:
     registry = LLMTransportRegistry()
     registry.register(transport)
     return LLMRuntime(config=config, registry=registry)
+
+
+async def _collect_async(stream) -> list[AgentEvent]:
+    return [event async for event in stream]
 
 
 def _trusted_terminal_policy() -> EffectivePermissionPolicy:
@@ -220,6 +237,95 @@ def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(tm
     assert result.error_message is not None
     assert "Current user input exceeds" in result.error_message
     assert transport.contexts == []
+    compiled_events = [
+        event
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, ContextCompiledEvent)
+    ]
+    assert [event.status for event in compiled_events] == ["pressure", "failed"]
+    assert compiled_events[0].model_call_index == compiled_events[1].model_call_index == 1
+    assert compiled_events[0].compile_attempt_index == compiled_events[1].compile_attempt_index == 1
+    assert compiled_events[0].context_retry_index == compiled_events[1].context_retry_index == 0
+
+
+def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "after retry"}])
+    runtime_session = in_memory_runtime_session(tmp_path)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+        budget=LoopBudget(
+            tool_result_context_chars=40,
+            current_tail_tool_result_context_chars=0,
+            latest_tool_result_reserved_chars=0,
+        ),
+    )
+    state = LoopState(session_id=runtime_session.runtime_session_id)
+    user = UserMsg(
+        name="user",
+        content="continue after pressure",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:terminal", name="terminal", input='{"cmd":"x"}')],
+    )
+    pressure_result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:terminal",
+                name="terminal",
+                output=[
+                    TextBlock(
+                        text=json.dumps(
+                            {
+                                "status": "success",
+                                "output": "body omitted",
+                                "exit_code": 0,
+                                "cwd": "/workspace",
+                                "process_id": "proc:1",
+                                "terminal_session_id": "default",
+                                "backend_type": "local",
+                            }
+                        )
+                    )
+                ],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, pressure_result])
+    compactor = RewritingContextCompactor((user,))
+    agent.context_compactor = compactor
+    exposure = CapabilityExposurePlan(
+        registry_generation=0,
+        direct_tool_specs=(),
+        direct_names=frozenset(),
+        deferred_names=frozenset(),
+        hidden_names=frozenset(),
+        callable_names=frozenset(),
+        descriptors_by_name={},
+        catalog_entries=(),
+        active_injections=(),
+        catalog_prompt=None,
+        active_skill_prompt=None,
+        diagnostics=(),
+    )
+
+    events = asyncio.run(_collect_async(agent._stream_model_loop(state, exposure)))
+
+    compiled_events = [event for event in events if isinstance(event, ContextCompiledEvent)]
+    assert [event.status for event in compiled_events] == ["pressure", "compiled"]
+    assert compiled_events[0].model_call_index == compiled_events[1].model_call_index == 1
+    assert compiled_events[0].compile_attempt_index == 1
+    assert compiled_events[1].compile_attempt_index == 2
+    assert compiled_events[1].context_retry_index == 1
+    assert compactor.calls == 1
+    assert len(transport.contexts) == 1
+    assert transport.contexts[0].model_call_index == 1
 
 
 def test_msg_to_llm_messages_compresses_context_blocks() -> None:
@@ -292,13 +398,20 @@ def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> Non
         )
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=30))
+    llm_messages = msg_to_llm_messages(
+        messages,
+        LoopBudget(
+            tool_result_context_chars=1_000,
+            tool_result_body_context_chars=0,
+            legacy_tool_result_context_chars=0,
+        ),
+    )
     content = "\n".join(llm_messages[0].content)
     body = content.split("\n", 1)[1]
     envelope = json.loads(body)
 
     assert envelope["output_truncated"] is True
-    assert "TOOL RESULT BODY OMITTED" in envelope["output_preview"]
+    assert "omitted" in envelope["output_preview"].lower()
     assert envelope["artifacts"][0]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
     assert envelope["artifacts"][0]["read_more"]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
 
@@ -331,7 +444,7 @@ def test_msg_to_llm_messages_uses_aggregate_tool_result_budget() -> None:
         ),
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=30))
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=90))
     first = "\n".join(llm_messages[0].content)
     second = "\n".join(llm_messages[1].content)
 
@@ -419,7 +532,10 @@ def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_body_is_
         )
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=0))
+    llm_messages = msg_to_llm_messages(
+        messages,
+        LoopBudget(tool_result_context_chars=700, tool_result_body_context_chars=0),
+    )
     rendered = "\n".join(llm_messages[0].content)
     envelope = json.loads(rendered.split("\n", 1)[1])
 
@@ -459,7 +575,10 @@ def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_json_is_
         )
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=120))
+    llm_messages = msg_to_llm_messages(
+        messages,
+        LoopBudget(tool_result_context_chars=700, tool_result_body_context_chars=120),
+    )
     rendered = "\n".join(llm_messages[0].content)
     envelope = json.loads(rendered.split("\n", 1)[1])
 
@@ -577,7 +696,10 @@ def test_msg_to_llm_messages_preserves_terminal_process_list_summary_when_body_i
         )
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=0))
+    llm_messages = msg_to_llm_messages(
+        messages,
+        LoopBudget(tool_result_context_chars=1_000, tool_result_body_context_chars=0),
+    )
     rendered = "\n".join(llm_messages[0].content)
     envelope = json.loads(rendered.split("\n", 1)[1])
 
@@ -2084,6 +2206,67 @@ def test_tool_result_persistence_hook_rejects_large_external_result_without_arti
 
     assert graph.find_by_type(rt.TOOL_RESULT) == []
     assert graph.find_by_type(rt.ARTIFACT) == []
+
+
+def test_tool_result_persistence_hook_accepts_large_artifact_read_with_source_ref(tmp_path) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    artifact_id = "artifact:tool-result:run-source:call-large:output:0"
+    write = runtime_session.archive.put_text(
+        artifact_id,
+        "SOURCE_HEAD\n" + ("x" * 12_000) + "\nSOURCE_TAIL",
+        session_id=runtime_session.runtime_session_id,
+        run_id="run:source",
+        media_type="text/plain; charset=utf-8",
+    )
+    runtime_session.tool_result_artifacts.put(
+        ToolResultArtifactRecord(
+            id="tool-result-artifact:run-source:call-large:output:0",
+            session_id=runtime_session.runtime_session_id,
+            run_id="run:source",
+            turn_id="turn:source",
+            reply_id="reply:source",
+            tool_call_id="call:large",
+            tool_name="terminal",
+            artifact_id=write.id,
+            role="output",
+            ordinal=0,
+            media_type="text/plain; charset=utf-8",
+            size_bytes=write.size_bytes,
+        )
+    )
+    context = EventContext(run_id="run:read", turn_id="turn:read", reply_id="reply:read")
+    executor = runtime_session.create_tool_executor(record_event=runtime_session.make_thread_recorder())
+    result = executor.execute(
+        ToolCall(
+            id="call:artifact-read",
+            name="artifact_read",
+            arguments={"artifact_id": artifact_id, "max_chars": 20_000},
+        ),
+        event_context=context,
+    )
+    block = runtime_session.event_log.replay("reply:read").content[0]
+    assert result.status is ToolResultState.SUCCESS
+    assert isinstance(block, ToolResultBlock)
+    assert block.artifacts and block.artifacts[0].artifact_id == artifact_id
+
+    graph = InMemoryGraphStore()
+    hook = ExecutionEvidencePersistenceHook(
+        ExecutionEvidenceLedger(
+            graph=graph,
+            archive=runtime_session.archive,
+            gate=MemoryWriteGate(),
+        )
+    )
+    state = LoopState(session_id=runtime_session.runtime_session_id, turn_id="turn:read")
+    state.current_scope = "ctx:workspace/test_project"
+    state.pending_tool_calls = [
+        ToolCallBlock(id="call:artifact-read", name="artifact_read", input=json.dumps({"artifact_id": artifact_id}))
+    ]
+
+    asyncio.run(hook.after_tool_results(state, [block]))
+
+    assert graph.find_by_type(rt.TOOL_RESULT)
+    assert graph.find_by_type(rt.ARTIFACT)
 
 
 def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> None:

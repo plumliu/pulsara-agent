@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from cachetools import LRUCache
+
 from pulsara_agent.llm.input import LLMMessage, ToolSpec
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.request import LLMContext
@@ -18,6 +20,9 @@ from pulsara_agent.runtime.context_engine import (
 )
 from pulsara_agent.runtime.context_engine.compiler import build_recovery_message
 from pulsara_agent.runtime.context_engine.tool_results import (
+    ToolResultRenderDecisionCache,
+    commit_tool_result_render_decision_cache,
+    make_tool_result_render_decision_cache,
     raise_if_tool_result_budget_unsatisfied,
     render_segmented_llm_messages,
 )
@@ -78,12 +83,25 @@ def build_compiled_context(
     runtime_session_id: str | None = None,
     component_prompts: tuple[tuple[str, str], ...] = (),
     lifecycle_coordinator: ContextLifecycleCoordinator | None = None,
+    tool_result_render_decision_cache: ToolResultRenderDecisionCache | None = None,
 ) -> CompiledContext:
     projection = _projection_component(state.memory_projection)
     prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     actual_context_id = context_id or f"context:{uuid4().hex}"
     anchor = current_user_anchor or _current_user_anchor_for_state(state)
-    segmented_messages = render_segmented_llm_messages(state.messages, budget, anchor)
+    decision_cache = tool_result_render_decision_cache
+    if decision_cache is None:
+        scratchpad_cache = state.scratchpad.get("tool_result_render_decision_cache")
+        if not isinstance(scratchpad_cache, LRUCache):
+            scratchpad_cache = make_tool_result_render_decision_cache()
+            state.scratchpad["tool_result_render_decision_cache"] = scratchpad_cache
+        decision_cache = scratchpad_cache
+    segmented_messages = render_segmented_llm_messages(
+        state.messages,
+        budget,
+        anchor,
+        decision_cache=decision_cache,
+    )
     raise_if_tool_result_budget_unsatisfied(
         context_id=actual_context_id,
         model_call_index=model_call_index,
@@ -107,7 +125,7 @@ def build_compiled_context(
         exposure=exposure,
         budget=budget,
     )
-    return compile_context(
+    compiled = compile_context(
         request,
         inputs=ContextCompileInputs(
             system_prompt=prompt,
@@ -122,6 +140,14 @@ def build_compiled_context(
         ),
         lifecycle_coordinator=lifecycle_coordinator,
     )
+    commit_stats = commit_tool_result_render_decision_cache(
+        decision_cache,
+        segmented_messages.tool_result_render_cache_candidates,
+    )
+    cache_report = compiled.tool_result_budget_report.get("render_decision_cache")
+    if isinstance(cache_report, dict):
+        cache_report["commit"] = commit_stats
+    return compiled
 
 
 def msg_to_llm_messages(messages: list[Msg], budget: LoopBudget) -> tuple[LLMMessage, ...]:

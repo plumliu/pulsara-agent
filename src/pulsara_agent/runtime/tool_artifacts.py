@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from pulsara_agent.capability.descriptor import CapabilityArtifactMode, CapabilityDescriptor
 from pulsara_agent.event import EventContext
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
-from pulsara_agent.message import ToolResultArtifactRef, ToolResultPreviewMetadata
+from pulsara_agent.message import ToolResultArtifactRef, ToolResultPreviewMetadata, ToolResultState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
 
 
@@ -253,12 +253,13 @@ class ToolResultArtifactService:
         descriptor: CapabilityDescriptor | None = None,
     ) -> tuple[ToolExecutionResult, tuple[ToolResultArtifactRef, ...]]:
         artifact_mode = descriptor.artifact_mode if descriptor is not None else CapabilityArtifactMode.DEFAULT
+        if result.tool_name == "artifact_read":
+            return result, self._artifact_read_source_refs(result, tool_call)
+
         # Compatibility for direct service tests/callers that have not yet
         # threaded a descriptor. The normal runtime path supplies the
         # descriptor and expresses this as artifact_mode=NEVER.
-        if artifact_mode is CapabilityArtifactMode.NEVER or (
-            descriptor is None and result.tool_name == "artifact_read"
-        ):
+        if artifact_mode is CapabilityArtifactMode.NEVER:
             return result, ()
 
         options = _options_for_tool_call(self.options, tool_call)
@@ -324,6 +325,31 @@ class ToolResultArtifactService:
                 artifact_candidates=result.artifact_candidates,
             )
         return processed, tuple(refs)
+
+    def _artifact_read_source_refs(
+        self,
+        result: ToolExecutionResult,
+        tool_call: ToolCall,
+    ) -> tuple[ToolResultArtifactRef, ...]:
+        """Attach the source artifact ref for artifact_read without re-archiving.
+
+        artifact_read is intentionally artifact_mode=NEVER: reading an artifact
+        should not recursively create another artifact.  But the returned text
+        can legitimately be larger than the ledger's inline-output threshold.
+        Carrying the original source artifact ref through ToolResultEndEvent
+        preserves the evidence anchor and lets persistence use the block-aware
+        path instead of treating the read text as an orphaned large output.
+        """
+
+        if result.status is not ToolResultState.SUCCESS:
+            return ()
+        artifact_id = str(tool_call.arguments.get("artifact_id") or "")
+        if not artifact_id:
+            return ()
+        record = self.index.get_for_session(artifact_id, session_id=self.runtime_session_id)
+        if record is None:
+            return ()
+        return (_artifact_ref_from_record(record),)
 
     def _archive_candidate(
         self,
@@ -402,6 +428,27 @@ def _candidate_size_bytes(candidate: ToolResultArtifactCandidate) -> int:
         return len(candidate.text.encode("utf-8"))
     assert candidate.data is not None
     return len(candidate.data)
+
+
+def _artifact_ref_from_record(record: ToolResultArtifactRecord) -> ToolResultArtifactRef:
+    preview: ToolResultPreviewMetadata | None = None
+    raw_preview = record.metadata.get("preview")
+    if isinstance(raw_preview, ToolResultPreviewMetadata):
+        preview = raw_preview
+    elif isinstance(raw_preview, dict):
+        try:
+            preview = ToolResultPreviewMetadata.model_validate(raw_preview)
+        except Exception:
+            preview = None
+    return ToolResultArtifactRef(
+        artifact_id=record.artifact_id,
+        role=record.role,
+        media_type=record.media_type,
+        size_bytes=record.size_bytes,
+        stored_complete=record.stored_complete,
+        loss_reason=record.loss_reason,
+        preview=preview,
+    )
 
 
 def _options_for_tool_call(options: ToolResultArtifactOptions, tool_call: ToolCall) -> ToolResultArtifactOptions:

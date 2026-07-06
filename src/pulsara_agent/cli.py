@@ -313,7 +313,7 @@ def main() -> None:
             ):
                 print(json.dumps(result, indent=2))
             else:
-                print(result.final_text)
+                _print_agent_run_result(result)
             return
         if args.host_command == "repl":
             try:
@@ -408,6 +408,32 @@ async def _host_run(args) -> object:
         finally:
             if close_error is not None:
                 raise close_error
+
+
+def _print_agent_run_result(result) -> None:
+    final_text = getattr(result, "final_text", "")
+    if final_text:
+        print(final_text)
+        return
+
+    status = getattr(result, "status", None)
+    status_value = getattr(status, "value", status)
+    if status_value == "failed":
+        print(_format_agent_run_failure(result), file=sys.stderr)
+
+
+def _format_agent_run_failure(result) -> str:
+    state = getattr(result, "state", None)
+    run_id = getattr(state, "run_id", None)
+    stop_reason = getattr(result, "stop_reason", None)
+    error_message = getattr(result, "error_message", None) or "unknown error"
+    lines = ["Agent run failed before producing a final reply."]
+    if run_id:
+        lines.append(f"run_id={run_id}")
+    if stop_reason:
+        lines.append(f"stop_reason={stop_reason}")
+    lines.append(f"error={error_message}")
+    return "\n".join(lines)
 
 
 def _inspect(args) -> dict[str, object]:
@@ -518,8 +544,7 @@ async def _answer_plan_question(session, pending: PendingPlanInteraction, answer
             selected_option=selected_option,
         )
     )
-    if result.final_text:
-        print(result.final_text)
+    _print_agent_run_result(result)
     _print_pending_plan_interaction(session.get_pending_interaction())
 
 
@@ -535,8 +560,7 @@ async def _approve_pending_plan(session, pending: PendingPlanInteraction) -> Non
     result = await session.resolve_plan_interaction(
         PlanExitResolution(interaction_id=pending.interaction_id, decision="approve")
     )
-    if result.final_text:
-        print(result.final_text)
+    _print_agent_run_result(result)
 
 
 def _attach_repl_compaction_notifications(session) -> None:
@@ -803,8 +827,7 @@ async def _host_repl(args) -> None:
                         user_feedback=feedback,
                     )
                 )
-                if result.final_text:
-                    print(result.final_text)
+                _print_agent_run_result(result)
                 _print_pending_plan_interaction(session.get_pending_interaction())
                 continue
             if command == ":cancel-plan":
@@ -840,8 +863,7 @@ async def _host_repl(args) -> None:
                     ),
                 )
                 result = await session.resolve_approval(resolution)
-                if result.final_text:
-                    print(result.final_text)
+                _print_agent_run_result(result)
                 pending = session.get_pending_approval()
                 if pending is not None:
                     print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
@@ -870,8 +892,7 @@ async def _host_repl(args) -> None:
                         )
                     continue
             result = await session.run_turn(prompt, active_skill_names=_active_skill_names_from_args(args))
-            if result.final_text:
-                print(result.final_text)
+            _print_agent_run_result(result)
             pending = session.get_pending_approval()
             if pending is not None:
                 print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
