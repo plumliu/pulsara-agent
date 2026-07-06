@@ -30,6 +30,23 @@ ContextLifecycleStatus = Literal["freshly_collected", "reused", "not_cacheable"]
 class ContextBudgetExceeded(ValueError):
     """Raised when a must-keep context section cannot fit the model input budget."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        context_id: str | None = None,
+        model_call_index: int | None = None,
+        diagnostics: tuple[ContextDiagnostic, ...] = (),
+        tool_result_render_decisions: tuple[dict[str, Any], ...] = (),
+        tool_result_budget_report: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.context_id = context_id
+        self.model_call_index = model_call_index
+        self.diagnostics = diagnostics
+        self.tool_result_render_decisions = tool_result_render_decisions
+        self.tool_result_budget_report = tool_result_budget_report or {}
+
 
 @dataclass(frozen=True, slots=True)
 class ContextDiagnostic:
@@ -223,6 +240,8 @@ class CompiledContext:
     lifecycle_decisions: tuple[ContextLifecycleDecisionDiagnostic, ...]
     estimated_tokens: int
     budget: ContextBudgetReport
+    tool_result_render_decisions: tuple[dict[str, Any], ...] = ()
+    tool_result_budget_report: dict[str, Any] = field(default_factory=dict)
 
     def to_event_value(self) -> dict[str, Any]:
         return {
@@ -236,4 +255,8 @@ class CompiledContext:
             "lifecycle_decisions": [
                 decision.to_event_value() for decision in self.lifecycle_decisions
             ],
+            "tool_result_render_decisions": [
+                dict(decision) for decision in self.tool_result_render_decisions
+            ],
+            "tool_result_budget_report": dict(self.tool_result_budget_report),
         }

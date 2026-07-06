@@ -762,6 +762,30 @@ class AgentRuntime:
                 state.error_message = str(exc)
                 state.transition(LoopTransition.FAIL)
                 yield await self.runtime_session.emit(
+                    ContextCompiledEvent(
+                        **self._event_context(state).event_fields(),
+                        status="failed",
+                        context_id=exc.context_id or f"context:failed:{uuid4().hex}",
+                        model_role=self.model_role.value,
+                        model_call_index=exc.model_call_index or model_call_index,
+                        estimated_tokens=0,
+                        context_window_tokens=256_000,
+                        reserved_output_tokens=8_000,
+                        tools_estimated_tokens=0,
+                        sections=[],
+                        tool_specs=[],
+                        diagnostics=[
+                            diagnostic.to_event_value() for diagnostic in exc.diagnostics
+                        ],
+                        lifecycle_decisions=[],
+                        tool_result_render_decisions=[
+                            dict(decision) for decision in exc.tool_result_render_decisions
+                        ],
+                        tool_result_budget_report=dict(exc.tool_result_budget_report),
+                    ),
+                    state=state,
+                )
+                yield await self.runtime_session.emit(
                     RunErrorEvent(
                         **self._event_context(state).event_fields(),
                         message=str(exc),
@@ -789,6 +813,11 @@ class AgentRuntime:
                         decision.to_event_value()
                         for decision in compiled_context.lifecycle_decisions
                     ],
+                    tool_result_render_decisions=[
+                        dict(decision)
+                        for decision in compiled_context.tool_result_render_decisions
+                    ],
+                    tool_result_budget_report=dict(compiled_context.tool_result_budget_report),
                 ),
                 state=state,
             )

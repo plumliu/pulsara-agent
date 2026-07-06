@@ -473,6 +473,7 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
     return {
         "sequence": event.sequence,
         "context_id": event.context_id,
+        "status": event.status,
         "run_id": event.run_id,
         "turn_id": event.turn_id,
         "reply_id": event.reply_id,
@@ -491,6 +492,10 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "lifecycle_decisions": [
             _json_safe(decision) for decision in event.lifecycle_decisions
         ],
+        "tool_result_render_decisions": [
+            _json_safe(decision) for decision in event.tool_result_render_decisions
+        ],
+        "tool_result_budget_report": _json_safe(event.tool_result_budget_report),
     }
 
 

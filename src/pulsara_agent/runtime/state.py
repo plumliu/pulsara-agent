@@ -58,6 +58,17 @@ class LoopBudget:
     projection_token_budget: int = 2_000
     recall_hard_timeout_ms: int = 1_500
     tool_result_context_chars: int = 36_000
+    tool_result_body_context_chars: int | None = None
+    tool_result_envelope_context_chars: int = 16_384
+    prior_tool_result_context_chars: int | None = None
+    current_tail_tool_result_context_chars: int | None = None
+    legacy_tool_result_context_chars: int | None = None
+    tool_result_per_tool_cap_chars: int | None = None
+    tool_result_per_message_cap_chars: int | None = None
+    tool_result_per_envelope_cap_chars: int = 1_200
+    latest_tool_result_reserved_chars: int = 2_048
+    max_tool_results_per_context: int = 256
+    minimum_essential_envelope_chars: int = 256
 
 
 @dataclass(slots=True)
