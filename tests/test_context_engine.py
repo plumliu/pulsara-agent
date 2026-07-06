@@ -1,6 +1,17 @@
+import json
+
 from pulsara_agent.llm.input import MessageRole, ToolSpec
 from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.message import AssistantMsg, TextBlock, ToolCallBlock, ToolResultBlock, ToolResultState, UserMsg
+from pulsara_agent.message import (
+    AssistantMsg,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultArtifactRef,
+    ToolResultBlock,
+    ToolResultPreviewMetadata,
+    ToolResultState,
+    UserMsg,
+)
 from pulsara_agent.runtime.context import build_compiled_context
 import pytest
 
@@ -10,7 +21,7 @@ from pulsara_agent.runtime.context_engine import (
     ContextLifecycleCoordinator,
     ContextSection,
 )
-from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.state import LoopBudget, LoopState
 
 
 def test_context_compiler_reports_current_user_and_current_run_tail() -> None:
@@ -558,6 +569,452 @@ def test_context_current_run_tail_estimate_includes_lowered_tool_result_body() -
         for text in message.content
     )
     assert tail.estimated_tokens >= max(1, (len(rendered_tail) + 3) // 4)
+
+
+def test_tool_result_budget_does_not_let_huge_prior_starve_fresh_tail_output() -> None:
+    state = LoopState(session_id="runtime:test")
+    prior = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:old",
+                name="terminal",
+                output=[TextBlock(text="OLD_OUTPUT " + ("x" * 36_000))],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    user = UserMsg(
+        name="user",
+        content="please run the script",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:fresh", name="terminal", input='{"cmd":"uv run python main.py"}')],
+    )
+    fresh = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:fresh",
+                name="terminal",
+                output=[TextBlock(text="FRESH_RESULT: 206 chars visible")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([prior, user, assistant, fresh])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=36_000),
+        context_id="context:fresh-tool-result",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    assert "FRESH_RESULT: 206 chars visible" in rendered
+    fresh_decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:fresh"
+    )
+    assert fresh_decision["segment"] == "current_run_tail"
+    assert fresh_decision["latest_reserved_candidate"] is True
+    assert fresh_decision["latest_reserved_applied"] is True
+    assert fresh_decision["latest_reserved_reason"] == "short_result_visible"
+    assert compiled.tool_result_budget_report["caps"]["prior_tool_result_context_chars"] < 36_000
+
+
+def test_truncated_artifact_preview_is_not_treated_as_latest_short_result() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run noisy command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:huge", name="terminal", input='{"cmd":"yes"}')],
+    )
+    huge = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:huge",
+                name="terminal",
+                output=[TextBlock(text="preview" * 100)],
+                state=ToolResultState.SUCCESS,
+                artifacts=[
+                    ToolResultArtifactRef(
+                        artifact_id="artifact:huge",
+                        role="combined_output",
+                        media_type="text/plain; charset=utf-8",
+                        size_bytes=200_000,
+                        preview=ToolResultPreviewMetadata(
+                            preview_policy="head_tail",
+                            preview_chars=4_000,
+                            original_chars=200_000,
+                            original_bytes=200_000,
+                            omitted_middle_chars=196_000,
+                            visible_head_chars=2_000,
+                            visible_tail_chars=2_000,
+                            read_more={"suggested_offset_chars": 2_000},
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, huge])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=36_000, latest_tool_result_reserved_chars=8_000),
+        context_id="context:truncated-preview",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:huge"
+    )
+    assert decision["latest_reserved_candidate"] is True
+    assert decision["latest_reserved_applied"] is False
+    assert decision["body_candidate_source"] == "non_short_truncated_preview"
+    assert decision["latest_reserved_reason"] == "non_short_truncated_preview"
+
+
+def test_truncated_terminal_json_preview_is_not_treated_as_latest_short_result() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run noisy terminal command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:terminal-preview", name="terminal", input='{"cmd":"yes"}')],
+    )
+    payload = {
+        "status": "success",
+        "output": "HEAD" + ("x" * 4000) + "TAIL",
+        "exit_code": 0,
+        "cwd": "/workspace",
+        "truncated": True,
+        "preview_policy": "head_tail",
+        "output_preview_chars": 4008,
+        "output_original_chars": 200_000,
+        "output_original_bytes": 200_000,
+        "omitted_middle_chars": 195_992,
+    }
+    result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:terminal-preview",
+                name="terminal",
+                output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, result])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=36_000, latest_tool_result_reserved_chars=8_000),
+        context_id="context:terminal-truncated-preview",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:terminal-preview"
+    )
+    assert decision["latest_reserved_candidate"] is True
+    assert decision["latest_reserved_applied"] is False
+    assert decision["body_candidate_chars"] == 200_000
+    assert decision["body_candidate_source"] == "non_short_truncated_preview"
+    assert decision["latest_reserved_reason"] == "non_short_truncated_preview"
+
+
+def test_non_text_artifact_is_not_primary_read_more_target() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="render image artifact",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:image", name="image_tool", input="{}")],
+    )
+    image_result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:image",
+                name="image_tool",
+                output=[TextBlock(text="image generated")],
+                state=ToolResultState.SUCCESS,
+                artifacts=[
+                    ToolResultArtifactRef(
+                        artifact_id="artifact:image",
+                        role="image",
+                        media_type="image/png",
+                        size_bytes=12_345,
+                        preview=ToolResultPreviewMetadata(
+                            preview_policy="full",
+                            preview_chars=256,
+                            original_chars=256,
+                            original_bytes=512,
+                            omitted_middle_chars=0,
+                            visible_head_chars=256,
+                            visible_tail_chars=0,
+                            read_more={"suggested_offset_chars": 0},
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, image_result])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=2_000,
+            latest_tool_result_reserved_chars=0,
+        ),
+        context_id="context:non-text-artifact",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:image"
+    )
+    assert decision["primary_artifact_id"] is None
+    assert decision["read_more"] is None
+    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    envelope = json.loads(rendered.rsplit("\n", 1)[1])
+    assert envelope["primary_artifact_id"] is None
+    assert envelope["artifact_ids"] == ["artifact:image"]
+    assert envelope["diagnostics"][0]["code"] == "tool_result_primary_text_artifact_missing"
+    assert "artifact_read" not in rendered
+
+
+def test_tool_result_essential_envelope_over_aggregate_cap_fails_closed() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="poll all processes",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolCallBlock(id=f"call:{idx}", name="terminal", input='{"cmd":"x"}')
+            for idx in range(4)
+        ],
+    )
+    results = [
+        AssistantMsg(
+            name="assistant",
+            content=[
+                ToolResultBlock(
+                    id=f"call:{idx}",
+                    name="terminal",
+                    output=[
+                        TextBlock(
+                            text=(
+                                '{"status":"success","output":"body omitted","exit_code":0,'
+                                f'"cwd":"/workspace/{idx}","process_id":"proc:{idx}",'
+                                '"terminal_session_id":"default","backend_type":"local"}'
+                            )
+                        )
+                    ],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+        for idx in range(4)
+    ]
+    state.messages.extend([user, assistant, *results])
+
+    with pytest.raises(ContextBudgetExceeded) as exc_info:
+        build_compiled_context(
+            state=state,
+            tools=(),
+            system_prompt="System",
+            budget=LoopBudget(
+                tool_result_context_chars=10_000,
+                current_tail_tool_result_context_chars=0,
+                latest_tool_result_reserved_chars=0,
+                tool_result_envelope_context_chars=120,
+            ),
+            context_id="context:tool-result-envelope-over-cap",
+            model_call_index=2,
+            current_user_anchor=user.id,
+        )
+
+    exc = exc_info.value
+    assert exc.context_id == "context:tool-result-envelope-over-cap"
+    assert exc.tool_result_render_decisions
+    assert any(
+        diagnostic.code == "essential_envelope_budget_unsatisfied"
+        for diagnostic in exc.diagnostics
+    )
+    assert any(
+        diagnostic.get("code") == "essential_envelope_budget_unsatisfied"
+        for diagnostic in exc.tool_result_budget_report["diagnostics"]
+    )
+
+
+def test_tool_result_per_message_cap_limits_same_tool_batch() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run two tools",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        id="msg:assistant-batch",
+        content=[
+            ToolCallBlock(id="call:first", name="terminal", input='{"cmd":"one"}'),
+            ToolCallBlock(id="call:second", name="terminal", input='{"cmd":"two"}'),
+        ],
+    )
+    first = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:first",
+                name="terminal",
+                output=[TextBlock(text="FIRST_RESULT_VISIBLE")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    second = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:second",
+                name="terminal",
+                output=[TextBlock(text="SECOND_RESULT_SHOULD_BE_TRUNCATED")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, first, second])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=36_000,
+            tool_result_per_message_cap_chars=24,
+            latest_tool_result_reserved_chars=0,
+        ),
+        context_id="context:per-message-cap",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    assert "FIRST_RESULT_VISIBLE" in rendered
+    assert "TOOL RESULT BODY OMITTED" in rendered
+    decisions = {
+        decision["tool_call_id"]: decision
+        for decision in compiled.tool_result_render_decisions
+    }
+    assert decisions["call:first"]["tool_batch_id"] == "msg:assistant-batch"
+    assert decisions["call:second"]["tool_batch_id"] == "msg:assistant-batch"
+    assert decisions["call:second"]["visible_body_chars"] == 0
+    assert decisions["call:second"]["batch_body_budget_remaining"] == 4
+    assert (
+        compiled.tool_result_budget_report["used_by_batch"]["msg:assistant-batch"]["remaining"]
+        == 4
+    )
+
+
+def test_latest_reserved_reports_unsatisfied_when_global_body_budget_is_exhausted() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run sequential commands",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    latest_call = AssistantMsg(
+        name="assistant",
+        id="msg:latest-call",
+        content=[ToolCallBlock(id="call:latest", name="terminal", input='{"cmd":"two"}')],
+    )
+    latest_result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:latest",
+                name="terminal",
+                output=[TextBlock(text="SHORT_BUT_BODY_BUDGET_EXHAUSTED")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, latest_call, latest_result])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=2_000,
+            tool_result_body_context_chars=28,
+            latest_tool_result_reserved_chars=64,
+        ),
+        context_id="context:latest-unsatisfied",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:latest"
+    )
+    assert decision["latest_reserved_candidate"] is True
+    assert decision["latest_reserved_applied"] is False
+    assert decision["latest_reserved_reason"] == "latest_reserved_budget_unsatisfied"
+    assert decision["body_budget_remaining"] == compiled.tool_result_budget_report["used_by_scope"]["current_run_tail"]["remaining"]
+    assert decision["body_budget_remaining"] != compiled.tool_result_budget_report["used_by_scope"]["latest_reserved"]["remaining"]
+    assert {"code": "latest_reserved_budget_unsatisfied"} in compiled.tool_result_budget_report["diagnostics"]
 
 
 def test_memory_projection_lifecycle_fingerprint_tracks_visible_text_changes() -> None:

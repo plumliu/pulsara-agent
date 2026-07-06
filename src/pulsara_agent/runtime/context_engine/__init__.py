@@ -11,6 +11,11 @@ from pulsara_agent.runtime.context_engine.compiler import (
     compile_context,
 )
 from pulsara_agent.runtime.context_engine.lifecycle import ContextLifecycleCoordinator
+from pulsara_agent.runtime.context_engine.tool_results import (
+    SegmentedLLMMessages,
+    raise_if_tool_result_budget_unsatisfied,
+    render_segmented_llm_messages,
+)
 from pulsara_agent.runtime.context_engine.types import (
     CompiledContext,
     CompiledContextSection,
@@ -45,5 +50,8 @@ __all__ = [
     "ContextRenderMode",
     "ContextSection",
     "ContextStability",
+    "SegmentedLLMMessages",
     "compile_context",
+    "raise_if_tool_result_budget_unsatisfied",
+    "render_segmented_llm_messages",
 ]

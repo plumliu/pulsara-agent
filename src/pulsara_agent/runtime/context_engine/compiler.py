@@ -37,6 +37,8 @@ class ContextCompileInputs:
     current_run_tail_messages: tuple[LLMMessage, ...] | None = None
     recovery_message: LLMMessage | None = None
     component_prompts: tuple[tuple[str, str], ...] = ()
+    tool_result_render_decisions: tuple[dict[str, object], ...] = ()
+    tool_result_budget_report: dict[str, object] | None = None
 
 
 def compile_context(
@@ -110,6 +112,8 @@ def compile_context(
         lifecycle_decisions=lifecycle_decisions,
         estimated_tokens=total_estimated_tokens,
         budget=budget,
+        tool_result_render_decisions=inputs.tool_result_render_decisions,
+        tool_result_budget_report=inputs.tool_result_budget_report or {},
     )
 
 

@@ -164,6 +164,7 @@ class ModelCallStartEvent(EventBase):
 
 class ContextCompiledEvent(EventBase):
     type: Literal[EventType.CONTEXT_COMPILED] = EventType.CONTEXT_COMPILED
+    status: Literal["compiled", "failed"] = "compiled"
     context_id: str
     model_role: str
     model_call_index: int
@@ -175,6 +176,8 @@ class ContextCompiledEvent(EventBase):
     tool_specs: list[dict[str, Any]] = Field(default_factory=list)
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     lifecycle_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    tool_result_render_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    tool_result_budget_report: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelCallEndEvent(EventBase):

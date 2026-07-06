@@ -264,6 +264,7 @@ def test_terminal_process_completed_event_round_trips_through_agent_event_serial
 def test_context_compiled_event_round_trips_through_agent_event_serialization() -> None:
     event = ContextCompiledEvent(
         **_ctx("contract:context-compiled").event_fields(),
+        status="failed",
         context_id="context:1",
         model_role="pro",
         model_call_index=1,
@@ -289,6 +290,18 @@ def test_context_compiled_event_round_trips_through_agent_event_serialization() 
                 "reason": "dependency_fingerprint_changed",
             }
         ],
+        tool_result_render_decisions=[
+            {
+                "tool_call_id": "call:terminal",
+                "segment": "current_run_tail",
+                "latest_reserved_applied": True,
+                "body_policy": "full_visible",
+            }
+        ],
+        tool_result_budget_report={
+            "caps": {"tool_result_total_context_chars": 36_000},
+            "used_by_scope": {"current_run_tail": {"body": 128}},
+        },
     )
 
     assert load_agent_event(dump_agent_event(event)) == event

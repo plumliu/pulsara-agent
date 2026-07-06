@@ -262,7 +262,7 @@ def test_msg_to_llm_messages_compresses_context_blocks() -> None:
     assert assistant_turn.thinking == ("hidden",)
     assert tool_call.id == "call:ignored"
     assert tool_call.name == "lookup"
-    assert "TOOL RESULT TRUNCATED" in "\n".join(tool_result.content)
+    assert "TOOL RESULT BODY OMITTED" in "\n".join(tool_result.content)
     assert tool_result.tool_call_id == "call:1"
     assert "data block omitted" in assistant_text
     assert "abc" not in assistant_text
@@ -298,8 +298,9 @@ def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> Non
     envelope = json.loads(body)
 
     assert envelope["output_truncated"] is True
-    assert "TOOL RESULT TRUNCATED" in envelope["output_preview"]
+    assert "TOOL RESULT BODY OMITTED" in envelope["output_preview"]
     assert envelope["artifacts"][0]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
+    assert envelope["artifacts"][0]["read_more"]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
 
 
 def test_msg_to_llm_messages_uses_aggregate_tool_result_budget() -> None:
@@ -335,7 +336,7 @@ def test_msg_to_llm_messages_uses_aggregate_tool_result_budget() -> None:
     second = "\n".join(llm_messages[1].content)
 
     assert "A" * 18 in first
-    assert "TOOL RESULT TRUNCATED" in second
+    assert "TOOL RESULT BODY OMITTED" in second
 
 
 def test_msg_to_llm_messages_bounds_artifact_envelopes_after_budget_exhaustion() -> None:
@@ -383,9 +384,210 @@ def test_msg_to_llm_messages_bounds_artifact_envelopes_after_budget_exhaustion()
     llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=500))
     rendered = "\n".join("\n".join(message.content) for message in llm_messages)
 
-    assert "aggregate context budget exhausted" in rendered
-    assert len(rendered) < 3_000
+    assert "TOOL RESULT BODY OMITTED" in rendered
+    assert len(rendered) < 4_000
     assert '"noise"' not in rendered
+
+
+def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_body_is_omitted() -> None:
+    payload = {
+        "status": "success",
+        "output": "VISIBLE_ONLY_IF_BUDGET_AVAILABLE",
+        "exit_code": 0,
+        "cwd": "/workspace",
+        "timed_out": False,
+        "truncated": False,
+        "error": None,
+        "process_id": "proc:123",
+        "yielded_to_background": True,
+        "terminal_session_id": "default",
+        "backend_type": "local",
+        "io_mode": "pipe",
+    }
+    messages = [
+        Msg(
+            role="tool_result",
+            name="terminal",
+            content=[
+                ToolResultBlock(
+                    id="call:terminal",
+                    name="terminal",
+                    output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=0))
+    rendered = "\n".join(llm_messages[0].content)
+    envelope = json.loads(rendered.split("\n", 1)[1])
+
+    assert envelope["tool_result_body_omitted"] is True
+    assert envelope["status"] == "success"
+    assert envelope["exit_code"] == 0
+    assert envelope["cwd"] == "/workspace"
+    assert envelope["process_id"] == "proc:123"
+    assert envelope["yielded_to_background"] is True
+    assert envelope["terminal_session_id"] == "default"
+    assert envelope["backend_type"] == "local"
+    assert "VISIBLE_ONLY_IF_BUDGET_AVAILABLE" not in rendered
+
+
+def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_json_is_clipped() -> None:
+    payload = {
+        "status": "success",
+        "output": "x" * 1_000,
+        "exit_code": 0,
+        "cwd": "/workspace",
+        "process_id": "proc:small-budget",
+        "terminal_session_id": "default",
+        "backend_type": "local",
+    }
+    messages = [
+        Msg(
+            role="tool_result",
+            name="terminal",
+            content=[
+                ToolResultBlock(
+                    id="call:terminal-small-budget",
+                    name="terminal",
+                    output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=120))
+    rendered = "\n".join(llm_messages[0].content)
+    envelope = json.loads(rendered.split("\n", 1)[1])
+
+    assert envelope["tool_result_body_omitted"] is True
+    assert envelope["status"] == "success"
+    assert envelope["exit_code"] == 0
+    assert envelope["cwd"] == "/workspace"
+    assert envelope["process_id"] == "proc:small-budget"
+    assert "TOOL RESULT BODY TRUNCATED" not in rendered
+    assert "x" * 80 not in rendered
+
+
+def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_read_file_json() -> None:
+    payload = {
+        "status": "ok",
+        "path": "large.txt",
+        "access_scope": "workspace",
+        "workspace_relative": True,
+        "offset": 1,
+        "limit": 200,
+        "total_lines": 400,
+        "file_size": 20_000,
+        "truncated": True,
+        "content": "LINE\n" * 1_000,
+    }
+    messages = [
+        Msg(
+            role="tool_result",
+            name="read_file",
+            content=[
+                ToolResultBlock(
+                    id="call:read-file-json",
+                    name="read_file",
+                    output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=500))
+    rendered = "\n".join(llm_messages[0].content)
+
+    assert "tool_result_body_omitted" not in rendered
+    assert "TOOL RESULT BODY TRUNCATED" in rendered
+    assert rendered.split("\n", 1)[1].startswith('{"status": "ok"')
+
+
+def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_custom_exec_json() -> None:
+    payload = {
+        "status": "ok",
+        "exit_code": 0,
+        "cwd": "/remote/project",
+        "output": "BUSINESS_EXECUTION_SUMMARY\n" * 200,
+    }
+    messages = [
+        Msg(
+            role="tool_result",
+            name="custom_mcp_exec_summary",
+            content=[
+                ToolResultBlock(
+                    id="call:custom-exec-json",
+                    name="custom_mcp_exec_summary",
+                    output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=500))
+    rendered = "\n".join(llm_messages[0].content)
+
+    assert "tool_result_body_omitted" not in rendered
+    assert "TOOL RESULT BODY TRUNCATED" in rendered
+    assert rendered.split("\n", 1)[1].startswith('{"status": "ok"')
+
+
+def test_msg_to_llm_messages_preserves_terminal_process_list_summary_when_body_is_omitted() -> None:
+    payload = {
+        "status": "success",
+        "terminal_process_action": "list",
+        "processes": [
+            {"process_id": "proc:running", "status": "running", "cwd": "/workspace", "exit_code": None},
+            {
+                "process_id": "proc:old-done",
+                "status": "success",
+                "cwd": "/workspace/old",
+                "exit_code": 0,
+                "ended_at_monotonic": 10.0,
+            },
+            {
+                "process_id": "proc:recent-done",
+                "status": "success",
+                "cwd": "/workspace/recent",
+                "exit_code": 0,
+                "ended_at_monotonic": 20.0,
+            },
+        ],
+        "live_process_count": 1,
+        "finished_process_count": 2,
+    }
+    messages = [
+        Msg(
+            role="tool_result",
+            name="terminal_process",
+            content=[
+                ToolResultBlock(
+                    id="call:terminal-process-list",
+                    name="terminal_process",
+                    output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+    ]
+
+    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=0))
+    rendered = "\n".join(llm_messages[0].content)
+    envelope = json.loads(rendered.split("\n", 1)[1])
+
+    assert envelope["tool_result_body_omitted"] is True
+    assert envelope["terminal_process_action"] == "list"
+    assert envelope["live_process_count"] == 1
+    assert envelope["finished_process_count"] == 2
+    assert envelope["processes_summary"][0]["process_id"] == "proc:running"
+    assert envelope["processes_summary"][1]["process_id"] == "proc:recent-done"
+    assert envelope["processes_summary"][2]["process_id"] == "proc:old-done"
 
 
 def test_msg_to_llm_messages_compact_envelope_keeps_primary_preview_artifact() -> None:
