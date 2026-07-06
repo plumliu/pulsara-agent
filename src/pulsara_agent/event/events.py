@@ -164,10 +164,12 @@ class ModelCallStartEvent(EventBase):
 
 class ContextCompiledEvent(EventBase):
     type: Literal[EventType.CONTEXT_COMPILED] = EventType.CONTEXT_COMPILED
-    status: Literal["compiled", "failed"] = "compiled"
+    status: Literal["compiled", "pressure", "failed"] = "compiled"
     context_id: str
     model_role: str
     model_call_index: int
+    compile_attempt_index: int | None = None
+    context_retry_index: int | None = None
     estimated_tokens: int
     context_window_tokens: int
     reserved_output_tokens: int

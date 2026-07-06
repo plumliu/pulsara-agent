@@ -49,6 +49,10 @@ from pulsara_agent.message import (
 )
 from pulsara_agent.runtime.context import build_compiled_context
 from pulsara_agent.runtime.context_engine import ContextBudgetExceeded, ContextLifecycleCoordinator
+from pulsara_agent.runtime.context_engine.tool_results import (
+    ToolResultRenderDecisionCache,
+    make_tool_result_render_decision_cache,
+)
 from pulsara_agent.runtime.approval import ApprovalResolution
 from pulsara_agent.runtime.compaction.inline import NoopRuntimeContextCompactor, RuntimeContextCompactorProtocol
 from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
@@ -309,6 +313,9 @@ class AgentRuntime:
         self.capability_runtime = capability_runtime
         self.context_compactor = context_compactor or NoopRuntimeContextCompactor()
         self.context_lifecycle = ContextLifecycleCoordinator()
+        self.tool_result_render_decision_cache: ToolResultRenderDecisionCache = (
+            make_tool_result_render_decision_cache()
+        )
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
         self.tool_executor = runtime_session.create_tool_executor(
@@ -732,67 +739,115 @@ class AgentRuntime:
                 ),
             )
             memory_prompt = getattr(self.memory_hooks, "memory_context_prompt", lambda: None)()
-            try:
-                compiled_context = build_compiled_context(
-                    state=state,
-                    tools=exposure.direct_tool_specs,
-                    system_prompt=self.system_prompt,
-                    budget=self.budget,
-                    context_id=f"context:{uuid4().hex}",
-                    model_call_index=model_call_index,
-                    model_role=self.model_role,
-                    exposure=exposure,
-                    current_user_anchor=f"user-message:{state.run_id}",
-                    runtime_session_id=self.runtime_session.runtime_session_id,
-                    component_prompts=tuple(
-                        (component_id, text)
-                        for component_id, text in (
-                            ("runtime_context", runtime_context_prompt),
-                            ("memory:hook_prompt", memory_prompt),
-                            ("capability:catalog", exposure.catalog_prompt),
-                            ("capability:active_skill", exposure.active_skill_prompt),
-                        )
-                        if text
-                    ),
-                    lifecycle_coordinator=self.context_lifecycle,
-                )
-            except ContextBudgetExceeded as exc:
-                state.status = LoopStatus.FAILED
-                state.stop_reason = "model_error"
-                state.error_message = str(exc)
-                state.transition(LoopTransition.FAIL)
-                yield await self.runtime_session.emit(
-                    ContextCompiledEvent(
-                        **self._event_context(state).event_fields(),
-                        status="failed",
-                        context_id=exc.context_id or f"context:failed:{uuid4().hex}",
-                        model_role=self.model_role.value,
-                        model_call_index=exc.model_call_index or model_call_index,
-                        estimated_tokens=0,
-                        context_window_tokens=256_000,
-                        reserved_output_tokens=8_000,
-                        tools_estimated_tokens=0,
-                        sections=[],
-                        tool_specs=[],
-                        diagnostics=[
-                            diagnostic.to_event_value() for diagnostic in exc.diagnostics
-                        ],
-                        lifecycle_decisions=[],
-                        tool_result_render_decisions=[
-                            dict(decision) for decision in exc.tool_result_render_decisions
-                        ],
-                        tool_result_budget_report=dict(exc.tool_result_budget_report),
-                    ),
-                    state=state,
-                )
-                yield await self.runtime_session.emit(
-                    RunErrorEvent(
-                        **self._event_context(state).event_fields(),
-                        message=str(exc),
-                        code="context_budget_exceeded",
-                    ),
-                    state=state,
-                )
+            compiled_context = None
+            compile_attempt_index = 0
+            context_retry_index = 0
+            while state.status is LoopStatus.RUNNING:
+                compile_attempt_index += 1
+                try:
+                    compiled_context = build_compiled_context(
+                        state=state,
+                        tools=exposure.direct_tool_specs,
+                        system_prompt=self.system_prompt,
+                        budget=self.budget,
+                        context_id=f"context:{uuid4().hex}",
+                        model_call_index=model_call_index,
+                        model_role=self.model_role,
+                        exposure=exposure,
+                        current_user_anchor=f"user-message:{state.run_id}",
+                        runtime_session_id=self.runtime_session.runtime_session_id,
+                        component_prompts=tuple(
+                            (component_id, text)
+                            for component_id, text in (
+                                ("runtime_context", runtime_context_prompt),
+                                ("memory:hook_prompt", memory_prompt),
+                                ("capability:catalog", exposure.catalog_prompt),
+                                ("capability:active_skill", exposure.active_skill_prompt),
+                            )
+                            if text
+                        ),
+                        lifecycle_coordinator=self.context_lifecycle,
+                        tool_result_render_decision_cache=self.tool_result_render_decision_cache,
+                    )
+                    break
+                except ContextBudgetExceeded as exc:
+                    failed_context_id = exc.context_id or f"context:failed:{uuid4().hex}"
+                    failed_model_call_index = exc.model_call_index or model_call_index
+                    pressure_diagnostics = [
+                        diagnostic.to_event_value() for diagnostic in exc.diagnostics
+                    ]
+                    pressure_tool_result_render_decisions = [
+                        dict(decision) for decision in exc.tool_result_render_decisions
+                    ]
+                    pressure_tool_result_budget_report = dict(exc.tool_result_budget_report)
+                    yield await self.runtime_session.emit(
+                        ContextCompiledEvent(
+                            **self._event_context(state).event_fields(),
+                            status="pressure",
+                            context_id=failed_context_id,
+                            model_role=self.model_role.value,
+                            model_call_index=failed_model_call_index,
+                            compile_attempt_index=compile_attempt_index,
+                            context_retry_index=context_retry_index,
+                            estimated_tokens=0,
+                            context_window_tokens=256_000,
+                            reserved_output_tokens=8_000,
+                            tools_estimated_tokens=0,
+                            sections=[],
+                            tool_specs=[],
+                            diagnostics=pressure_diagnostics,
+                            lifecycle_decisions=[],
+                            tool_result_render_decisions=pressure_tool_result_render_decisions,
+                            tool_result_budget_report=pressure_tool_result_budget_report,
+                        ),
+                        state=state,
+                    )
+                    if (
+                        context_retry_index == 0
+                        and _context_budget_pressure_is_recoverable(exc)
+                    ):
+                        previous_mid_turn_compaction = state.scratchpad.get("mid_turn_compaction")
+                        async for event in self._maybe_compact_mid_turn_before_followup(state):
+                            yield event
+                        if state.scratchpad.get("mid_turn_compaction") != previous_mid_turn_compaction:
+                            context_retry_index += 1
+                            continue
+                    state.status = LoopStatus.FAILED
+                    state.stop_reason = "model_error"
+                    state.error_message = str(exc)
+                    state.transition(LoopTransition.FAIL)
+                    yield await self.runtime_session.emit(
+                        ContextCompiledEvent(
+                            **self._event_context(state).event_fields(),
+                            status="failed",
+                            context_id=failed_context_id,
+                            model_role=self.model_role.value,
+                            model_call_index=failed_model_call_index,
+                            compile_attempt_index=compile_attempt_index,
+                            context_retry_index=context_retry_index,
+                            estimated_tokens=0,
+                            context_window_tokens=256_000,
+                            reserved_output_tokens=8_000,
+                            tools_estimated_tokens=0,
+                            sections=[],
+                            tool_specs=[],
+                            diagnostics=pressure_diagnostics,
+                            lifecycle_decisions=[],
+                            tool_result_render_decisions=pressure_tool_result_render_decisions,
+                            tool_result_budget_report=pressure_tool_result_budget_report,
+                        ),
+                        state=state,
+                    )
+                    yield await self.runtime_session.emit(
+                        RunErrorEvent(
+                            **self._event_context(state).event_fields(),
+                            message=str(exc),
+                            code="context_budget_exceeded",
+                        ),
+                        state=state,
+                    )
+                    break
+            if compiled_context is None:
                 break
             yield await self.runtime_session.emit(
                 ContextCompiledEvent(
@@ -800,6 +855,8 @@ class AgentRuntime:
                     context_id=compiled_context.context_id,
                     model_role=self.model_role.value,
                     model_call_index=model_call_index,
+                    compile_attempt_index=compile_attempt_index,
+                    context_retry_index=context_retry_index,
                     estimated_tokens=compiled_context.estimated_tokens,
                     context_window_tokens=compiled_context.budget.context_window_tokens,
                     reserved_output_tokens=compiled_context.budget.reserved_output_tokens,
@@ -2439,6 +2496,22 @@ def _next_model_call_index(state: LoopState) -> int:
     value += 1
     state.scratchpad["model_call_index"] = value
     return value
+
+
+def _context_budget_pressure_is_recoverable(exc: ContextBudgetExceeded) -> bool:
+    report = exc.tool_result_budget_report
+    diagnostics = report.get("diagnostics") if isinstance(report, dict) else None
+    if not isinstance(diagnostics, list):
+        return False
+    return any(
+        isinstance(diagnostic, dict)
+        and diagnostic.get("code")
+        in {
+            "tool_result_total_budget_unsatisfied",
+            "max_tool_results_per_context_exceeded",
+        }
+        for diagnostic in diagnostics
+    )
 
 
 def _is_overridden_hook(instance: object, name: str, base: type) -> bool:

@@ -49,7 +49,7 @@ class LoopTransition(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class LoopBudget:
-    max_turns: int = 20
+    max_turns: int = 50
     max_tool_calls: int = 64
     max_consecutive_model_failures: int = 2
     max_consecutive_tool_failures: int = 8

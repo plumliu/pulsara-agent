@@ -25,6 +25,14 @@ class FakeResult:
     final_text = "fake final"
 
 
+class FakeFailedResult:
+    status = LoopStatus.FAILED
+    stop_reason = "model_error"
+    final_text = ""
+    error_message = "context budget exceeded"
+    state = SimpleNamespace(run_id="run:failed")
+
+
 class FakeSession:
     host_session_id = "host:fake"
     runtime_session_id = "runtime:fake"
@@ -76,6 +84,17 @@ class FakeSession:
     async def exit_plan_workflow(self, *, source: str, user_feedback: str = ""):
         self.exit_plan_sources.append(source)
         self.plan_state.finish()
+
+
+def test_print_agent_run_result_shows_failed_runs_without_final_text(capsys) -> None:
+    cli._print_agent_run_result(FakeFailedResult())
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Agent run failed before producing a final reply." in captured.err
+    assert "run_id=run:failed" in captured.err
+    assert "stop_reason=model_error" in captured.err
+    assert "error=context budget exceeded" in captured.err
 
 
 class PendingFakeSession(FakeSession):

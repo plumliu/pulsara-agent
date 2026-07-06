@@ -4,6 +4,7 @@ from pulsara_agent.llm.input import MessageRole, ToolSpec
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.message import (
     AssistantMsg,
+    Msg,
     TextBlock,
     ToolCallBlock,
     ToolResultArtifactRef,
@@ -20,6 +21,10 @@ from pulsara_agent.runtime.context_engine import (
     ContextCompileRequest,
     ContextLifecycleCoordinator,
     ContextSection,
+)
+from pulsara_agent.runtime.context_engine.tool_results import (
+    commit_tool_result_render_decision_cache,
+    make_tool_result_render_decision_cache,
 )
 from pulsara_agent.runtime.state import LoopBudget, LoopState
 
@@ -628,7 +633,541 @@ def test_tool_result_budget_does_not_let_huge_prior_starve_fresh_tail_output() -
     assert fresh_decision["latest_reserved_candidate"] is True
     assert fresh_decision["latest_reserved_applied"] is True
     assert fresh_decision["latest_reserved_reason"] == "short_result_visible"
+    assert fresh_decision["source_block_id"] == "call:fresh"
+    assert fresh_decision["source_message_id"] == fresh.id
+    assert fresh_decision["source_message_index"] == 3
+    assert fresh_decision["content_block_index"] == 0
+    assert fresh_decision["model_tool_name"] == "terminal"
+    assert str(fresh_decision["render_source_fingerprint"]).startswith("sha256:")
+    assert str(fresh_decision["unit_fingerprint"]).startswith("sha256:")
     assert compiled.tool_result_budget_report["caps"]["prior_tool_result_context_chars"] < 36_000
+
+
+def test_prior_envelopes_do_not_borrow_through_current_tail_protected_pool() -> None:
+    state = LoopState(session_id="runtime:test")
+    prior_results = [
+        AssistantMsg(
+            name="assistant",
+            content=[
+                ToolResultBlock(
+                    id=f"call:old:{idx}",
+                    name="terminal",
+                    output=[
+                        TextBlock(
+                            text=json.dumps(
+                                {
+                                    "status": "success",
+                                    "output": "old body",
+                                    "exit_code": 0,
+                                    "cwd": f"/workspace/{idx}",
+                                    "process_id": f"proc:{idx}",
+                                    "terminal_session_id": "default",
+                                    "backend_type": "local",
+                                }
+                            )
+                        )
+                    ],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+        for idx in range(2)
+    ]
+    user = UserMsg(
+        name="user",
+        content="run final command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:fresh-tail", name="terminal", input='{"cmd":"python main.py"}')],
+    )
+    fresh = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:fresh-tail",
+                name="terminal",
+                output=[TextBlock(text="FRESH_TAIL_STILL_VISIBLE")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([*prior_results, user, assistant, fresh])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=1_200,
+            tool_result_envelope_context_chars=256,
+            latest_tool_result_reserved_chars=128,
+        ),
+        context_id="context:prior-envelope-protection",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    assert "FRESH_TAIL_STILL_VISIBLE" in rendered
+    fresh_decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:fresh-tail"
+    )
+    assert fresh_decision["latest_reserved_applied"] is True
+    assert compiled.tool_result_budget_report["caps"]["protected_current_tail_total_chars"] > 0
+
+
+def test_tool_result_model_visible_tool_name_is_bounded() -> None:
+    state = LoopState(session_id="runtime:test")
+    long_tool_name = "mcp_server_with_an_extremely_long_name__" + ("x" * 120)
+    user = UserMsg(
+        name="user",
+        content="call long tool",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:long", name=long_tool_name, input="{}")],
+    )
+    result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:long",
+                name=long_tool_name,
+                output=[TextBlock(text="ok")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, result])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:bounded-tool-name",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:long"
+    )
+    model_tool_name = str(decision["model_tool_name"])
+    assert decision["tool_name"] == long_tool_name
+    assert len(model_tool_name) <= 64
+    assert model_tool_name != long_tool_name
+    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    assert f"[tool_result:{model_tool_name}:success]" in rendered
+    assert f"[tool_result:{long_tool_name}:success]" not in rendered
+
+
+def test_tool_result_inside_current_user_segment_is_inert_and_diagnosed() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = Msg(
+        role="user",
+        name="user",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+        content=[
+            ToolResultBlock(
+                id="call:pasted",
+                name="terminal",
+                output=[TextBlock(text="pasted tool-looking content")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.append(user)
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:current-user-tool-result",
+        model_call_index=1,
+        current_user_anchor=user.id,
+    )
+
+    decision = next(
+        decision
+        for decision in compiled.tool_result_render_decisions
+        if decision["tool_call_id"] == "call:pasted"
+    )
+    assert decision["segment"] == "current_user"
+    assert {"code": "tool_result_in_current_user_segment"} in decision["diagnostics"]
+    assert any(
+        diagnostic.get("code") == "tool_result_in_current_user_segment"
+        and diagnostic.get("severity") == "error"
+        for diagnostic in compiled.tool_result_budget_report["diagnostics"]
+    )
+    assert all(message.role is not MessageRole.TOOL_RESULT for message in compiled.llm_context.messages)
+
+
+def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:cached", name="terminal", input='{"cmd":"echo ok"}')],
+    )
+    result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:cached",
+                name="terminal",
+                output=[TextBlock(text="CACHED_RESULT")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, result])
+
+    first = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:cache-first",
+        model_call_index=1,
+        current_user_anchor=user.id,
+    )
+    second = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:cache-second",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    first_decision = first.tool_result_render_decisions[0]
+    second_decision = second.tool_result_render_decisions[0]
+    assert first_decision["render_decision_cache_status"] == "freshly_collected"
+    assert second_decision["render_decision_cache_status"] == "reused"
+    assert first_decision["unit_fingerprint"] == second_decision["unit_fingerprint"]
+    assert second.tool_result_budget_report["render_decision_cache"]["status_counts"]["reused"] == 1
+    rendered_second = next(
+        text
+        for message in second.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    assert "CACHED_RESULT" in rendered_second
+    assert second_decision["rendered_total_chars"] == len(rendered_second)
+    assert second_decision["rendered_header_chars"] > 0
+    assert second_decision["rendered_envelope_chars"] >= second_decision["rendered_header_chars"]
+
+    constrained = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=500,
+            current_tail_tool_result_context_chars=5,
+            latest_tool_result_reserved_chars=0,
+            tool_result_per_tool_cap_chars=5,
+        ),
+        context_id="context:cache-constrained",
+        model_call_index=3,
+        current_user_anchor=user.id,
+    )
+    constrained_decision = constrained.tool_result_render_decisions[0]
+    assert constrained_decision["render_decision_cache_status"] == "overridden_for_hard_cap"
+    assert {"code": "tool_result_render_cache_overridden_for_hard_cap", "reason": "cached_rendered_payload_exceeds_current_hard_cap"} in constrained_decision["diagnostics"]
+    rendered_constrained = "\n".join(
+        text for message in constrained.llm_context.messages for text in message.content
+    )
+    assert "CACHED_RESULT" not in rendered_constrained
+
+    wide_after_override = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:cache-wide-after-override",
+        model_call_index=4,
+        current_user_anchor=user.id,
+    )
+    wide_decision = wide_after_override.tool_result_render_decisions[0]
+    assert wide_decision["render_decision_cache_status"] == "reused"
+    rendered_wide = "\n".join(
+        text for message in wide_after_override.llm_context.messages for text in message.content
+    )
+    assert "CACHED_RESULT" in rendered_wide
+
+    result.content[0].output = [TextBlock(text="CHANGED_RESULT")]
+    third = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:cache-third",
+        model_call_index=5,
+        current_user_anchor=user.id,
+    )
+    assert third.tool_result_render_decisions[0]["render_decision_cache_status"] == "freshly_collected"
+    assert third.tool_result_render_decisions[0]["unit_fingerprint"] != second_decision["unit_fingerprint"]
+
+
+def test_low_budget_first_render_does_not_seed_canonical_cache() -> None:
+    state = LoopState(session_id="runtime:test")
+    cache: dict[str, dict[str, object]] = {}
+    user = UserMsg(
+        name="user",
+        content="run command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:low-cache", name="terminal", input='{"cmd":"echo"}')],
+    )
+    result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:low-cache",
+                name="terminal",
+                output=[TextBlock(text="FULL_RESULT_SHOULD_NOT_BE_CACHED_AS_OMITTED")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, result])
+
+    low = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=500,
+            current_tail_tool_result_context_chars=5,
+            latest_tool_result_reserved_chars=0,
+            tool_result_per_tool_cap_chars=5,
+        ),
+        context_id="context:low-cache-first",
+        model_call_index=1,
+        current_user_anchor=user.id,
+        tool_result_render_decision_cache=cache,
+    )
+    assert low.tool_result_render_decisions[0]["body_policy"] != "full_visible"
+    assert cache == {}
+
+    wide = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:low-cache-wide",
+        model_call_index=2,
+        current_user_anchor=user.id,
+        tool_result_render_decision_cache=cache,
+    )
+    wide_decision = wide.tool_result_render_decisions[0]
+    assert wide_decision["render_decision_cache_status"] == "freshly_collected"
+    assert wide_decision["body_policy"] == "full_visible"
+    rendered = "\n".join(text for message in wide.llm_context.messages for text in message.content)
+    assert "FULL_RESULT_SHOULD_NOT_BE_CACHED_AS_OMITTED" in rendered
+    assert cache
+
+
+def test_pressure_compile_does_not_commit_render_cache_candidates() -> None:
+    state = LoopState(session_id="runtime:test")
+    cache: dict[str, dict[str, object]] = {}
+    user = UserMsg(
+        name="user",
+        content="run command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:pressure-cache", name="terminal", input='{"cmd":"echo"}')],
+    )
+    result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:pressure-cache",
+                name="terminal",
+                output=[TextBlock(text="PRESSURE_RESULT_SHOULD_NOT_SEED_CACHE")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, result])
+
+    with pytest.raises(ContextBudgetExceeded):
+        build_compiled_context(
+            state=state,
+            tools=(),
+            system_prompt="System",
+            budget=LoopBudget(max_tool_results_per_context=0),
+            context_id="context:pressure-cache",
+            model_call_index=1,
+            current_user_anchor=user.id,
+            tool_result_render_decision_cache=cache,
+        )
+    assert cache == {}
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:pressure-cache-retry",
+        model_call_index=2,
+        current_user_anchor=user.id,
+        tool_result_render_decision_cache=cache,
+    )
+    assert compiled.tool_result_render_decisions[0]["render_decision_cache_status"] == "freshly_collected"
+    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    assert "PRESSURE_RESULT_SHOULD_NOT_SEED_CACHE" in rendered
+
+
+def test_tool_result_render_cache_commit_reports_lru_eviction() -> None:
+    cache = make_tool_result_render_decision_cache(max_rendered_chars=100)
+    first_stats = commit_tool_result_render_decision_cache(
+        cache,
+        {
+            "unit:first": {
+                "_rendered": "A" * 80,
+                "visible_body_chars": 80,
+                "rendered_envelope_chars": 0,
+                "rendered_total_chars": 100,
+                "body_policy": "full_visible",
+                "envelope_policy": "full_envelope",
+                "reason": "within_budget",
+            }
+        },
+    )
+    assert first_stats["committed_entries"] == 1
+    assert first_stats["evicted_entries"] == 0
+    assert list(cache.keys()) == ["unit:first"]
+
+    second_stats = commit_tool_result_render_decision_cache(
+        cache,
+        {
+            "unit:second": {
+                "_rendered": "B" * 80,
+                "visible_body_chars": 80,
+                "rendered_envelope_chars": 0,
+                "rendered_total_chars": 100,
+                "body_policy": "full_visible",
+                "envelope_policy": "full_envelope",
+                "reason": "within_budget",
+            }
+        },
+    )
+    assert second_stats["committed_entries"] == 1
+    assert second_stats["evicted_entries"] == 1
+    assert second_stats["evicted_rendered_chars"] == 80
+    assert second_stats["entries_after_commit"] == 1
+    assert list(cache.keys()) == ["unit:second"]
+
+
+def test_tool_result_render_cache_skips_oversize_without_deleting_existing_key() -> None:
+    cache = make_tool_result_render_decision_cache(max_rendered_chars=100)
+    commit_tool_result_render_decision_cache(
+        cache,
+        {
+            "unit:same": {
+                "_rendered": "A" * 80,
+                "visible_body_chars": 80,
+                "rendered_envelope_chars": 0,
+                "rendered_total_chars": 100,
+                "body_policy": "full_visible",
+                "envelope_policy": "full_envelope",
+                "reason": "within_budget",
+            }
+        },
+    )
+
+    stats = commit_tool_result_render_decision_cache(
+        cache,
+        {
+            "unit:same": {
+                "_rendered": "B" * 101,
+                "visible_body_chars": 101,
+                "rendered_envelope_chars": 0,
+                "rendered_total_chars": 121,
+                "body_policy": "full_visible",
+                "envelope_policy": "full_envelope",
+                "reason": "within_budget",
+            }
+        },
+    )
+
+    assert stats["committed_entries"] == 0
+    assert stats["skipped_oversize_entries"] == 1
+    assert stats["entries_after_commit"] == 1
+    assert cache["unit:same"]["_rendered"] == "A" * 80
+
+
+def test_tool_result_render_cache_eviction_is_reported_in_compiled_context() -> None:
+    cache = make_tool_result_render_decision_cache(max_rendered_chars=100)
+
+    def compile_with_output(output: str, *, context_id: str) -> dict[str, object]:
+        state = LoopState(session_id="runtime:test")
+        user = UserMsg(
+            name="user",
+            content="run command",
+            id=f"user-message:{state.run_id}",
+            metadata={"run_id": state.run_id},
+        )
+        assistant = AssistantMsg(
+            name="assistant",
+            content=[ToolCallBlock(id=f"call:{context_id}", name="terminal", input='{"cmd":"echo"}')],
+        )
+        result = AssistantMsg(
+            name="assistant",
+            content=[
+                ToolResultBlock(
+                    id=f"call:{context_id}",
+                    name="terminal",
+                    output=[TextBlock(text=output)],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+        state.messages.extend([user, assistant, result])
+        compiled = build_compiled_context(
+            state=state,
+            tools=(),
+            system_prompt="System",
+            budget=state.budget,
+            context_id=f"context:{context_id}",
+            model_call_index=1,
+            current_user_anchor=user.id,
+            tool_result_render_decision_cache=cache,
+        )
+        return compiled.tool_result_budget_report["render_decision_cache"]["commit"]
+
+    first_commit = compile_with_output("A" * 80, context_id="cache-evict-first")
+    assert first_commit["committed_entries"] == 1
+    assert first_commit["evicted_entries"] == 0
+    second_commit = compile_with_output("B" * 80, context_id="cache-evict-second")
+    assert second_commit["committed_entries"] == 1
+    assert second_commit["evicted_entries"] == 1
+    assert second_commit["entries_after_commit"] == 1
 
 
 def test_truncated_artifact_preview_is_not_treated_as_latest_short_result() -> None:
@@ -825,7 +1364,7 @@ def test_non_text_artifact_is_not_primary_read_more_target() -> None:
     assert "artifact_read" not in rendered
 
 
-def test_tool_result_essential_envelope_over_aggregate_cap_fails_closed() -> None:
+def test_tool_result_essential_envelope_over_aggregate_soft_cap_borrows_total() -> None:
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -864,33 +1403,30 @@ def test_tool_result_essential_envelope_over_aggregate_cap_fails_closed() -> Non
     ]
     state.messages.extend([user, assistant, *results])
 
-    with pytest.raises(ContextBudgetExceeded) as exc_info:
-        build_compiled_context(
-            state=state,
-            tools=(),
-            system_prompt="System",
-            budget=LoopBudget(
-                tool_result_context_chars=10_000,
-                current_tail_tool_result_context_chars=0,
-                latest_tool_result_reserved_chars=0,
-                tool_result_envelope_context_chars=120,
-            ),
-            context_id="context:tool-result-envelope-over-cap",
-            model_call_index=2,
-            current_user_anchor=user.id,
-        )
-
-    exc = exc_info.value
-    assert exc.context_id == "context:tool-result-envelope-over-cap"
-    assert exc.tool_result_render_decisions
-    assert any(
-        diagnostic.code == "essential_envelope_budget_unsatisfied"
-        for diagnostic in exc.diagnostics
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=10_000,
+            current_tail_tool_result_context_chars=0,
+            latest_tool_result_reserved_chars=0,
+            tool_result_envelope_context_chars=120,
+        ),
+        context_id="context:tool-result-envelope-over-cap",
+        model_call_index=2,
+        current_user_anchor=user.id,
     )
+
+    assert compiled.tool_result_render_decisions
     assert any(
         diagnostic.get("code") == "essential_envelope_budget_unsatisfied"
-        for diagnostic in exc.tool_result_budget_report["diagnostics"]
+        and diagnostic.get("soft_target") is True
+        and diagnostic.get("borrowed_chars", 0) > 0
+        for diagnostic in compiled.tool_result_budget_report["diagnostics"]
     )
+    assert compiled.tool_result_budget_report["soft_target_overage"]["envelope_chars"] > 0
+    assert compiled.tool_result_budget_report["estimated_tokens"]["total"] > 0
 
 
 def test_tool_result_per_message_cap_limits_same_tool_batch() -> None:
@@ -964,7 +1500,7 @@ def test_tool_result_per_message_cap_limits_same_tool_batch() -> None:
     )
 
 
-def test_latest_reserved_reports_unsatisfied_when_global_body_budget_is_exhausted() -> None:
+def test_latest_reserved_short_result_can_borrow_past_body_soft_target() -> None:
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -1010,11 +1546,199 @@ def test_latest_reserved_reports_unsatisfied_when_global_body_budget_is_exhauste
         if decision["tool_call_id"] == "call:latest"
     )
     assert decision["latest_reserved_candidate"] is True
-    assert decision["latest_reserved_applied"] is False
-    assert decision["latest_reserved_reason"] == "latest_reserved_budget_unsatisfied"
-    assert decision["body_budget_remaining"] == compiled.tool_result_budget_report["used_by_scope"]["current_run_tail"]["remaining"]
-    assert decision["body_budget_remaining"] != compiled.tool_result_budget_report["used_by_scope"]["latest_reserved"]["remaining"]
-    assert {"code": "latest_reserved_budget_unsatisfied"} in compiled.tool_result_budget_report["diagnostics"]
+    assert decision["latest_reserved_applied"] is True
+    assert decision["latest_reserved_reason"] == "short_result_visible"
+    assert decision["body_budget_remaining"] == compiled.tool_result_budget_report["used_by_scope"]["latest_reserved"]["remaining"]
+    assert any(
+        diagnostic.get("code") == "tool_result_body_budget_unsatisfied"
+        and diagnostic.get("severity") == "warning"
+        for diagnostic in compiled.tool_result_budget_report["diagnostics"]
+    )
+    assert compiled.tool_result_budget_report["soft_target_overage"]["body_chars"] > 0
+
+
+def test_max_tool_results_per_context_triggers_pressure() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run many commands",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        id="msg:many-tools",
+        content=[
+            ToolCallBlock(id=f"call:{idx}", name="terminal", input='{"cmd":"echo"}')
+            for idx in range(3)
+        ],
+    )
+    results = [
+        AssistantMsg(
+            name="assistant",
+            content=[
+                ToolResultBlock(
+                    id=f"call:{idx}",
+                    name="terminal",
+                    output=[TextBlock(text=f"result:{idx}")],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+        for idx in range(3)
+    ]
+    state.messages.extend([user, assistant, *results])
+
+    with pytest.raises(ContextBudgetExceeded) as exc_info:
+        build_compiled_context(
+            state=state,
+            tools=(),
+            system_prompt="System",
+            budget=LoopBudget(max_tool_results_per_context=2),
+            context_id="context:too-many-tool-results",
+            model_call_index=2,
+            current_user_anchor=user.id,
+        )
+
+    diagnostics = exc_info.value.tool_result_budget_report["diagnostics"]
+    assert any(
+        diagnostic.get("code") == "max_tool_results_per_context_exceeded"
+        and diagnostic.get("severity") == "error"
+        for diagnostic in diagnostics
+    )
+
+
+def test_terminal_essential_envelope_marks_clipped_error() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run broken command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:error", name="terminal", input='{"cmd":"bad"}')],
+    )
+    result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:error",
+                name="terminal",
+                output=[
+                    TextBlock(
+                        text=json.dumps(
+                            {
+                                "status": "error",
+                                "output": "body",
+                                "exit_code": 1,
+                                "cwd": "/workspace",
+                                "error": "E" * 800,
+                                "terminal_session_id": "default",
+                                "backend_type": "local",
+                            }
+                        )
+                    )
+                ],
+                state=ToolResultState.ERROR,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, result])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=2_000,
+            current_tail_tool_result_context_chars=0,
+            latest_tool_result_reserved_chars=0,
+            tool_result_per_envelope_cap_chars=400,
+        ),
+        context_id="context:terminal-error-truncated",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    rendered = "\n".join(
+        text
+        for message in compiled.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    payload = json.loads(rendered.split("\n", 1)[1])
+    assert payload["error_truncated"] is True
+    assert len(payload["error"]) < 800
+
+
+def test_terminal_essential_envelope_respects_per_result_hard_cap() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run very broken command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[ToolCallBlock(id="call:tiny-envelope", name="terminal", input='{"cmd":"bad"}')],
+    )
+    result = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolResultBlock(
+                id="call:tiny-envelope",
+                name="terminal",
+                output=[
+                    TextBlock(
+                        text=json.dumps(
+                            {
+                                "status": "error",
+                                "output": "body",
+                                "exit_code": 1,
+                                "cwd": "/workspace/" + ("deep/" * 80),
+                                "error": "ERR" * 800,
+                                "process_id": "proc-" + ("x" * 400),
+                                "terminal_session_id": "default",
+                                "backend_type": "local",
+                            }
+                        )
+                    )
+                ],
+                state=ToolResultState.ERROR,
+            )
+        ],
+    )
+    state.messages.extend([user, assistant, result])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=2_000,
+            current_tail_tool_result_context_chars=0,
+            latest_tool_result_reserved_chars=0,
+            tool_result_per_envelope_cap_chars=256,
+        ),
+        context_id="context:terminal-envelope-cap",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    decision = compiled.tool_result_render_decisions[0]
+    assert decision["rendered_envelope_chars"] <= 256
+    rendered = next(
+        text
+        for message in compiled.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    assert len(rendered) == decision["rendered_total_chars"]
+    payload = json.loads(rendered.split("\n", 1)[1])
+    assert payload["tool_result_body_omitted"] is True
 
 
 def test_memory_projection_lifecycle_fingerprint_tracks_visible_text_changes() -> None:

@@ -9,9 +9,13 @@ context.
 from __future__ import annotations
 
 import json
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Any
+
+from cachetools import LRUCache
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
 from pulsara_agent.message import (
@@ -29,7 +33,16 @@ from pulsara_agent.runtime.context_engine.types import (
     ContextBudgetExceeded,
     ContextDiagnostic,
 )
+from pulsara_agent.runtime.mcp.types import (
+    MAX_MCP_MODEL_TOOL_NAME_CHARS,
+    normalize_mcp_identifier,
+)
 from pulsara_agent.runtime.state import LoopBudget
+
+
+TOOL_RESULT_RENDER_CACHE_MAX_ENTRIES = 256
+TOOL_RESULT_RENDER_CACHE_MAX_RENDERED_CHARS = 512_000
+ToolResultRenderDecisionCache = MutableMapping[str, dict[str, object]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,12 +53,77 @@ class SegmentedLLMMessages:
     current_run_tail_messages: tuple[LLMMessage, ...] | None
     tool_result_render_decisions: tuple[dict[str, object], ...]
     tool_result_budget_report: dict[str, object]
+    tool_result_render_cache_candidates: dict[str, dict[str, object]]
+
+
+def make_tool_result_render_decision_cache(
+    *,
+    max_rendered_chars: int = TOOL_RESULT_RENDER_CACHE_MAX_RENDERED_CHARS,
+) -> LRUCache[str, dict[str, object]]:
+    return LRUCache(
+        maxsize=max(1, max_rendered_chars),
+        getsizeof=_cache_entry_weight,
+    )
+
+
+def commit_tool_result_render_decision_cache(
+    decision_cache: ToolResultRenderDecisionCache,
+    candidates: dict[str, dict[str, object]],
+    *,
+    max_entries: int = TOOL_RESULT_RENDER_CACHE_MAX_ENTRIES,
+    max_rendered_chars: int = TOOL_RESULT_RENDER_CACHE_MAX_RENDERED_CHARS,
+) -> dict[str, int]:
+    """Commit high-fidelity render candidates after a successful compile."""
+
+    committed_entries = 0
+    evicted_entries = 0
+    evicted_rendered_chars = 0
+    skipped_oversize_entries = 0
+    for key, entry in candidates.items():
+        if _cache_entry_is_oversize(
+            decision_cache,
+            entry,
+            max_rendered_chars=max_rendered_chars,
+        ):
+            skipped_oversize_entries += 1
+            continue
+        before_sizes = {
+            cache_key: _cache_entry_rendered_chars(cache_entry)
+            for cache_key, cache_entry in decision_cache.items()
+        }
+        try:
+            decision_cache[key] = entry
+        except ValueError:
+            skipped_oversize_entries += 1
+            continue
+        committed_entries += 1
+        removed_keys = set(before_sizes) - set(decision_cache)
+        evicted_entries += len(removed_keys)
+        evicted_rendered_chars += sum(before_sizes[key] for key in removed_keys)
+    extra_evicted_entries, extra_evicted_rendered_chars = _evict_tool_result_render_cache(
+        decision_cache,
+        max_entries=max_entries,
+        max_rendered_chars=max_rendered_chars,
+    )
+    evicted_entries += extra_evicted_entries
+    evicted_rendered_chars += extra_evicted_rendered_chars
+    return {
+        "committed_entries": committed_entries,
+        "evicted_entries": evicted_entries,
+        "evicted_rendered_chars": evicted_rendered_chars,
+        "skipped_oversize_entries": skipped_oversize_entries,
+        "entries_after_commit": len(decision_cache),
+        "rendered_chars_after_commit": _cache_rendered_chars(decision_cache),
+        "max_entries": max_entries,
+        "max_rendered_chars": _cache_max_rendered_chars(decision_cache),
+    }
 
 
 def render_segmented_llm_messages(
     messages: list[Msg],
     budget: LoopBudget,
     anchor: str | None,
+    decision_cache: ToolResultRenderDecisionCache | None = None,
 ) -> SegmentedLLMMessages:
     """Render raw Msg history into budgeted model-visible LLM messages.
 
@@ -82,6 +160,7 @@ def render_segmented_llm_messages(
         budget,
         latest_tool_result_ids=latest_ids,
         latest_reserved_tool_result_ids=latest_reserved_ids,
+        decision_cache=decision_cache,
     )
     for index, message in enumerate(messages):
         segment = _message_segment(index, anchor_index)
@@ -90,6 +169,7 @@ def render_segmented_llm_messages(
             tool_budget,
             segment=segment,
             source_message_id=message.id,
+            source_message_index=index,
             source_assistant_message_id=source_assistant_by_index.get(index),
         )
         llm_messages.extend(converted)
@@ -108,6 +188,7 @@ def render_segmented_llm_messages(
         current_run_tail_messages=tuple(tail_messages) if anchor_index is not None else None,
         tool_result_render_decisions=tuple(tool_budget.decisions),
         tool_result_budget_report=tool_budget.report(),
+        tool_result_render_cache_candidates=dict(tool_budget.cache_candidates),
     )
 
 
@@ -123,10 +204,12 @@ def raise_if_tool_result_budget_unsatisfied(
         for diagnostic in report.get("diagnostics", [])
         if isinstance(diagnostic, dict)
     ]
+    # Only the final rendered total is a hard stop at this layer. Aggregate
+    # body/envelope budgets are soft targets: they explain budget pressure and
+    # borrowing, but must not fail a run while the final tool-result payload
+    # still fits inside ``tool_result_context_chars``.
     fail_codes = {
         "tool_result_total_budget_unsatisfied",
-        "tool_result_body_budget_unsatisfied",
-        "essential_envelope_budget_unsatisfied",
         "max_tool_results_per_context_exceeded",
     }
     failures = [
@@ -173,6 +256,7 @@ def _message_to_llm_messages(
     *,
     segment: str,
     source_message_id: str,
+    source_message_index: int,
     source_assistant_message_id: str | None,
 ) -> list[LLMMessage]:
     if message.role == "user":
@@ -181,6 +265,7 @@ def _message_to_llm_messages(
             tool_budget,
             segment=segment,
             source_message_id=source_message_id,
+            source_message_index=source_message_index,
             source_assistant_message_id=source_assistant_message_id,
         )
         return [LLMMessage.user("\n".join(parts))] if parts else []
@@ -190,6 +275,7 @@ def _message_to_llm_messages(
             tool_budget,
             segment=segment,
             source_message_id=source_message_id,
+            source_message_index=source_message_index,
             source_assistant_message_id=source_assistant_message_id,
         )
     if message.role == "system":
@@ -198,6 +284,7 @@ def _message_to_llm_messages(
             tool_budget,
             segment=segment,
             source_message_id=source_message_id,
+            source_message_index=source_message_index,
             source_assistant_message_id=source_assistant_message_id,
         )
         return [LLMMessage.system("\n".join(parts))] if parts else []
@@ -207,6 +294,7 @@ def _message_to_llm_messages(
             tool_budget,
             segment=segment,
             source_message_id=source_message_id,
+            source_message_index=source_message_index,
             source_assistant_message_id=source_assistant_message_id,
         )
     return []
@@ -218,6 +306,7 @@ def _assistant_messages(
     *,
     segment: str,
     source_message_id: str,
+    source_message_index: int,
     source_assistant_message_id: str | None,
 ) -> list[LLMMessage]:
     messages: list[LLMMessage] = []
@@ -240,7 +329,7 @@ def _assistant_messages(
         thinking_parts = []
         tool_calls = []
 
-    for block in message.content:
+    for content_block_index, block in enumerate(message.content):
         if isinstance(block, TextBlock):
             text_parts.append(block.text)
         elif isinstance(block, ThinkingBlock):
@@ -263,6 +352,8 @@ def _assistant_messages(
                     tool_budget,
                     segment=segment,
                     source_message_id=source_message_id,
+                    source_message_index=source_message_index,
+                    content_block_index=content_block_index,
                     source_assistant_message_id=source_assistant_message_id or source_message_id,
                 )
             )
@@ -276,22 +367,29 @@ def _tool_result_messages(
     *,
     segment: str,
     source_message_id: str,
+    source_message_index: int,
     source_assistant_message_id: str | None,
+    content_block_index: int | None = None,
 ) -> list[LLMMessage]:
     messages: list[LLMMessage] = []
-    for block in message.content:
+    for fallback_block_index, block in enumerate(message.content):
         if not isinstance(block, ToolResultBlock):
             continue
+        actual_block_index = content_block_index if content_block_index is not None else fallback_block_index
         body = _render_tool_result_body(
             block,
             tool_budget,
             segment=segment,
             source_message_id=source_message_id,
+            source_message_index=source_message_index,
+            content_block_index=actual_block_index,
             source_assistant_message_id=source_assistant_message_id,
         )
+        model_tool_name = _model_tool_name(block.name)
+        header = _tool_result_header(model_tool_name, block.state.value)
         messages.append(
             LLMMessage.tool_result(
-                f"[tool_result:{block.name}:{block.state.value}]\n{body}",
+                f"{header}{body}",
                 tool_call_id=block.id,
             )
         )
@@ -304,10 +402,11 @@ def _textual_parts(
     *,
     segment: str,
     source_message_id: str,
+    source_message_index: int,
     source_assistant_message_id: str | None,
 ) -> list[str]:
     parts: list[str] = []
-    for block in message.content:
+    for content_block_index, block in enumerate(message.content):
         if isinstance(block, TextBlock):
             parts.append(block.text)
         elif isinstance(block, ToolResultBlock):
@@ -316,9 +415,12 @@ def _textual_parts(
                 tool_budget,
                 segment=segment,
                 source_message_id=source_message_id,
+                source_message_index=source_message_index,
+                content_block_index=content_block_index,
                 source_assistant_message_id=source_assistant_message_id,
             )
-            parts.append(f"[tool_result:{block.name}:{block.state.value}]\n{body}")
+            model_tool_name = _model_tool_name(block.name)
+            parts.append(f"{_tool_result_header(model_tool_name, block.state.value)}{body}")
         elif isinstance(block, DataBlock):
             parts.append(_data_placeholder(block))
         else:
@@ -348,6 +450,7 @@ class _ToolResultRenderAllocator:
         per_tool_cap_chars: int,
         per_message_cap_chars: int,
         per_envelope_cap_chars: int,
+        decision_cache: ToolResultRenderDecisionCache | None = None,
     ) -> None:
         self.caps = caps
         self.segment_remaining = segment_remaining
@@ -358,11 +461,13 @@ class _ToolResultRenderAllocator:
         self.per_tool_cap_chars = per_tool_cap_chars
         self.per_message_cap_chars = per_message_cap_chars
         self.per_envelope_cap_chars = per_envelope_cap_chars
+        self.decision_cache = decision_cache
         self.body_remaining = caps["tool_result_body_context_chars"]
         self.total_remaining = caps["tool_result_total_context_chars"]
         self.batch_remaining: dict[str, int] = {}
         self.envelope_remaining = caps["tool_result_envelope_context_chars"]
         self.decisions: list[dict[str, object]] = []
+        self.cache_candidates: dict[str, dict[str, object]] = {}
         self._render_order = 0
 
     @classmethod
@@ -372,6 +477,7 @@ class _ToolResultRenderAllocator:
         *,
         latest_tool_result_ids: set[str],
         latest_reserved_tool_result_ids: set[str],
+        decision_cache: ToolResultRenderDecisionCache | None = None,
     ) -> "_ToolResultRenderAllocator":
         total = max(0, budget.tool_result_context_chars)
         body_total = budget.tool_result_body_context_chars
@@ -414,6 +520,7 @@ class _ToolResultRenderAllocator:
             "latest_tool_result_reserved_chars": latest_reserved,
             "latest_reserved_total_chars": reserved_total,
             "current_tail_normal_context_chars": normal_current,
+            "protected_current_tail_total_chars": max(0, normal_current + reserved_total),
             "max_tool_results_per_context": max(0, budget.max_tool_results_per_context),
             "minimum_essential_envelope_chars": max(1, budget.minimum_essential_envelope_chars),
         }
@@ -431,6 +538,7 @@ class _ToolResultRenderAllocator:
             per_tool_cap_chars=max(0, per_tool),
             per_message_cap_chars=max(0, per_message),
             per_envelope_cap_chars=per_envelope,
+            decision_cache=decision_cache,
         )
 
     def render(
@@ -439,12 +547,26 @@ class _ToolResultRenderAllocator:
         *,
         segment: str,
         source_message_id: str,
+        source_message_index: int,
+        content_block_index: int,
         source_assistant_message_id: str | None,
     ) -> str:
         self._render_order += 1
         text = _tool_result_text(block)
+        parsed = _parse_tool_result_json(text)
+        render_source_fingerprint = _text_fingerprint(text)
+        artifact_fingerprint = _artifact_fingerprint(block.artifacts)
         original_chars = _tool_result_original_chars(block, text)
         body_candidate_chars, body_candidate_source = _tool_result_body_candidate(block, text)
+        unit_fingerprint = _unit_fingerprint(
+            block=block,
+            source_message_id=source_message_id,
+            source_assistant_message_id=source_assistant_message_id,
+            render_source_fingerprint=render_source_fingerprint,
+            artifact_fingerprint=artifact_fingerprint,
+            body_candidate_chars=body_candidate_chars,
+            original_chars=original_chars,
+        )
         latest_candidate = block.id in self.latest_tool_result_ids
         latest_short = (
             latest_candidate
@@ -460,6 +582,8 @@ class _ToolResultRenderAllocator:
             body_candidate_chars is None
             or batch_before >= min(self.latest_reserved_chars, body_candidate_chars)
         )
+        model_tool_name = _model_tool_name(block.name)
+        header_chars = len(_tool_result_header(model_tool_name, block.state.value))
         use_reserved = (
             latest_short
             and block.id in self.latest_reserved_tool_result_ids
@@ -470,19 +594,56 @@ class _ToolResultRenderAllocator:
         body_allowed = self.latest_reserved_chars if use_reserved else budget_before
         body_allowed = min(body_allowed, batch_before)
         body_allowed = min(body_allowed, self.per_tool_cap_chars) if self.per_tool_cap_chars > 0 else body_allowed
-        body_allowed = min(body_allowed, self.body_remaining, self.total_remaining)
-        envelope_allowed = min(self.envelope_remaining, self.per_envelope_cap_chars, self.total_remaining)
-        total_allowed = self.total_remaining
-
-        rendered, visible_body_chars, body_policy, envelope_policy, primary_artifact_id, artifact_ids, reason = (
-            self._render_with_allowance(
-                block,
-                text,
-                body_allowed=body_allowed,
-                envelope_allowed=envelope_allowed,
-                total_allowed=total_allowed,
-            )
+        total_allowed = self._total_allowed_for_segment(segment)
+        body_payload_total_allowed = max(0, total_allowed - header_chars)
+        body_allowed = min(body_allowed, body_payload_total_allowed)
+        body_payload_envelope_allowed = max(0, self.per_envelope_cap_chars - header_chars)
+        envelope_allowed = min(
+            self.envelope_remaining,
+            body_payload_envelope_allowed,
+            body_payload_total_allowed,
         )
+
+        cache_status = "not_cacheable"
+        cache_diagnostics: list[dict[str, object]] = []
+        cached_output = None
+        if self.decision_cache is not None:
+            cached_entry = self.decision_cache.get(unit_fingerprint)
+            cache_status = "freshly_collected"
+            if cached_entry is not None:
+                cached_output = _cached_render_output(
+                    cached_entry,
+                    body_allowed=body_allowed,
+                    total_allowed=total_allowed,
+                    header_chars=header_chars,
+                    per_envelope_cap_chars=self.per_envelope_cap_chars,
+                )
+                if cached_output is None:
+                    cache_status = "overridden_for_hard_cap"
+                    cache_diagnostics.append(
+                        {
+                            "code": "tool_result_render_cache_overridden_for_hard_cap",
+                            "reason": "cached_rendered_payload_exceeds_current_hard_cap",
+                        }
+                    )
+                else:
+                    cache_status = "reused"
+                    self.decision_cache.pop(unit_fingerprint, None)
+                    self.decision_cache[unit_fingerprint] = cached_entry
+        if cached_output is None:
+            rendered, visible_body_chars, body_policy, envelope_policy, primary_artifact_id, artifact_ids, reason = (
+                self._render_with_allowance(
+                    block,
+                    text,
+                    body_allowed=body_allowed,
+                    envelope_allowed=envelope_allowed,
+                    total_allowed=body_payload_total_allowed,
+                )
+            )
+        else:
+            rendered, visible_body_chars, body_policy, envelope_policy, primary_artifact_id, artifact_ids, reason = (
+                cached_output
+            )
         reserved_applied = use_reserved and _latest_reserved_was_satisfied(
             body_candidate_chars=body_candidate_chars,
             visible_body_chars=visible_body_chars,
@@ -494,10 +655,12 @@ class _ToolResultRenderAllocator:
         else:
             self.segment_remaining[budget_key] = max(0, budget_before - visible_body_chars)
         self.batch_remaining[tool_batch_id] = max(0, batch_before - visible_body_chars)
-        rendered_envelope_chars = max(0, len(rendered) - visible_body_chars)
+        rendered_header_chars = header_chars
+        rendered_envelope_chars = max(0, len(rendered) - visible_body_chars) + rendered_header_chars
+        rendered_total_chars = len(rendered) + rendered_header_chars
         self.body_remaining = max(0, self.body_remaining - visible_body_chars)
         self.envelope_remaining = max(0, self.envelope_remaining - rendered_envelope_chars)
-        self.total_remaining = max(0, self.total_remaining - len(rendered))
+        self.total_remaining = max(0, self.total_remaining - rendered_total_chars)
         remaining_after = self.latest_reserved_remaining if reserved_applied else self.segment_remaining[budget_key]
         latest_reason = self._latest_reserved_reason(
             latest_candidate=latest_candidate,
@@ -506,39 +669,61 @@ class _ToolResultRenderAllocator:
             body_candidate_chars=body_candidate_chars,
             body_candidate_source=body_candidate_source,
         )
-        self.decisions.append(
-            {
-                "tool_call_id": block.id,
-                "source_message_id": source_message_id,
-                "source_assistant_message_id": source_assistant_message_id,
-                "tool_batch_id": tool_batch_id,
-                "tool_name": block.name,
-                "segment": segment,
-                "render_order": self._render_order,
-                "state": block.state.value,
-                "original_chars": original_chars,
-                "body_candidate_chars": body_candidate_chars,
-                "body_candidate_source": body_candidate_source,
-                "latest_reserved_candidate": latest_candidate,
-                "latest_reserved_applied": reserved_applied,
-                "latest_reserved_reason": latest_reason,
-                "visible_body_chars": visible_body_chars,
-                "rendered_envelope_chars": rendered_envelope_chars,
-                "rendered_total_chars": len(rendered),
-                "body_budget_remaining": remaining_after,
-                "batch_body_budget_remaining": self.batch_remaining[tool_batch_id],
-                "envelope_budget_remaining": self.envelope_remaining,
-                "primary_artifact_id": primary_artifact_id,
-                "artifact_ids": artifact_ids,
-                "artifact_ref_count": len(block.artifacts),
-                "body_policy": body_policy,
-                "envelope_policy": envelope_policy,
-                "reason": reason,
-                "clipped_envelope_fields": [],
-                "read_more": _decision_read_more(primary_artifact_id, block),
-                "diagnostics": _tool_result_decision_diagnostics(block, primary_artifact_id),
-            }
+        decision_diagnostics = _tool_result_decision_diagnostics(
+            block,
+            primary_artifact_id,
+            segment=segment,
         )
+        decision_diagnostics.extend(cache_diagnostics)
+        decision = {
+            "tool_call_id": block.id,
+            "source_block_id": block.id,
+            "source_message_id": source_message_id,
+            "source_message_index": source_message_index,
+            "content_block_index": content_block_index,
+            "source_assistant_message_id": source_assistant_message_id,
+            "tool_batch_id": tool_batch_id,
+            "tool_name": block.name,
+            "model_tool_name": model_tool_name,
+            "segment": segment,
+            "render_order": self._render_order,
+            "transcript_order": self._render_order,
+            "state": block.state.value,
+            "render_source_fingerprint": render_source_fingerprint,
+            "artifact_fingerprint": artifact_fingerprint,
+            "unit_fingerprint": unit_fingerprint,
+            "render_decision_cache_status": cache_status,
+            "original_chars": original_chars,
+            "body_candidate_chars": body_candidate_chars,
+            "body_candidate_source": body_candidate_source,
+            "minimum_envelope_kind": _minimum_envelope_kind(block, parsed),
+            "latest_reserved_candidate": latest_candidate,
+            "latest_reserved_applied": reserved_applied,
+            "latest_reserved_reason": latest_reason,
+            "visible_body_chars": visible_body_chars,
+            "rendered_header_chars": rendered_header_chars,
+            "rendered_envelope_chars": rendered_envelope_chars,
+            "rendered_total_chars": rendered_total_chars,
+            "body_budget_remaining": remaining_after,
+            "batch_body_budget_remaining": self.batch_remaining[tool_batch_id],
+            "envelope_budget_remaining": self.envelope_remaining,
+            "primary_artifact_id": primary_artifact_id,
+            "artifact_ids": artifact_ids,
+            "artifact_ref_count": len(block.artifacts),
+            "body_policy": body_policy,
+            "envelope_policy": envelope_policy,
+            "reason": reason,
+            "clipped_envelope_fields": [],
+            "read_more": _decision_read_more(primary_artifact_id, block),
+            "diagnostics": decision_diagnostics,
+        }
+        self.decisions.append(decision)
+        if (
+            self.decision_cache is not None
+            and cache_status == "freshly_collected"
+            and _is_cacheable_render_decision(decision)
+        ):
+            self.cache_candidates[unit_fingerprint] = _decision_cache_entry(decision, rendered)
         return rendered
 
     def _render_with_allowance(
@@ -560,7 +745,7 @@ class _ToolResultRenderAllocator:
                     block,
                     parsed=parsed,
                     artifact_refs=(),
-                    per_envelope_cap_chars=self.per_envelope_cap_chars,
+                    per_envelope_cap_chars=envelope_allowed,
                 )
                 if essential is not None:
                     return (
@@ -578,7 +763,7 @@ class _ToolResultRenderAllocator:
                         block,
                         parsed=parsed,
                         artifact_refs=(),
-                        per_envelope_cap_chars=self.per_envelope_cap_chars,
+                        per_envelope_cap_chars=envelope_allowed,
                     )
                     if essential is not None:
                         return (
@@ -607,7 +792,7 @@ class _ToolResultRenderAllocator:
                     block,
                     parsed=parsed,
                     artifact_refs=(),
-                    per_envelope_cap_chars=self.per_envelope_cap_chars,
+                    per_envelope_cap_chars=envelope_allowed,
                 )
                 if essential is not None:
                     return (
@@ -627,7 +812,7 @@ class _ToolResultRenderAllocator:
             len(text) > body_allowed
             and not _has_room_for_clipped_preview(text, body_allowed)
         ):
-            compact = _compact_artifact_envelope(block, per_envelope_cap_chars=self.per_envelope_cap_chars)
+            compact = _compact_artifact_envelope(block, per_envelope_cap_chars=envelope_allowed)
             return compact, 0, "artifact_preview", "essential_envelope", primary_artifact_id, artifact_ids, "budget_exhausted"
 
         artifact_payloads = _artifact_refs_for_model(block, primary_artifact=primary_artifact)
@@ -661,7 +846,7 @@ class _ToolResultRenderAllocator:
         if rendered_envelope_chars <= envelope_allowed and len(rendered) <= total_allowed:
             body_policy = "full_visible" if not output_truncated else "artifact_preview"
             return rendered, len(clipped), body_policy, "full_envelope", primary_artifact_id, artifact_ids, "within_budget"
-        compact = _compact_artifact_envelope(block, per_envelope_cap_chars=self.per_envelope_cap_chars)
+        compact = _compact_artifact_envelope(block, per_envelope_cap_chars=envelope_allowed)
         return compact, 0, "artifact_preview", "essential_envelope", primary_artifact_id, artifact_ids, "envelope_over_budget"
 
     def _latest_reserved_reason(
@@ -687,6 +872,15 @@ class _ToolResultRenderAllocator:
             return "short_result_visible"
         return "latest_reserved_budget_unsatisfied"
 
+    def _total_allowed_for_segment(self, segment: str) -> int:
+        if segment != "prior_history":
+            return self.total_remaining
+        protected = min(
+            self.total_remaining,
+            int(self.caps.get("protected_current_tail_total_chars", 0)),
+        )
+        return max(0, self.total_remaining - protected)
+
     def report(self) -> dict[str, object]:
         used_by_scope: dict[str, dict[str, int]] = {}
         for segment, remaining in self.segment_remaining.items():
@@ -711,16 +905,23 @@ class _ToolResultRenderAllocator:
         rendered_total = sum(_int_decision(decision.get("rendered_total_chars")) for decision in self.decisions)
         rendered_body = sum(_int_decision(decision.get("visible_body_chars")) for decision in self.decisions)
         rendered_envelope = sum(_int_decision(decision.get("rendered_envelope_chars")) for decision in self.decisions)
+        cache_status_counts: dict[str, int] = {}
+        for decision in self.decisions:
+            status = str(decision.get("render_decision_cache_status") or "not_cacheable")
+            cache_status_counts[status] = cache_status_counts.get(status, 0) + 1
         if any(
             decision.get("latest_reserved_reason") == "latest_reserved_budget_unsatisfied"
             for decision in self.decisions
         ):
-            diagnostics.append({"code": "latest_reserved_budget_unsatisfied"})
+            diagnostics.append({"severity": "warning", "code": "latest_reserved_budget_unsatisfied"})
         if any(_decision_has_diagnostic(decision, "tool_result_primary_text_artifact_missing") for decision in self.decisions):
-            diagnostics.append({"code": "tool_result_primary_text_artifact_missing"})
+            diagnostics.append({"severity": "warning", "code": "tool_result_primary_text_artifact_missing"})
+        if any(_decision_has_diagnostic(decision, "tool_result_in_current_user_segment") for decision in self.decisions):
+            diagnostics.append({"severity": "error", "code": "tool_result_in_current_user_segment"})
         if rendered_total > self.caps["tool_result_total_context_chars"]:
             diagnostics.append(
                 {
+                    "severity": "error",
                     "code": "tool_result_total_budget_unsatisfied",
                     "rendered_total_chars": rendered_total,
                     "cap": self.caps["tool_result_total_context_chars"],
@@ -729,22 +930,29 @@ class _ToolResultRenderAllocator:
         if rendered_body > self.caps["tool_result_body_context_chars"]:
             diagnostics.append(
                 {
+                    "severity": "warning",
                     "code": "tool_result_body_budget_unsatisfied",
                     "rendered_body_chars": rendered_body,
                     "cap": self.caps["tool_result_body_context_chars"],
+                    "soft_target": True,
+                    "borrowed_chars": rendered_body - self.caps["tool_result_body_context_chars"],
                 }
             )
         if rendered_envelope > self.caps["tool_result_envelope_context_chars"]:
             diagnostics.append(
                 {
+                    "severity": "warning",
                     "code": "essential_envelope_budget_unsatisfied",
                     "rendered_envelope_chars": rendered_envelope,
                     "cap": self.caps["tool_result_envelope_context_chars"],
+                    "soft_target": True,
+                    "borrowed_chars": rendered_envelope - self.caps["tool_result_envelope_context_chars"],
                 }
             )
         if len(self.decisions) > self.caps["max_tool_results_per_context"]:
             diagnostics.append(
                 {
+                    "severity": "error",
                     "code": "max_tool_results_per_context_exceeded",
                     "tool_result_count": len(self.decisions),
                     "cap": self.caps["max_tool_results_per_context"],
@@ -757,10 +965,31 @@ class _ToolResultRenderAllocator:
                 "body": rendered_body,
                 "envelope": rendered_envelope,
             },
+            "estimated_tokens": {
+                "total": _estimate_tokens_from_chars(rendered_total),
+                "body": _estimate_tokens_from_chars(rendered_body),
+                "envelope": _estimate_tokens_from_chars(rendered_envelope),
+            },
             "remaining": {
                 "total": self.total_remaining,
                 "body": self.body_remaining,
                 "envelope": self.envelope_remaining,
+            },
+            "soft_target_overage": {
+                "body_chars": max(
+                    0,
+                    rendered_body - self.caps["tool_result_body_context_chars"],
+                ),
+                "envelope_chars": max(
+                    0,
+                    rendered_envelope - self.caps["tool_result_envelope_context_chars"],
+                ),
+                "source_accounting": "not_tracked_v1",
+            },
+            "render_decision_cache": {
+                "status_counts": cache_status_counts,
+                "candidate_entries": len(self.cache_candidates),
+                "candidate_rendered_chars": _cache_rendered_chars(self.cache_candidates),
             },
             "used_by_scope": used_by_scope,
             "used_by_batch": {
@@ -780,18 +1009,172 @@ def _render_tool_result_body(
     *,
     segment: str,
     source_message_id: str,
+    source_message_index: int,
+    content_block_index: int,
     source_assistant_message_id: str | None,
 ) -> str:
     return budget.render(
         block,
         segment=segment,
         source_message_id=source_message_id,
+        source_message_index=source_message_index,
+        content_block_index=content_block_index,
         source_assistant_message_id=source_assistant_message_id,
     )
 
 
 def _int_decision(value: object) -> int:
     return value if isinstance(value, int) else 0
+
+
+def _decision_cache_entry(decision: dict[str, object], rendered: str) -> dict[str, object]:
+    """Store only stable render facts plus the model-visible replacement.
+
+    Dynamic accounting fields such as remaining budget, render order, and cache
+    status are intentionally not used to decide future reuse.
+    """
+
+    stable_keys = (
+        "visible_body_chars",
+        "rendered_header_chars",
+        "rendered_envelope_chars",
+        "rendered_total_chars",
+        "body_policy",
+        "envelope_policy",
+        "primary_artifact_id",
+        "artifact_ids",
+        "reason",
+    )
+    entry = {key: decision[key] for key in stable_keys if key in decision}
+    entry["_rendered"] = rendered
+    return entry
+
+
+def _evict_tool_result_render_cache(
+    decision_cache: ToolResultRenderDecisionCache,
+    *,
+    max_entries: int,
+    max_rendered_chars: int,
+) -> tuple[int, int]:
+    evicted_entries = 0
+    evicted_rendered_chars = 0
+    while decision_cache and (
+        len(decision_cache) > max_entries
+        or (
+            not isinstance(decision_cache, LRUCache)
+            and _cache_rendered_chars(decision_cache) > max_rendered_chars
+        )
+    ):
+        if isinstance(decision_cache, LRUCache):
+            _, evicted = decision_cache.popitem()
+        else:
+            oldest_key = next(iter(decision_cache))
+            evicted = decision_cache.pop(oldest_key)
+        rendered_chars = _cache_entry_rendered_chars(evicted)
+        evicted_entries += 1
+        evicted_rendered_chars += rendered_chars
+    return evicted_entries, evicted_rendered_chars
+
+
+def _cache_entry_is_oversize(
+    decision_cache: ToolResultRenderDecisionCache,
+    entry: dict[str, object],
+    *,
+    max_rendered_chars: int,
+) -> bool:
+    if isinstance(decision_cache, LRUCache):
+        return _cache_entry_weight(entry) > decision_cache.maxsize
+    return _cache_entry_rendered_chars(entry) > max_rendered_chars
+
+
+def _cache_rendered_chars(decision_cache: ToolResultRenderDecisionCache) -> int:
+    return sum(_cache_entry_rendered_chars(entry) for entry in decision_cache.values())
+
+
+def _cache_max_rendered_chars(decision_cache: ToolResultRenderDecisionCache) -> int:
+    if isinstance(decision_cache, LRUCache):
+        return int(decision_cache.maxsize)
+    return TOOL_RESULT_RENDER_CACHE_MAX_RENDERED_CHARS
+
+
+def _cache_entry_rendered_chars(entry: dict[str, object]) -> int:
+    rendered = entry.get("_rendered")
+    return len(rendered) if isinstance(rendered, str) else 0
+
+
+def _cache_entry_weight(entry: dict[str, object]) -> int:
+    return max(1, _cache_entry_rendered_chars(entry))
+
+
+def _is_cacheable_render_decision(decision: dict[str, object]) -> bool:
+    """Only canonicalize high-fidelity renders.
+
+    Low-budget render attempts may be perfectly valid for that one compile, but
+    they should not become the stable replacement used by a later wider retry.
+    """
+
+    if decision.get("body_policy") != "full_visible":
+        return False
+    if decision.get("envelope_policy") != "full_envelope":
+        return False
+    if decision.get("reason") != "within_budget":
+        return False
+    body_candidate_chars = decision.get("body_candidate_chars")
+    visible_body_chars = _int_decision(decision.get("visible_body_chars"))
+    if isinstance(body_candidate_chars, int) and visible_body_chars < body_candidate_chars:
+        return False
+    return True
+
+
+def _cached_render_output(
+    cache_entry: dict[str, object],
+    *,
+    body_allowed: int,
+    total_allowed: int,
+    header_chars: int,
+    per_envelope_cap_chars: int,
+) -> tuple[str, int, str, str, str | None, list[str], str] | None:
+    rendered = cache_entry.get("_rendered")
+    if not isinstance(rendered, str):
+        return None
+    visible_body_chars = _int_decision(cache_entry.get("visible_body_chars"))
+    rendered_total_chars = len(rendered) + header_chars
+    rendered_envelope_chars = max(
+        _int_decision(cache_entry.get("rendered_envelope_chars")),
+        len(rendered) - visible_body_chars + header_chars,
+    )
+    if rendered_total_chars > total_allowed:
+        return None
+    if visible_body_chars > body_allowed:
+        return None
+    if rendered_envelope_chars > per_envelope_cap_chars:
+        return None
+    body_policy = str(cache_entry.get("body_policy") or "cached")
+    envelope_policy = str(cache_entry.get("envelope_policy") or "cached")
+    primary_artifact = cache_entry.get("primary_artifact_id")
+    primary_artifact_id = primary_artifact if isinstance(primary_artifact, str) else None
+    artifact_ids_value = cache_entry.get("artifact_ids")
+    artifact_ids = [
+        artifact_id
+        for artifact_id in artifact_ids_value
+        if isinstance(artifact_id, str)
+    ] if isinstance(artifact_ids_value, list) else []
+    reason = str(cache_entry.get("reason") or "cache_reused")
+    return (
+        rendered,
+        visible_body_chars,
+        body_policy,
+        envelope_policy,
+        primary_artifact_id,
+        artifact_ids,
+        reason,
+    )
+
+
+def _estimate_tokens_from_chars(chars: int) -> int:
+    if chars <= 0:
+        return 0
+    return max(1, (chars + 3) // 4)
 
 
 def _latest_reserved_was_satisfied(
@@ -937,6 +1320,79 @@ def _tool_result_body_candidate(block: ToolResultBlock, text: str) -> tuple[int 
     return len(text), "render_source_text_fallback"
 
 
+def _model_tool_name(
+    tool_name: str,
+    *,
+    max_chars: int = MAX_MCP_MODEL_TOOL_NAME_CHARS,
+    hash_chars: int = 10,
+) -> str:
+    # MCP tools should already arrive here as the provider-exposed model name
+    # (mcp__server__tool, bounded by the MCP normalizer).  For builtins/custom
+    # tools we reuse the same safe identifier rules and maximum length so the
+    # renderer does not invent a second model-name dialect.
+    normalized = normalize_mcp_identifier(tool_name) or "tool"
+    if len(normalized) <= max_chars:
+        return normalized
+    digest = sha256(tool_name.encode("utf-8")).hexdigest()[:hash_chars]
+    suffix = f"_{digest}"
+    return normalized[: max(1, max_chars - len(suffix))] + suffix
+
+
+def _tool_result_header(model_tool_name: str, state: str) -> str:
+    return f"[tool_result:{model_tool_name}:{state}]\n"
+
+
+def _text_fingerprint(text: str) -> str:
+    return "sha256:" + sha256(text.encode("utf-8")).hexdigest()
+
+
+def _artifact_fingerprint(artifacts: tuple[ToolResultArtifactRef, ...]) -> str | None:
+    if not artifacts:
+        return None
+    payload = [
+        {
+            "artifact_id": artifact.artifact_id,
+            "role": artifact.role,
+            "media_type": artifact.media_type,
+            "size_bytes": artifact.size_bytes,
+            "stored_complete": artifact.stored_complete,
+            "loss_reason": artifact.loss_reason,
+            "preview": artifact.preview.model_dump() if artifact.preview is not None else None,
+        }
+        for artifact in artifacts
+    ]
+    return "sha256:" + sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _unit_fingerprint(
+    *,
+    block: ToolResultBlock,
+    source_message_id: str,
+    source_assistant_message_id: str | None,
+    render_source_fingerprint: str,
+    artifact_fingerprint: str | None,
+    body_candidate_chars: int | None,
+    original_chars: int | None,
+) -> str:
+    payload = {
+        "render_policy_version": 1,
+        "tool_call_id": block.id,
+        "tool_name": block.name,
+        "state": block.state.value,
+        "source_message_id": source_message_id,
+        "source_assistant_message_id": source_assistant_message_id,
+        "render_source_fingerprint": render_source_fingerprint,
+        "artifact_fingerprint": artifact_fingerprint,
+        "body_candidate_chars": body_candidate_chars,
+        "original_chars": original_chars,
+    }
+    return "sha256:" + sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def _parse_tool_result_json(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if not stripped.startswith("{"):
@@ -1021,10 +1477,32 @@ def _artifact_ref_payload(
 def _tool_result_decision_diagnostics(
     block: ToolResultBlock,
     primary_artifact_id: str | None,
+    *,
+    segment: str,
 ) -> list[dict[str, object]]:
+    diagnostics: list[dict[str, object]] = []
     if block.artifacts and primary_artifact_id is None:
-        return [{"code": "tool_result_primary_text_artifact_missing"}]
-    return []
+        diagnostics.append({"code": "tool_result_primary_text_artifact_missing"})
+    if segment == "current_user":
+        diagnostics.append({"code": "tool_result_in_current_user_segment"})
+    return diagnostics
+
+
+def _minimum_envelope_kind(block: ToolResultBlock, parsed: dict[str, Any]) -> str:
+    if not _is_terminal_like_payload(block, parsed):
+        return "none"
+    action = parsed.get("terminal_process_action")
+    if action == "list":
+        return "terminal_process_inventory"
+    if action in {"log", "poll", "wait", "kill"}:
+        return "terminal_process_followup"
+    if parsed.get("yielded_to_background") is True:
+        return "terminal_yielded"
+    status = str(parsed.get("status") or block.state.value)
+    process_id = parsed.get("process_id")
+    if status in {"running", "pending"} and process_id:
+        return "terminal_running"
+    return "terminal_completed"
 
 
 def _decision_read_more(artifact_id: str | None, block: ToolResultBlock) -> dict[str, object] | None:
@@ -1143,6 +1621,8 @@ def _essential_tool_result_envelope(
     for key in essential_keys:
         value = parsed.get(key)
         if value is not None:
+            if key == "error" and _string_would_clip(value, max_string_chars=240):
+                payload["error_truncated"] = True
             payload[key] = _clip_envelope_value(value, max_string_chars=240)
     if parsed.get("terminal_process_action") == "list" and isinstance(parsed.get("processes"), list):
         processes, omitted = _summarize_terminal_processes(parsed["processes"])
@@ -1157,6 +1637,8 @@ def _essential_tool_result_envelope(
     clipped_payload = dict(payload)
     for key in ("error", "cwd", "command"):
         if isinstance(clipped_payload.get(key), str):
+            if key == "error" and _string_would_clip(clipped_payload[key], max_string_chars=96):
+                clipped_payload["error_truncated"] = True
             clipped_payload[key] = _clip_string(str(clipped_payload[key]), 96)
     if "processes_summary" in clipped_payload and isinstance(clipped_payload["processes_summary"], list):
         clipped_payload["processes_summary"] = clipped_payload["processes_summary"][:3]
@@ -1173,10 +1655,34 @@ def _essential_tool_result_envelope(
     }
     for key in ("exit_code", "process_id", "terminal_process_action", "error"):
         if key in payload:
+            if key == "error" and _string_would_clip(payload[key], max_string_chars=72):
+                minimal["error_truncated"] = True
             minimal[key] = _clip_envelope_value(payload[key], max_string_chars=72)
     if artifact_refs:
         minimal["artifacts"] = list(artifact_refs[:1])
-    return json.dumps(minimal, ensure_ascii=False)
+    rendered = json.dumps(minimal, ensure_ascii=False)
+    if len(rendered) <= per_envelope_cap_chars:
+        return rendered
+    ultra_minimal: dict[str, object] = {
+        "output_preview": "[omitted]",
+        "output_truncated": True,
+        "tool_result_body_omitted": True,
+        "status": payload.get("status", block.state.value),
+    }
+    for key in ("exit_code", "process_id", "terminal_process_action"):
+        if key in payload:
+            ultra_minimal[key] = _clip_envelope_value(payload[key], max_string_chars=32)
+    if "error" in payload:
+        ultra_minimal["error"] = _clip_envelope_value(payload["error"], max_string_chars=32)
+        ultra_minimal["error_truncated"] = True
+    rendered = json.dumps(ultra_minimal, ensure_ascii=False)
+    if len(rendered) <= per_envelope_cap_chars:
+        return rendered
+    fallback = {
+        "status": block.state.value,
+        "tool_result_body_omitted": True,
+    }
+    return json.dumps(fallback, ensure_ascii=False)
 
 
 def _summarize_terminal_processes(processes: list[Any], *, max_processes: int = 8) -> tuple[list[dict[str, object]], int]:
@@ -1232,6 +1738,10 @@ def _clip_envelope_value(value: object, *, max_string_chars: int) -> object:
     if isinstance(value, str):
         return _clip_string(value, max_string_chars)
     return value
+
+
+def _string_would_clip(value: object, *, max_string_chars: int) -> bool:
+    return isinstance(value, str) and len(value) > max_string_chars
 
 
 def _clip_string(value: str, max_chars: int) -> str:
