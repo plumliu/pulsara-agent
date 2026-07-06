@@ -445,11 +445,12 @@ class SdkMcpClientManager(McpClientManager):
         self._closed = True
         self.cancel_active()
         if self._active_tasks:
-            with contextlib.suppress(TimeoutError):
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(
                     asyncio.gather(*tuple(self._active_tasks), return_exceptions=True),
                     timeout=timeout_seconds,
                 )
+            _clear_current_task_cancellation()
         close_tasks = tuple(self._close_connection(server_id) for server_id in tuple(self._connections))
         if close_tasks:
             with contextlib.suppress(TimeoutError, asyncio.CancelledError):
@@ -457,17 +458,16 @@ class SdkMcpClientManager(McpClientManager):
                     asyncio.gather(*close_tasks, return_exceptions=True),
                     timeout=timeout_seconds,
                 )
+            _clear_current_task_cancellation()
 
     async def _close_connection(self, server_id: str) -> None:
         connection = self._connections.pop(server_id, None)
         if connection is None:
             return
-        await _terminate_sdk_stdio_process(connection.client)
-        with contextlib.suppress(Exception):
-            await connection.client.__aexit__(None, None, None)
+        await _best_effort_sdk_close_step(_terminate_sdk_stdio_process(connection.client))
+        await _best_effort_sdk_close_step(connection.client.__aexit__(None, None, None))
         if connection.http_client is not None:
-            with contextlib.suppress(Exception):
-                await connection.http_client.aclose()
+            await _best_effort_sdk_close_step(connection.http_client.aclose())
 
     def _require_connection(self, server_id: str) -> _SdkServerConnection:
         if self._closed:
@@ -548,6 +548,31 @@ def _sdk_stdio_process(client: Client) -> Any | None:
         if process is not None:
             return process
     return None
+
+
+async def _best_effort_sdk_close_step(awaitable: Any) -> None:
+    """Run one SDK close step without leaking internal cancel-scope shutdown.
+
+    MCP SDK v2 transports may use cancellation as part of normal ``__aexit__``
+    teardown.  Pulsara owns the host/session lifecycle above this facade, so an
+    SDK-internal close cancellation must not poison the REPL task or make
+    ``:close`` fail after the server has already been detached.
+    """
+
+    try:
+        await awaitable
+    except asyncio.CancelledError:
+        _clear_current_task_cancellation()
+    except Exception:
+        pass
+
+
+def _clear_current_task_cancellation() -> None:
+    task = asyncio.current_task()
+    if task is None or not hasattr(task, "uncancel"):
+        return
+    while task.cancelling():
+        task.uncancel()
 
 
 def _safe_child_env(explicit_env: dict[str, str]) -> dict[str, str]:

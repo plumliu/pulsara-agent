@@ -128,7 +128,7 @@ class McpServerSupervisor:
             self._retry_attempts.clear()
             self._next_retry_monotonic.clear()
         await asyncio.gather(
-            *(manager.aclose(timeout_seconds=timeout_seconds) for manager in managers),
+            *(_close_manager_safely(manager, timeout_seconds=timeout_seconds) for manager in managers),
             return_exceptions=True,
         )
 
@@ -138,7 +138,7 @@ class McpServerSupervisor:
         if clear_retry:
             self._clear_retry(server_id)
         if manager is not None:
-            await manager.aclose()
+            await _close_manager_safely(manager, timeout_seconds=5.0)
 
     def _active_manager(self, server_id: str) -> McpClientManager:
         manager = self._managers.get(server_id)
@@ -168,6 +168,21 @@ def disabled_snapshots(configs: tuple[McpServerConfig, ...]) -> tuple[McpServerS
 def _manager_ready(manager: McpClientManager) -> bool:
     snapshots = manager.snapshots
     return bool(snapshots) and all(snapshot.status is McpServerStatus.READY for snapshot in snapshots)
+
+
+async def _close_manager_safely(manager: McpClientManager, *, timeout_seconds: float) -> None:
+    try:
+        await manager.aclose(timeout_seconds=timeout_seconds)
+    except (asyncio.CancelledError, TimeoutError):
+        _clear_current_task_cancellation()
+
+
+def _clear_current_task_cancellation() -> None:
+    task = asyncio.current_task()
+    if task is None or not hasattr(task, "uncancel"):
+        return
+    while task.cancelling():
+        task.uncancel()
 
 
 async def _refresh_manager_snapshot(manager: McpClientManager) -> None:

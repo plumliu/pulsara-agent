@@ -413,6 +413,60 @@ def test_sdk_mcp_manager_discovers_calls_resources_prompts_and_closes(tmp_path: 
     asyncio.run(run())
 
 
+def test_sdk_mcp_manager_close_suppresses_internal_cancel_scope() -> None:
+    class CancelOnExitClient:
+        async def __aexit__(self, exc_type, exc, tb):
+            raise asyncio.CancelledError("SDK internal close cancellation")
+
+    async def run() -> None:
+        manager = SdkMcpClientManager(
+            _snapshots=(),
+            _connections={
+                "docs": SimpleNamespace(
+                    client=CancelOnExitClient(),
+                    http_client=None,
+                )
+            },
+        )
+
+        await manager.aclose(timeout_seconds=1)
+        await asyncio.sleep(0)
+
+        assert manager._connections == {}
+        assert asyncio.current_task() is not None
+        assert asyncio.current_task().cancelling() == 0
+
+    asyncio.run(run())
+
+
+def test_mcp_supervisor_close_suppresses_manager_cancel_scope() -> None:
+    class CancelCloseManager:
+        snapshots = ()
+        close_count = 0
+
+        async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
+            self.close_count += 1
+            raise asyncio.CancelledError("manager internal close cancellation")
+
+        def cancel_active(self) -> None:
+            pass
+
+    async def run() -> None:
+        manager = CancelCloseManager()
+        supervisor = McpServerSupervisor()
+        supervisor._managers["docs"] = manager  # exercise teardown path directly
+
+        await supervisor.aclose(timeout_seconds=1)
+        await asyncio.sleep(0)
+
+        assert manager.close_count == 1
+        assert supervisor.manager is None
+        assert asyncio.current_task() is not None
+        assert asyncio.current_task().cancelling() == 0
+
+    asyncio.run(run())
+
+
 def test_sdk_mcp_manager_maps_input_required_to_pulsara_dto(tmp_path: Path) -> None:
     fixture = _write_sdk_input_required_fixture(tmp_path)
     config = McpServerConfig(
