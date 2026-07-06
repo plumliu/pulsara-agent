@@ -67,6 +67,8 @@ class _SdkServerConnection:
     config: McpServerConfig
     client: Client
     http_client: httpx.AsyncClient | None = None
+    close_requested: asyncio.Event | None = None
+    owner_task: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -112,8 +114,17 @@ class SdkMcpClientManager(McpClientManager):
             return McpServerSnapshot(config=config, status=McpServerStatus.DISABLED)
         try:
             client, http_client = _build_sdk_client(config)
-            await asyncio.wait_for(client.__aenter__(), timeout=config.startup_timeout_ms / 1000)
-            connection = _SdkServerConnection(config=config, client=client, http_client=http_client)
+            close_requested, owner_task = await _start_sdk_client_owner(
+                client,
+                timeout_seconds=config.startup_timeout_ms / 1000,
+            )
+            connection = _SdkServerConnection(
+                config=config,
+                client=client,
+                http_client=http_client,
+                close_requested=close_requested,
+                owner_task=owner_task,
+            )
             self._connections[config.server_id] = connection
             return await self._discover_connected(connection)
         except Exception as exc:
@@ -465,7 +476,12 @@ class SdkMcpClientManager(McpClientManager):
         if connection is None:
             return
         await _best_effort_sdk_close_step(_terminate_sdk_stdio_process(connection.client))
-        await _best_effort_sdk_close_step(connection.client.__aexit__(None, None, None))
+        if connection.close_requested is not None:
+            connection.close_requested.set()
+        if connection.owner_task is not None:
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(connection.owner_task, timeout=1.0)
+            _clear_current_task_cancellation()
         if connection.http_client is not None:
             await _best_effort_sdk_close_step(connection.http_client.aclose())
 
@@ -507,6 +523,52 @@ def _build_sdk_client(config: McpServerConfig) -> tuple[Client, httpx.AsyncClien
             read_timeout_seconds=config.tool_timeout_ms / 1000,
         ), http_client
     raise TypeError(f"unsupported MCP transport: {type(transport).__name__}")
+
+
+async def _start_sdk_client_owner(
+    client: Client,
+    *,
+    timeout_seconds: float,
+) -> tuple[asyncio.Event, asyncio.Task[None]]:
+    """Enter and exit the SDK client context from one dedicated task.
+
+    MCP SDK v2 beta streamable-http transports use anyio cancel scopes that must
+    be exited by the same task that entered them.  Keeping a tiny owner task
+    alive for the lifetime of the connection prevents close-time cancellation
+    from leaking into HostCore/REPL teardown.
+    """
+
+    ready = asyncio.Event()
+    close_requested = asyncio.Event()
+    enter_error: BaseException | None = None
+
+    async def owner() -> None:
+        nonlocal enter_error
+        try:
+            await client.__aenter__()
+        except BaseException as exc:
+            enter_error = exc
+            ready.set()
+            return
+        ready.set()
+        try:
+            await close_requested.wait()
+        finally:
+            await _best_effort_sdk_close_step(client.__aexit__(None, None, None))
+
+    task = asyncio.create_task(owner(), name="pulsara-mcp-sdk-client-owner")
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=timeout_seconds)
+    except BaseException:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        raise
+    if enter_error is not None:
+        with contextlib.suppress(BaseException):
+            await task
+        raise enter_error
+    return close_requested, task
 
 
 async def _terminate_sdk_stdio_process(client: Client) -> None:

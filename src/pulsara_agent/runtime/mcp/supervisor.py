@@ -127,10 +127,17 @@ class McpServerSupervisor:
             self._disabled_configs.clear()
             self._retry_attempts.clear()
             self._next_retry_monotonic.clear()
-        await asyncio.gather(
-            *(_close_manager_safely(manager, timeout_seconds=timeout_seconds) for manager in managers),
-            return_exceptions=True,
-        )
+        try:
+            await asyncio.gather(
+                *(_close_manager_safely(manager, timeout_seconds=timeout_seconds) for manager in managers),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            # The official MCP SDK may cancel the task that is awaiting
+            # transport ``__aexit__`` as part of normal close.  A session-owned
+            # MCP supervisor close is best-effort and must not leak that
+            # internal cancel scope into HostSession/HostCore teardown.
+            _clear_current_task_cancellation()
 
     async def _disconnect(self, server_id: str, *, clear_retry: bool = True) -> None:
         manager = self._managers.pop(server_id, None)

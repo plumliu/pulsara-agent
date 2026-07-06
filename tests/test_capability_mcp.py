@@ -76,7 +76,11 @@ from pulsara_agent.runtime.mcp import (
     mangle_mcp_tool_name,
 )
 from pulsara_agent.runtime.mcp.types import redact_mcp_error_message
-from pulsara_agent.runtime.mcp.sdk import _redact_diagnostic, _sdk_input_responses, mcp_tool_result_from_sdk
+from pulsara_agent.runtime.mcp.sdk import (
+    _redact_diagnostic,
+    _sdk_input_responses,
+    mcp_tool_result_from_sdk,
+)
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor, _config_fingerprint
 from pulsara_agent.cli import _format_repl_mcp_startup_notice, _mcp_command
 from pulsara_agent.runtime.permission import (
@@ -413,17 +417,21 @@ def test_sdk_mcp_manager_discovers_calls_resources_prompts_and_closes(tmp_path: 
     asyncio.run(run())
 
 
-def test_sdk_mcp_manager_close_suppresses_internal_cancel_scope() -> None:
+def test_sdk_mcp_manager_close_suppresses_internal_cancel_scope_without_poisoning_caller() -> None:
     class CancelOnExitClient:
+        exit_called = False
+
         async def __aexit__(self, exc_type, exc, tb):
+            self.exit_called = True
             raise asyncio.CancelledError("SDK internal close cancellation")
 
     async def run() -> None:
+        client = CancelOnExitClient()
         manager = SdkMcpClientManager(
             _snapshots=(),
             _connections={
                 "docs": SimpleNamespace(
-                    client=CancelOnExitClient(),
+                    client=client,
                     http_client=None,
                 )
             },
@@ -1115,6 +1123,42 @@ def test_host_session_close_closes_mcp_manager_once(tmp_path: Path) -> None:
 
     assert manager.close_count == 1
     assert manager.cancel_count == 1
+
+
+def test_host_session_close_suppresses_mcp_manager_internal_cancel(tmp_path: Path) -> None:
+    class CancelCloseMcpManager:
+        snapshots = (_snapshot(_tool()),)
+        close_count = 0
+
+        async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
+            self.close_count += 1
+            raise asyncio.CancelledError("MCP SDK internal close cancellation")
+
+        def cancel_active(self) -> None:
+            pass
+
+    manager = CancelCloseMcpManager()
+    bundle = build_mcp_bundle(manager)
+    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
+        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        wiring=AgentRuntimeWiring(
+            agent_runtime=_CloseOnlyAgentRuntime(runtime_wiring.runtime_session),
+            runtime_wiring=runtime_wiring,
+        ),
+    )
+
+    async def run() -> None:
+        await session.aclose()
+        await asyncio.sleep(0)
+        assert manager.close_count == 1
+        assert asyncio.current_task() is not None
+        assert asyncio.current_task().cancelling() == 0
+
+    asyncio.run(run())
 
 
 def test_host_session_captures_and_resolves_mcp_elicitation(tmp_path: Path) -> None:

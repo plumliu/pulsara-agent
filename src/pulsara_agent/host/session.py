@@ -626,7 +626,14 @@ class HostSession:
         await self._finalize_suspended_run(reason)
         mcp_manager = self.wiring.runtime_wiring.mcp_manager
         if mcp_manager is not None:
-            await mcp_manager.aclose(timeout_seconds=drain_timeout_seconds)
+            try:
+                await mcp_manager.aclose(timeout_seconds=drain_timeout_seconds)
+            except asyncio.CancelledError:
+                # MCP SDK transports can use cancellation as an internal close
+                # signal.  HostSession close owns teardown and should remain
+                # idempotent; do not let a transport cancel scope poison the
+                # caller task or make ``:close`` crash.
+                _clear_current_task_cancellation()
         self.close()
 
     async def drain_active_run(
@@ -1057,3 +1064,11 @@ class HostSession:
         task = self._active_task
         if self._run_lock.locked() or (task is not None and not task.done()):
             raise HostSessionBusyError("host session already has an active run")
+
+
+def _clear_current_task_cancellation() -> None:
+    task = asyncio.current_task()
+    if task is None or not hasattr(task, "uncancel"):
+        return
+    while task.cancelling():
+        task.uncancel()
