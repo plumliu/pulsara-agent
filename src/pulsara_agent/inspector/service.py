@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityGateDecisionEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
@@ -396,25 +397,63 @@ def _capability_surface_projection(events: Iterable[AgentEvent]) -> dict[str, An
     exposures: list[dict[str, Any]] = []
     gate_decisions: list[dict[str, Any]] = []
     for event in events:
-        if not isinstance(event, CustomEvent):
-            continue
-        if event.name == "capability_exposure_resolved":
+        if isinstance(event, CustomEvent) and event.name == "capability_exposure_resolved":
             value = dict(event.value)
             value["sequence"] = event.sequence
             value["run_id"] = event.run_id
             value["turn_id"] = event.turn_id
+            value["reply_id"] = event.reply_id
             exposures.append(_json_safe(value))
-        elif event.name == "capability_gate_decision":
-            value = dict(event.value)
-            value["sequence"] = event.sequence
-            value["run_id"] = event.run_id
-            value["turn_id"] = event.turn_id
-            gate_decisions.append(_json_safe(value))
+            continue
+        gate_decision = _capability_gate_decision_payload(event)
+        if gate_decision is not None:
+            gate_decisions.append(_json_safe(gate_decision))
     return {
         "latest_exposure": exposures[-1] if exposures else None,
         "exposures": exposures,
         "gate_decisions": gate_decisions,
     }
+
+
+def _capability_gate_decision_payload(event: AgentEvent) -> dict[str, Any] | None:
+    if isinstance(event, CapabilityGateDecisionEvent):
+        payload = {
+            "tool_call_id": event.tool_call_id,
+            "tool_name": event.tool_name,
+            "descriptor_id": event.descriptor_id,
+            "decision": event.decision,
+            "reason_code": event.reason_code,
+            "reason_message": event.reason_message,
+            "suggested_rules": event.suggested_rules,
+            "result_state": event.result_state.value if event.result_state is not None else None,
+            "policy_mode": event.policy_mode,
+            "permission_policy": event.permission_policy,
+            "exposure_generation": event.exposure_generation,
+            "availability": event.availability,
+            "permission_category": event.permission_category,
+            "effective_permission_category": event.effective_permission_category,
+            "effective_read_only": event.effective_read_only,
+            "capability_context": event.capability_context,
+        }
+    else:
+        return None
+    payload["sequence"] = event.sequence
+    payload["run_id"] = event.run_id
+    payload["turn_id"] = event.turn_id
+    payload["reply_id"] = event.reply_id
+    payload.setdefault("reason_code", None)
+    payload.setdefault("reason_message", None)
+    payload.setdefault("suggested_rules", [])
+    payload.setdefault("policy_mode", None)
+    payload.setdefault("permission_policy", {})
+    payload.setdefault("exposure_generation", None)
+    payload.setdefault("availability", None)
+    payload.setdefault("permission_category", None)
+    payload.setdefault("effective_permission_category", None)
+    payload.setdefault("effective_read_only", None)
+    payload.setdefault("result_state", None)
+    payload.setdefault("capability_context", {})
+    return payload
 
 
 def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, Any]:

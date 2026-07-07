@@ -24,6 +24,7 @@ from pulsara_agent.capability.providers.mcp import McpCapabilityProvider, build_
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.types import CapabilityResolveContext
 from pulsara_agent.event import (
+    CapabilityGateDecisionEvent,
     CustomEvent,
     EventContext,
     ReplyEndEvent,
@@ -134,6 +135,66 @@ def _snapshot_for_config(
         tools=tools,
         generation=generation,
     )
+
+
+def _mcp_input_required_host_session(
+    tmp_path: Path,
+) -> tuple[HostSession, MockMcpClientManager, AgentRuntimeWiring, AgentRuntime]:
+    def request_input(args: dict[str, object]) -> McpInputRequired:
+        return McpInputRequired(
+            interaction_id="mcp_input_required:host",
+            server_id="docs",
+            protocol_version="2026-07-28",
+            request_state=None,
+            input_requests=(
+                McpInputRequestDTO(
+                    key="token",
+                    method="elicitation/create",
+                    params={"message": "Need a token", "mode": "form"},
+                ),
+            ),
+            original_request=McpOriginalRequest(
+                source_method=McpRequestSourceMethod.TOOL_CALL,
+                tool_name="lookup",
+                arguments=dict(args),
+            ),
+        )
+
+    manager = MockMcpClientManager((_snapshot(_tool()),), handlers={("docs", "lookup"): request_input})
+    bundle = build_mcp_bundle(manager)
+    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
+        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
+    transport = _ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:mcp-input",
+                        "name": "mcp__docs__lookup",
+                        "arguments": json.dumps({"query": "pulsara"}),
+                    }
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    agent = AgentRuntime(
+        runtime_session=runtime_wiring.runtime_session,
+        llm_runtime=_llm_runtime(transport),
+        capability_runtime=CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)),
+        permission_policy=EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.NEVER,
+            terminal=TerminalAccess.ALLOW,
+        ),
+    )
+    session = HostSession(
+        host_session_id="host:test",
+        conversation_id="conversation:test",
+        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
+    )
+    return session, manager, runtime_wiring, agent
 
 
 @dataclass(slots=True)
@@ -1227,60 +1288,7 @@ def test_host_session_captures_and_resolves_mcp_elicitation(tmp_path: Path) -> N
 
 
 def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -> None:
-    def request_input(args: dict[str, object]) -> McpInputRequired:
-        return McpInputRequired(
-            interaction_id="mcp_input_required:host",
-            server_id="docs",
-            protocol_version="2026-07-28",
-            request_state=None,
-            input_requests=(
-                McpInputRequestDTO(
-                    key="token",
-                    method="elicitation/create",
-                    params={"message": "Need a token", "mode": "form"},
-                ),
-            ),
-            original_request=McpOriginalRequest(
-                source_method=McpRequestSourceMethod.TOOL_CALL,
-                tool_name="lookup",
-                arguments=dict(args),
-            ),
-        )
-
-    manager = MockMcpClientManager((_snapshot(_tool()),), handlers={("docs", "lookup"): request_input})
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    transport = _ScriptedTransport(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call:mcp-input",
-                        "name": "mcp__docs__lookup",
-                        "arguments": json.dumps({"query": "pulsara"}),
-                    }
-                ]
-            },
-            {"text": "done"},
-        ]
-    )
-    agent = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.ALLOW,
-        ),
-    )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
-    )
+    session, manager, _, _ = _mcp_input_required_host_session(tmp_path)
 
     first = asyncio.run(session.run_turn("call mcp"))
 
@@ -1311,6 +1319,115 @@ def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -
     assert final.status.value == "finished"
     assert session.get_pending_interaction() is None
     assert manager.calls[-1] == ("docs", "lookup", {"query": "pulsara"})
+
+
+def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path: Path) -> None:
+    session, _, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
+    first = asyncio.run(session.run_turn("call mcp"))
+    assert first.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingMcpInputRequired)
+
+    agent.refresh_capability_runtime(CapabilityRuntime(providers=()))
+    if session._suspended_state is not None:
+        session._suspended_state.scratchpad.pop("capability_exposure", None)
+
+    final = asyncio.run(
+        session.resolve_mcp_input_required(
+            McpInputRequiredInteractionResolution(
+                interaction_id=pending.interaction_id,
+                responses={"token": {"value": "secret"}},
+                cancelled=False,
+            )
+        )
+    )
+
+    assert final.status.value == "finished"
+    gate_decisions = [
+        event
+        for event in runtime_wiring.event_log.iter()
+        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+    ]
+    assert gate_decisions[-1].decision == "deny"
+    assert gate_decisions[-1].reason_code == "capability_descriptor_missing"
+    assert gate_decisions[-1].result_state is ToolResultState.ERROR
+
+
+def test_mcp_input_required_resume_permission_denial_emits_gate_decision(tmp_path: Path) -> None:
+    session, _, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
+    first = asyncio.run(session.run_turn("call mcp"))
+    assert first.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingMcpInputRequired)
+
+    agent.set_permission_policy(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.READ_ONLY,
+            approval=ApprovalPolicy.NEVER,
+            terminal=TerminalAccess.OFF,
+        )
+    )
+
+    final = asyncio.run(
+        session.resolve_mcp_input_required(
+            McpInputRequiredInteractionResolution(
+                interaction_id=pending.interaction_id,
+                responses={"token": {"value": "secret"}},
+                cancelled=False,
+            )
+        )
+    )
+
+    assert final.status.value == "finished"
+    gate_decisions = [
+        event
+        for event in runtime_wiring.event_log.iter()
+        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+    ]
+    assert gate_decisions[-1].decision == "deny"
+    assert gate_decisions[-1].reason_code == "permission_denied"
+    assert gate_decisions[-1].result_state is ToolResultState.DENIED
+    assert gate_decisions[-1].permission_policy["profile"] == "read_only"
+
+
+def test_mcp_input_required_resume_permission_wait_fails_closed_with_typed_deny(tmp_path: Path) -> None:
+    session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
+    first = asyncio.run(session.run_turn("call mcp"))
+    assert first.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingMcpInputRequired)
+
+    agent.set_permission_policy(
+        EffectivePermissionPolicy(
+            profile=PermissionProfile.TRUSTED_HOST,
+            approval=ApprovalPolicy.ON_REQUEST,
+            terminal=TerminalAccess.ALLOW,
+        )
+    )
+
+    final = asyncio.run(
+        session.resolve_mcp_input_required(
+            McpInputRequiredInteractionResolution(
+                interaction_id=pending.interaction_id,
+                responses={"token": {"value": "secret"}},
+                cancelled=False,
+            )
+        )
+    )
+
+    assert final.status.value == "finished"
+    assert manager.calls == [("docs", "lookup", {"query": "pulsara"})]
+    gate_decisions = [
+        event
+        for event in runtime_wiring.event_log.iter()
+        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+    ]
+    assert gate_decisions[-1].decision == "deny"
+    assert gate_decisions[-1].reason_code == "mcp_resume_permission_approval_unsupported"
+    assert gate_decisions[-1].reason_message == (
+        "mcp_resume_permission_approval_unsupported: destructive tool requires user confirmation by approval policy"
+    )
+    assert gate_decisions[-1].result_state is ToolResultState.DENIED
 
 
 def test_mcp_adapter_preserves_wrapper_tool_call_id_on_multi_round_input_required() -> None:

@@ -322,6 +322,21 @@ class PolicyPermissionGate:
         base = await self.inner.evaluate(calls)
         return base
 
+    def evaluate_local_capability_call(
+        self,
+        call: ToolCall,
+        *,
+        exposure: CapabilityExposurePlan,
+        classifier: CapabilityCallClassifier | None = None,
+    ) -> PermissionDecision:
+        """Evaluate only Pulsara-owned per-call capability/policy rules.
+
+        This intentionally does not call ``inner.evaluate``. AgentRuntime uses
+        it to build per-call gate facts before the single batch-level custom
+        permission gate invocation.
+        """
+        return self._evaluate_capability_call(call, exposure, classifier or DefaultCapabilityCallClassifier())
+
     def _evaluate_capability_call(
         self,
         call: ToolCall,

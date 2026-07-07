@@ -8,6 +8,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.event import (
+    CapabilityGateDecisionEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     CustomEvent,
@@ -398,15 +399,27 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                         "callable_names": ["read_file"],
                     },
                 ),
+                CapabilityGateDecisionEvent(
+                    **ctx.event_fields(),
+                    tool_call_id="call:read",
+                    tool_name="read_file",
+                    descriptor_id="builtin:read_file",
+                    decision="allow",
+                    reason_code=None,
+                    permission_policy={"profile": "trusted_host"},
+                    exposure_generation=1,
+                    availability="available",
+                    permission_category="filesystem_read",
+                    effective_permission_category="filesystem_read",
+                    effective_read_only=True,
+                ),
                 CustomEvent(
                     **ctx.event_fields(),
                     name="capability_gate_decision",
                     value={
-                        "tool_call_id": "call:read",
-                        "tool_name": "read_file",
-                        "descriptor_id": "builtin:read_file",
+                        "tool_call_id": "call:legacy",
+                        "tool_name": "legacy_tool",
                         "decision": "allow",
-                        "reason_code": None,
                     },
                 ),
                 *events[1:],
@@ -423,11 +436,23 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                 "sequence": capability["gate_decisions"][0]["sequence"],
                 "run_id": ctx.run_id,
                 "turn_id": ctx.turn_id,
+                "reply_id": ctx.reply_id,
                 "tool_call_id": "call:read",
                 "tool_name": "read_file",
                 "descriptor_id": "builtin:read_file",
                 "decision": "allow",
                 "reason_code": None,
+                "reason_message": None,
+                "suggested_rules": [],
+                "result_state": None,
+                "policy_mode": None,
+                "permission_policy": {"profile": "trusted_host"},
+                "exposure_generation": 1,
+                "availability": "available",
+                "permission_category": "filesystem_read",
+                "effective_permission_category": "filesystem_read",
+                "effective_read_only": True,
+                "capability_context": {},
             }
         ]
     finally:

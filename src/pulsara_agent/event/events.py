@@ -31,6 +31,7 @@ class EventType(StrEnum):
     MODEL_CALL_START = "MODEL_CALL_START"
     MODEL_CALL_END = "MODEL_CALL_END"
     CONTEXT_COMPILED = "CONTEXT_COMPILED"
+    CAPABILITY_GATE_DECISION = "CAPABILITY_GATE_DECISION"
 
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
     TEXT_BLOCK_DELTA = "TEXT_BLOCK_DELTA"
@@ -180,6 +181,26 @@ class ContextCompiledEvent(EventBase):
     lifecycle_decisions: list[dict[str, Any]] = Field(default_factory=list)
     tool_result_render_decisions: list[dict[str, Any]] = Field(default_factory=list)
     tool_result_budget_report: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapabilityGateDecisionEvent(EventBase):
+    type: Literal[EventType.CAPABILITY_GATE_DECISION] = EventType.CAPABILITY_GATE_DECISION
+    tool_call_id: str
+    tool_name: str
+    descriptor_id: str | None = None
+    decision: Literal["allow", "deny", "wait_for_user"]
+    reason_code: str | None = None
+    reason_message: str | None = None
+    suggested_rules: list[dict[str, Any]] = Field(default_factory=list)
+    result_state: ToolResultState | None = None
+    policy_mode: str | None = None
+    permission_policy: dict[str, Any] = Field(default_factory=dict)
+    exposure_generation: int | None = None
+    availability: str | None = None
+    permission_category: str | None = None
+    effective_permission_category: str | None = None
+    effective_read_only: bool | None = None
+    capability_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelCallEndEvent(EventBase):
@@ -611,6 +632,7 @@ AgentEvent: TypeAlias = (
     | RunErrorEvent
     | ExceedMaxItersEvent
     | ContextCompiledEvent
+    | CapabilityGateDecisionEvent
     | ModelCallStartEvent
     | ModelCallEndEvent
     | TextBlockStartEvent
