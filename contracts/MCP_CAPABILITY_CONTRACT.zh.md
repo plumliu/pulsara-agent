@@ -229,6 +229,12 @@ MCP tool 与内置 tool 共享同一套 gate：
 
 MCP 不拥有独立 approval 系统。MCP server 的 annotation / default approval mode 只能影响 descriptor hint 或 diagnostics，不得绕过 Pulsara 的 `PolicyPermissionGate`。
 
+MCP input-required resume 是恢复已挂起 MCP 请求的边界，不得静默绕过 gate。resume 前必须重新执行 capability exposure / permission recheck：
+
+- `DENY`：写入 `CapabilityGateDecisionEvent(decision="deny")` 与 denied/error tool result；
+- `WAIT_FOR_USER`：V1 不创建二次 approval pending，必须 fail-closed，写入 `CapabilityGateDecisionEvent(decision="deny", reason_code="mcp_resume_permission_approval_unsupported")` 与 denied tool result；
+- `ALLOW`：才可以调用 adapter / manager resume。
+
 ---
 
 ## 12. Observability
@@ -236,7 +242,7 @@ MCP 不拥有独立 approval 系统。MCP server 的 annotation / default approv
 MCP 必须能通过现有 capability 与 tool events 被解释：
 
 - `capability_exposure_resolved` 显示 MCP descriptor、hidden/deferred/callable 状态与 diagnostics；
-- `capability_gate_decision` 显示 MCP tool 的最终 gate decision；
+- `CapabilityGateDecisionEvent` 显示 MCP tool 的最终 gate decision；
 - tool call/result events 显示 model tool name；
 - result metadata 保留 server id 与 original tool name；
 - input-required suspension 写入 `tool_execution_suspended`。

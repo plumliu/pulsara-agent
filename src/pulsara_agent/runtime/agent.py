@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import AsyncIterator, Literal
+from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
 
+from pulsara_agent.capability.call_classifier import DefaultCapabilityCallClassifier
+from pulsara_agent.capability.descriptor import CapabilityAvailability
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResolveContext
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityGateDecisionEvent,
     ConfirmResult,
     ContextCompiledEvent,
     CustomEvent,
@@ -119,6 +122,21 @@ WorkspaceKind = Literal["project", "transient"]
 
 _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME = "plan_revision_required_instruction"
 _TERMINAL_CAPABILITY_CONTEXT_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
+_KNOWN_CAPABILITY_GATE_REASON_CODES = frozenset(
+    {
+        "capability_descriptor_missing",
+        "capability_hidden",
+        "capability_unavailable",
+        "capability_not_callable",
+        "permission_denied",
+        "permission_wait_for_user",
+        "permission_wait_for_user_batch_suspension",
+        "workflow_control_batch_suppressed",
+        "mcp_resume_permission_approval_unsupported",
+        "hardline_terminal_command_blocked",
+        "hardline_terminal_process_input_blocked",
+    }
+)
 
 StopReason = Literal[
     "final",
@@ -130,6 +148,26 @@ StopReason = Literal[
     "waiting_user",
     "aborted",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityGateDecisionFact:
+    tool_call_id: str
+    tool_name: str
+    descriptor_id: str | None
+    decision: PermissionDecisionKind
+    reason_code: str | None = None
+    reason_message: str | None = None
+    suggested_rules: tuple[dict[str, Any], ...] = ()
+    result_state: ToolResultState | None = None
+    policy_mode: str | None = None
+    permission_policy: dict[str, Any] = field(default_factory=dict)
+    exposure_generation: int | None = None
+    availability: CapabilityAvailability | None = None
+    permission_category: str | None = None
+    effective_permission_category: str | None = None
+    effective_read_only: bool | None = None
+    capability_context: dict[str, Any] = field(default_factory=dict)
 
 
 def _terminal_capability_context(
@@ -180,6 +218,58 @@ def _merged_skill_values(injections: tuple[ActiveSkillInjection, ...], field_nam
 def _max_auth_required(injections: tuple[ActiveSkillInjection, ...]) -> str:
     rank = {"none": 0, "optional": 1, "required": 2}
     return max((injection.auth_required for injection in injections), key=lambda value: rank[value], default="none")
+
+
+def _normalize_capability_gate_reason(
+    decision: PermissionDecision,
+    *,
+    reason_code_override: str | None = None,
+) -> tuple[str | None, str | None]:
+    reason = decision.reason
+    if reason_code_override is not None:
+        return reason_code_override, reason
+    if reason is None:
+        return None, None
+    if reason in _KNOWN_CAPABILITY_GATE_REASON_CODES:
+        return reason, reason
+    if "capability_descriptor_missing" in reason:
+        return "capability_descriptor_missing", reason
+    if reason.startswith("capability_hidden") or "capability_hidden_in_current_exposure" in reason:
+        return "capability_hidden", reason
+    if reason.startswith("capability_unavailable") or "capability_unavailable_in_current_exposure" in reason:
+        return "capability_unavailable", reason
+    if reason.startswith("capability_not_callable") or "capability_not_callable_in_current_exposure" in reason:
+        return "capability_not_callable", reason
+    if reason.startswith("tool call suppressed because workflow control tool"):
+        return "workflow_control_batch_suppressed", reason
+    if "mcp_resume_permission_approval_unsupported" in reason:
+        return "mcp_resume_permission_approval_unsupported", reason
+    if reason == "terminal command blocked by hardline permission policy":
+        return "hardline_terminal_command_blocked", reason
+    if reason == "terminal process input blocked by hardline permission policy":
+        return "hardline_terminal_process_input_blocked", reason
+    if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
+        return "permission_wait_for_user", reason
+    if decision.kind is PermissionDecisionKind.DENY and "not allowed by permission policy" in reason:
+        return "permission_denied", reason
+    return None, reason
+
+
+def _call_matches_suggested_rule(call: ToolCall, suggested_rules: list[dict] | tuple[dict[str, Any], ...]) -> bool:
+    for rule in suggested_rules:
+        if rule.get("tool") == call.name:
+            return True
+    return False
+
+
+def _suppressed_by_workflow_control_decision(workflow_call: ToolCall) -> PermissionDecision:
+    return PermissionDecision(
+        kind=PermissionDecisionKind.DENY,
+        reason=(
+            f"tool call suppressed because workflow control tool '{workflow_call.name}' "
+            "owns this tool batch"
+        ),
+    )
 
 
 def _mcp_input_requests_from_payload(value: object) -> tuple[McpInputRequestDTO, ...]:
@@ -599,34 +689,72 @@ class AgentRuntime:
         state.scratchpad["capability_exposure"] = exposure
         return exposure
 
-    async def _emit_capability_gate_decision(
+    def _capability_gate_decision_fact(
         self,
-        state: LoopState,
         call: ToolCall,
         *,
         exposure: CapabilityExposurePlan,
         decision: PermissionDecision,
         result_state: ToolResultState | None = None,
-    ) -> AsyncIterator[AgentEvent]:
+        reason_code_override: str | None = None,
+    ) -> CapabilityGateDecisionFact:
         descriptor = exposure.descriptors_by_name.get(call.name)
-        value = {
-            "tool_call_id": call.id,
-            "tool_name": call.name,
-            "descriptor_id": descriptor.id if descriptor is not None else None,
-            "decision": decision.kind.value,
-            "reason_code": decision.reason,
-            "policy_mode": self.permission_mode.value if self.permission_mode is not None else None,
-        }
-        if result_state is not None:
-            value["result_state"] = result_state.value
+        classification = None
+        if descriptor is not None:
+            try:
+                classification = DefaultCapabilityCallClassifier().classify(call, descriptor)
+            except Exception:
+                classification = None
+        reason_code, reason_message = _normalize_capability_gate_reason(
+            decision,
+            reason_code_override=reason_code_override,
+        )
         capability_context = _terminal_capability_context(call, exposure)
-        if capability_context is not None:
-            value["capability_context"] = capability_context
+        return CapabilityGateDecisionFact(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            descriptor_id=descriptor.id if descriptor is not None else None,
+            decision=decision.kind,
+            reason_code=reason_code,
+            reason_message=reason_message,
+            suggested_rules=tuple(dict(rule) for rule in decision.suggested_rules),
+            result_state=result_state,
+            policy_mode=self.permission_mode.value if self.permission_mode is not None else None,
+            permission_policy=dict(self.permission_policy.to_dict()),
+            exposure_generation=exposure.registry_generation,
+            availability=descriptor.availability if descriptor is not None else None,
+            permission_category=descriptor.permission_category if descriptor is not None else None,
+            effective_permission_category=(
+                classification.effective_permission_category if classification is not None else None
+            ),
+            effective_read_only=classification.effective_read_only if classification is not None else None,
+            capability_context=capability_context or {},
+        )
+
+    async def _emit_capability_gate_decision(
+        self,
+        state: LoopState,
+        fact: CapabilityGateDecisionFact,
+    ) -> AsyncIterator[AgentEvent]:
         yield await self.runtime_session.emit(
-            CustomEvent(
+            CapabilityGateDecisionEvent(
                 **self._event_context(state).event_fields(),
-                name="capability_gate_decision",
-                value=value,
+                tool_call_id=fact.tool_call_id,
+                tool_name=fact.tool_name,
+                descriptor_id=fact.descriptor_id,
+                decision=fact.decision.value,
+                reason_code=fact.reason_code,
+                reason_message=fact.reason_message,
+                suggested_rules=list(fact.suggested_rules),
+                result_state=fact.result_state,
+                policy_mode=fact.policy_mode,
+                permission_policy=fact.permission_policy,
+                exposure_generation=fact.exposure_generation,
+                availability=fact.availability.value if fact.availability is not None else None,
+                permission_category=fact.permission_category,
+                effective_permission_category=fact.effective_permission_category,
+                effective_read_only=fact.effective_read_only,
+                capability_context=fact.capability_context,
             ),
             state=state,
         )
@@ -652,14 +780,59 @@ class AgentRuntime:
             result_state=result_state,
         ):
             yield event
-        async for event in self._emit_capability_gate_decision(
-            state,
+        fact = self._capability_gate_decision_fact(
             call,
             exposure=exposure,
             decision=decision,
             result_state=result_state,
-        ):
+        )
+        async for event in self._emit_capability_gate_decision(state, fact):
             yield event
+
+    async def _emit_permission_gate_denial(
+        self,
+        state: LoopState,
+        call: ToolCall,
+        *,
+        exposure: CapabilityExposurePlan,
+        decision: PermissionDecision,
+    ) -> AsyncIterator[AgentEvent]:
+        result_state = (
+            ToolResultState.ERROR
+            if decision.reason and "capability_descriptor_missing" in decision.reason
+            else ToolResultState.DENIED
+        )
+        stored_events = await self.runtime_session.emit_many(
+            build_tool_result_error_events(
+                self._event_context(state),
+                tool_call_id=call.id,
+                tool_call_name=call.name,
+                message=decision.reason or "tool call denied by permission gate",
+                state=result_state,
+            ),
+            state=state,
+        )
+        for event in stored_events:
+            yield event
+        fact = self._capability_gate_decision_fact(
+            call,
+            exposure=exposure,
+            decision=decision,
+            result_state=result_state,
+        )
+        async for event in self._emit_capability_gate_decision(state, fact):
+            yield event
+        result_block = _tool_result_from_event_slice(stored_events, call.id)
+        _remember_tool_result_event_span(state, stored_events, call.id)
+        state.tool_results.append(result_block)
+        state.messages.append(
+            Msg(
+                role="tool_result",
+                name=call.name,
+                id=f"tool-result-message:{call.id}",
+                content=[result_block],
+            )
+        )
 
     async def _stream_capability_access_filtered_calls(
         self,
@@ -1245,27 +1418,49 @@ class AgentRuntime:
             state.pending_interaction_payload = {}
             state.status = LoopStatus.RUNNING
             state.stop_reason = None
-            async for event in self._emit_tool_result_and_record(
+            async for event in self._emit_capability_access_denial(
                 state,
-                tool_call_id=tool_call_id,
-                tool_call_name=tool_name,
-                output=exposure_decision.reason or "MCP tool is no longer callable",
-                result_state=ToolResultState.ERROR,
+                gate_call,
+                exposure=exposure,
+                decision=exposure_decision,
             ):
                 yield event
         else:
             permission_decision = await self.permission_gate.evaluate([gate_call], exposure=exposure)
-            if permission_decision.kind is not PermissionDecisionKind.ALLOW:
+            if permission_decision.kind is PermissionDecisionKind.DENY:
                 state.pending_interaction_kind = None
                 state.pending_interaction_payload = {}
                 state.status = LoopStatus.RUNNING
                 state.stop_reason = None
-                async for event in self._emit_tool_result_and_record(
+                async for event in self._emit_permission_gate_denial(
                     state,
-                    tool_call_id=tool_call_id,
-                    tool_call_name=tool_name,
-                    output=permission_decision.reason or "MCP tool resume was blocked by permission policy",
-                    result_state=ToolResultState.ERROR,
+                    gate_call,
+                    exposure=exposure,
+                    decision=permission_decision,
+                ):
+                    yield event
+            elif permission_decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
+                state.pending_interaction_kind = None
+                state.pending_interaction_payload = {}
+                state.status = LoopStatus.RUNNING
+                state.stop_reason = None
+                reason = "mcp_resume_permission_approval_unsupported"
+                if permission_decision.reason:
+                    reason = f"{reason}: {permission_decision.reason}"
+                async for event in self._emit_permission_gate_denial(
+                    state,
+                    gate_call,
+                    exposure=exposure,
+                    decision=PermissionDecision(
+                        kind=PermissionDecisionKind.DENY,
+                        reason=reason,
+                        suggested_rules=[
+                            {
+                                "tool": gate_call.name,
+                                "reason": "mcp_resume_permission_approval_unsupported",
+                            }
+                        ],
+                    ),
                 ):
                     yield event
             else:
@@ -1866,23 +2061,68 @@ class AgentRuntime:
             else:
                 yield event_or_calls
 
+        if not executable_calls:
+            return
+
         if any(call.name in PLAN_WORKFLOW_TOOL_NAMES for call in executable_calls):
+            async for event in self._emit_workflow_gate_decisions(state, executable_calls, exposure=exposure):
+                yield event
             async for event in self._handle_workflow_tool_batch(state, executable_calls):
                 yield event
             return
 
+        permission_executable_calls: list[ToolCall] = []
+        local_permission_decisions: dict[str, PermissionDecision] = {}
+        for call in executable_calls:
+            local_permission_decision = self.permission_gate.evaluate_local_capability_call(
+                call,
+                exposure=exposure,
+            )
+            if local_permission_decision.kind is PermissionDecisionKind.DENY:
+                async for event in self._emit_permission_gate_denial(
+                    state,
+                    call,
+                    exposure=exposure,
+                    decision=local_permission_decision,
+                ):
+                    yield event
+                continue
+            local_permission_decisions[call.id] = local_permission_decision
+            permission_executable_calls.append(call)
+        executable_calls = permission_executable_calls
         if not executable_calls:
             return
 
         decision = await self.permission_gate.evaluate(executable_calls, exposure=exposure)
         if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
             for call in executable_calls:
-                async for event in self._emit_capability_gate_decision(
-                    state,
+                local_decision = local_permission_decisions.get(call.id)
+                if local_decision is not None and local_decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
+                    fact_decision = local_decision
+                    reason_code_override = "permission_wait_for_user"
+                elif any(
+                    item.kind is PermissionDecisionKind.WAIT_FOR_USER
+                    for item in local_permission_decisions.values()
+                ):
+                    fact_decision = PermissionDecision(
+                        kind=PermissionDecisionKind.WAIT_FOR_USER,
+                        reason=decision.reason,
+                    )
+                    reason_code_override = "permission_wait_for_user_batch_suspension"
+                else:
+                    fact_decision = decision
+                    reason_code_override = (
+                        "permission_wait_for_user"
+                        if _call_matches_suggested_rule(call, decision.suggested_rules) or len(executable_calls) == 1
+                        else "permission_wait_for_user_batch_suspension"
+                    )
+                fact = self._capability_gate_decision_fact(
                     call,
                     exposure=exposure,
-                    decision=decision,
-                ):
+                    decision=fact_decision,
+                    reason_code_override=reason_code_override,
+                )
+                async for event in self._emit_capability_gate_decision(state, fact):
                     yield event
             blocks = [
                 ToolCallBlock(
@@ -1890,7 +2130,12 @@ class AgentRuntime:
                     name=call.name,
                     input=json.dumps(call.arguments),
                     state=ToolCallState.ASKING,
-                    suggested_rules=decision.suggested_rules,
+                    suggested_rules=(
+                        local_permission_decisions[call.id].suggested_rules
+                        if local_permission_decisions.get(call.id) is not None
+                        and local_permission_decisions[call.id].kind is PermissionDecisionKind.WAIT_FOR_USER
+                        else decision.suggested_rules
+                    ),
                 )
                 for call in executable_calls
             ]
@@ -1906,55 +2151,56 @@ class AgentRuntime:
             return
         if decision.kind is PermissionDecisionKind.DENY:
             for call in executable_calls:
-                result_state = (
-                    ToolResultState.ERROR
-                    if decision.reason and "capability_descriptor_missing" in decision.reason
-                    else ToolResultState.DENIED
-                )
-                stored_events = await self.runtime_session.emit_many(
-                    build_tool_result_error_events(
-                        self._event_context(state),
-                        tool_call_id=call.id,
-                        tool_call_name=call.name,
-                        message=decision.reason or "tool call denied by permission gate",
-                        state=result_state,
-                    ),
-                    state=state,
-                )
-                for event in stored_events:
-                    yield event
-                async for event in self._emit_capability_gate_decision(
+                async for event in self._emit_permission_gate_denial(
                     state,
                     call,
                     exposure=exposure,
                     decision=decision,
-                    result_state=result_state,
                 ):
                     yield event
-                result_block = _tool_result_from_event_slice(stored_events, call.id)
-                _remember_tool_result_event_span(state, stored_events, call.id)
-                state.tool_results.append(result_block)
-                state.messages.append(
-                    Msg(
-                        role="tool_result",
-                        name=call.name,
-                        id=f"tool-result-message:{call.id}",
-                        content=[result_block],
-                    )
-                )
             return
 
         for call in executable_calls:
-            async for event in self._emit_capability_gate_decision(
-                state,
+            fact = self._capability_gate_decision_fact(
                 call,
                 exposure=exposure,
                 decision=decision,
-            ):
+            )
+            async for event in self._emit_capability_gate_decision(state, fact):
                 yield event
 
         async for event in self._stream_parsed_tool_calls(state, executable_calls):
             yield event
+
+    async def _emit_workflow_gate_decisions(
+        self,
+        state: LoopState,
+        parsed_calls: list[ToolCall],
+        *,
+        exposure: CapabilityExposurePlan,
+    ) -> AsyncIterator[AgentEvent]:
+        workflow_index = next(
+            index for index, call in enumerate(parsed_calls) if call.name in PLAN_WORKFLOW_TOOL_NAMES
+        )
+        workflow_call = parsed_calls[workflow_index]
+        allow_fact = self._capability_gate_decision_fact(
+            workflow_call,
+            exposure=exposure,
+            decision=PermissionDecision.allow(),
+        )
+        async for event in self._emit_capability_gate_decision(state, allow_fact):
+            yield event
+        for index, call in enumerate(parsed_calls):
+            if index == workflow_index:
+                continue
+            suppress_fact = self._capability_gate_decision_fact(
+                call,
+                exposure=exposure,
+                decision=_suppressed_by_workflow_control_decision(workflow_call),
+                result_state=ToolResultState.DENIED,
+            )
+            async for event in self._emit_capability_gate_decision(state, suppress_fact):
+                yield event
 
     async def _handle_workflow_tool_batch(
         self,

@@ -108,10 +108,12 @@ Timeline 只总结事件，不替代 canonical event list。
 
 ## 6. Capability projection
 
-Inspector 必须从 `CustomEvent` 投影 capability facts：
+Inspector 必须从 typed runtime events 投影 capability facts：
 
 - `capability_exposure_resolved` -> exposures/latest exposure；
-- `capability_gate_decision` -> gate decisions。
+- `CapabilityGateDecisionEvent` -> gate decisions。
+
+`CustomEvent(name="capability_gate_decision")` 不再是新 run 的 canonical fact，也不是 inspector 的兼容读取要求；Capability gate decision 已硬切为 typed event。
 
 不得从当前 `CapabilityRuntime` 重新 resolve 来解释历史，因为 provider/snapshot/skills 可能已经变化。
 

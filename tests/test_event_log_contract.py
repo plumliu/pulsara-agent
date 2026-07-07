@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
+    CapabilityGateDecisionEvent,
     ContextCompiledEvent,
     EventContext,
     PlanExitRequestedEvent,
@@ -339,6 +340,29 @@ def test_context_compiled_pressure_event_round_trips_through_agent_event_seriali
             "used": {"total": 37_000},
             "diagnostics": [{"code": "tool_result_total_budget_unsatisfied"}],
         },
+    )
+
+    assert load_agent_event(dump_agent_event(event)) == event
+
+
+def test_capability_gate_decision_event_round_trips_through_agent_event_serialization() -> None:
+    event = CapabilityGateDecisionEvent(
+        **_ctx("contract:capability-gate").event_fields(),
+        tool_call_id="call:terminal",
+        tool_name="terminal",
+        descriptor_id="builtin:terminal",
+        decision="wait_for_user",
+        reason_code="permission_wait_for_user",
+        reason_message="terminal access requires user confirmation by permission policy",
+        suggested_rules=[{"tool": "terminal", "reason": "terminal_access_ask"}],
+        policy_mode="ask-permissions",
+        permission_policy={"profile": "trusted_host", "terminal_access": "ask"},
+        exposure_generation=7,
+        availability="available",
+        permission_category="terminal",
+        effective_permission_category="terminal",
+        effective_read_only=False,
+        capability_context={"context_kind": "active_skill_present", "active_skill_names": ["hf-cli"]},
     )
 
     assert load_agent_event(dump_agent_event(event)) == event
