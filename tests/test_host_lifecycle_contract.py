@@ -47,12 +47,7 @@ from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.runtime import AbortKind, ApprovalResolution, ToolApprovalDecision
-from pulsara_agent.runtime.permission import (
-    ApprovalPolicy,
-    EffectivePermissionPolicy,
-    PermissionProfile,
-    TerminalAccess,
-)
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode, preset_to_policy
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
     TerminalOwnerContext,
@@ -133,19 +128,11 @@ def _core(monkeypatch, transport: ScriptedTransport) -> HostCore:
 
 
 def _trusted_terminal_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.RISKY_ONLY,
-        terminal=TerminalAccess.ALLOW,
-    )
+    return preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
 
 
 def _trusted_terminal_ask_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.RISKY_ONLY,
-        terminal=TerminalAccess.ASK,
-    )
+    return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
 
 
 async def _open(core, root, *, host_session_id="host:test", conversation_id=None, policy=None):
@@ -455,7 +442,7 @@ def test_close_suspended_run_emits_auditable_host_teardown(tmp_path, monkeypatch
     core = _core(monkeypatch, transport)
 
     async def run():
-        s = await _open(core, tmp_path, host_session_id="host:susp", policy=_trusted_terminal_policy())
+        s = await _open(core, tmp_path, host_session_id="host:susp", policy=_trusted_terminal_ask_policy())
         first = await s.run_turn("danger")
         assert s.get_pending_approval() is not None
         await core.close_session("host:susp")

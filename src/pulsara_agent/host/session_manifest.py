@@ -20,12 +20,12 @@ from psycopg.types.json import Jsonb
 from pulsara_agent.host.identity import HostWorkspaceInput, ResolvedWorkspace
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.runtime.permission import (
-    ApprovalPolicy,
     EffectivePermissionPolicy,
-    PermissionProfile,
-    TerminalAccess,
-    mode_for_policy,
     preset_to_policy,
+)
+from pulsara_agent.runtime.permission_snapshot import (
+    require_preset_permission_mode_for_policy,
+    validate_preset_policy_payload,
 )
 from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
 
@@ -135,13 +135,16 @@ class SessionManifestStore:
         existing = self.get(runtime_session_id, ensure_schema=False)
         existing_metadata = existing.metadata if existing is not None else {}
         created_at = existing.created_at if existing is not None else now
-        permission_mode = mode_for_policy(permission_policy)
+        permission_mode = require_preset_permission_mode_for_policy(
+            permission_policy,
+            context="session manifest runtime permission",
+        )
         metadata = _merged_manifest_metadata(
             existing_metadata,
             conversation_id=conversation_id,
             workspace=workspace,
             model_role=model_role.value,
-            permission_mode=permission_mode.value if permission_mode is not None else None,
+            permission_mode=permission_mode.value,
             permission_policy=permission_policy.to_dict(),
             created_by=created_by,
             created_at=created_at,
@@ -326,17 +329,23 @@ def _merged_manifest_metadata(
     return metadata
 
 
-def permission_policy_from_manifest(manifest: SessionManifest) -> EffectivePermissionPolicy | None:
-    if manifest.permission_mode is not None:
+def permission_policy_from_manifest(manifest: SessionManifest) -> EffectivePermissionPolicy:
+    if manifest.permission_mode is None:
+        if not manifest.permission_policy:
+            raise ValueError(
+                "session manifest permission_mode and permission_policy are required "
+                "under the run-bound permission hard-cut"
+            )
+        raise ValueError("session manifest permission_mode is required when permission_policy is present")
+    if manifest.permission_policy:
+        validate_preset_policy_payload(
+            manifest.permission_mode,
+            manifest.permission_policy,
+            context="SessionManifest",
+        )
+    else:
         return preset_to_policy(manifest.permission_mode)
-    policy = manifest.permission_policy
-    if not policy:
-        return None
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile(str(policy["profile"])),
-        approval=ApprovalPolicy(str(policy["approval_policy"])),
-        terminal=TerminalAccess(str(policy["terminal_access"])),
-    )
+    return preset_to_policy(manifest.permission_mode)
 
 
 def _manifest_from_row(row: dict[str, Any]) -> SessionManifest:

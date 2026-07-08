@@ -175,13 +175,16 @@ def preset_to_policy(mode: str | PermissionMode) -> EffectivePermissionPolicy:
 
 
 def mode_for_policy(policy: EffectivePermissionPolicy) -> PermissionMode | None:
-    """Reverse-map a policy to its preset mode, or None for a custom triple."""
+    """Reverse-map a policy to its preset mode, or None for a custom policy.
+
+    This intentionally compares the full serialized payload, not just the
+    profile/approval/terminal axes.  Production run/session contracts are
+    preset-only, so fields such as execution_boundary and network_isolated are
+    part of the preset identity as well.
+    """
+    policy_payload = policy.to_dict()
     for mode, preset in _PRESET_POLICIES.items():
-        if (preset.profile, preset.approval, preset.terminal) == (
-            policy.profile,
-            policy.approval,
-            policy.terminal,
-        ):
+        if preset.to_dict() == policy_payload:
             return mode
     return None
 
@@ -220,8 +223,8 @@ def resolve_permission_policy(
     env: Mapping[str, str] | None = None,
     prefix: str = "PULSARA",
 ) -> EffectivePermissionPolicy:
-    # Custom three-axis feature entry (PERMISSION_POLICY_CONTRACT §7), not the
-    # main path. The main path is preset_to_policy(). Any axis left unspecified
+    # Component/test-only custom three-axis constructor (PERMISSION_POLICY_CONTRACT §7),
+    # not the production run path. The main path is preset_to_policy(). Any axis left unspecified
     # falls back to the bypass default (PERMISSION_POLICY_CONTRACT §6); no
     # workspace_kind / risky_only inference happens here.
     environ = os.environ if env is None else env

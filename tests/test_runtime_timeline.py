@@ -171,7 +171,7 @@ def test_build_run_timeline_projects_plan_waiting_and_resolution(tmp_path) -> No
                 **CTX.event_fields(),
                 source="user",
                 previous_permission_mode="bypass-permissions",
-                previous_permission_policy={"profile": "trusted_host"},
+                previous_permission_policy=run_start_permission_fields(CTX.run_id)["permission_policy"],
                 reason="plan",
             ),
             PlanQuestionAskedEvent(
@@ -207,7 +207,7 @@ def test_build_run_timeline_projects_plan_waiting_and_resolution(tmp_path) -> No
                 source="approved_exit_plan",
                 exit_request_id="plan_exit:1",
                 restored_permission_mode="bypass-permissions",
-                restored_permission_policy={"profile": "trusted_host"},
+                restored_permission_policy=run_start_permission_fields(CTX.run_id)["permission_policy"],
                 accepted_plan_summary="draft summary",
             ),
         ]:

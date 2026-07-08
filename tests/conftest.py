@@ -1,6 +1,28 @@
 from __future__ import annotations
 
+import builtins
+
 import pytest
+
+from pulsara_agent.runtime.permission import PermissionMode, parse_permission_mode, preset_to_policy
+
+
+def run_start_permission_fields(
+    run_id: str,
+    *,
+    mode: str | PermissionMode = PermissionMode.BYPASS_PERMISSIONS,
+    source: str = "session_default",
+) -> dict[str, object]:
+    parsed = parse_permission_mode(mode)
+    return {
+        "permission_snapshot_id": f"permission_snapshot:{run_id}",
+        "permission_mode": parsed.value,
+        "permission_policy": preset_to_policy(parsed).to_dict(),
+        "permission_snapshot_source": source,
+    }
+
+
+builtins.run_start_permission_fields = run_start_permission_fields
 
 
 @pytest.fixture(autouse=True)

@@ -128,7 +128,7 @@ def _append_turn(log: InMemoryEventLog, label: str, user_input: str, assistant_t
     ctx = _ctx(label)
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=len(user_input), metadata={"user_input": user_input}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=len(user_input), metadata={"user_input": user_input}),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
             TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
             TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{label}", delta=assistant_text),
@@ -141,7 +141,7 @@ def _append_turn(log: InMemoryEventLog, label: str, user_input: str, assistant_t
 async def _emit_turn(runtime_session, label: str, user_input: str, assistant_text: str) -> None:
     ctx = _ctx(label)
     for event in [
-        RunStartEvent(**ctx.event_fields(), user_input_chars=len(user_input), metadata={"user_input": user_input}),
+        RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=len(user_input), metadata={"user_input": user_input}),
         ReplyStartEvent(**ctx.event_fields(), name="assistant"),
         TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
         TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{label}", delta=assistant_text),
@@ -697,6 +697,7 @@ def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_r
     current_start = log.append(
         RunStartEvent(
             **current.event_fields(),
+            **run_start_permission_fields(current.run_id),
             user_input_chars=len("current request"),
             metadata={"user_input": "current request"},
         )
@@ -751,6 +752,7 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
                 run_id=state.run_id,
                 turn_id=state.turn_id,
                 reply_id=state.reply_id,
+                **run_start_permission_fields(state.run_id),
                 user_input_chars=len("current request"),
                 metadata={"user_input": "current request"},
             ),
@@ -820,6 +822,7 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
                 run_id=state.run_id,
                 turn_id=state.turn_id,
                 reply_id=state.reply_id,
+                **run_start_permission_fields(state.run_id),
                 user_input_chars=len("current request"),
                 metadata={"user_input": "current request"},
             ),
@@ -945,7 +948,7 @@ def test_auto_context_compaction_uses_model_visible_messages_not_raw_streaming_e
     ctx = _ctx("streamy")
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "short"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=5, metadata={"user_input": "short"}),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
             TextBlockStartEvent(**ctx.event_fields(), block_id="text:streamy"),
             *[
@@ -1010,7 +1013,7 @@ def test_auto_context_compaction_can_use_context_compiled_estimate() -> None:
     ctx = _ctx("compiled-estimate")
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=5, metadata={"user_input": "hello"}),
             ContextCompiledEvent(
                 **ctx.event_fields(),
                 context_id="context:compiled-estimate",
@@ -1057,7 +1060,7 @@ def test_auto_context_compaction_compiled_prefix_uses_safety_margin() -> None:
     ctx = _ctx("compiled-margin")
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=5, metadata={"user_input": "hello"}),
             ContextCompiledEvent(
                 **ctx.event_fields(),
                 context_id="context:compiled-margin",
@@ -1101,7 +1104,7 @@ def test_auto_context_compaction_compiled_estimate_includes_post_model_output() 
     ctx = _ctx("compiled-post-output")
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=5, metadata={"user_input": "hello"}),
             ContextCompiledEvent(
                 **ctx.event_fields(),
                 context_id="context:compiled-post-output",
@@ -1152,7 +1155,7 @@ def test_compaction_input_coalesces_deltas_and_clips_large_tool_result() -> None
     ctx = _ctx("coalesce")
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=11, metadata={"user_input": "search news"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=11, metadata={"user_input": "search news"}),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
             TextBlockStartEvent(**ctx.event_fields(), block_id="text:coalesce"),
             TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:coalesce", delta="hello "),
@@ -1453,12 +1456,20 @@ def test_host_session_publishes_directly_written_preflight_compaction_events_to_
     async def run() -> None:
         try:
             await runtime_wiring.runtime_session.emit(
-                RunStartEvent(**_ctx("before-gap").event_fields(), user_input_chars=1)
+                RunStartEvent(
+                    **_ctx("before-gap").event_fields(),
+                    **run_start_permission_fields(_ctx("before-gap").run_id),
+                    user_input_chars=1,
+                )
             )
             assert await session._compact_if_needed_and_notify(fake, reason="preflight_context_threshold") is True
             await asyncio.wait_for(
                 runtime_wiring.runtime_session.emit(
-                    RunStartEvent(**_ctx("after-gap").event_fields(), user_input_chars=1)
+                    RunStartEvent(
+                        **_ctx("after-gap").event_fields(),
+                        **run_start_permission_fields(_ctx("after-gap").run_id),
+                        user_input_chars=1,
+                    )
                 ),
                 timeout=1,
             )
@@ -1493,12 +1504,20 @@ def test_host_session_compact_now_publishes_directly_written_events_without_noti
     async def run() -> dict[str, object]:
         try:
             await runtime_wiring.runtime_session.emit(
-                RunStartEvent(**_ctx("manual-before-gap").event_fields(), user_input_chars=1)
+                RunStartEvent(
+                    **_ctx("manual-before-gap").event_fields(),
+                    **run_start_permission_fields(_ctx("manual-before-gap").run_id),
+                    user_input_chars=1,
+                )
             )
             result = await session.compact_now()
             await asyncio.wait_for(
                 runtime_wiring.runtime_session.emit(
-                    RunStartEvent(**_ctx("manual-after-gap").event_fields(), user_input_chars=1)
+                    RunStartEvent(
+                        **_ctx("manual-after-gap").event_fields(),
+                        **run_start_permission_fields(_ctx("manual-after-gap").run_id),
+                        user_input_chars=1,
+                    )
                 ),
                 timeout=1,
             )
@@ -1535,7 +1554,11 @@ def test_host_session_compact_now_failure_publishes_events_to_avoid_sequence_gap
     async def run() -> None:
         try:
             await runtime_wiring.runtime_session.emit(
-                RunStartEvent(**_ctx("manual-fail-before-gap").event_fields(), user_input_chars=1)
+                RunStartEvent(
+                    **_ctx("manual-fail-before-gap").event_fields(),
+                    **run_start_permission_fields(_ctx("manual-fail-before-gap").run_id),
+                    user_input_chars=1,
+                )
             )
             try:
                 await session.compact_now()
@@ -1545,7 +1568,11 @@ def test_host_session_compact_now_failure_publishes_events_to_avoid_sequence_gap
                 raise AssertionError("manual compact failure did not propagate")
             await asyncio.wait_for(
                 runtime_wiring.runtime_session.emit(
-                    RunStartEvent(**_ctx("manual-fail-after-gap").event_fields(), user_input_chars=1)
+                    RunStartEvent(
+                        **_ctx("manual-fail-after-gap").event_fields(),
+                        **run_start_permission_fields(_ctx("manual-fail-after-gap").run_id),
+                        user_input_chars=1,
+                    )
                 ),
                 timeout=1,
             )

@@ -186,6 +186,18 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
         _require(session.get_pending_interaction() is None, "plan dogfood left pending interaction", evidence)
         _require(question_count == 1, "plan dogfood did not ask exactly one plan question", evidence)
         _require(exit_count == 1, "plan dogfood did not request exit_plan exactly once", evidence)
+        if PLAN_SENTINEL not in last_result.final_text:
+            _require(
+                session.plan_state.active is False,
+                "plan dogfood expected approved exit before implementation turn",
+                evidence,
+            )
+            last_result = await _await_with_plan_trace(
+                session,
+                session.run_turn(_PLAN_DOGFOOD_APPROVED_IMPLEMENTATION_REQUEST),
+                evidence,
+                "round_after_exit_implementation",
+            )
 
         events = session.replay_events()
         _collect_artifacts(workspace_root, evidence)
@@ -536,6 +548,16 @@ _PLAN_DOGFOOD_USER_REQUEST = """
 - 我确认后，用 exit_plan 提交计划，得到批准后再改代码。
 - 获批后实现 lazy/passive timeout recovery + receipt/token，运行 `uv run pytest tests/test_visibility_timeout.py -q`。
 - 测试通过后，用一句话总结并包含 PULSARA_PLAN_QUEUE_DOGFOOD_OK。
+""".strip()
+
+
+_PLAN_DOGFOOD_APPROVED_IMPLEMENTATION_REQUEST = f"""
+The plan was approved in the previous run. Plan workflow is now exited.
+
+Now implement the approved lazy/passive visibility timeout + receipt/token design in main.py only.
+Then run exactly: `{TEST_COMMAND}`.
+If tests fail, inspect the failure, fix main.py, and rerun the same command.
+When tests pass, answer with a short final response containing {PLAN_SENTINEL}.
 """.strip()
 
 

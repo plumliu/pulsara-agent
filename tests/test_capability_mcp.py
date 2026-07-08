@@ -87,10 +87,13 @@ from pulsara_agent.cli import _format_repl_mcp_startup_notice, _mcp_command
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
+    PermissionMode,
     PermissionProfile,
     PolicyPermissionGate,
     TerminalAccess,
+    preset_to_policy,
 )
+from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolExecutionSuspended, ToolRuntimeContext
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 
@@ -182,11 +185,7 @@ def _mcp_input_required_host_session(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_llm_runtime(transport),
         capability_runtime=CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.ALLOW,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     session = HostSession(
         host_session_id="host:test",
@@ -1131,11 +1130,7 @@ def test_host_session_mcp_refresh_preserves_non_mcp_bindings_and_providers(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_FinalTextRuntime(),
         capability_runtime=CapabilityRuntime.with_default_providers(provider),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.ALLOW,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     monkeypatch.setattr(
         host_session_module,
@@ -1250,11 +1245,7 @@ def test_host_session_captures_and_resolves_mcp_elicitation(tmp_path: Path) -> N
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_llm_runtime(transport),
         capability_runtime=CapabilityRuntime.with_default_providers(_FixtureCapabilityProvider(fixture_tool.name)),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.ALLOW,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     session = HostSession(
         host_session_id="host:test",
@@ -1322,7 +1313,7 @@ def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -
 
 
 def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path: Path) -> None:
-    session, _, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
+    session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
     first = asyncio.run(session.run_turn("call mcp"))
     assert first.status.value == "waiting_user"
     pending = session.get_pending_interaction()
@@ -1353,57 +1344,16 @@ def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path:
     assert gate_decisions[-1].result_state is ToolResultState.ERROR
 
 
-def test_mcp_input_required_resume_permission_denial_emits_gate_decision(tmp_path: Path) -> None:
-    session, _, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
-    first = asyncio.run(session.run_turn("call mcp"))
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-
-    agent.set_permission_policy(
-        EffectivePermissionPolicy(
-            profile=PermissionProfile.READ_ONLY,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.OFF,
-        )
-    )
-
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "finished"
-    gate_decisions = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
-    ]
-    assert gate_decisions[-1].decision == "deny"
-    assert gate_decisions[-1].reason_code == "permission_denied"
-    assert gate_decisions[-1].result_state is ToolResultState.DENIED
-    assert gate_decisions[-1].permission_policy["profile"] == "read_only"
-
-
-def test_mcp_input_required_resume_permission_wait_fails_closed_with_typed_deny(tmp_path: Path) -> None:
+def test_mcp_input_required_resume_uses_original_run_snapshot_after_read_only_default_switch(
+    tmp_path: Path,
+) -> None:
     session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
     first = asyncio.run(session.run_turn("call mcp"))
     assert first.status.value == "waiting_user"
     pending = session.get_pending_interaction()
     assert isinstance(pending, PendingMcpInputRequired)
 
-    agent.set_permission_policy(
-        EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.ALLOW,
-        )
-    )
+    agent.set_permission_policy(preset_to_policy(PermissionMode.READ_ONLY))
 
     final = asyncio.run(
         session.resolve_mcp_input_required(
@@ -1415,19 +1365,59 @@ def test_mcp_input_required_resume_permission_wait_fails_closed_with_typed_deny(
         )
     )
 
-    assert final.status.value == "finished"
-    assert manager.calls == [("docs", "lookup", {"query": "pulsara"})]
+    assert final.status.value == "waiting_user"
+    assert manager.calls == [
+        ("docs", "lookup", {"query": "pulsara"}),
+        ("docs", "lookup", {"query": "pulsara"}),
+    ]
+    assert isinstance(session.get_pending_interaction(), PendingMcpInputRequired)
     gate_decisions = [
         event
         for event in runtime_wiring.event_log.iter()
         if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
     ]
-    assert gate_decisions[-1].decision == "deny"
-    assert gate_decisions[-1].reason_code == "mcp_resume_permission_approval_unsupported"
-    assert gate_decisions[-1].reason_message == (
-        "mcp_resume_permission_approval_unsupported: destructive tool requires user confirmation by approval policy"
+    assert gate_decisions[-1].decision == "allow"
+    assert gate_decisions[-1].reason_code is None
+    assert gate_decisions[-1].result_state is None
+    assert gate_decisions[-1].permission_policy["profile"] == "trusted_host"
+    assert gate_decisions[-1].permission_policy["terminal_access"] == "allow"
+
+
+def test_mcp_input_required_resume_uses_original_run_snapshot_after_ask_default_switch(tmp_path: Path) -> None:
+    session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
+    first = asyncio.run(session.run_turn("call mcp"))
+    assert first.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingMcpInputRequired)
+
+    agent.set_permission_policy(preset_to_policy(PermissionMode.ASK_PERMISSIONS))
+
+    final = asyncio.run(
+        session.resolve_mcp_input_required(
+            McpInputRequiredInteractionResolution(
+                interaction_id=pending.interaction_id,
+                responses={"token": {"value": "secret"}},
+                cancelled=False,
+            )
+        )
     )
-    assert gate_decisions[-1].result_state is ToolResultState.DENIED
+
+    assert final.status.value == "waiting_user"
+    assert manager.calls == [
+        ("docs", "lookup", {"query": "pulsara"}),
+        ("docs", "lookup", {"query": "pulsara"}),
+    ]
+    assert isinstance(session.get_pending_interaction(), PendingMcpInputRequired)
+    gate_decisions = [
+        event
+        for event in runtime_wiring.event_log.iter()
+        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+    ]
+    assert gate_decisions[-1].decision == "allow"
+    assert gate_decisions[-1].reason_code is None
+    assert gate_decisions[-1].result_state is None
+    assert gate_decisions[-1].permission_policy["profile"] == "trusted_host"
+    assert gate_decisions[-1].permission_policy["terminal_access"] == "allow"
 
 
 def test_mcp_adapter_preserves_wrapper_tool_call_id_on_multi_round_input_required() -> None:
@@ -1548,11 +1538,7 @@ def test_mcp_input_required_resume_failure_preserves_pending_interaction(tmp_pat
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_llm_runtime(transport),
         capability_runtime=CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.ALLOW,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     session = HostSession(
         host_session_id="host:test",
@@ -1600,13 +1586,15 @@ def test_mcp_elicitation_suspends_and_resume_routes_answer_to_manager(tmp_path: 
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_FinalTextRuntime(),
         capability_runtime=CapabilityRuntime.with_default_providers(_FixtureCapabilityProvider(fixture_tool.name)),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.ALLOW,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     state = agent.new_state()
+    state.permission_snapshot = snapshot_from_mode(
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        run_id=state.run_id,
+        permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        permission_snapshot_source="session_default",
+    )
 
     events = asyncio.run(
         _collect(
@@ -1671,13 +1659,15 @@ def test_approved_pending_mcp_call_reruns_capability_gate_and_fails_closed(tmp_p
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_FinalTextRuntime(),
         capability_runtime=CapabilityRuntime(providers=()),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.ALLOW,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     state = agent.new_state()
+    state.permission_snapshot = snapshot_from_mode(
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        run_id=state.run_id,
+        permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        permission_snapshot_source="session_default",
+    )
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_tool_calls = [

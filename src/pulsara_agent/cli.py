@@ -52,12 +52,12 @@ from pulsara_agent.runtime.mcp.store import (
     mcp_config_sources,
 )
 from pulsara_agent.runtime.permission import (
+    DEFAULT_PERMISSION_MODE,
     PermissionMode,
     PermissionState,
     mode_for_policy,
     parse_permission_mode,
     preset_to_policy,
-    resolve_permission_policy,
 )
 from pulsara_agent.repl import ReplPrompt, build_repl_prompt
 from pulsara_agent.settings import PulsaraSettings, load_env_file
@@ -218,27 +218,27 @@ def _add_host_permission_args(parser: argparse.ArgumentParser) -> argparse.Argum
         help=(
             "Permission preset (main path). One of: read-only, ask-permissions, "
             "accept-edits, bypass-permissions. Defaults to bypass-permissions for run, "
-            "read-only for inspect. Mutually exclusive with the advanced --permission-profile/"
-            "--approval-policy/--terminal-access flags."
+            "read-only for inspect. Production host paths are preset-only; the raw "
+            "three-axis flags are rejected."
         ),
     )
     parser.add_argument(
         "--permission-profile",
         default=None,
         choices=("trusted_host", "workspace_guarded", "read_only"),
-        help="[advanced/custom] Raw permission profile. Cannot be combined with --permission-mode.",
+        help="[deprecated/test-only] Raw permission profile is not accepted by production host paths.",
     )
     parser.add_argument(
         "--approval-policy",
         default=None,
         choices=("never", "risky_only", "on_request"),
-        help="[advanced/custom] Raw approval policy. Cannot be combined with --permission-mode.",
+        help="[deprecated/test-only] Raw approval policy is not accepted by production host paths.",
     )
     parser.add_argument(
         "--terminal-access",
         default=None,
         choices=("off", "ask", "allow"),
-        help="[advanced/custom] Raw terminal access policy. Cannot be combined with --permission-mode.",
+        help="[deprecated/test-only] Raw terminal access policy is not accepted by production host paths.",
     )
     return parser
 
@@ -512,6 +512,18 @@ def _format_pending_plan_interaction(pending: PendingPlanInteraction) -> str:
     return _format_plan_exit(pending)
 
 
+def _host_session_status_payload(session) -> dict:
+    default_mode = session.default_permission_mode
+    effective_mode = session.effective_next_run_permission_mode
+    return {
+        "default_mode": default_mode.value if default_mode is not None else None,
+        "default_policy": session.default_permission_policy().to_dict(),
+        "effective_next_run_mode": effective_mode.value if effective_mode is not None else None,
+        "effective_next_run_policy": session.effective_next_run_permission_policy().to_dict(),
+        "plan_active": session.plan_state.active,
+    }
+
+
 def _print_pending_plan_interaction(pending: PendingPlanInteraction | None) -> None:
     if pending is not None:
         print(_format_pending_plan_interaction(pending))
@@ -741,16 +753,7 @@ async def _host_repl(args) -> None:
                 print(json.dumps({"plan": session.plan_state.to_dict(), "policy": policy.to_dict()}, indent=2))
                 continue
             if command == ":status":
-                mode = session.current_permission_mode
-                print(
-                    json.dumps(
-                        {
-                            "mode": mode.value if mode is not None else "custom",
-                            "policy": session.current_permission_policy().to_dict(),
-                        },
-                        indent=2,
-                    )
-                )
+                print(json.dumps(_host_session_status_payload(session), indent=2))
                 continue
             if command.startswith(":mode"):
                 requested = command[len(":mode"):].strip()
@@ -950,7 +953,7 @@ _REPL_HELP = """Commands:
   :resume <session-id>    Detach current HostSession and resume a durable runtime session
   :continue               Detach current HostSession and resume the latest workspace session
   :close                  Explicitly close this durable conversation
-  :status                 Show the current permission mode and policy
+  :status                 Show stored default and effective next-run permission
   :mode <preset>          Switch permission mode
   :plan [reason]          Enter plan mode
   :interaction            Show a pending plan interaction
@@ -1442,21 +1445,30 @@ def _permission_policy_from_host_args(args, *, intent: str):
     raw_approval = getattr(args, "approval_policy", None)
     raw_terminal = getattr(args, "terminal_access", None)
     mode = getattr(args, "permission_mode", None) or _env_permission_mode(prefix)
+    raw_env_axes = [
+        env_name
+        for env_name in (
+            f"{prefix}_PERMISSION_PROFILE",
+            f"{prefix}_APPROVAL_POLICY",
+            f"{prefix}_TERMINAL_ACCESS",
+        )
+        if os.environ.get(env_name)
+    ]
+    custom_flags = [
+        flag
+        for flag, value in (
+            ("--permission-profile", raw_profile),
+            ("--approval-policy", raw_approval),
+            ("--terminal-access", raw_terminal),
+        )
+        if value is not None
+    ] + raw_env_axes
 
     if mode is not None:
-        custom_flags = [
-            flag
-            for flag, value in (
-                ("--permission-profile", raw_profile),
-                ("--approval-policy", raw_approval),
-                ("--terminal-access", raw_terminal),
-            )
-            if value is not None
-        ]
         if custom_flags:
             print(
                 "ERROR: --permission-mode cannot be combined with the advanced flag(s): "
-                f"{', '.join(custom_flags)}. Use a preset OR the custom three-axis flags, not both.",
+                f"{', '.join(custom_flags)}. Production host paths are preset-only; use --permission-mode.",
                 file=sys.stderr,
             )
             raise SystemExit(2)
@@ -1466,10 +1478,12 @@ def _permission_policy_from_host_args(args, *, intent: str):
             print(f"ERROR: {exc}", file=sys.stderr)
             raise SystemExit(2) from exc
 
-    return resolve_permission_policy(
-        intent=intent,
-        profile=raw_profile,
-        approval=raw_approval,
-        terminal=raw_terminal,
-        prefix=prefix,
-    )
+    if custom_flags:
+        print(
+            "ERROR: raw permission axis flag(s) are not accepted by production host paths: "
+            f"{', '.join(custom_flags)}. Use --permission-mode with one of the preset modes.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    return preset_to_policy(PermissionMode.READ_ONLY if intent == "inspect" else DEFAULT_PERMISSION_MODE)

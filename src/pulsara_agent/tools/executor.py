@@ -41,6 +41,11 @@ class ToolExecutor:
         *,
         event_context: EventContext,
         descriptor: CapabilityDescriptor | None = None,
+        context_id: str | None = None,
+        model_call_index: int | None = None,
+        permission_snapshot_id: str | None = None,
+        permission_mode: str | None = None,
+        permission_policy: dict | None = None,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         self._append(
             ToolResultStartEvent(
@@ -51,18 +56,33 @@ class ToolExecutor:
         )
         try:
             tool = self.registry.get(call.name)
+            runtime_context = (
+                ToolRuntimeContext(
+                    runtime_session_id=self.runtime_session_id,
+                    event_context=event_context,
+                    context_id=context_id,
+                    model_call_index=model_call_index,
+                    permission_snapshot_id=permission_snapshot_id,
+                    permission_mode=permission_mode,
+                    permission_policy=permission_policy,
+                )
+                if self.runtime_session_id is not None
+                else None
+            )
             if hasattr(tool, "execute_streaming_with_context"):
                 result = tool.execute_streaming_with_context(
                     call,
                     self._tool_delta_emitter(event_context, call.id),
                     event_context=event_context,
                     record_event=self.record_event,
+                    runtime_context=runtime_context,
                 )
             elif hasattr(tool, "execute_with_context"):
                 result = tool.execute_with_context(
                     call,
                     event_context=event_context,
                     record_event=self.record_event,
+                    runtime_context=runtime_context,
                 )
             elif hasattr(tool, "execute_streaming"):
                 result = tool.execute_streaming(call, self._tool_delta_emitter(event_context, call.id))
@@ -85,6 +105,9 @@ class ToolExecutor:
         descriptor: CapabilityDescriptor | None = None,
         context_id: str | None = None,
         model_call_index: int | None = None,
+        permission_snapshot_id: str | None = None,
+        permission_mode: str | None = None,
+        permission_policy: dict | None = None,
     ) -> ToolExecutionResult:
         self._append(
             ToolResultStartEvent(
@@ -107,6 +130,9 @@ class ToolExecutor:
                     event_context=event_context,
                     context_id=context_id,
                     model_call_index=model_call_index,
+                    permission_snapshot_id=permission_snapshot_id,
+                    permission_mode=permission_mode,
+                    permission_policy=permission_policy,
                 ),
             )
             if isinstance(result, ToolExecutionSuspended):

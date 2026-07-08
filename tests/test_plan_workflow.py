@@ -13,11 +13,7 @@ def test_plan_workflow_reducer_tracks_active_and_exited_state() -> None:
                 **ctx.event_fields(),
                 source="user",
                 previous_permission_mode="bypass-permissions",
-                previous_permission_policy={
-                    "profile": "trusted_host",
-                    "approval_policy": "never",
-                    "terminal_access": "allow",
-                },
+                previous_permission_policy=run_start_permission_fields("run:plan")["permission_policy"],
                 reason="plan first",
             ),
             PlanModeExitedEvent(
@@ -25,11 +21,7 @@ def test_plan_workflow_reducer_tracks_active_and_exited_state() -> None:
                 source="approved_exit_plan",
                 exit_request_id="plan_exit:1",
                 restored_permission_mode="bypass-permissions",
-                restored_permission_policy={
-                    "profile": "trusted_host",
-                    "approval_policy": "never",
-                    "terminal_access": "allow",
-                },
+                restored_permission_policy=run_start_permission_fields("run:plan")["permission_policy"],
                 accepted_plan_summary="accepted summary",
                 accepted_plan_artifact_id=accepted_artifact_id,
             ),
@@ -51,12 +43,8 @@ def test_plan_workflow_reducer_restores_active_state_after_enter() -> None:
         PlanModeEnteredEvent(
             **ctx.event_fields(),
             source="agent",
-            previous_permission_mode=None,
-            previous_permission_policy={
-                "profile": "trusted_host",
-                "approval_policy": "risky_only",
-                "terminal_access": "ask",
-            },
+            previous_permission_mode="ask-permissions",
+            previous_permission_policy=run_start_permission_fields("run:plan", mode="ask-permissions")["permission_policy"],
             reason="agent chose to plan",
         )
     )
@@ -65,9 +53,8 @@ def test_plan_workflow_reducer_restores_active_state_after_enter() -> None:
 
     assert state.active is True
     assert state.entered_by == "agent"
-    assert state.pre_plan_permission_mode is None
-    assert state.pre_plan_permission_policy == {
-        "profile": "trusted_host",
-        "approval_policy": "risky_only",
-        "terminal_access": "ask",
-    }
+    assert state.pre_plan_permission_mode == "ask-permissions"
+    assert state.pre_plan_permission_policy == run_start_permission_fields(
+        "run:plan",
+        mode="ask-permissions",
+    )["permission_policy"]

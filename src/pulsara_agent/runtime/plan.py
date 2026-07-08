@@ -9,7 +9,8 @@ from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent, PlanQuestionOption
 from pulsara_agent.runtime.approval import PendingApproval
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode, parse_permission_mode
+from pulsara_agent.runtime.permission_snapshot import validate_preset_policy_payload
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 PLAN_ENTRY_INSTRUCTION_NAME = "plan_entry_instruction"
 PLAN_ACTIVE_INSTRUCTION_NAME = "plan_active_instruction"
@@ -66,7 +67,7 @@ class PlanWorkflowState:
         self,
         *,
         source: Literal["user", "agent"],
-        previous_mode: PermissionMode | str | None,
+        previous_mode: PermissionMode | str,
         previous_policy: EffectivePermissionPolicy,
         reason: str = "",
         pending_entry_audit: bool = False,
@@ -74,7 +75,13 @@ class PlanWorkflowState:
         self.active = True
         self.entered_by = source
         self.entered_at = time.monotonic()
-        self.pre_plan_permission_mode = previous_mode.value if isinstance(previous_mode, PermissionMode) else previous_mode
+        parsed_mode = parse_permission_mode(previous_mode)
+        validate_preset_policy_payload(
+            parsed_mode,
+            previous_policy.to_dict(),
+            context="PlanWorkflowState.begin",
+        )
+        self.pre_plan_permission_mode = parsed_mode.value
         self.pre_plan_permission_policy = previous_policy.to_dict()
         self.pending_entry_audit = pending_entry_audit
         self.entry_reason = reason

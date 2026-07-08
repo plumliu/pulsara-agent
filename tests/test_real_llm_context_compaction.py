@@ -268,6 +268,7 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Pa
                     run_id=state.run_id,
                     turn_id=state.turn_id,
                     reply_id=state.reply_id,
+                    **run_start_permission_fields(state.run_id),
                     user_input_chars=len("Current request: inspect the just-finished tool output."),
                     metadata={"user_input": "Current request: inspect the just-finished tool output."},
                 ),
@@ -332,7 +333,7 @@ def _append_turn(log: PostgresEventLog, label: str, user_input: str, assistant_t
     )
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=len(user_input), metadata={"user_input": user_input}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=len(user_input), metadata={"user_input": user_input}),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
             TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
             TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{label}", delta=assistant_text),

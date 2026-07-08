@@ -33,10 +33,10 @@ from pulsara_agent.runtime.permission import (
     PermissionMode,
     PermissionProfile,
     TerminalAccess,
-    default_permission_policy,
     parse_permission_mode,
     preset_to_policy,
 )
+from pulsara_agent.runtime.permission_snapshot import validate_preset_policy_payload
 from pulsara_agent.runtime.plan import (
     McpElicitationResolution,
     McpInputRequiredInteractionResolution,
@@ -194,11 +194,6 @@ class HostSession:
         reduced = reduce_plan_workflow_state(self.wiring.runtime_wiring.event_log.iter())
         if reduced.active or reduced.latest_accepted_plan_summary or reduced.latest_accepted_plan_artifact_id:
             self.plan_state = reduced
-        if self.plan_state.active:
-            self.wiring.agent_runtime.set_permission_policy(
-                preset_to_policy(PermissionMode.READ_ONLY),
-                mode=PermissionMode.READ_ONLY,
-            )
 
     @property
     def closed(self) -> bool:
@@ -346,11 +341,29 @@ class HostSession:
         return self.pending_interaction
 
     @property
-    def current_permission_mode(self) -> PermissionMode | None:
+    def default_permission_mode(self) -> PermissionMode | None:
         return self.wiring.agent_runtime.permission_mode
 
-    def current_permission_policy(self) -> EffectivePermissionPolicy:
+    def default_permission_policy(self) -> EffectivePermissionPolicy:
         return self.wiring.agent_runtime.permission_policy
+
+    @property
+    def effective_next_run_permission_mode(self) -> PermissionMode | None:
+        if self.plan_state.active:
+            return PermissionMode.READ_ONLY
+        return self.default_permission_mode
+
+    def effective_next_run_permission_policy(self) -> EffectivePermissionPolicy:
+        if self.plan_state.active:
+            return preset_to_policy(PermissionMode.READ_ONLY)
+        return self.default_permission_policy()
+
+    @property
+    def current_permission_mode(self) -> PermissionMode | None:
+        return self.effective_next_run_permission_mode
+
+    def current_permission_policy(self) -> EffectivePermissionPolicy:
+        return self.effective_next_run_permission_policy()
 
     def set_permission_mode(self, mode: str | PermissionMode) -> EffectivePermissionPolicy:
         """Switch the conversation's permission mode at a turn boundary.
@@ -370,25 +383,8 @@ class HostSession:
                 "approve, cancel, or force-exit the plan first"
             )
         parsed = parse_permission_mode(mode)
-        previous_mode = self.current_permission_mode
         policy = preset_to_policy(parsed)
         self.wiring.agent_runtime.set_permission_policy(policy, mode=parsed)
-        subagent_runtime = getattr(self.wiring.runtime_wiring.runtime_session, "subagent_runtime", None)
-        if (
-            subagent_runtime is not None
-            and previous_mode is PermissionMode.BYPASS_PERMISSIONS
-            and parsed is not PermissionMode.BYPASS_PERMISSIONS
-        ):
-            subagent_runtime.fail_active_children_for_safety_narrowing_now(
-                reason_code="subagent_bypass_revoked",
-                reason_message="Parent permission mode left bypass while child agents were active.",
-                diagnostics=[
-                    {
-                        "previous_permission_mode": previous_mode.value if previous_mode is not None else None,
-                        "new_permission_mode": parsed.value,
-                    }
-                ],
-            )
         self.last_active_at = time.monotonic()
         return policy
 
@@ -1001,14 +997,13 @@ class HostSession:
         if not self.plan_state.active:
             self.plan_state.begin(
                 source="user",
-                previous_mode=self.current_permission_mode,
-                previous_policy=self.current_permission_policy(),
+                previous_mode=self.default_permission_mode,
+                previous_policy=self.default_permission_policy(),
                 reason=reason,
                 pending_entry_audit=False,
             )
             self._emit_user_plan_mode_entered(reason=reason)
         policy = preset_to_policy(PermissionMode.READ_ONLY)
-        self.wiring.agent_runtime.set_permission_policy(policy, mode=PermissionMode.READ_ONLY)
         self.last_active_at = time.monotonic()
         return policy
 
@@ -1064,8 +1059,13 @@ class HostSession:
 
     def _pre_plan_policy(self) -> EffectivePermissionPolicy:
         payload = self.plan_state.pre_plan_permission_policy or {}
-        if not payload:
-            return default_permission_policy()
+        if not payload or self.plan_state.pre_plan_permission_mode is None:
+            raise ValueError("plan workflow is missing preset previous permission facts")
+        validate_preset_policy_payload(
+            self.plan_state.pre_plan_permission_mode,
+            dict(payload),
+            context="HostSession.plan_state",
+        )
         return EffectivePermissionPolicy(
             profile=PermissionProfile(str(payload["profile"])),
             approval=ApprovalPolicy(str(payload["approval_policy"])),
@@ -1083,10 +1083,7 @@ class HostSession:
     ) -> None:
         restored_mode = self.plan_state.pre_plan_permission_mode
         restored_policy = self._pre_plan_policy()
-        self.wiring.agent_runtime.set_permission_policy(
-            restored_policy,
-            mode=parse_permission_mode(restored_mode) if restored_mode is not None else None,
-        )
+        restored_mode_value = parse_permission_mode(restored_mode).value
         await self.wiring.runtime_wiring.runtime_session.emit(
             PlanModeExitedEvent(
                 run_id=state.run_id,
@@ -1094,7 +1091,7 @@ class HostSession:
                 reply_id=state.reply_id,
                 source=source,  # type: ignore[arg-type]
                 exit_request_id=exit_request_id,
-                restored_permission_mode=restored_mode,
+                restored_permission_mode=restored_mode_value,
                 restored_permission_policy=restored_policy.to_dict(),
             ),
             state=state,

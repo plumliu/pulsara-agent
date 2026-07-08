@@ -86,6 +86,12 @@ from pulsara_agent.runtime.permission import (
     parse_permission_mode,
     preset_to_policy,
 )
+from pulsara_agent.runtime.permission_snapshot import (
+    RunPermissionSnapshot,
+    require_preset_permission_mode_for_policy,
+    snapshot_from_mode,
+    validate_preset_policy_payload,
+)
 from pulsara_agent.runtime.plan import (
     McpElicitationResolution,
     McpInputRequiredInteractionResolution,
@@ -477,10 +483,14 @@ class AgentRuntime:
         self.memory_hooks = memory_hooks or NoopMemoryHooks()
         self.tool_result_persistence_hook = tool_result_persistence_hook
         policy = permission_policy or default_permission_policy()
-        # Mutable holder shared by the gate and the terminal tools, so a
-        # mid-conversation mode switch (set_permission_policy) is picked up by
-        # everyone on the next turn without rebuilding the gate/executor/registry.
-        self._permission_state = PermissionState.from_policy(policy)
+        permission_mode = require_preset_permission_mode_for_policy(
+            policy,
+            context="AgentRuntime production permission policy",
+        )
+        # Session default holder. It is used to resolve the next run's immutable
+        # RunPermissionSnapshot; it is no longer the in-run permission fact
+        # source.
+        self._permission_state = PermissionState(policy=policy, mode=permission_mode)
         self.permission_gate = PolicyPermissionGate(
             self._permission_state,
             inner=permission_gate or AllowAllPermissionGate(),
@@ -552,11 +562,17 @@ class AgentRuntime:
         *,
         mode: PermissionMode | None = None,
     ) -> None:
-        """Swap the live permission policy. Takes effect on the next turn for
-        the gate and on next execution for the terminal tools. Nothing is
-        rebuilt — live terminal processes and the event log are unaffected."""
+        """Set the session default permission policy for future runs."""
+        resolved_mode = mode if mode is not None else mode_for_policy(policy)
+        if resolved_mode is None:
+            raise ValueError("AgentRuntime session default requires a preset permission mode")
+        validate_preset_policy_payload(
+            resolved_mode,
+            policy.to_dict(),
+            context="AgentRuntime session default",
+        )
         self._permission_state.policy = policy
-        self._permission_state.mode = mode if mode is not None else mode_for_policy(policy)
+        self._permission_state.mode = resolved_mode
 
     async def run_task(
         self,
@@ -697,6 +713,9 @@ class AgentRuntime:
 
     async def _run_child_agent(self, subagent_runtime: SubagentRuntime, run: SubagentRun) -> None:
         child_session = subagent_runtime.child_runtime_session(run.subagent_run_id)
+        if run.capability_profile.permission_mode is None:
+            raise ValueError("child subagent run requires a preset child_profile permission mode")
+        child_permission_mode = parse_permission_mode(run.capability_profile.permission_mode)
         child_agent = AgentRuntime(
             runtime_session=child_session,
             llm_runtime=self.llm_runtime,
@@ -709,7 +728,7 @@ class AgentRuntime:
             capability_runtime=_profile_filtered_capability_runtime(self.capability_runtime, run.capability_profile),
             memory_domain=None,
             workspace_kind=self.workspace_kind,
-            permission_policy=self.permission_policy,
+            permission_policy=preset_to_policy(child_permission_mode),
             context_compactor=NoopRuntimeContextCompactor(),
             subagent_runtime=subagent_runtime,
             enable_subagents=False,
@@ -762,6 +781,76 @@ class AgentRuntime:
     def new_state(self) -> LoopState:
         return LoopState(session_id=self.runtime_session.runtime_session_id, budget=self.budget)
 
+    def _capture_run_permission_snapshot(self, state: LoopState) -> RunPermissionSnapshot:
+        if state.permission_snapshot is not None:
+            return state.permission_snapshot
+        if self._is_subagent_child:
+            mode = self._permission_state.mode
+            if mode is None:
+                raise ValueError("child AgentRuntime requires a preset child_profile permission mode")
+            source = "child_profile"
+        elif self._plan_state(state).active:
+            mode = PermissionMode.READ_ONLY
+            source = "plan_mode"
+        else:
+            mode = self._permission_state.mode
+            if mode is None:
+                raise ValueError("AgentRuntime session default requires a preset permission mode")
+            source = "session_default"
+        snapshot = snapshot_from_mode(
+            runtime_session_id=self.runtime_session.runtime_session_id,
+            run_id=state.run_id,
+            permission_mode=mode,
+            permission_snapshot_source=source,
+        )
+        state.permission_snapshot = snapshot
+        return snapshot
+
+    def _require_run_permission_snapshot(self, state: LoopState) -> RunPermissionSnapshot:
+        if state.permission_snapshot is None:
+            raise RuntimeError(
+                "missing RunPermissionSnapshot for active run; RunStartEvent permission fields are required"
+            )
+        return state.permission_snapshot
+
+    def _run_permission_policy(self, state: LoopState) -> EffectivePermissionPolicy:
+        return preset_to_policy(self._require_run_permission_snapshot(state).permission_mode)
+
+    def _run_permission_mode(self, state: LoopState) -> PermissionMode:
+        return self._require_run_permission_snapshot(state).permission_mode
+
+    def _permission_gate_for_state(self, state: LoopState) -> PolicyPermissionGate:
+        return PolicyPermissionGate(
+            self._require_run_permission_snapshot(state).to_permission_state(),
+            inner=self.permission_gate.inner,
+        )
+
+    def _tool_runtime_context(
+        self,
+        state: LoopState,
+        *,
+        context_id: str | None = None,
+        model_call_index: int | None = None,
+    ) -> ToolRuntimeContext:
+        snapshot = self._require_run_permission_snapshot(state)
+        return ToolRuntimeContext(
+            runtime_session_id=self.runtime_session.runtime_session_id,
+            event_context=self._event_context(state),
+            context_id=context_id,
+            model_call_index=model_call_index,
+            permission_snapshot_id=snapshot.snapshot_id,
+            permission_mode=snapshot.permission_mode.value,
+            permission_policy=dict(snapshot.permission_policy),
+        )
+
+    def _tool_permission_kwargs(self, state: LoopState) -> dict[str, object]:
+        snapshot = self._require_run_permission_snapshot(state)
+        return {
+            "permission_snapshot_id": snapshot.snapshot_id,
+            "permission_mode": snapshot.permission_mode.value,
+            "permission_policy": dict(snapshot.permission_policy),
+        }
+
     async def _stream_task(
         self,
         user_input: str,
@@ -777,6 +866,7 @@ class AgentRuntime:
         ):
             await self.subagent_runtime.repair_dangling_children()
             self._subagent_dangling_repair_done = True
+        permission_snapshot = self._capture_run_permission_snapshot(state)
         state.messages.extend(message.model_copy(deep=True) for message in (prior_messages or []))
         state.messages.append(
             UserMsg(
@@ -790,6 +880,7 @@ class AgentRuntime:
             RunStartEvent(
                 **self._event_context(state).event_fields(),
                 user_input_chars=len(user_input),
+                **permission_snapshot.to_event_fields(),
                 metadata={"user_input": user_input},
             ),
             state=state,
@@ -817,8 +908,8 @@ class AgentRuntime:
         if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
             self.subagent_runtime.refresh_parent_capability_snapshot(
                 exposure=exposure,
-                permission_mode=self.permission_mode.value if self.permission_mode is not None else None,
-                permission_policy=self.permission_policy.to_dict(),
+                permission_mode=permission_snapshot.permission_mode.value,
+                permission_policy=dict(permission_snapshot.permission_policy),
             )
         yield await self.runtime_session.emit(
             CustomEvent(
@@ -851,7 +942,7 @@ class AgentRuntime:
                 active_skill_names=active_skill_names or frozenset(),
             ),
             tool_registry=self.tool_executor.registry,
-            permission_policy=self.permission_policy,
+            permission_policy=self._run_permission_policy(state),
             plan_active=self._plan_state(state).active,
         )
 
@@ -870,6 +961,7 @@ class AgentRuntime:
 
     def _capability_gate_decision_fact(
         self,
+        state: LoopState,
         call: ToolCall,
         *,
         exposure: CapabilityExposurePlan,
@@ -902,8 +994,8 @@ class AgentRuntime:
             reason_message=reason_message,
             suggested_rules=tuple(dict(rule) for rule in decision.suggested_rules),
             result_state=result_state,
-            policy_mode=self.permission_mode.value if self.permission_mode is not None else None,
-            permission_policy=dict(self.permission_policy.to_dict()),
+            policy_mode=self._run_permission_mode(state).value,
+            permission_policy=dict(self._require_run_permission_snapshot(state).permission_policy),
             exposure_generation=exposure.registry_generation,
             availability=descriptor.availability if descriptor is not None else None,
             permission_category=descriptor.permission_category if descriptor is not None else None,
@@ -964,6 +1056,7 @@ class AgentRuntime:
         ):
             yield event
         fact = self._capability_gate_decision_fact(
+            state,
             call,
             exposure=exposure,
             decision=decision,
@@ -998,6 +1091,7 @@ class AgentRuntime:
         for event in stored_events:
             yield event
         fact = self._capability_gate_decision_fact(
+            state,
             call,
             exposure=exposure,
             decision=decision,
@@ -1526,10 +1620,7 @@ class AgentRuntime:
             result = await resume(
                 request_id=request_id,
                 answer=answer,
-                runtime_context=ToolRuntimeContext(
-                    runtime_session_id=self.runtime_session.runtime_session_id,
-                    event_context=self._event_context(state),
-                ),
+                runtime_context=self._tool_runtime_context(state),
             )
             async for event in self._emit_tool_result_and_record(
                 state,
@@ -1643,7 +1734,7 @@ class AgentRuntime:
             ):
                 yield event
         else:
-            permission_decision = await self.permission_gate.evaluate([gate_call], exposure=exposure)
+            permission_decision = await self._permission_gate_for_state(state).evaluate([gate_call], exposure=exposure)
             if permission_decision.kind is PermissionDecisionKind.DENY:
                 state.pending_interaction_kind = None
                 state.pending_interaction_payload = {}
@@ -1710,10 +1801,7 @@ class AgentRuntime:
                                 round_count=round_count,
                                 deadline_monotonic=deadline_monotonic,
                             ),
-                            runtime_context=ToolRuntimeContext(
-                                runtime_session_id=self.runtime_session.runtime_session_id,
-                                event_context=self._event_context(state),
-                            ),
+                            runtime_context=self._tool_runtime_context(state),
                         )
                     except Exception as exc:
                         state.pending_interaction_kind = "mcp_input_required"
@@ -1868,42 +1956,41 @@ class AgentRuntime:
             else:
                 state.scratchpad["plan_revision_required"] = True
                 state.scratchpad["plan_revision_feedback"] = resolution.user_feedback
-        if resolution.decision == "approve":
+        if resolution.decision in {"approve", "cancel"}:
             plan_state = self._plan_state(state)
             event_context = self._event_context(state)
             accepted_summary = str(payload.get("summary") or "")
             accepted_plan_text = str(payload.get("plan_text") or "")
-            accepted_artifact_id = _accepted_plan_artifact_id(
-                event_context.run_id,
-                exit_request_id,
-            )
-            self.runtime_session.archive.put_text(
-                accepted_artifact_id,
-                accepted_plan_text,
-                session_id=self.runtime_session.runtime_session_id,
-                run_id=event_context.run_id,
-                media_type="text/plain; charset=utf-8",
-                metadata={
-                    "kind": "accepted_plan",
-                    "exit_request_id": exit_request_id,
-                    "tool_call_id": tool_call_id,
-                    "summary": accepted_summary,
-                },
-            )
+            accepted_artifact_id = None
+            if resolution.decision == "approve":
+                accepted_artifact_id = _accepted_plan_artifact_id(
+                    event_context.run_id,
+                    exit_request_id,
+                )
+                self.runtime_session.archive.put_text(
+                    accepted_artifact_id,
+                    accepted_plan_text,
+                    session_id=self.runtime_session.runtime_session_id,
+                    run_id=event_context.run_id,
+                    media_type="text/plain; charset=utf-8",
+                    metadata={
+                        "kind": "accepted_plan",
+                        "exit_request_id": exit_request_id,
+                        "tool_call_id": tool_call_id,
+                        "summary": accepted_summary,
+                    },
+                )
             restored_mode = plan_state.pre_plan_permission_mode
             restored_policy = self._policy_from_plan_state(plan_state)
-            self.set_permission_policy(
-                restored_policy,
-                mode=parse_permission_mode(restored_mode) if restored_mode is not None else None,
-            )
+            restored_mode_value = parse_permission_mode(restored_mode).value
             yield await self.runtime_session.emit(
                 PlanModeExitedEvent(
                     **event_context.event_fields(),
-                    source="approved_exit_plan",
+                    source="approved_exit_plan" if resolution.decision == "approve" else "user_cancel",
                     exit_request_id=exit_request_id,
-                    restored_permission_mode=restored_mode,
+                    restored_permission_mode=restored_mode_value,
                     restored_permission_policy=restored_policy.to_dict(),
-                    accepted_plan_summary=accepted_summary,
+                    accepted_plan_summary=accepted_summary if resolution.decision == "approve" else "",
                     accepted_plan_artifact_id=accepted_artifact_id,
                 ),
                 state=state,
@@ -1913,6 +2000,9 @@ class AgentRuntime:
                 accepted_plan_artifact_id=accepted_artifact_id,
             )
             _remove_plan_runtime_instructions(state)
+            state.status = LoopStatus.FINISHED
+            state.stop_reason = "final"
+            state.transition(LoopTransition.FINISH)
         output = json.dumps(
             _plan_exit_resolution_output(resolution),
             ensure_ascii=False,
@@ -2310,7 +2400,7 @@ class AgentRuntime:
         permission_executable_calls: list[ToolCall] = []
         local_permission_decisions: dict[str, PermissionDecision] = {}
         for call in executable_calls:
-            local_permission_decision = self.permission_gate.evaluate_local_capability_call(
+            local_permission_decision = self._permission_gate_for_state(state).evaluate_local_capability_call(
                 call,
                 exposure=exposure,
             )
@@ -2329,7 +2419,7 @@ class AgentRuntime:
         if not executable_calls:
             return
 
-        decision = await self.permission_gate.evaluate(executable_calls, exposure=exposure)
+        decision = await self._permission_gate_for_state(state).evaluate(executable_calls, exposure=exposure)
         if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
             for call in executable_calls:
                 local_decision = local_permission_decisions.get(call.id)
@@ -2353,6 +2443,7 @@ class AgentRuntime:
                         else "permission_wait_for_user_batch_suspension"
                     )
                 fact = self._capability_gate_decision_fact(
+                    state,
                     call,
                     exposure=exposure,
                     decision=fact_decision,
@@ -2398,6 +2489,7 @@ class AgentRuntime:
 
         for call in executable_calls:
             fact = self._capability_gate_decision_fact(
+                state,
                 call,
                 exposure=exposure,
                 decision=decision,
@@ -2420,6 +2512,7 @@ class AgentRuntime:
         )
         workflow_call = parsed_calls[workflow_index]
         allow_fact = self._capability_gate_decision_fact(
+            state,
             workflow_call,
             exposure=exposure,
             decision=PermissionDecision.allow(),
@@ -2430,6 +2523,7 @@ class AgentRuntime:
             if index == workflow_index:
                 continue
             suppress_fact = self._capability_gate_decision_fact(
+                state,
                 call,
                 exposure=exposure,
                 decision=_suppressed_by_workflow_control_decision(workflow_call),
@@ -2507,6 +2601,8 @@ class AgentRuntime:
         reason = _optional_str(call.arguments.get("reason"))
         previous_mode = self.permission_mode
         previous_policy = self.permission_policy
+        if previous_mode is None:
+            raise ValueError("enter_plan requires a preset session default permission mode")
         plan_state.begin(
             source="agent",
             previous_mode=previous_mode,
@@ -2514,17 +2610,11 @@ class AgentRuntime:
             reason=reason,
             pending_entry_audit=False,
         )
-        self.set_permission_policy(
-            preset_to_policy(PermissionMode.READ_ONLY),
-            mode=PermissionMode.READ_ONLY,
-        )
         yield await self.runtime_session.emit(
             PlanModeEnteredEvent(
                 **self._event_context(state).event_fields(),
                 source="agent",
-                previous_permission_mode=(
-                    previous_mode.value if isinstance(previous_mode, PermissionMode) else previous_mode
-                ),
+                previous_permission_mode=previous_mode.value,
                 previous_permission_policy=previous_policy.to_dict(),
                 reason=reason,
             ),
@@ -2539,6 +2629,9 @@ class AgentRuntime:
             result_state=ToolResultState.SUCCESS,
         ):
             yield event
+        state.status = LoopStatus.FINISHED
+        state.stop_reason = "final"
+        state.transition(LoopTransition.FINISH)
 
     async def _execute_ask_plan_question(self, state: LoopState, call: ToolCall) -> AsyncIterator[AgentEvent]:
         if not self._plan_state(state).active:
@@ -2731,8 +2824,13 @@ class AgentRuntime:
 
     def _policy_from_plan_state(self, plan_state: PlanWorkflowState) -> EffectivePermissionPolicy:
         payload = plan_state.pre_plan_permission_policy or {}
-        if not payload:
-            return default_permission_policy()
+        if not payload or plan_state.pre_plan_permission_mode is None:
+            raise ValueError("plan workflow is missing preset previous permission facts")
+        validate_preset_policy_payload(
+            plan_state.pre_plan_permission_mode,
+            dict(payload),
+            context="PlanWorkflowState.pre_plan",
+        )
         return EffectivePermissionPolicy(
             profile=PermissionProfile(str(payload["profile"])),
             approval=ApprovalPolicy(str(payload["approval_policy"])),
@@ -2881,12 +2979,16 @@ class AgentRuntime:
                     descriptor=descriptor,
                     context_id=_optional_scratchpad_str(state, "current_context_id"),
                     model_call_index=_optional_scratchpad_int(state, "current_model_call_index"),
+                    **self._tool_permission_kwargs(state),
                 )
             return await asyncio.to_thread(
                 executor.execute,
                 call,
                 event_context=self._event_context(state),
                 descriptor=descriptor,
+                context_id=_optional_scratchpad_str(state, "current_context_id"),
+                model_call_index=_optional_scratchpad_int(state, "current_model_call_index"),
+                **self._tool_permission_kwargs(state),
             )
 
         tasks = [asyncio.create_task(execute_call(call)) for call in batch]

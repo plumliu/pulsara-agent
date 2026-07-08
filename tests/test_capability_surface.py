@@ -50,10 +50,13 @@ from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,
     PermissionDecision,
     PermissionDecisionKind,
+    PermissionMode,
     PermissionProfile,
     PolicyPermissionGate,
     TerminalAccess,
+    preset_to_policy,
 )
+from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
 from pulsara_agent.runtime.tool_artifacts import (
     InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
@@ -360,11 +363,7 @@ def test_terminal_process_observe_gate_event_records_effective_category(tmp_path
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_descriptors(_descriptor("terminal_process", permission_category="terminal")),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.ASK,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
     registry.register(DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True))
@@ -398,11 +397,7 @@ def test_wait_for_user_batch_suspension_reason_code(tmp_path) -> None:
             _descriptor("read_file", permission_category="filesystem_read"),
             _descriptor("terminal", permission_category="terminal"),
         ),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.ASK,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
     registry.register(DummyTool("read_file", is_read_only=True, is_concurrency_safe=True))
@@ -440,11 +435,7 @@ def test_multiple_independent_wait_calls_keep_own_reason_code(tmp_path) -> None:
             _descriptor("write_file", permission_category="filesystem_write"),
             _descriptor("terminal", permission_category="terminal"),
         ),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.ASK,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
     registry.register(DummyTool("write_file", is_read_only=False, is_concurrency_safe=True))
@@ -824,11 +815,7 @@ def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(tmp
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_provider(provider),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.NEVER,
-            terminal=TerminalAccess.OFF,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.READ_ONLY),
     )
     registry = ToolRegistry()
     registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
@@ -856,11 +843,7 @@ def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(tmp
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
         capability_runtime=_runtime_for_provider(provider),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.TRUSTED_HOST,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.ASK,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
     registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
@@ -988,6 +971,12 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(tmp_path)
         capability_runtime=CapabilityRuntime(providers=()),
     )
     state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state.permission_snapshot = snapshot_from_mode(
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        run_id=state.run_id,
+        permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        permission_snapshot_source="session_default",
+    )
     state.status = LoopStatus.WAITING_USER
     state.stop_reason = "waiting_user"
     state.pending_tool_calls = [
