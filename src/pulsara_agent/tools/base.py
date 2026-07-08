@@ -37,6 +37,8 @@ class ToolExecutionSuspended:
 class ToolRuntimeContext:
     runtime_session_id: str
     event_context: EventContext
+    context_id: str | None = None
+    model_call_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

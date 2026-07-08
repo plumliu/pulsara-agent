@@ -19,6 +19,16 @@ from pulsara_agent.event import (
     ReplyStartEvent,
     RunEndEvent,
     RunStartEvent,
+    SubagentEdgeRecordedEvent,
+    SubagentMessageSentEvent,
+    SubagentResultDeliveredEvent,
+    SubagentRunCompletedEvent,
+    SubagentRunStartedEvent,
+    SubagentTaskBlockedEvent,
+    SubagentTaskCompletedEvent,
+    SubagentTaskCreatedEvent,
+    SubagentTaskFailedEvent,
+    SubagentTaskStartedEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -455,6 +465,195 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                 "capability_context": {},
             }
         ]
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx("subagent-graph")
+        child_runtime_session_id = f"runtime:subagent:{uuid4().hex}"
+        subagent_run_id = f"subagent_run:{uuid4().hex}"
+        review_task_id = f"subagent_task:{uuid4().hex}"
+        prepare_task_id = f"subagent_task:{uuid4().hex}"
+        verify_task_id = f"subagent_task:{uuid4().hex}"
+        result_id = f"subagent_result:{uuid4().hex}"
+        result_artifact_id = f"{subagent_run_id}:result"
+        edge_id = f"subagent_edge:{subagent_run_id}:spawn"
+        log.extend(
+            [
+                *_simple_run_events(ctx, user_input="delegate", text="parent done"),
+                SubagentTaskCreatedEvent(
+                    **ctx.event_fields(),
+                    task_id=review_task_id,
+                    batch_id="subagent_batch:test",
+                    create_tool_call_id="tool:create-tasks",
+                    task_key="review",
+                    label="Review",
+                    profile_id="review_worker",
+                    objective_preview="Review the change",
+                    depends_on=[],
+                ),
+                SubagentTaskCreatedEvent(
+                    **ctx.event_fields(),
+                    task_id=prepare_task_id,
+                    batch_id="subagent_batch:test",
+                    create_tool_call_id="tool:create-tasks",
+                    task_key="prepare",
+                    label="Prepare",
+                    profile_id="review_worker",
+                    objective_preview="Prepare evidence",
+                    depends_on=[],
+                ),
+                SubagentTaskCreatedEvent(
+                    **ctx.event_fields(),
+                    task_id=verify_task_id,
+                    batch_id="subagent_batch:test",
+                    create_tool_call_id="tool:create-tasks",
+                    task_key="verify",
+                    label="Verify",
+                    profile_id="verification_worker",
+                    objective_preview="Verify the review",
+                    depends_on=[prepare_task_id],
+                ),
+                SubagentTaskFailedEvent(
+                    **ctx.event_fields(),
+                    task_id=prepare_task_id,
+                    subagent_run_id=None,
+                    reason_code="synthetic_prepare_failed",
+                    reason_message="prepare failed",
+                ),
+                SubagentRunStartedEvent(
+                    **ctx.event_fields(),
+                    subagent_run_id=subagent_run_id,
+                    edge_id=edge_id,
+                    parent_runtime_session_id=runtime_session_id,
+                    parent_run_id=ctx.run_id,
+                    parent_turn_id=ctx.turn_id,
+                    parent_reply_id=ctx.reply_id,
+                    parent_context_id="context:parent",
+                    parent_model_call_index=1,
+                    spawning_tool_call_id="tool:spawn",
+                    spawning_tool_name="spawn_agent",
+                    child_runtime_session_id=child_runtime_session_id,
+                    label="worker",
+                    role="worker",
+                    task_preview="child task",
+                    task_id=review_task_id,
+                    batch_id="subagent_batch:test",
+                    create_tool_call_id="tool:create-tasks",
+                ),
+                SubagentTaskStartedEvent(
+                    **ctx.event_fields(),
+                    task_id=review_task_id,
+                    subagent_run_id=subagent_run_id,
+                    batch_id="subagent_batch:test",
+                    create_tool_call_id="tool:create-tasks",
+                    run_index=1,
+                    spawn_initiator_kind="tool_call",
+                    spawn_initiator_id="tool:create-tasks",
+                ),
+                SubagentMessageSentEvent(
+                    **ctx.event_fields(),
+                    edge_id=edge_id,
+                    subagent_run_id=subagent_run_id,
+                    parent_runtime_session_id=runtime_session_id,
+                    parent_run_id=ctx.run_id,
+                    child_runtime_session_id=child_runtime_session_id,
+                    message_artifact_id=f"{subagent_run_id}:task",
+                    message_preview="child task",
+                    delivery_kind="spawn_task",
+                ),
+                SubagentRunCompletedEvent(
+                    **ctx.event_fields(),
+                    subagent_run_id=subagent_run_id,
+                    parent_runtime_session_id=runtime_session_id,
+                    child_runtime_session_id=child_runtime_session_id,
+                    result_id=result_id,
+                    summary="child summary",
+                    result_artifact_id=result_artifact_id,
+                    artifact_ids=[result_artifact_id],
+                ),
+                SubagentTaskCompletedEvent(
+                    **ctx.event_fields(),
+                    task_id=review_task_id,
+                    subagent_run_id=subagent_run_id,
+                    result_id=result_id,
+                    primary_result_artifact_id=result_artifact_id,
+                    result_source="inferred",
+                ),
+                SubagentTaskBlockedEvent(
+                    **ctx.event_fields(),
+                    task_id=verify_task_id,
+                    status="blocked_dependency_failed",
+                    blocked_reason="dependency_failed",
+                    blocked_by_task_ids=[prepare_task_id],
+                    dependency_status_snapshot={prepare_task_id: "failed"},
+                    dependency_terminal_event_ids={prepare_task_id: "event_sequence:999"},
+                    dependency_generation=999,
+                ),
+                SubagentEdgeRecordedEvent(
+                    **ctx.event_fields(),
+                    edge_id=f"subagent_edge:{subagent_run_id}:wait:{uuid4().hex}",
+                    edge_kind="wait",
+                    parent_runtime_session_id=runtime_session_id,
+                    parent_run_id=ctx.run_id,
+                    parent_turn_id=ctx.turn_id,
+                    parent_reply_id=ctx.reply_id,
+                    subagent_run_id=subagent_run_id,
+                    child_runtime_session_id=child_runtime_session_id,
+                    source_tool_call_id="tool:wait",
+                    source_tool_name="wait_agent",
+                    result_id=result_id,
+                    result_artifact_id=result_artifact_id,
+                    returned_to_tool_call_id="tool:wait",
+                ),
+                SubagentResultDeliveredEvent(
+                    **ctx.event_fields(),
+                    subagent_run_id=subagent_run_id,
+                    parent_runtime_session_id=runtime_session_id,
+                    parent_run_id=ctx.run_id,
+                    parent_turn_id=ctx.turn_id,
+                    parent_reply_id=ctx.reply_id,
+                    context_id="context:parent",
+                    model_call_index=2,
+                    section_id="subagent:results",
+                    result_id=result_id,
+                    result_artifact_id=result_artifact_id,
+                    summary="child summary",
+                ),
+            ]
+        )
+
+        run_report = _service(dsn).inspect_run(ctx.run_id)
+        session_report = _service(dsn).inspect_session(runtime_session_id)
+
+        assert run_report["subagent_graph"]["nodes"] == session_report["subagent_graph"]["nodes"]
+        [node] = run_report["subagent_graph"]["nodes"]
+        assert node["subagent_run_id"] == subagent_run_id
+        assert node["status"] == "completed"
+        assert node["delivered"] is True
+        assert node["consumed_by_wait"] is True
+        edge_kinds = {edge["edge_kind"] for edge in run_report["subagent_graph"]["edges"]}
+        assert {"spawn", "wait"}.issubset(edge_kinds)
+        assert run_report["subagent_graph"]["tasks"] == session_report["subagent_graph"]["tasks"]
+        tasks_by_key = {
+            task["task_key"]: task
+            for task in run_report["subagent_graph"]["tasks"]
+        }
+        assert tasks_by_key["review"]["current_run_id"] == subagent_run_id
+        assert tasks_by_key["review"]["result_id"] == result_id
+        assert tasks_by_key["prepare"]["status"] == "failed"
+        assert tasks_by_key["verify"]["current_run_id"] is None
+        assert tasks_by_key["verify"]["status"] == "blocked_dependency_failed"
+        assert tasks_by_key["verify"]["blocked_by_task_ids"] == [prepare_task_id]
+        assert tasks_by_key["verify"]["dependency_terminal_event_ids"] == {
+            prepare_task_id: "event_sequence:999"
+        }
     finally:
         _cleanup_session(dsn, runtime_session_id)
 

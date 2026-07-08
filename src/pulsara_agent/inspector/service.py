@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
 from pulsara_agent.event import (
@@ -19,7 +19,7 @@ from pulsara_agent.event import (
     ReplyStartEvent,
     RunStartEvent,
 )
-from pulsara_agent.event_log import dump_agent_event
+from pulsara_agent.event_log import PostgresEventLog, dump_agent_event
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.inspector.diagnostics import (
@@ -34,6 +34,7 @@ from pulsara_agent.message import AssistantMsg, Msg
 from pulsara_agent.message.blocks import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime.timeline import build_run_timeline
+from pulsara_agent.runtime.subagent.projection import project_subagent_graph
 
 
 _REQUIRED_TABLES = (
@@ -85,6 +86,11 @@ class InspectorService:
             "capability_surface_as_seen": _capability_surface_projection(events),
             "context_compilations": _context_compilation_projection(events),
             "compaction_windows": _compaction_windows(events, self.store),
+            "subagent_graph": _subagent_graph_projection(
+                session_id,
+                events,
+                self.store,
+            ),
             "events": _event_summaries(events[:limit_events], include_payload=include_payload),
             "event_count": len(events),
             "events_truncated": len(events) > limit_events,
@@ -149,6 +155,12 @@ class InspectorService:
             "projections_as_seen": [_projection_to_dict(event) for event in run_events if isinstance(event, ProjectionReadyEvent)],
             "capability_surface_as_seen": _capability_surface_projection(run_events),
             "contexts_as_seen": _context_compilation_projection(run_events),
+            "subagent_graph": _subagent_graph_projection(
+                session_id,
+                session_events,
+                self.store,
+                parent_run_id=run_id,
+            ),
             "assistant_replies": _assistant_replies(run_events),
             "tool_result_artifacts": [_json_safe(row) for row in tool_artifacts],
             "recall_traces": [_json_safe(row) for row in self.store.recall_traces_for_run(run_id)],
@@ -336,6 +348,59 @@ class _BoundedEventLog:
         for event in events:
             reducer.append(event)
         return reducer.message
+
+
+@dataclass(frozen=True, slots=True)
+class _InspectorEventLogLocator:
+    store: PostgresInspectorStore
+
+    def event_log_for_runtime_session(self, runtime_session_id: str):
+        session = self.store.session(runtime_session_id)
+        workspace_root = session.get("workspace_root") if session is not None else None
+        return PostgresEventLog(
+            dsn=self.store.dsn,
+            runtime_session_id=runtime_session_id,
+            workspace_root=str(workspace_root) if workspace_root is not None else None,
+        )
+
+
+def _subagent_graph_projection(
+    session_id: str,
+    events: Iterable[AgentEvent],
+    store: PostgresInspectorStore,
+    *,
+    parent_run_id: str | None = None,
+) -> dict[str, Any]:
+    projection = project_subagent_graph(
+        session_id,
+        _BoundedEventLog(events),
+        locator=_InspectorEventLogLocator(store),
+    )
+    edges = list(projection.edges)
+    nodes = list(projection.nodes)
+    tasks = list(projection.tasks)
+    if parent_run_id is not None:
+        subagent_ids = {
+            edge.subagent_run_id
+            for edge in edges
+            if edge.parent_run_id == parent_run_id
+        }
+        edges = [edge for edge in edges if edge.subagent_run_id in subagent_ids]
+        nodes = [node for node in nodes if node.subagent_run_id in subagent_ids]
+        task_ids = {
+            task.task_id
+            for task in tasks
+            if task.parent_run_id == parent_run_id
+            or (task.current_run_id is not None and task.current_run_id in subagent_ids)
+        }
+        tasks = [task for task in tasks if task.task_id in task_ids]
+    return {
+        "parent_runtime_session_id": projection.parent_runtime_session_id,
+        "nodes": [_json_safe(asdict(node)) for node in nodes],
+        "edges": [_json_safe(asdict(edge)) for edge in edges],
+        "tasks": [_json_safe(asdict(task)) for task in tasks],
+        "diagnostics": [_json_safe(diagnostic) for diagnostic in projection.diagnostics],
+    }
 
 
 def _event_summaries(events: Iterable[AgentEvent], *, include_payload: bool) -> list[dict[str, Any]]:

@@ -128,6 +128,14 @@ def _lower_system_prompt(sections: tuple[ContextSection, ...]) -> str:
         and section.included
         and section.text
     )
+    parts.extend(
+        f"## {_component_label(section.id)}\n{section.text}"
+        for section in sections
+        if section.channel == "handoff_hint"
+        and section.id != "recovery:prompt"
+        and section.included
+        and section.text
+    )
     return "\n\n".join(part for part in parts if part)
 
 
@@ -199,6 +207,8 @@ def _component_label(component_id: str) -> str:
         return "Available Capabilities"
     if component_id.startswith("capability:active_skill"):
         return "Active Skill"
+    if component_id.startswith("subagent:results"):
+        return "Subagent Results"
     return component_id
 
 
@@ -254,7 +264,7 @@ def _collect_sections(
         source_id, channel, budget_class = _component_section_classification(component_id)
         metadata = {
             "chars": len(text),
-            "lowered_to": "system_prompt" if channel == "system" else "messages",
+            "lowered_to": "system_prompt" if channel in {"system", "handoff_hint"} else "messages",
         }
         sections.append(
             ContextSection(
@@ -576,6 +586,8 @@ def _component_section_classification(
         return "memory_projection", "leading_user", "important"
     if component_id.startswith("memory:hook"):
         return "memory_projection", "leading_user", "important"
+    if component_id.startswith("subagent:results"):
+        return "subagent_runtime", "handoff_hint", "important"
     return "system_prompt", "system", "important"
 
 
@@ -603,6 +615,8 @@ def _component_dependency_fingerprint(
         )
     if component_id.startswith("memory:hook"):
         return f"{component_id}:prompt:{_text_fingerprint(text)}"
+    if component_id.startswith("subagent:results"):
+        return f"{component_id}:text:{_text_fingerprint(text)}"
     return None
 
 

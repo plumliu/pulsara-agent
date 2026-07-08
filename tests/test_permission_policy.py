@@ -730,6 +730,33 @@ def test_permission_state_switch_preserves_hardline_floor() -> None:
     assert decision.suggested_rules[0]["reason"] == "hardline_terminal_command"
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "spawn_agent",
+        "wait_agent",
+        "stop_agent",
+        "list_agents",
+        "create_agent_tasks",
+        "wait_agent_tasks",
+        "stop_agent_task",
+    ],
+)
+def test_subagent_system_tools_require_bypass_mode(tool_name: str) -> None:
+    for mode in (PermissionMode.READ_ONLY, PermissionMode.ASK_PERMISSIONS, PermissionMode.ACCEPT_EDITS):
+        gate = PolicyPermissionGate(preset_to_policy(mode), inner=AllowAllPermissionGate())
+        decision = asyncio.run(gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name)]))
+        assert decision.kind is PermissionDecisionKind.DENY
+        assert decision.reason == "subagent_requires_bypass_mode"
+
+    bypass_gate = PolicyPermissionGate(
+        preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        inner=AllowAllPermissionGate(),
+    )
+    bypass_decision = asyncio.run(bypass_gate.evaluate([ToolCall(id=f"call:{tool_name}", name=tool_name)]))
+    assert bypass_decision.kind is PermissionDecisionKind.ALLOW
+
+
 def test_mode_for_policy_reverse_maps_presets_and_custom() -> None:
     for mode in PermissionMode:
         assert mode_for_policy(preset_to_policy(mode)) is mode

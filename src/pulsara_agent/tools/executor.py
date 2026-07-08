@@ -83,6 +83,8 @@ class ToolExecutor:
         *,
         event_context: EventContext,
         descriptor: CapabilityDescriptor | None = None,
+        context_id: str | None = None,
+        model_call_index: int | None = None,
     ) -> ToolExecutionResult:
         self._append(
             ToolResultStartEvent(
@@ -103,6 +105,8 @@ class ToolExecutor:
                 runtime_context=ToolRuntimeContext(
                     runtime_session_id=self.runtime_session_id,
                     event_context=event_context,
+                    context_id=context_id,
+                    model_call_index=model_call_index,
                 ),
             )
             if isinstance(result, ToolExecutionSuspended):

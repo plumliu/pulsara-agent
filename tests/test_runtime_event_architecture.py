@@ -15,7 +15,7 @@ def test_runtime_business_code_does_not_directly_append_to_event_log() -> None:
         normalized = path.as_posix()
         if "event_log.append(" in text and not normalized.endswith("runtime/session.py"):
             append_violations.append(normalized)
-        if "event_log.extend(" in text:
+        if "event_log.extend(" in text and not normalized.endswith("runtime/session.py"):
             extend_violations.append(normalized)
 
     assert append_violations == []

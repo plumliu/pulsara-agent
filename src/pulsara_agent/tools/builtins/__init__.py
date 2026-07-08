@@ -16,16 +16,31 @@ from pulsara_agent.tools.builtins.memory import (
 )
 from pulsara_agent.tools.builtins.plan import AskPlanQuestionTool, EnterPlanTool, ExitPlanTool
 from pulsara_agent.tools.builtins.registry import build_core_tool_registry
+from pulsara_agent.tools.builtins.subagent import (
+    CreateAgentTasksTool,
+    ListAgentsTool,
+    ReportAgentPhaseTool,
+    ReportAgentResultTool,
+    SpawnAgentTool,
+    StopAgentTool,
+    StopAgentTaskTool,
+    WaitAgentTool,
+    WaitAgentTasksTool,
+)
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 
 __all__ = [
     "AskPlanQuestionTool",
+    "CreateAgentTasksTool",
     "EditFileTool",
     "EnterPlanTool",
     "ArtifactReadTool",
     "ExitPlanTool",
+    "ListAgentsTool",
+    "ReportAgentPhaseTool",
+    "ReportAgentResultTool",
     "ReadFileTool",
     "RememberActionBoundaryTool",
     "RememberClaimTool",
@@ -33,9 +48,14 @@ __all__ = [
     "RememberObservationTool",
     "RememberPreferenceTool",
     "SearchFilesTool",
+    "SpawnAgentTool",
+    "StopAgentTool",
+    "StopAgentTaskTool",
     "TerminalProcessTool",
     "TerminalTool",
     "TodoTool",
+    "WaitAgentTool",
+    "WaitAgentTasksTool",
     "WriteFileTool",
     "build_core_tool_registry",
 ]
