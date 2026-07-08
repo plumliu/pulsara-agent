@@ -193,27 +193,15 @@ def _core(monkeypatch, transport: ScriptedTransport) -> HostCore:
 
 
 def _trusted_terminal_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.RISKY_ONLY,
-        terminal=TerminalAccess.ALLOW,
-    )
+    return preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
 
 
 def _trusted_terminal_ask_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.RISKY_ONLY,
-        terminal=TerminalAccess.ASK,
-    )
+    return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
 
 
 def _workspace_on_request_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.WORKSPACE_GUARDED,
-        approval=ApprovalPolicy.ON_REQUEST,
-        terminal=TerminalAccess.OFF,
-    )
+    return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
 
 
 async def _open_project_session(
@@ -235,6 +223,23 @@ async def _open_project_session(
 
 def _context_text(context: LLMContext) -> str:
     return "\n".join(part for message in context.messages for part in message.content)
+
+
+def test_host_session_rejects_custom_policy_for_run_turn(tmp_path, monkeypatch) -> None:
+    core = _core(monkeypatch, ScriptedTransport([{"text": "unused"}]))
+    custom_like_bypass = EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.NEVER,
+        terminal=TerminalAccess.ALLOW,
+        network_isolated=True,
+    )
+
+    async def run():
+        with pytest.raises(ValueError, match="preset permission mode"):
+            await _open_project_session(core, tmp_path, permission_policy=custom_like_bypass)
+        await core.shutdown()
+
+    asyncio.run(run())
 
 
 def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> None:
@@ -262,7 +267,7 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "first user"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "first user"}),
             ModelCallStartEvent(**ctx.event_fields(), model_name="flash", model_role="flash", provider="scripted"),
             RunErrorEvent(
                 **ctx.event_fields(),
@@ -303,7 +308,7 @@ def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> Non
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "first user"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "first user"}),
             TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
             TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="partial answer"),
             RunErrorEvent(**ctx.event_fields(), message="provider failed", code="openai_responses_error"),
@@ -328,11 +333,11 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**failed_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "failed user"}),
+            RunStartEvent(**failed_ctx.event_fields(), **run_start_permission_fields(failed_ctx.run_id), user_input_chars=10, metadata={"user_input": "failed user"}),
             RunErrorEvent(**failed_ctx.event_fields(), message="provider failed", code="openai_responses_error"),
             ReplyEndEvent(**failed_ctx.event_fields()),
             RunEndEvent(**failed_ctx.event_fields(), status="failed", stop_reason="model_error"),
-            RunStartEvent(**done_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "done user"}),
+            RunStartEvent(**done_ctx.event_fields(), **run_start_permission_fields(done_ctx.run_id), user_input_chars=8, metadata={"user_input": "done user"}),
             TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
             TextBlockDeltaEvent(**done_ctx.event_fields(), block_id="text:done", delta="done"),
             TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
@@ -357,7 +362,7 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "long user task"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "long user task"}),
             TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
             TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="partial answer"),
             ReplyEndEvent(**ctx.event_fields()),
@@ -384,10 +389,10 @@ def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active(
                 **ctx.event_fields(),
                 source="user",
                 previous_permission_mode="bypass-permissions",
-                previous_permission_policy={"profile": "trusted_host"},
+                previous_permission_policy=run_start_permission_fields(ctx.run_id)["permission_policy"],
                 reason="plan first",
             ),
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "ask plan question"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "ask plan question"}),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
                 **ctx.event_fields(),
@@ -412,7 +417,7 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "dangerous task"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "dangerous task"}),
             ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
             ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:danger", delta='{"command": "rm -rf ./x"}'),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:danger"),
@@ -442,7 +447,7 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "run command"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "run command"}),
             ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
             ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta='{"command": "sleep 30"}'),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
@@ -468,7 +473,7 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "run command"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "run command"}),
             ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
             ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta='{"command": "printf done"}'),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
@@ -496,7 +501,7 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "change files"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "change files"}),
             ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
             ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:write", delta='{"path": "secret.txt"}'),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:write"),
@@ -529,6 +534,7 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
         [
             RunStartEvent(
                 **aborted_ctx.event_fields(),
+                **run_start_permission_fields(aborted_ctx.run_id),
                 user_input_chars=10,
                 metadata={"user_input": "dangerous task"},
             ),
@@ -547,6 +553,7 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
             RunEndEvent(**aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"),
             RunStartEvent(
                 **failed_ctx.event_fields(),
+                **run_start_permission_fields(failed_ctx.run_id),
                 user_input_chars=10,
                 metadata={"user_input": "failed follow-up"},
             ),
@@ -574,10 +581,10 @@ def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succ
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**aborted_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "aborted user"}),
+            RunStartEvent(**aborted_ctx.event_fields(), **run_start_permission_fields(aborted_ctx.run_id), user_input_chars=10, metadata={"user_input": "aborted user"}),
             ReplyEndEvent(**aborted_ctx.event_fields()),
             RunEndEvent(**aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"),
-            RunStartEvent(**done_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "done user"}),
+            RunStartEvent(**done_ctx.event_fields(), **run_start_permission_fields(done_ctx.run_id), user_input_chars=8, metadata={"user_input": "done user"}),
             TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
             TextBlockDeltaEvent(**done_ctx.event_fields(), block_id="text:done", delta="done"),
             TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
@@ -602,7 +609,7 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "first user"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "first user"}),
             RunErrorEvent(**ctx.event_fields(), message="APIConnectionError: boom", code="model_stream_error"),
             RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="model_error"),
         ]
@@ -622,7 +629,7 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**first_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "run tests"}),
+            RunStartEvent(**first_ctx.event_fields(), **run_start_permission_fields(first_ctx.run_id), user_input_chars=10, metadata={"user_input": "run tests"}),
             ReplyEndEvent(**first_ctx.event_fields()),
             RunEndEvent(**first_ctx.event_fields(), status="finished", stop_reason="final"),
             TerminalProcessCompletedEvent(
@@ -647,7 +654,7 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
 
     log.extend(
         [
-            RunStartEvent(**second_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "continue"}),
+            RunStartEvent(**second_ctx.event_fields(), **run_start_permission_fields(second_ctx.run_id), user_input_chars=8, metadata={"user_input": "continue"}),
             ReplyEndEvent(**second_ctx.event_fields()),
             RunEndEvent(**second_ctx.event_fields(), status="finished", stop_reason="final"),
         ]
@@ -668,10 +675,10 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**first_ctx.event_fields(), user_input_chars=10, metadata={"user_input": "start server"}),
+            RunStartEvent(**first_ctx.event_fields(), **run_start_permission_fields(first_ctx.run_id), user_input_chars=10, metadata={"user_input": "start server"}),
             ReplyEndEvent(**first_ctx.event_fields()),
             RunEndEvent(**first_ctx.event_fields(), status="finished", stop_reason="final"),
-            RunStartEvent(**second_ctx.event_fields(), user_input_chars=8, metadata={"user_input": "do other work"}),
+            RunStartEvent(**second_ctx.event_fields(), **run_start_permission_fields(second_ctx.run_id), user_input_chars=8, metadata={"user_input": "do other work"}),
             TerminalProcessCompletedEvent(
                 **first_ctx.event_fields(),
                 process_id="proc_late",
@@ -701,7 +708,7 @@ def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_proje
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "start background"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "start background"}),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
             TerminalProcessCompletedEvent(
@@ -742,7 +749,7 @@ def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processe
     ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
     log = InMemoryEventLog()
     events = [
-        RunStartEvent(**ctx.event_fields(), user_input_chars=10, metadata={"user_input": "start background"}),
+        RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "start background"}),
         ReplyEndEvent(**ctx.event_fields()),
         RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
     ]
@@ -991,7 +998,7 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         first = await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -1654,7 +1661,7 @@ def test_plan_mode_blocks_permission_switch_until_explicit_exit(tmp_path, monkey
     assert "not allowed by permission policy" in write_output
 
 
-def test_agent_enter_plan_tool_switches_read_only_before_next_tool_turn(tmp_path, monkeypatch) -> None:
+def test_agent_enter_plan_tool_finalizes_current_run_before_next_tool_turn(tmp_path, monkeypatch) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1698,13 +1705,15 @@ def test_agent_enter_plan_tool_switches_read_only_before_next_tool_turn(tmp_path
         if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:write-after-enter"
     )
 
-    assert result.final_text == "stayed in plan"
+    assert result.status.value == "finished"
+    assert result.final_text == ""
     assert session.plan_state.active is True
     assert session.current_permission_mode is PermissionMode.READ_ONLY
     assert entered[0].source == "agent"
     assert entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
     assert not (tmp_path / "after_enter.txt").exists()
-    assert "not allowed by permission policy" in write_output
+    assert write_output == ""
+    assert len(transport.contexts) == 1
 
 
 def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monkeypatch) -> None:
@@ -1859,7 +1868,8 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
     events = session.replay_events()
 
     assert first.status.value == "waiting_user"
-    assert resolved.final_text == "approved execution can begin"
+    assert resolved.status.value == "finished"
+    assert resolved.final_text == ""
     assert session.plan_state.active is False
     assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
     assert any(isinstance(event, PlanExitRequestedEvent) for event in events)
@@ -1872,9 +1882,7 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
     assert session.wiring.runtime_wiring.runtime_session.archive.get_text(
         exited[0].accepted_plan_artifact_id
     ) == expected_plan_text
-    post_approval_context = _context_text(transport.contexts[1])
-    assert "Plan workflow is active" not in post_approval_context
-    assert "You are still in Plan workflow" not in post_approval_context
+    assert len(transport.contexts) == 1
 
 
 def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch) -> None:
@@ -2237,7 +2245,7 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(tm
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -2280,7 +2288,7 @@ def test_host_session_stop_pending_approval_aborts_without_tool_execution(tmp_pa
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         first = await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -2323,7 +2331,7 @@ def test_host_core_stop_current_turn_delegates_to_session(tmp_path, monkeypatch)
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         await session.run_turn("attempt dangerous command")
         return await core.stop_current_turn(session.host_session_id)
 
@@ -2486,7 +2494,7 @@ def test_host_session_resume_can_suspend_again_with_new_pending_approval(tmp_pat
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         first = await session.run_turn("attempt dangerous command")
         first_pending = session.get_pending_approval()
         assert first_pending is not None
@@ -2529,7 +2537,7 @@ def test_host_session_close_invalidates_pending_approval(tmp_path, monkeypatch) 
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -2570,7 +2578,7 @@ def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(tmp_p
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         streamed = [event async for event in session.stream_turn("attempt dangerous command")]
         pending = session.get_pending_approval()
         assert pending is not None
@@ -2614,7 +2622,7 @@ def test_host_session_stream_turn_captures_suspended_run_id_before_clearing_acti
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
         streamed = [event async for event in session.stream_turn("attempt dangerous command")]
         pending = session.get_pending_approval()
         confirm = next(event for event in streamed if isinstance(event, RequireUserConfirmEvent))
@@ -2650,7 +2658,7 @@ def test_host_core_approval_facade_resolves_pending_request(tmp_path, monkeypatc
             core,
             tmp_path,
             host_session_id="host:approval-facade",
-            permission_policy=_trusted_terminal_policy(),
+            permission_policy=_trusted_terminal_ask_policy(),
         )
         await session.run_turn("attempt dangerous command")
         pending = await core.get_pending_approval(session.host_session_id)

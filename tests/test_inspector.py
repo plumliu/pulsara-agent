@@ -79,7 +79,7 @@ def _service(dsn: str) -> InspectorService:
 
 def _simple_run_events(ctx: EventContext, *, user_input: str, text: str):
     return [
-        RunStartEvent(**ctx.event_fields(), user_input_chars=len(user_input), metadata={"user_input": user_input}),
+        RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=len(user_input), metadata={"user_input": user_input}),
         ReplyStartEvent(**ctx.event_fields(), name="assistant"),
         TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
         TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta=text),
@@ -104,6 +104,9 @@ def test_inspect_run_rebuilds_timeline_and_assistant_reply(tmp_path: Path) -> No
         assert report["session"]["id"] == runtime_session_id
         assert report["run"]["status"] == "finished"
         assert report["canonical"]["current_user_input"] == "hello"
+        assert report["canonical"]["permission_snapshot"]["permission_snapshot_id"] == f"permission_snapshot:{ctx.run_id}"
+        assert report["canonical"]["permission_snapshot"]["permission_mode"] == "bypass-permissions"
+        assert report["canonical"]["permission_snapshot"]["permission_snapshot_source"] == "session_default"
         assert report["timeline"]["status"] == "completed"
         assert "PULSARA_INSPECTOR_TEXT" in report["assistant_replies"][0]["content"][0]["text"]
         assert report["diagnostics"] == []
@@ -236,7 +239,7 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: P
         context_id = f"context:{uuid4().hex}"
         log.extend(
             [
-                RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}),
+                RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=5, metadata={"user_input": "hello"}),
                 ContextCompiledEvent(
                     **ctx.event_fields(),
                     context_id=context_id,
@@ -347,7 +350,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
         future = _ctx("future-projection")
         log.extend(
             [
-                RunStartEvent(**target.event_fields(), user_input_chars=6, metadata={"user_input": "target"}),
+                RunStartEvent(**target.event_fields(), **run_start_permission_fields(target.run_id), user_input_chars=6, metadata={"user_input": "target"}),
                 ProjectionReadyEvent(
                     **target.event_fields(),
                     projection_id="projection:target",
@@ -366,7 +369,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
         )
         log.extend(
             [
-                RunStartEvent(**future.event_fields(), user_input_chars=6, metadata={"user_input": "future"}),
+                RunStartEvent(**future.event_fields(), **run_start_permission_fields(future.run_id), user_input_chars=6, metadata={"user_input": "future"}),
                 ProjectionReadyEvent(
                     **future.event_fields(),
                     projection_id="projection:future",
@@ -416,7 +419,8 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                     descriptor_id="builtin:read_file",
                     decision="allow",
                     reason_code=None,
-                    permission_policy={"profile": "trusted_host"},
+                    policy_mode="bypass-permissions",
+                    permission_policy=run_start_permission_fields(ctx.run_id)["permission_policy"],
                     exposure_generation=1,
                     availability="available",
                     permission_category="filesystem_read",
@@ -455,8 +459,8 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                 "reason_message": None,
                 "suggested_rules": [],
                 "result_state": None,
-                "policy_mode": None,
-                "permission_policy": {"profile": "trusted_host"},
+                "policy_mode": "bypass-permissions",
+                "permission_policy": run_start_permission_fields(ctx.run_id)["permission_policy"],
                 "exposure_generation": 1,
                 "availability": "available",
                 "permission_category": "filesystem_read",
@@ -465,6 +469,53 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                 "capability_context": {},
             }
         ]
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspect_run_reports_gate_permission_snapshot_mismatch(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx("gate-permission-mismatch")
+        events = _simple_run_events(ctx, user_input="hello", text="done")
+        log.extend(
+            [
+                events[0],
+                CapabilityGateDecisionEvent(
+                    **ctx.event_fields(),
+                    tool_call_id="call:terminal",
+                    tool_name="terminal",
+                    descriptor_id="builtin:terminal",
+                    decision="deny",
+                    reason_code="hardline_terminal_command_blocked",
+                    policy_mode="read-only",
+                    permission_policy=run_start_permission_fields(ctx.run_id, mode="read-only")[
+                        "permission_policy"
+                    ],
+                    availability="available",
+                    permission_category="terminal",
+                    effective_permission_category="terminal",
+                    effective_read_only=False,
+                ),
+                *events[1:],
+            ]
+        )
+
+        report = _service(dsn).inspect_run(ctx.run_id)
+
+        diagnostic = next(
+            diagnostic
+            for diagnostic in report["diagnostics"]
+            if diagnostic["code"] == "capability_gate_permission_snapshot_mismatch"
+        )
+        assert diagnostic["details"]["tool_call_id"] == "call:terminal"
+        assert diagnostic["details"]["run_permission_mode"] == "bypass-permissions"
+        assert diagnostic["details"]["gate_policy_mode"] == "read-only"
+        assert diagnostic["details"]["mode_matches"] is False
+        assert diagnostic["details"]["policy_matches"] is False
     finally:
         _cleanup_session(dsn, runtime_session_id)
 
@@ -668,7 +719,7 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
         call_id = "call:missing-artifact"
         log.extend(
             [
-                RunStartEvent(**ctx.event_fields(), user_input_chars=5, metadata={"user_input": "tool"}),
+                RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=5, metadata={"user_input": "tool"}),
                 ToolCallStartEvent(**ctx.event_fields(), tool_call_id=call_id, tool_call_name="read_file"),
                 ToolCallEndEvent(**ctx.event_fields(), tool_call_id=call_id),
                 ToolResultStartEvent(**ctx.event_fields(), tool_call_id=call_id, tool_call_name="read_file"),

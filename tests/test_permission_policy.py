@@ -533,7 +533,7 @@ def test_profile_default_workspace_guarded_bare_falls_back_to_bypass() -> None:
 
 def test_workspace_guarded_and_risky_only_still_valid_as_explicit_axes() -> None:
     # The vocabulary is preserved: explicitly passing the demoted axis values
-    # still constructs a valid policy (custom three-axis feature, §7).
+    # still constructs a valid component-level policy (test-only axes, §7).
     policy = resolve_permission_policy(
         profile="workspace_guarded",
         approval="risky_only",
@@ -760,6 +760,13 @@ def test_subagent_system_tools_require_bypass_mode(tool_name: str) -> None:
 def test_mode_for_policy_reverse_maps_presets_and_custom() -> None:
     for mode in PermissionMode:
         assert mode_for_policy(preset_to_policy(mode)) is mode
+    custom_like_bypass = EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.NEVER,
+        terminal=TerminalAccess.ALLOW,
+        network_isolated=True,
+    )
+    assert mode_for_policy(custom_like_bypass) is None
     custom = EffectivePermissionPolicy(
         profile=PermissionProfile.WORKSPACE_GUARDED,
         approval=ApprovalPolicy.RISKY_ONLY,

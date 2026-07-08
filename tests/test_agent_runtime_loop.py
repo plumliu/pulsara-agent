@@ -79,10 +79,12 @@ from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
+    PermissionMode,
     PermissionDecision,
     PermissionDecisionKind,
     PermissionProfile,
     TerminalAccess,
+    preset_to_policy,
 )
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
@@ -178,12 +180,12 @@ async def _collect_async(stream) -> list[AgentEvent]:
     return [event async for event in stream]
 
 
-def _trusted_terminal_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.RISKY_ONLY,
-        terminal=TerminalAccess.ALLOW,
-    )
+def _terminal_ask_policy() -> EffectivePermissionPolicy:
+    return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+
+
+def _terminal_bypass_policy() -> EffectivePermissionPolicy:
+    return preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
 
 
 def test_loop_state_initializes_from_runtime_session(tmp_path) -> None:
@@ -1269,7 +1271,7 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
     )
 
     result = asyncio.run(agent.run_task("attempt dangerous command"))
@@ -1283,7 +1285,7 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
     assert confirm.tool_calls[0].id == "call:danger"
     assert confirm.tool_calls[0].name == "terminal"
     assert confirm.tool_calls[0].state is ToolCallState.ASKING
-    assert confirm.tool_calls[0].suggested_rules[0]["reason"] == "dangerous_terminal_command"
+    assert confirm.tool_calls[0].suggested_rules[0]["reason"] == "terminal_access_ask"
     assert not any(isinstance(event, ToolResultStartEvent) for event in events)
     assert not any(isinstance(event, RunEndEvent) for event in events)
 
@@ -1305,7 +1307,7 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_pa
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
     )
 
     first = asyncio.run(agent.run_task("attempt dangerous command"))
@@ -1339,7 +1341,7 @@ def test_agent_runtime_finalize_run_is_idempotent(tmp_path) -> None:
     assert [event.status for event in run_ends] == ["finished"]
 
 
-def test_approval_resume_approve_executes_original_tool_snapshot_and_continues(tmp_path) -> None:
+def test_approval_resume_uses_original_run_snapshot_after_default_switch(tmp_path) -> None:
     calls: list[str] = []
     transport = ScriptedTransport(
         [
@@ -1358,13 +1360,14 @@ def test_approval_resume_approve_executes_original_tool_snapshot_and_continues(t
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
     agent.tool_executor.registry = registry
 
     first = asyncio.run(agent.run_task("attempt dangerous command"))
+    agent.set_permission_policy(preset_to_policy(PermissionMode.READ_ONLY))
     resolution = ApprovalResolution(
         approval_id="host-minted",
         decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),),
@@ -1407,7 +1410,7 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
@@ -1457,7 +1460,7 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_p
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
@@ -1503,7 +1506,7 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_pat
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
         memory_hooks=hooks,
     )
     registry = ToolRegistry()
@@ -1548,7 +1551,7 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
     )
     registry = ToolRegistry()
     registry.register(RecordingTool("terminal", calls=calls))
@@ -1598,7 +1601,7 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_ask_policy(),
     )
 
     first = asyncio.run(agent.run_task("attempt dangerous command"))
@@ -1636,7 +1639,7 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
     agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_terminal_bypass_policy(),
     )
     process_id: str | None = None
 

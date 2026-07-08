@@ -323,7 +323,7 @@ def test_cli_host_run_rejects_removed_runtime_backend_flags(tmp_path, removed_fl
         )
 
 
-def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) -> None:
+def test_cli_host_run_threads_explicit_permission_mode(monkeypatch, tmp_path) -> None:
     class PolicyCapturingCore(FakeCore):
         async def open_session(self, workspace_input, *, model_role, permission_policy=None):
             self.workspace_input = workspace_input
@@ -342,12 +342,8 @@ def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) 
             "run",
             "--workspace",
             str(tmp_path),
-            "--permission-profile",
-            "workspace_guarded",
-            "--approval-policy",
-            "risky_only",
-            "--terminal-access",
-            "off",
+            "--permission-mode",
+            "accept-edits",
             "say hi",
         ]
     )
@@ -356,9 +352,9 @@ def test_cli_host_run_threads_explicit_permission_policy(monkeypatch, tmp_path) 
 
     assert result.final_text == "fake final"
     core = PolicyCapturingCore.instances[0]
-    assert core.permission_policy.profile.value == "workspace_guarded"
-    assert core.permission_policy.approval.value == "risky_only"
-    assert core.permission_policy.terminal.value == "off"
+    assert core.permission_policy.profile.value == "trusted_host"
+    assert core.permission_policy.approval.value == "never"
+    assert core.permission_policy.terminal.value == "ask"
 
 
 def test_cli_host_run_returns_pending_approval_summary_for_one_shot(monkeypatch, tmp_path) -> None:
@@ -378,12 +374,8 @@ def test_cli_host_run_returns_pending_approval_summary_for_one_shot(monkeypatch,
             "run",
             "--workspace",
             str(tmp_path),
-            "--permission-profile",
-            "trusted_host",
-            "--approval-policy",
-            "on_request",
-            "--terminal-access",
-            "ask",
+            "--permission-mode",
+            "ask-permissions",
             "danger",
         ]
     )
@@ -1094,7 +1086,7 @@ cli_usage_kind: read
     assert FakeCore.instances == []
 
 
-def test_cli_host_inspect_can_report_explicit_trusted_host_policy(
+def test_cli_host_inspect_can_report_bypass_preset_policy(
     monkeypatch, tmp_path, inspect_wiring
 ) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
@@ -1110,12 +1102,8 @@ def test_cli_host_inspect_can_report_explicit_trusted_host_policy(
             "inspect",
             "--workspace",
             str(tmp_path),
-            "--permission-profile",
-            "trusted_host",
-            "--approval-policy",
-            "never",
-            "--terminal-access",
-            "allow",
+            "--permission-mode",
+            "bypass-permissions",
         ]
     )
 
@@ -1128,7 +1116,7 @@ def test_cli_host_inspect_can_report_explicit_trusted_host_policy(
     assert snapshot["permissions"]["filesystem"]["terminal"] == "host_shell"
 
 
-def test_cli_host_inspect_can_report_terminal_ask_policy(
+def test_cli_host_inspect_can_report_accept_edits_preset_policy(
     monkeypatch, tmp_path, inspect_wiring
 ) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
@@ -1144,12 +1132,8 @@ def test_cli_host_inspect_can_report_terminal_ask_policy(
             "inspect",
             "--workspace",
             str(tmp_path),
-            "--permission-profile",
-            "trusted_host",
-            "--approval-policy",
-            "never",
-            "--terminal-access",
-            "ask",
+            "--permission-mode",
+            "accept-edits",
         ]
     )
 
@@ -1162,7 +1146,7 @@ def test_cli_host_inspect_can_report_terminal_ask_policy(
     assert snapshot["permissions"]["filesystem"]["terminal"] == "host_shell"
 
 
-def test_cli_host_inspect_can_report_on_request_with_terminal_allow(
+def test_cli_host_inspect_can_report_ask_permissions_preset_policy(
     monkeypatch, tmp_path, inspect_wiring
 ) -> None:
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
@@ -1178,12 +1162,8 @@ def test_cli_host_inspect_can_report_on_request_with_terminal_allow(
             "inspect",
             "--workspace",
             str(tmp_path),
-            "--permission-profile",
-            "trusted_host",
-            "--approval-policy",
-            "on_request",
-            "--terminal-access",
-            "allow",
+            "--permission-mode",
+            "ask-permissions",
         ]
     )
 
@@ -1192,7 +1172,7 @@ def test_cli_host_inspect_can_report_on_request_with_terminal_allow(
     assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(snapshot["tools"])
     assert snapshot["permissions"]["profile"] == "trusted_host"
     assert snapshot["permissions"]["approval_policy"] == "on_request"
-    assert snapshot["permissions"]["terminal_access"] == "allow"
+    assert snapshot["permissions"]["terminal_access"] == "ask"
 
 
 def test_cli_host_run_accepts_resumable_on_request_policy(monkeypatch, tmp_path) -> None:
@@ -1208,12 +1188,8 @@ def test_cli_host_run_accepts_resumable_on_request_policy(monkeypatch, tmp_path)
             "run",
             "--workspace",
             str(tmp_path),
-            "--permission-profile",
-            "trusted_host",
-            "--approval-policy",
-            "on_request",
-            "--terminal-access",
-            "ask",
+            "--permission-mode",
+            "ask-permissions",
             "say hi",
         ]
     )
@@ -1370,6 +1346,44 @@ def test_permission_mode_is_mutually_exclusive_with_raw_axes(tmp_path, capsys) -
     assert "--approval-policy" in err
 
 
+def test_raw_permission_axes_are_rejected_without_permission_mode(tmp_path, capsys) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "host",
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--approval-policy",
+            "never",
+            "say hi",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._permission_policy_from_host_args(args, intent="run")
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "raw permission axis flag" in err
+    assert "--approval-policy" in err
+    assert "--permission-mode" in err
+
+
+def test_raw_permission_axis_env_is_rejected(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("PULSARA_APPROVAL_POLICY", "never")
+    parser = cli.build_parser()
+    args = parser.parse_args(["host", "inspect", "--workspace", str(tmp_path)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._permission_policy_from_host_args(args, intent="inspect")
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "PULSARA_APPROVAL_POLICY" in err
+    assert "--permission-mode" in err
+
+
 def test_permission_mode_from_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PULSARA_PERMISSION_MODE", "accept-edits")
     parser = cli.build_parser()
@@ -1380,3 +1394,21 @@ def test_permission_mode_from_env(tmp_path, monkeypatch) -> None:
     assert policy.profile.value == "trusted_host"
     assert policy.approval.value == "never"
     assert policy.terminal.value == "ask"
+
+
+def test_repl_status_payload_distinguishes_default_and_effective_plan_mode() -> None:
+    session = SimpleNamespace(
+        default_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        effective_next_run_permission_mode=PermissionMode.READ_ONLY,
+        default_permission_policy=lambda: preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        effective_next_run_permission_policy=lambda: preset_to_policy(PermissionMode.READ_ONLY),
+        plan_state=SimpleNamespace(active=True),
+    )
+
+    payload = cli._host_session_status_payload(session)
+
+    assert payload["default_mode"] == "bypass-permissions"
+    assert payload["effective_next_run_mode"] == "read-only"
+    assert payload["default_policy"]["terminal_access"] == "allow"
+    assert payload["effective_next_run_policy"]["terminal_access"] == "off"
+    assert payload["plan_active"] is True

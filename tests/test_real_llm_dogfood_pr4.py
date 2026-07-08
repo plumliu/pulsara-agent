@@ -1378,6 +1378,7 @@ def _inject_controlled_failed_run(session, user_input: str) -> None:
     for event in (
         RunStartEvent(
             **ctx.event_fields(),
+            **run_start_permission_fields(ctx.run_id),
             user_input_chars=len(user_input),
             metadata={"user_input": user_input},
         ),

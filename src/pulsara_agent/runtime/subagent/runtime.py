@@ -39,6 +39,7 @@ from pulsara_agent.event import (
     SubagentTaskStartedEvent,
 )
 from pulsara_agent.event_log import EventLog
+from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.subagent.projection import (
     EventLogLocator,
@@ -2362,8 +2363,11 @@ class SubagentRuntime:
 
 
 def _default_capability_profile(budget: SubagentBudget) -> SubagentCapabilityProfile:
+    permission_mode = PermissionMode.READ_ONLY
     return SubagentCapabilityProfile(
         profile_id=f"subagent_capability_profile:{uuid4().hex}",
+        permission_mode=permission_mode.value,
+        permission_policy=preset_to_policy(permission_mode).to_dict(),
         max_spawn_depth_from_root=budget.max_spawn_depth_from_root,
         allowed_tool_names=_CHILD_REPORT_TOOL_NAMES,
         allowed_descriptor_ids=_CHILD_REPORT_DESCRIPTOR_IDS,

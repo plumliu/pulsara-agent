@@ -39,6 +39,9 @@ class ToolRuntimeContext:
     event_context: EventContext
     context_id: str | None = None
     model_call_index: int | None = None
+    permission_snapshot_id: str | None = None
+    permission_mode: str | None = None
+    permission_policy: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

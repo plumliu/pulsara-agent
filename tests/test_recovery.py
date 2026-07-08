@@ -43,7 +43,7 @@ def test_guidance_tables_cover_same_keys() -> None:
 
 def test_project_recovery_from_events_failed_run_uses_run_failed_guidance() -> None:
     events = [
-        RunStartEvent(**CTX.event_fields(), user_input_chars=12, metadata={"user_input": "do work"}),
+        RunStartEvent(**CTX.event_fields(), **run_start_permission_fields(CTX.run_id), user_input_chars=12, metadata={"user_input": "do work"}),
         ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
         ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
         RunEndEvent(**CTX.event_fields(), status="failed", stop_reason="tool_error"),
@@ -65,10 +65,10 @@ def test_project_recovery_from_events_aborted_plan_turn_uses_plan_aborted_guidan
             **CTX.event_fields(),
             source="user",
             previous_permission_mode="bypass-permissions",
-            previous_permission_policy={"profile": "trusted_host"},
+            previous_permission_policy=run_start_permission_fields(CTX.run_id)["permission_policy"],
             reason="plan first",
         ),
-        RunStartEvent(**CTX.event_fields(), user_input_chars=4, metadata={"user_input": "ask"}),
+        RunStartEvent(**CTX.event_fields(), **run_start_permission_fields(CTX.run_id), user_input_chars=4, metadata={"user_input": "ask"}),
         ReplyEndEvent(**CTX.event_fields()),
         RunEndEvent(
             **CTX.event_fields(),
@@ -93,7 +93,7 @@ def test_project_recovery_from_events_aborted_plan_turn_uses_plan_aborted_guidan
 
 def test_project_recovery_from_events_late_tool_result_preserves_completed_semantics() -> None:
     events = [
-        RunStartEvent(**CTX.event_fields(), user_input_chars=10, metadata={"user_input": "run command"}),
+        RunStartEvent(**CTX.event_fields(), **run_start_permission_fields(CTX.run_id), user_input_chars=10, metadata={"user_input": "run command"}),
         ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
         ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
         RunEndEvent(
@@ -114,7 +114,7 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
 
 def test_host_teardown_has_distinct_recovery_guidance() -> None:
     events = [
-        RunStartEvent(**CTX.event_fields(), user_input_chars=4, metadata={"user_input": "work"}),
+        RunStartEvent(**CTX.event_fields(), **run_start_permission_fields(CTX.run_id), user_input_chars=4, metadata={"user_input": "work"}),
         RunEndEvent(
             **CTX.event_fields(),
             status="aborted",

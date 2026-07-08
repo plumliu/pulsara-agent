@@ -7,7 +7,9 @@ from typing import Any, Iterable
 
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityGateDecisionEvent,
     RunEndEvent,
+    RunStartEvent,
     ToolCallStartEvent,
     ToolResultEndEvent,
 )
@@ -73,6 +75,45 @@ def run_projection_diagnostics(run_row: dict[str, Any] | None, events: Iterable[
             "details": {"run_id": latest_end.run_id, "fields": stale_fields},
         }
     ]
+
+
+def permission_snapshot_diagnostics(events: Iterable[AgentEvent]) -> list[dict[str, Any]]:
+    event_list = list(events)
+    run_start = next((event for event in event_list if isinstance(event, RunStartEvent)), None)
+    if run_start is None:
+        return []
+
+    expected_mode = run_start.permission_mode
+    expected_policy = dict(run_start.permission_policy)
+    diagnostics: list[dict[str, Any]] = []
+    for event in event_list:
+        if not isinstance(event, CapabilityGateDecisionEvent):
+            continue
+        actual_mode = event.policy_mode
+        actual_policy = dict(event.permission_policy or {})
+        mode_matches = actual_mode == expected_mode
+        policy_matches = actual_policy == expected_policy
+        if mode_matches and policy_matches:
+            continue
+        diagnostics.append(
+            {
+                "code": "capability_gate_permission_snapshot_mismatch",
+                "severity": "error",
+                "message": "Capability gate decision permission facts do not match the run permission snapshot.",
+                "details": {
+                    "run_id": run_start.run_id,
+                    "tool_call_id": event.tool_call_id,
+                    "tool_name": event.tool_name,
+                    "sequence": event.sequence,
+                    "run_permission_snapshot_id": run_start.permission_snapshot_id,
+                    "run_permission_mode": expected_mode,
+                    "gate_policy_mode": actual_mode,
+                    "mode_matches": mode_matches,
+                    "policy_matches": policy_matches,
+                },
+            }
+        )
+    return diagnostics
 
 
 def tool_flow_diagnostics(

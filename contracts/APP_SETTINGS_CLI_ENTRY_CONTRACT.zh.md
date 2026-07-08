@@ -116,7 +116,7 @@ Removed / prohibited:
 - `accept-edits`
 - `bypass-permissions`
 
-高级 raw axes：
+Deprecated / test-only raw axes（生产 host run / repl / inspect 拒绝）：
 
 - `--permission-profile`
 - `--approval-policy`
@@ -125,6 +125,7 @@ Removed / prohibited:
 规则：
 
 - `--permission-mode` 与 raw axes 互斥。
+- production host run / repl / inspect path 必须拒绝 raw axes flags/env；它们不能进入 HostSession / AgentRuntime / RunStartEvent contract。
 - `host run` / `host repl` 默认 `bypass-permissions`。
 - `host inspect` 默认 `read-only`。
 - 环境变量 `PULSARA_PERMISSION_MODE` 可以提供 run/repl 默认 mode。
@@ -347,7 +348,7 @@ Host/Runtime 必须在 model system prompt 中注入当前 runtime context：
 - host run 使用 HostCore、thread workspace/model role/permission/active skill。
 - host run pending approval/interaction 输出 JSON summary。
 - removed commands/flags/kinds 被 argparse 拒绝。
-- permission mode 与 raw axes 互斥。
+- permission mode 是生产主路径；raw axes flags/env 在 host run/repl/inspect 中被拒绝。
 - run 默认 bypass，inspect 默认 read-only。
 - REPL approval/plan/question/choose/revise/cancel commands 正确转移状态。
 - REPL prompt 在 pending approval/plan/active plan 下显示正确。

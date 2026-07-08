@@ -24,6 +24,7 @@ from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.inspector.diagnostics import (
     outbox_diagnostics,
+    permission_snapshot_diagnostics,
     run_projection_diagnostics,
     sequence_gap_diagnostics,
     tool_flow_diagnostics,
@@ -136,6 +137,7 @@ class InspectorService:
         diagnostics = []
         diagnostics.extend(sequence_gap_diagnostics(session_events))
         diagnostics.extend(run_projection_diagnostics(run, run_events))
+        diagnostics.extend(permission_snapshot_diagnostics(run_events))
         diagnostics.extend(tool_flow_diagnostics(run_events, known_artifact_ids=indexed_artifact_ids))
         diagnostics.extend(outbox_diagnostics(self.store.outbox_for_run(run_id)))
 
@@ -148,6 +150,7 @@ class InspectorService:
                 "start_sequence": _min_sequence(run_events),
                 "end_sequence": _max_sequence(run_events),
                 "current_user_input": _run_user_input(run_start),
+                "permission_snapshot": _run_permission_snapshot(run_start),
             },
             "timeline": timeline.to_dict(),
             "compaction_boundary_as_seen": compaction_boundary,
@@ -797,6 +800,17 @@ def _run_user_input(event: RunStartEvent | None) -> str | None:
         return None
     value = event.metadata.get("user_input")
     return value if isinstance(value, str) else None
+
+
+def _run_permission_snapshot(event: RunStartEvent | None) -> dict[str, Any] | None:
+    if event is None:
+        return None
+    return {
+        "permission_snapshot_id": event.permission_snapshot_id,
+        "permission_mode": event.permission_mode,
+        "permission_policy": _json_safe(event.permission_policy),
+        "permission_snapshot_source": event.permission_snapshot_source,
+    }
 
 
 def _min_sequence(events: Iterable[AgentEvent]) -> int | None:

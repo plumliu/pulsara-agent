@@ -19,6 +19,85 @@ from pulsara_agent.message.blocks import (
 )
 from pulsara_agent.ontology import memory
 
+_PRESET_PERMISSION_MODES = frozenset(
+    {
+        "read-only",
+        "ask-permissions",
+        "accept-edits",
+        "bypass-permissions",
+    }
+)
+_RUN_PERMISSION_SNAPSHOT_SOURCES = frozenset({"session_default", "plan_mode", "child_profile"})
+
+_PRESET_PERMISSION_POLICIES: dict[str, dict[str, Any]] = {
+    "read-only": {
+        "profile": "read_only",
+        "approval_policy": "on_request",
+        "terminal_access": "off",
+        "execution_boundary": "host",
+        "network_isolated": False,
+        "filesystem": {
+            "read_file_scope": "host_local_text",
+            "search_files_scope": "host_local_text_guarded_broad_roots",
+            "write_file_scope": "workspace_only",
+            "terminal": "off",
+        },
+    },
+    "ask-permissions": {
+        "profile": "trusted_host",
+        "approval_policy": "on_request",
+        "terminal_access": "ask",
+        "execution_boundary": "host",
+        "network_isolated": False,
+        "filesystem": {
+            "read_file_scope": "host_local_text",
+            "search_files_scope": "host_local_text_guarded_broad_roots",
+            "write_file_scope": "workspace_only",
+            "terminal": "host_shell",
+        },
+    },
+    "accept-edits": {
+        "profile": "trusted_host",
+        "approval_policy": "never",
+        "terminal_access": "ask",
+        "execution_boundary": "host",
+        "network_isolated": False,
+        "filesystem": {
+            "read_file_scope": "host_local_text",
+            "search_files_scope": "host_local_text_guarded_broad_roots",
+            "write_file_scope": "workspace_only",
+            "terminal": "host_shell",
+        },
+    },
+    "bypass-permissions": {
+        "profile": "trusted_host",
+        "approval_policy": "never",
+        "terminal_access": "allow",
+        "execution_boundary": "host",
+        "network_isolated": False,
+        "filesystem": {
+            "read_file_scope": "host_local_text",
+            "search_files_scope": "host_local_text_guarded_broad_roots",
+            "write_file_scope": "workspace_only",
+            "terminal": "host_shell",
+        },
+    },
+}
+
+
+def _validate_preset_permission_payload(
+    *,
+    mode: str,
+    policy: dict[str, Any],
+    context: str,
+) -> None:
+    if mode not in _PRESET_PERMISSION_MODES:
+        allowed = ", ".join(sorted(_PRESET_PERMISSION_MODES))
+        raise ValueError(f"{context} permission mode must be one of: {allowed}")
+    expected = _PRESET_PERMISSION_POLICIES[mode]
+    if dict(policy) != expected:
+        raise ValueError(f"{context} permission policy must match preset mode {mode!r}")
+
 
 class EventType(StrEnum):
     RUN_START = "RUN_START"
@@ -141,6 +220,21 @@ class EventBase(BaseModel):
 class RunStartEvent(EventBase):
     type: Literal[EventType.RUN_START] = EventType.RUN_START
     user_input_chars: int
+    permission_snapshot_id: str
+    permission_mode: Literal["read-only", "ask-permissions", "accept-edits", "bypass-permissions"]
+    permission_policy: dict[str, Any]
+    permission_snapshot_source: Literal["session_default", "plan_mode", "child_profile"]
+
+    @model_validator(mode="after")
+    def _validate_permission_snapshot(self) -> "RunStartEvent":
+        if self.permission_snapshot_source not in _RUN_PERMISSION_SNAPSHOT_SOURCES:
+            raise ValueError("RunStartEvent permission_snapshot_source is invalid")
+        _validate_preset_permission_payload(
+            mode=self.permission_mode,
+            policy=self.permission_policy,
+            context="RunStartEvent",
+        )
+        return self
 
 
 class RunEndEvent(EventBase):
@@ -386,9 +480,18 @@ class TerminalProcessCompletedEvent(EventBase):
 class PlanModeEnteredEvent(EventBase):
     type: Literal[EventType.PLAN_MODE_ENTERED] = EventType.PLAN_MODE_ENTERED
     source: Literal["user", "agent"]
-    previous_permission_mode: str | None = None
-    previous_permission_policy: dict[str, Any] = Field(default_factory=dict)
+    previous_permission_mode: Literal["read-only", "ask-permissions", "accept-edits", "bypass-permissions"]
+    previous_permission_policy: dict[str, Any]
     reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_previous_permission(self) -> "PlanModeEnteredEvent":
+        _validate_preset_permission_payload(
+            mode=self.previous_permission_mode,
+            policy=self.previous_permission_policy,
+            context="PlanModeEnteredEvent.previous",
+        )
+        return self
 
 
 class PlanQuestionOption(BaseModel):
@@ -458,10 +561,19 @@ class PlanModeExitedEvent(EventBase):
     type: Literal[EventType.PLAN_MODE_EXITED] = EventType.PLAN_MODE_EXITED
     source: Literal["approved_exit_plan", "user_cancel", "user_force_exit"]
     exit_request_id: str | None = None
-    restored_permission_mode: str | None = None
-    restored_permission_policy: dict[str, Any] = Field(default_factory=dict)
+    restored_permission_mode: Literal["read-only", "ask-permissions", "accept-edits", "bypass-permissions"]
+    restored_permission_policy: dict[str, Any]
     accepted_plan_summary: str = ""
     accepted_plan_artifact_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_restored_permission(self) -> "PlanModeExitedEvent":
+        _validate_preset_permission_payload(
+            mode=self.restored_permission_mode,
+            policy=self.restored_permission_policy,
+            context="PlanModeExitedEvent.restored",
+        )
+        return self
 
 
 class MemoryEventBase(EventBase):

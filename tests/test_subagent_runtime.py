@@ -508,8 +508,8 @@ def test_builtin_profiles_compute_child_tool_boundaries(tmp_path) -> None:
     )
     runtime.refresh_parent_capability_snapshot(
         exposure=exposure,
-        permission_mode="bypass",
-        permission_policy={"mode": "bypass"},
+        permission_mode=PermissionMode.BYPASS_PERMISSIONS.value,
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS).to_dict(),
     )
 
     async def run() -> None:
@@ -555,8 +555,8 @@ def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
     )
     runtime.refresh_parent_capability_snapshot(
         exposure=exposure,
-        permission_mode="bypass",
-        permission_policy={"mode": "bypass"},
+        permission_mode=PermissionMode.BYPASS_PERMISSIONS.value,
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS).to_dict(),
     )
     tool = CreateAgentTasksTool(runtime)
 
@@ -1323,7 +1323,7 @@ def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_host_permission_leaving_bypass_cancels_active_subagents(tmp_path) -> None:
+def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(tmp_path) -> None:
     started = asyncio.Event()
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     locator = InMemoryEventLogLocator()
@@ -1376,15 +1376,19 @@ def test_host_permission_leaving_bypass_cancels_active_subagents(tmp_path) -> No
         session.set_permission_mode("read-only")
         await asyncio.sleep(0)
 
-        assert task.cancelled()
+        assert not task.cancelled()
         cancelled = [
             event
             for event in runtime_wiring.runtime_session.event_log.iter()
             if isinstance(event, SubagentRunCancelledEvent)
         ]
-        assert cancelled
-        assert cancelled[-1].reason_code == "subagent_bypass_revoked"
-        assert cancelled[-1].cancelled_by == "runtime"
+        assert not cancelled
+        await subagent_runtime.cancel(
+            subagent.subagent_run_id,
+            event_context=CTX,
+            reason_code="test_cleanup",
+            cancelled_by="runtime",
+        )
 
     asyncio.run(run())
 
@@ -1408,7 +1412,7 @@ def test_parent_transcript_rebuild_ignores_subagent_graph_events_after_run_end(t
     async def run() -> None:
         from pulsara_agent.event import RunEndEvent, RunStartEvent
 
-        await parent.emit(RunStartEvent(**CTX.event_fields(), user_input_chars=5, metadata={"user_input": "hello"}))
+        await parent.emit(RunStartEvent(**CTX.event_fields(), **run_start_permission_fields(CTX.run_id), user_input_chars=5, metadata={"user_input": "hello"}))
         await parent.emit(RunEndEvent(**CTX.event_fields(), status="finished", stop_reason="final"))
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
         await runtime.complete_fake(subagent.subagent_run_id, summary="child done")
@@ -1665,7 +1669,7 @@ def test_agent_runtime_repairs_dangling_subagent_before_turn(tmp_path) -> None:
     assert failed[-1].reason_code == "subagent_dangling_repaired"
 
 
-def test_child_pending_interaction_fails_closed_without_parent_pending_slot(tmp_path) -> None:
+def test_child_enter_plan_finalizes_without_parent_pending_slot(tmp_path) -> None:
     transport = _PendingChildTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
@@ -1691,13 +1695,13 @@ def test_child_pending_interaction_fails_closed_without_parent_pending_slot(tmp_
         assert result.state.pending_interaction_kind is None
         for _ in range(200):
             if any(
-                isinstance(event, SubagentRunFailedEvent)
-                and event.reason_code == "subagent_pending_unsupported"
+                isinstance(event, SubagentRunCompletedEvent)
+                and event.summary == "(child agent finished without final text)"
                 for event in parent_session.event_log.iter()
             ):
                 return
             await asyncio.sleep(0.001)
-        raise AssertionError("child pending failure was not recorded")
+        raise AssertionError("child enter_plan completion was not recorded")
 
     asyncio.run(run_parent())
 

@@ -75,7 +75,7 @@ _Created: 2026-07-04_
 
 1. 将 prior messages 复制进 `LoopState.messages`。
 2. append current user message。
-3. emit `RUN_START`。
+3. capture immutable `RunPermissionSnapshot` and emit `RUN_START` with required `permission_snapshot_id` / `permission_mode` / `permission_policy` / `permission_snapshot_source`。
 4. emit pending plan-entry audit（若用户先进入 plan mode）。
 5. run memory `on_turn_start` hook。
 6. resolve `CapabilityExposurePlan`。
@@ -169,13 +169,15 @@ Plan mode 是 workflow 子系统，不是 permission mode 的第五个值。
 
 规则：
 
-- 进入 plan mode 时 session permission 被切到 read-only。
+- 进入 plan mode 不改写已有 run 的 permission snapshot，也不把 HostSession stored default live mutate 成 read-only。
 - `PlanModeEnteredEvent` 必须持久写入；用户手动进入也不能只保存在内存里。
-- active plan mode 下禁止用户通过 `:mode bypass-permissions` 等命令绕过 read-only。
+- active plan mode 下禁止用户通过 `:mode bypass-permissions` 等命令绕过 read-only；plan active 时所有新 run 的 snapshot 强制为 `read-only` / `plan_mode`。
 - `ask_plan_question` 只允许在 plan active 时使用。
-- `exit_plan` 产生 pending exit interaction；用户 approve 后退出 plan mode 并恢复 pre-plan policy。
+- agent `enter_plan` 是 run-ending workflow control：写入 event + tool result 后 finalize 当前 run，不再 follow-up model call。
+- `exit_plan` 产生 pending exit interaction；用户 approve/cancel/force-exit 后退出 plan mode，并恢复 pre-plan stored default for future run。exit_plan 所在 run 仍保持 read-only snapshot，不在当前 run 内放宽。
 - `:revise-plan <feedback>` 保持 plan active/read-only，并要求模型重新提交 updated plan + `exit_plan`，不得只输出普通解释。
 - `:cancel-plan` 放弃整个 plan workflow，退出 plan mode。
+- `PlanModeEnteredEvent.previous_permission_mode/policy` 与 `PlanModeExitedEvent.restored_permission_mode/policy` 必须是 preset mode + `preset_to_policy(mode).to_dict()`；缺失、自定义或不一致为 contract error。
 
 Plan workflow tools 必须先通过 capability exposure access；descriptor 缺失时不得改变 plan state。
 

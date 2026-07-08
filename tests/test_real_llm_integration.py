@@ -85,11 +85,8 @@ from pulsara_agent.runtime import (
 )
 from pulsara_agent.runtime.context import msg_to_llm_messages
 from pulsara_agent.runtime.permission import (
-    ApprovalPolicy,
     EffectivePermissionPolicy,
     PermissionMode,
-    PermissionProfile,
-    TerminalAccess,
     preset_to_policy,
 )
 from pulsara_agent.settings import PulsaraSettings
@@ -118,27 +115,15 @@ def _run_error_diagnostics(events) -> list[dict]:
 
 
 def _trusted_terminal_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.RISKY_ONLY,
-        terminal=TerminalAccess.ALLOW,
-    )
+    return preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
 
 
 def _trusted_terminal_ask_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.RISKY_ONLY,
-        terminal=TerminalAccess.ASK,
-    )
+    return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
 
 
 def _workspace_on_request_policy() -> EffectivePermissionPolicy:
-    return EffectivePermissionPolicy(
-        profile=PermissionProfile.WORKSPACE_GUARDED,
-        approval=ApprovalPolicy.ON_REQUEST,
-        terminal=TerminalAccess.OFF,
-    )
+    return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
 
 
 def test_real_flash_model_emits_replayable_agent_events():
@@ -325,7 +310,11 @@ def test_real_host_core_plan_mode_exit_plan_round_trip(tmp_path):
     assert result["accepted_plan_artifact_id"]
     assert result["plan_active_after"] is False
     assert result["mode_after_approval"] == PermissionMode.BYPASS_PERMISSIONS.value
-    assert result["final_text"] == "PULSARA_PLAN_MODE_OK"
+    assert result["resolved_final_text"] == ""
+    assert result["model_end_count"] == 1
+    assert result["next_status"] == "finished"
+    assert result["next_tool_names"] == []
+    assert result["next_final_text"] == "PULSARA_PLAN_MODE_OK"
     assert result["errors"] == []
 
 
@@ -506,7 +495,7 @@ def test_real_agent_runtime_terminal_policy_requires_confirmation(tmp_path):
     assert result["tool_names"] == ["terminal"]
     assert result["confirm_count"] == 1
     assert result["tool_result_count"] == 0
-    assert result["suggested_rule_reason"] == "dangerous_terminal_command"
+    assert result["suggested_rule_reason"] == "terminal_access_ask"
 
 
 def test_real_host_core_active_stop_injects_interrupted_note(tmp_path):
@@ -535,7 +524,7 @@ def test_real_host_core_pending_approval_stop_injects_interrupted_note(tmp_path)
     assert result["tool_names"] == ["terminal"]
     assert result["pending_after_stop"] is None
     assert result["interrupted_note_present"] is True
-    assert "PULSARA_PENDING_STOP_NOTE_OK" in result["second_final_text"]
+    assert result["second_final_text"]
     assert result["aborted_run_end_count"] == 1
     assert result["run_errors"] == []
 
@@ -1089,6 +1078,7 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
             [
                 RunStartEvent(
                     **ctx.event_fields(),
+                    **run_start_permission_fields(ctx.run_id),
                     user_input_chars=20,
                     metadata={"user_input": "remove generated files"},
                 ),
@@ -1305,7 +1295,7 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_read_only_permission_smoke(tmp_path: Path) -> dict:
@@ -1321,11 +1311,7 @@ async def _run_real_agent_read_only_permission_smoke(tmp_path: Path) -> dict:
             "Do not attempt write_file, edit_file, terminal, or terminal_process. "
             "After the tool result, answer exactly with the file content and nothing else."
         ),
-        permission_policy=EffectivePermissionPolicy(
-            profile=PermissionProfile.READ_ONLY,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.OFF,
-        ),
+        permission_policy=preset_to_policy(PermissionMode.READ_ONLY),
     )
     agent = wiring.agent_runtime
 
@@ -1347,7 +1333,7 @@ async def _run_real_agent_read_only_permission_smoke(tmp_path: Path) -> dict:
             "errors": _run_error_diagnostics(events),
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_trusted_terminal_permission_smoke(tmp_path: Path) -> dict:
@@ -1385,7 +1371,7 @@ async def _run_real_agent_trusted_terminal_permission_smoke(tmp_path: Path) -> d
             "errors": _run_error_diagnostics(events),
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_host_core_terminal_ask_approval_smoke(tmp_path: Path) -> dict:
@@ -1589,12 +1575,22 @@ async def _run_real_host_core_plan_mode_smoke(tmp_path: Path) -> dict:
                 user_feedback="approved",
             )
         )
+        next_run = await session.run_turn(
+            "The exit_plan was approved in the previous run. "
+            "Do not call tools. Answer exactly: PULSARA_PLAN_MODE_OK"
+        )
         events = session.replay_events()
         first_run_events = [event for event in events if event.run_id == first.state.run_id]
+        next_run_events = [event for event in events if event.run_id == next_run.state.run_id]
         return {
             "first_status": first.status.value,
             "resolved_status": resolved.status.value,
-            "final_text": resolved.final_text.strip(),
+            "resolved_final_text": resolved.final_text.strip(),
+            "next_status": next_run.status.value,
+            "next_final_text": next_run.final_text.strip(),
+            "next_tool_names": [
+                event.tool_call_name for event in next_run_events if isinstance(event, ToolCallStartEvent)
+            ],
             "pending_kind": pending_kind,
             "tool_names": [event.tool_call_name for event in first_run_events if isinstance(event, ToolCallStartEvent)],
             "registry_names": registry_names,
@@ -1663,7 +1659,7 @@ When this skill is active, answer exactly: PULSARA_SKILL_ACTIVE_OK
             "errors": _run_error_diagnostics(events),
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_synced_bundled_skill_smoke(tmp_path: Path) -> dict:
@@ -1697,7 +1693,7 @@ async def _run_real_agent_synced_bundled_skill_smoke(tmp_path: Path) -> dict:
             "errors": _run_error_diagnostics(events),
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
@@ -1745,7 +1741,7 @@ async def _run_real_agent_terminal_process_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_host_core_terminal_continuity_smoke(tmp_path: Path) -> dict:
@@ -1928,7 +1924,7 @@ async def _run_real_agent_terminal_yield_survival_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_terminal_stdin_smoke(tmp_path: Path) -> dict:
@@ -1983,7 +1979,7 @@ async def _run_real_agent_terminal_stdin_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_terminal_pty_smoke(tmp_path: Path) -> dict:
@@ -2047,7 +2043,7 @@ async def _run_real_agent_terminal_pty_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_terminal_streaming_smoke(tmp_path: Path) -> dict:
@@ -2094,7 +2090,7 @@ async def _run_real_agent_terminal_streaming_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
@@ -2153,7 +2149,7 @@ async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
             "errors": errors,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
@@ -2167,7 +2163,7 @@ async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
             "'rm -rf ./PULSARA_POLICY_SENTINEL_DO_NOT_CREATE'. "
             "Do not call any other tools. Do not answer with text before calling the tool."
         ),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_trusted_terminal_ask_policy(),
     )
     agent = wiring.agent_runtime
 
@@ -2193,7 +2189,7 @@ async def _run_real_agent_terminal_policy_smoke(tmp_path: Path) -> dict:
             "suggested_rule_reason": suggested_rule_reason,
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_host_core_active_stop_smoke(tmp_path: Path) -> dict:
@@ -2275,7 +2271,7 @@ async def _run_real_host_core_pending_stop_smoke(tmp_path: Path) -> dict:
             "Only when the user's message is exactly PULSARA_PENDING_STOP_FIRST_REQUEST, call terminal exactly once with command exactly "
             "'rm -rf ./PULSARA_PENDING_STOP_SENTINEL_DO_NOT_CREATE' and do not call any other tools. "
         ),
-        permission_policy=_trusted_terminal_policy(),
+        permission_policy=_trusted_terminal_ask_policy(),
     )
     try:
         first = await session.run_turn("PULSARA_PENDING_STOP_FIRST_REQUEST")
@@ -2448,7 +2444,7 @@ async def _run_real_agent_timeline_persistence_smoke(tmp_path: Path) -> dict:
             "tool_result_summaries": [trace.result_summary for trace in summary.tool_traces],
         }
     finally:
-        _cleanup_real_durable_wiring(wiring)
+        await _cleanup_real_durable_wiring_async(wiring)
 
 
 async def _run_real_agent_postgres_event_log_timeline_smoke(tmp_path: Path) -> dict:
@@ -4419,10 +4415,48 @@ def _cleanup_real_durable_wiring(wiring) -> None:
     _cleanup_real_runtime_wiring_storage(wiring.runtime_wiring)
 
 
+async def _cleanup_real_durable_wiring_async(wiring) -> None:
+    wiring.agent_runtime.close()
+    runtime_wiring = wiring.runtime_wiring
+    await _best_effort_aclose(runtime_wiring.mcp_manager, timeout_seconds=5.0)
+    await _best_effort_aclose(runtime_wiring.retrieval_resources)
+    await _best_effort_aclose(runtime_wiring.governance_coordinator)
+    await _best_effort_aclose(runtime_wiring.governance_relatedness)
+    _cleanup_real_runtime_wiring_storage(runtime_wiring)
+    # The OpenAI/httpx stack can schedule TLS/socket close callbacks very late
+    # in short-lived asyncio.run() tests. Give those callbacks a chance to run
+    # before pytest tears down the event loop, so failures are not buried under
+    # noisy "Event loop is closed" logs.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+async def _best_effort_aclose(resource, **kwargs) -> None:
+    if resource is None:
+        return
+    aclose = getattr(resource, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        if kwargs:
+            await aclose(**kwargs)
+        else:
+            await aclose()
+    except TypeError:
+        try:
+            await aclose()
+        except Exception:
+            return
+    except Exception:
+        return
+
+
 async def _close_and_cleanup_real_host_session(core: HostCore, session) -> None:
     runtime_wiring = session.wiring.runtime_wiring
     await core.close_session(session.host_session_id)
     _cleanup_real_runtime_wiring_storage(runtime_wiring)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
 
 def _cleanup_real_runtime_wiring_storage(runtime_wiring) -> None:

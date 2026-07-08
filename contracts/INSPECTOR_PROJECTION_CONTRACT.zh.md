@@ -68,7 +68,7 @@ Session inspection 必须展示：
 Run inspection 必须展示：
 
 - session/run rows；
-- canonical event count / start/end sequence / current user input；
+- canonical event count / start/end sequence / current user input / run permission snapshot；
 - business timeline；
 - compaction boundary as seen；
 - prior messages as seen；
@@ -81,6 +81,8 @@ Run inspection 必须展示：
 - diagnostics。
 
 `prior_messages_as_seen` 必须用同一条 `rebuild_prior_messages()` 路径重建，不能另写 transcript reducer。
+
+Run permission snapshot 必须来自该 run 的 `RunStartEvent`，展示 `permission_snapshot_id`、`permission_mode`、`permission_policy`、`permission_snapshot_source`；Inspector 不得从 live HostSession default 或 session manifest 反推历史 run 权限。
 
 ---
 

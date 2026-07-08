@@ -191,6 +191,7 @@ call-local fail-closed：
 batch-level permission：
 
 - 对已通过 capability exposure 的 call 集合，`PolicyPermissionGate` 可以返回 ALLOW / WAIT / DENY。
+- permission gate 必须读取当前 run 的 immutable `RunPermissionSnapshot`，不得读取 HostSession stored default 或其他 live mutable holder 来解释已启动 / suspended run。
 - `WAIT_FOR_USER` 是 batch suspension，适用于本批需要用户批准的调用。
 - `DENY` 的错误信息必须对应最终被拒工具，不得把某个兄弟工具的 reason 套给所有 call。
 

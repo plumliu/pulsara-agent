@@ -11,7 +11,7 @@ from pulsara_agent.runtime.permission import PermissionState, TerminalAccess
 from pulsara_agent.runtime.terminal import TerminalSessionManager, TerminalStatus
 from pulsara_agent.runtime.terminal.process import ProcessInputError
 from pulsara_agent.runtime.terminal_risk import is_hardline_terminal_command
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
     MIN_TERMINAL_OUTPUT_CHARS,
@@ -67,10 +67,15 @@ class TerminalProcessTool(WorkspaceTool):
         if self.terminal_sessions is None:
             self.terminal_sessions = TerminalSessionManager(self.workspace_root)
 
-    def execute(self, call: ToolCall) -> ToolExecutionResult:
+    def execute(
+        self,
+        call: ToolCall,
+        *,
+        runtime_context: ToolRuntimeContext | None = None,
+    ) -> ToolExecutionResult:
         action = required_str_arg(call.arguments, "action").strip()
         process_id = _optional_process_id(call.arguments)
-        if self.permission_state is not None and self.permission_state.policy.terminal is TerminalAccess.OFF:
+        if _terminal_access_off(runtime_context=runtime_context, permission_state=self.permission_state):
             return self._error_result(
                 call,
                 process_id=process_id,
@@ -185,6 +190,16 @@ class TerminalProcessTool(WorkspaceTool):
         except ProcessInputError as exc:
             return self._error_result(call, process_id=process_id, error=str(exc), status="blocked")
         return self._process_result(call, result, action=action)
+
+    def execute_with_context(
+        self,
+        call: ToolCall,
+        *,
+        event_context=None,
+        record_event=None,
+        runtime_context: ToolRuntimeContext | None = None,
+    ) -> ToolExecutionResult:
+        return self.execute(call, runtime_context=runtime_context)
 
     def _list_result(self, call: ToolCall, processes, *, action: str) -> ToolExecutionResult:
         live_count = self.terminal_sessions.live_process_count(owner_host_session_id=self.owner_host_session_id)
@@ -309,6 +324,16 @@ class TerminalProcessTool(WorkspaceTool):
 def _optional_process_id(args: dict[str, Any]) -> str | None:
     raw = args.get("process_id")
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
+def _terminal_access_off(
+    *,
+    runtime_context: ToolRuntimeContext | None,
+    permission_state: PermissionState | None,
+) -> bool:
+    if runtime_context is not None and isinstance(runtime_context.permission_policy, dict):
+        return runtime_context.permission_policy.get("terminal_access") == TerminalAccess.OFF.value
+    return permission_state is not None and permission_state.policy.terminal is TerminalAccess.OFF
 
 
 @dataclass(frozen=True, slots=True)

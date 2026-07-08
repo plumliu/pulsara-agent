@@ -15,7 +15,7 @@ from pulsara_agent.runtime.tool_artifacts import (
     build_adaptive_preview,
     effective_terminal_output_cap,
 )
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
+from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate, ToolRuntimeContext
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
     MIN_TERMINAL_OUTPUT_CHARS,
@@ -94,8 +94,14 @@ class TerminalTool(WorkspaceTool):
         *,
         event_context: EventContext,
         record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+        runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
-        return self._execute(call, event_context=event_context, record_event=record_event)
+        return self._execute(
+            call,
+            event_context=event_context,
+            record_event=record_event,
+            runtime_context=runtime_context,
+        )
 
     def execute_streaming_with_context(
         self,
@@ -104,12 +110,14 @@ class TerminalTool(WorkspaceTool):
         *,
         event_context: EventContext,
         record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+        runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
         return self._execute_streaming(
             call,
             emit_delta,
             event_context=event_context,
             record_event=record_event,
+            runtime_context=runtime_context,
         )
 
     def _execute_streaming(
@@ -119,6 +127,7 @@ class TerminalTool(WorkspaceTool):
         *,
         event_context: EventContext | None = None,
         record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+        runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
         max_output = _max_output_chars_arg(call.arguments)
         builder = _StreamingTerminalJsonBuilder(emit_delta, max_output_chars=max_output)
@@ -127,6 +136,7 @@ class TerminalTool(WorkspaceTool):
             output_callback=builder.emit_output_delta,
             event_context=event_context,
             record_event=record_event,
+            runtime_context=runtime_context,
         )
         return builder.finish(result)
 
@@ -137,11 +147,12 @@ class TerminalTool(WorkspaceTool):
         output_callback: Callable[[str], None] | None = None,
         event_context: EventContext | None = None,
         record_event: Callable[[AgentEvent], AgentEvent] | None = None,
+        runtime_context: ToolRuntimeContext | None = None,
     ) -> ToolExecutionResult:
         command = required_str_arg(call.arguments, "command")
         workdir = str_arg(call.arguments, "workdir")
         session_id = str_arg(call.arguments, "terminal_session_id") or "default"
-        if self.permission_state is not None and self.permission_state.policy.terminal is TerminalAccess.OFF:
+        if _terminal_access_off(runtime_context=runtime_context, permission_state=self.permission_state):
             return self._blocked_result(
                 call,
                 command=command,
@@ -326,6 +337,16 @@ def terminal_artifact_candidates(result) -> tuple[ToolResultArtifactCandidate, .
             },
         ),
     )
+
+
+def _terminal_access_off(
+    *,
+    runtime_context: ToolRuntimeContext | None,
+    permission_state: PermissionState | None,
+) -> bool:
+    if runtime_context is not None and isinstance(runtime_context.permission_policy, dict):
+        return runtime_context.permission_policy.get("terminal_access") == TerminalAccess.OFF.value
+    return permission_state is not None and permission_state.policy.terminal is TerminalAccess.OFF
 
 
 def _tool_result_state(status: TerminalStatus) -> ToolResultState:

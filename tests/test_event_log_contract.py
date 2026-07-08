@@ -121,11 +121,78 @@ def test_event_log_replay_rebuilds_assistant_message(event_log: EventLog) -> Non
 
 def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> None:
     ctx = _ctx("contract:lifecycle")
-    started = RunStartEvent(**ctx.event_fields(), user_input_chars=7)
+    started = RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=7)
     ended = RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted", abort_kind="user_stop")
 
     assert load_agent_event(dump_agent_event(started)) == started
     assert load_agent_event(dump_agent_event(ended)) == ended
+
+
+def test_run_start_permission_policy_equals_preset_expansion() -> None:
+    ctx = _ctx("contract:lifecycle-permission-preset")
+    fields = run_start_permission_fields(ctx.run_id, mode="accept-edits")
+
+    event = RunStartEvent(**ctx.event_fields(), **fields, user_input_chars=7)
+
+    assert event.permission_mode == "accept-edits"
+    assert event.permission_policy == fields["permission_policy"]
+
+
+def test_run_start_rejects_missing_or_custom_permission_mode() -> None:
+    ctx = _ctx("contract:lifecycle-permission-required")
+
+    with pytest.raises(ValueError):
+        RunStartEvent(**ctx.event_fields(), user_input_chars=7)
+
+    fields = run_start_permission_fields(ctx.run_id)
+    with pytest.raises(ValueError):
+        RunStartEvent(
+            **ctx.event_fields(),
+            **{
+                **fields,
+                "permission_policy": {
+                    **fields["permission_policy"],
+                    "terminal_access": "ask",
+                },
+            },
+            user_input_chars=7,
+        )
+
+
+def test_run_start_permission_fields_are_required_and_preset_only() -> None:
+    test_run_start_rejects_missing_or_custom_permission_mode()
+
+
+def test_plan_workflow_permission_facts_are_required_preset_expansions() -> None:
+    entered_ctx = _ctx("contract:plan-permission-entered")
+    exited_ctx = _ctx("contract:plan-permission-exited")
+    policy = run_start_permission_fields("run:contract:plan-permission")["permission_policy"]
+
+    with pytest.raises(ValueError):
+        PlanModeEnteredEvent(
+            **entered_ctx.event_fields(),
+            source="user",
+            previous_permission_mode="bypass-permissions",
+            reason="plan",
+        )
+
+    with pytest.raises(ValueError):
+        PlanModeEnteredEvent(
+            **entered_ctx.event_fields(),
+            source="user",
+            previous_permission_mode="bypass-permissions",
+            previous_permission_policy={**policy, "terminal_access": "ask"},
+            reason="plan",
+        )
+
+    with pytest.raises(ValueError):
+        PlanModeExitedEvent(
+            **exited_ctx.event_fields(),
+            source="approved_exit_plan",
+            exit_request_id="plan_exit:test",
+            restored_permission_mode="bypass-permissions",
+            restored_permission_policy={**policy, "terminal_access": "ask"},
+        )
 
 
 @pytest.mark.parametrize(
@@ -150,6 +217,7 @@ def test_postgres_event_log_updates_runs_projection_on_run_lifecycle(
         ctx = _ctx(f"postgres:run-projection:{status}:{uuid4().hex}")
         started = RunStartEvent(
             **ctx.event_fields(),
+            **run_start_permission_fields(ctx.run_id),
             user_input_chars=12,
             created_at="2026-01-02T03:04:05+00:00",
         )
@@ -196,12 +264,14 @@ def test_postgres_event_log_repairs_stale_runs_projection(tmp_path: Path) -> Non
             [
                 RunStartEvent(
                     **ended_ctx.event_fields(),
+                    **run_start_permission_fields(ended_ctx.run_id),
                     user_input_chars=8,
                     created_at="2026-01-02T03:04:05+00:00",
                 ),
                 ended,
                 RunStartEvent(
                     **running_ctx.event_fields(),
+                    **run_start_permission_fields(running_ctx.run_id),
                     user_input_chars=9,
                     created_at="2026-01-03T04:05:06+00:00",
                 ),
@@ -375,7 +445,7 @@ def test_capability_gate_decision_event_round_trips_through_agent_event_serializ
             **_ctx("contract:plan-entered").event_fields(),
             source="user",
             previous_permission_mode="bypass-permissions",
-            previous_permission_policy={"profile": "trusted_host"},
+            previous_permission_policy=run_start_permission_fields("run:contract:plan-entered")["permission_policy"],
             reason="plan first",
         ),
         PlanQuestionAskedEvent(
@@ -412,7 +482,7 @@ def test_capability_gate_decision_event_round_trips_through_agent_event_serializ
             source="approved_exit_plan",
             exit_request_id="plan_exit:1",
             restored_permission_mode="bypass-permissions",
-            restored_permission_policy={"profile": "trusted_host"},
+            restored_permission_policy=run_start_permission_fields("run:contract:plan-exited")["permission_policy"],
             accepted_plan_summary="Thing plan",
         ),
     ],

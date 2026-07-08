@@ -43,7 +43,7 @@ CapabilityDescriptor / CapabilityExposurePlan
 - `ToolRegistry` 只负责 execution binding。
 - `ToolExecutor` 只负责调用工具、规范化异常、发 tool result events、归档 artifact candidates。
 - Permission gate / capability gate 在 `AgentRuntime` 中运行；普通工具实现不得自建一套全局权限判定。
-- 少量工具可以有本地 fail-closed 防线，例如 `terminal=off`、hardline terminal command、workspace path escape；这些防线不能替代 runtime gate。
+- 少量工具可以有本地 fail-closed 防线，例如 `terminal=off`、hardline terminal command、workspace path escape；这些防线必须优先读取 `ToolRuntimeContext` 中的 run permission snapshot，不得读取 HostSession stored default 来改变已启动 run 的行为，也不能替代 runtime gate。
 
 ---
 

@@ -24,11 +24,18 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.host.identity import resolve_workspace
-from pulsara_agent.host.session_manifest import SessionManifestStore
+from pulsara_agent.host.session_manifest import SessionManifest, SessionManifestStore, permission_policy_from_manifest
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.runtime.permission import (
+    ApprovalPolicy,
+    EffectivePermissionPolicy,
+    PermissionMode,
+    PermissionProfile,
+    TerminalAccess,
+    preset_to_policy,
+)
 from pulsara_agent.runtime.recovery import HOST_TEARDOWN_NOTE_TEXT
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
@@ -229,6 +236,78 @@ def test_resume_restores_manifest_permission_mode_when_not_overridden(tmp_path, 
             _delete_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
+def test_manifest_permission_mode_without_policy_recovers_that_preset_not_default() -> None:
+    manifest = SessionManifest(
+        runtime_session_id="runtime:manifest:read-only",
+        conversation_id="conversation:manifest:read-only",
+        workspace_kind="project",
+        workspace_root="/tmp/project",
+        display_label="project",
+        memory_domain_id="u_test",
+        model_role=ModelRole.FLASH.value,
+        permission_mode=PermissionMode.READ_ONLY.value,
+        permission_policy={},
+        created_by="test",
+        created_at=None,
+        last_active_at=None,
+        closed_at=None,
+        archived=False,
+        metadata={},
+    )
+
+    policy = permission_policy_from_manifest(manifest)
+
+    assert policy == preset_to_policy(PermissionMode.READ_ONLY)
+
+
+def test_manifest_without_permission_facts_is_contract_error() -> None:
+    manifest = SessionManifest(
+        runtime_session_id="runtime:manifest:legacy-missing-permission",
+        conversation_id="conversation:manifest:legacy-missing-permission",
+        workspace_kind="project",
+        workspace_root="/tmp/project",
+        display_label="project",
+        memory_domain_id="u_test",
+        model_role=ModelRole.FLASH.value,
+        permission_mode=None,
+        permission_policy={},
+        created_by="test",
+        created_at=None,
+        last_active_at=None,
+        closed_at=None,
+        archived=False,
+        metadata={},
+    )
+
+    with pytest.raises(ValueError, match="permission_mode and permission_policy are required"):
+        permission_policy_from_manifest(manifest)
+
+
+def test_session_manifest_rejects_custom_policy_that_only_matches_preset_axes(tmp_path) -> None:
+    settings = _settings_or_skip()
+    store = SessionManifestStore(settings.storage.postgres_dsn)
+    runtime_session_id = f"runtime:manifest-custom:{uuid4().hex}"
+    custom_like_bypass = EffectivePermissionPolicy(
+        profile=PermissionProfile.TRUSTED_HOST,
+        approval=ApprovalPolicy.NEVER,
+        terminal=TerminalAccess.ALLOW,
+        network_isolated=True,
+    )
+
+    try:
+        with pytest.raises(ValueError, match="preset permission mode"):
+            store.upsert_open_manifest(
+                runtime_session_id=runtime_session_id,
+                conversation_id=f"conversation:{uuid4().hex}",
+                workspace=resolve_workspace(_workspace(tmp_path)),
+                model_role=ModelRole.FLASH,
+                permission_policy=custom_like_bypass,
+                created_by="test",
+            )
+    finally:
+        _delete_session(settings.storage.postgres_dsn, runtime_session_id)
+
+
 def test_resume_repairs_dangling_running_run_before_replay(tmp_path, monkeypatch) -> None:
     settings = _settings_or_skip()
     transport = ScriptedTransport(["after repair"])
@@ -257,7 +336,7 @@ def test_resume_repairs_dangling_running_run_before_replay(tmp_path, monkeypatch
     )
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), user_input_chars=13, metadata={"user_input": "dangling user"}),
+            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=13, metadata={"user_input": "dangling user"}),
             ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:dangling", tool_call_name="terminal"),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:dangling"),
         ]
