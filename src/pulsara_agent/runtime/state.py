@@ -69,6 +69,7 @@ class LoopBudget:
     latest_tool_result_reserved_chars: int = 2_048
     max_tool_results_per_context: int = 256
     minimum_essential_envelope_chars: int = 256
+    max_subagent_results_per_parent_compile: int = 8
 
 
 @dataclass(slots=True)

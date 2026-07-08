@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent
@@ -46,6 +46,8 @@ class RuntimeSession:
     memory_proposal_sink: MemoryProposalSink = field(default_factory=MemoryProposalSink)
     terminal_binding: TerminalRuntimeBinding | None = None
     extra_tool_bindings: tuple[Tool | AsyncTool, ...] = ()
+    subagent_runtime: Any | None = None
+    default_event_metadata: dict[str, Any] = field(default_factory=dict)
     publisher: RuntimeEventPublisher = field(init=False)
     terminal_sessions: TerminalSessionManager = field(init=False)
     artifact_service: ToolResultArtifactService = field(init=False)
@@ -95,8 +97,31 @@ class RuntimeSession:
                 "RuntimeSession.emit requires sequence=None; canonical sequence is assigned by EventLog"
             )
 
+    def _with_default_metadata(self, event: AgentEvent) -> AgentEvent:
+        if not self.default_event_metadata:
+            return event
+        metadata = _merge_event_metadata(self.default_event_metadata, event.metadata)
+        if metadata == event.metadata:
+            return event
+        return event.model_copy(update={"metadata": metadata})
+
+    def _require_default_metadata_present(self, event: AgentEvent) -> None:
+        if not self.default_event_metadata:
+            return
+        missing = [
+            key for key, value in self.default_event_metadata.items()
+            if key not in event.metadata
+            or not _metadata_contains_default(event.metadata[key], value)
+        ]
+        if missing:
+            raise ValueError(
+                "Stored event is missing RuntimeSession default metadata values: "
+                + ", ".join(sorted(missing))
+            )
+
     async def emit(self, event: AgentEvent, *, state: LoopState | None = None) -> AgentEvent:
         self._require_runtime_managed_sequence(event)
+        event = self._with_default_metadata(event)
         stored = self.event_log.append(event)
         await self.publisher.publish(
             RuntimePublishedEvent(
@@ -113,13 +138,24 @@ class RuntimeSession:
         *,
         state: LoopState | None = None,
     ) -> list[AgentEvent]:
-        stored_events: list[AgentEvent] = []
-        for event in events:
-            stored_events.append(await self.emit(event, state=state))
+        event_list = list(events)
+        for event in event_list:
+            self._require_runtime_managed_sequence(event)
+        event_list = [self._with_default_metadata(event) for event in event_list]
+        stored_events = self.event_log.extend(event_list)
+        for stored in stored_events:
+            await self.publisher.publish(
+                RuntimePublishedEvent(
+                    runtime_session_id=self.runtime_session_id,
+                    event=stored,
+                    state=state,
+                )
+            )
         return stored_events
 
     def emit_from_thread(self, event: AgentEvent, *, state: LoopState | None = None) -> AgentEvent:
         self._require_runtime_managed_sequence(event)
+        event = self._with_default_metadata(event)
         stored = self.event_log.append(event)
         published = RuntimePublishedEvent(
             runtime_session_id=self.runtime_session_id,
@@ -133,6 +169,7 @@ class RuntimeSession:
     def publish_stored_event(self, event: AgentEvent, *, state: LoopState | None = None) -> None:
         if event.sequence is None:
             raise ValueError("Stored events must have a canonical sequence")
+        self._require_default_metadata_present(event)
         published = RuntimePublishedEvent(
             runtime_session_id=self.runtime_session_id,
             event=event,
@@ -199,3 +236,26 @@ class RuntimeSession:
 
 def _next_publish_sequence(event_log: EventLog) -> int:
     return event_log.next_sequence()
+
+
+def _merge_event_metadata(default_metadata: dict[str, Any], event_metadata: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(default_metadata)
+    for key, value in event_metadata.items():
+        if isinstance(metadata.get(key), dict) and isinstance(value, dict):
+            nested = dict(metadata[key])
+            nested.update(value)
+            metadata[key] = nested
+        else:
+            metadata[key] = value
+    return metadata
+
+
+def _metadata_contains_default(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(
+            key in actual and _metadata_contains_default(actual[key], value)
+            for key, value in expected.items()
+        )
+    return actual == expected

@@ -59,6 +59,7 @@ from pulsara_agent.runtime.recovery import AbortKind, StopRequest
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.types import McpServerStatus
 from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 from pulsara_agent.capability.providers.mcp import McpCapabilityBindingBundle, McpCapabilityProvider, build_mcp_bundle
@@ -118,6 +119,27 @@ def _replace_mcp_capability_provider(
     if mcp_bundle is not None and not inserted:
         providers.append(McpCapabilityProvider(mcp_bundle))
     return CapabilityRuntime(providers=tuple(providers))
+
+
+def _mcp_ready_server_ids(mcp_bundle: McpCapabilityBindingBundle | None) -> frozenset[str]:
+    if mcp_bundle is None:
+        return frozenset()
+    return frozenset(
+        snapshot.config.server_id
+        for snapshot in mcp_bundle.manager.snapshots
+        if snapshot.status is McpServerStatus.READY
+    )
+
+
+def _permission_mode_rank(mode: PermissionMode | None) -> int:
+    if mode is None:
+        return 0
+    return {
+        PermissionMode.READ_ONLY: 1,
+        PermissionMode.ASK_PERMISSIONS: 2,
+        PermissionMode.ACCEPT_EDITS: 3,
+        PermissionMode.BYPASS_PERMISSIONS: 4,
+    }[mode]
 
 
 class _StreamObserver:
@@ -223,9 +245,11 @@ class HostSession:
         supervisor = self.mcp_supervisor
         if supervisor is None:
             return
+        old_ready_server_ids = _mcp_ready_server_ids(self.wiring.runtime_wiring.mcp_bundle)
         configs = load_mcp_server_configs(workspace_root=self.workspace.workspace_root)
         manager = await supervisor.sync_servers(configs)
         mcp_bundle = build_mcp_bundle(manager) if manager is not None else None
+        new_ready_server_ids = _mcp_ready_server_ids(mcp_bundle)
         runtime_session = self.wiring.runtime_wiring.runtime_session
         runtime_session.extra_tool_bindings = _replace_mcp_tool_bindings(
             runtime_session.extra_tool_bindings,
@@ -246,6 +270,14 @@ class HostSession:
             self._suspended_state.scratchpad.pop("capability_exposure", None)
         if self._active_state is not None:
             self._active_state.scratchpad.pop("capability_exposure", None)
+        revoked_servers = sorted(old_ready_server_ids.difference(new_ready_server_ids))
+        subagent_runtime = getattr(runtime_session, "subagent_runtime", None)
+        if revoked_servers and subagent_runtime is not None:
+            await subagent_runtime.fail_active_children_for_safety_narrowing(
+                reason_code="subagent_mcp_server_unavailable",
+                reason_message="Parent MCP safe-point sync removed or disabled a previously ready server.",
+                diagnostics=[{"revoked_mcp_server_ids": revoked_servers}],
+            )
 
     # -- Run entry points -----------------------------------------------------
     # run_turn / stream_turn / approval resume / plan resume all flow through one
@@ -338,8 +370,25 @@ class HostSession:
                 "approve, cancel, or force-exit the plan first"
             )
         parsed = parse_permission_mode(mode)
+        previous_mode = self.current_permission_mode
         policy = preset_to_policy(parsed)
         self.wiring.agent_runtime.set_permission_policy(policy, mode=parsed)
+        subagent_runtime = getattr(self.wiring.runtime_wiring.runtime_session, "subagent_runtime", None)
+        if (
+            subagent_runtime is not None
+            and previous_mode is PermissionMode.BYPASS_PERMISSIONS
+            and parsed is not PermissionMode.BYPASS_PERMISSIONS
+        ):
+            subagent_runtime.fail_active_children_for_safety_narrowing_now(
+                reason_code="subagent_bypass_revoked",
+                reason_message="Parent permission mode left bypass while child agents were active.",
+                diagnostics=[
+                    {
+                        "previous_permission_mode": previous_mode.value if previous_mode is not None else None,
+                        "new_permission_mode": parsed.value,
+                    }
+                ],
+            )
         self.last_active_at = time.monotonic()
         return policy
 
@@ -624,6 +673,14 @@ class HostSession:
         self.begin_close()
         await self.drain_active_run(reason=reason, timeout_seconds=drain_timeout_seconds)
         await self._finalize_suspended_run(reason)
+        subagent_runtime = getattr(self.wiring.runtime_wiring.runtime_session, "subagent_runtime", None)
+        if subagent_runtime is not None:
+            await subagent_runtime.cancel_active_children(
+                reason_code="subagent_host_session_close",
+                reason_message="HostSession is closing; active child runtimes are cancelled.",
+                cancelled_by="host_shutdown",
+                timeout_seconds=drain_timeout_seconds,
+            )
         mcp_manager = self.wiring.runtime_wiring.mcp_manager
         if mcp_manager is not None:
             try:

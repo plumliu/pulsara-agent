@@ -18,7 +18,11 @@ from pulsara_agent.runtime.terminal_risk import (
     is_risky_terminal_command,
     is_sensitive_terminal_command,
 )
-from pulsara_agent.runtime.tool_taxonomy import FILE_WRITE_TOOL_NAMES, TERMINAL_TOOL_NAMES
+from pulsara_agent.runtime.tool_taxonomy import (
+    FILE_WRITE_TOOL_NAMES,
+    SUBAGENT_SYSTEM_TOOL_NAMES,
+    TERMINAL_TOOL_NAMES,
+)
 from pulsara_agent.tools.base import ToolCall
 
 
@@ -347,6 +351,11 @@ class PolicyPermissionGate:
         if exposure_decision is not None:
             return exposure_decision
         descriptor = exposure.descriptors_by_name[call.name]
+        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not PermissionMode.BYPASS_PERMISSIONS:
+            return PermissionDecision(
+                kind=PermissionDecisionKind.DENY,
+                reason="subagent_requires_bypass_mode",
+            )
         if call.name == "terminal":
             command = call.arguments.get("command")
             if isinstance(command, str) and is_hardline_terminal_command(command):
@@ -441,6 +450,11 @@ class PolicyPermissionGate:
                         }
                     ],
                 )
+        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not PermissionMode.BYPASS_PERMISSIONS:
+            return PermissionDecision(
+                kind=PermissionDecisionKind.DENY,
+                reason="subagent_requires_bypass_mode",
+            )
         if not is_tool_allowed_by_policy(call.name, self.policy):
             return PermissionDecision(
                 kind=PermissionDecisionKind.DENY,

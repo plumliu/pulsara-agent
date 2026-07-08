@@ -188,6 +188,26 @@ def test_context_compiler_reports_component_sections_and_counts_lowered_context(
     assert "Skill catalog" in compiled.llm_context.messages[0].content[0]
 
 
+def test_context_compiler_lowers_subagent_results_as_handoff_not_user_request() -> None:
+    state = LoopState(session_id="runtime:test")
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:test",
+        model_call_index=1,
+        component_prompts=(("subagent:results", "child result summary"),),
+    )
+
+    section = next(section for section in compiled.sections if section.id == "subagent:results")
+    assert section.channel == "handoff_hint"
+    assert section.metadata["lowered_to"] == "system_prompt"
+    assert "## Subagent Results\nchild result summary" in (compiled.llm_context.system_prompt or "")
+    assert not compiled.llm_context.messages
+
+
 def test_context_lifecycle_reuses_and_invalidates_turn_sections() -> None:
     coordinator = ContextLifecycleCoordinator()
     state = LoopState(session_id="runtime:test")

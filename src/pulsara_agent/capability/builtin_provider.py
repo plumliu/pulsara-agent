@@ -395,6 +395,177 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         is_concurrency_safe=False,
         permission_category="agent_local",
     ),
+    "spawn_agent": _descriptor(
+        name="spawn_agent",
+        description=(
+            "Start an isolated child agent runtime for a bounded subtask. The child has its own runtime "
+            "session and event stream; use wait_agent to explicitly collect its result."
+        ),
+        input_schema=object_schema(
+            properties={
+                "task": {"type": "string"},
+                "label": {"type": "string"},
+                "role": {"type": "string", "enum": ["worker", "verifier", "synthesizer", "orchestrator"]},
+                "context": {"type": "string", "enum": ["isolated", "fork"]},
+            },
+            required=["task"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="subagent_runtime",
+    ),
+    "wait_agent": _descriptor(
+        name="wait_agent",
+        description=(
+            "Collect a completed child agent result and mark that result as explicitly consumed by this tool call."
+        ),
+        input_schema=object_schema(
+            properties={
+                "subagent_run_id": {"type": "string"},
+                "timeout_seconds": {"type": "number"},
+            },
+            required=["subagent_run_id"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="subagent_runtime",
+    ),
+    "stop_agent": _descriptor(
+        name="stop_agent",
+        description="Cancel a running child agent runtime.",
+        input_schema=object_schema(
+            properties={"subagent_run_id": {"type": "string"}, "reason": {"type": "string"}},
+            required=["subagent_run_id"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="subagent_runtime",
+        is_destructive=True,
+    ),
+    "list_agents": _descriptor(
+        name="list_agents",
+        description=(
+            "Return a bounded, read-only projection of child agent runs and task-board state. "
+            "This never returns child raw transcripts."
+        ),
+        input_schema=object_schema(
+            properties={
+                "max_items": {"type": "integer", "default": 50},
+                "include_edges": {"type": "boolean", "default": False},
+            },
+            required=[],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="subagent_runtime",
+    ),
+    "create_agent_tasks": _descriptor(
+        name="create_agent_tasks",
+        description=(
+            "Create a batch of logical subagent tasks. Tasks with satisfied dependencies start immediately; "
+            "tasks with unmet dependencies wait until upstream completion, and upstream failure blocks downstream tasks."
+        ),
+        input_schema=object_schema(
+            properties={
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task_key": {"type": "string"},
+                            "label": {"type": "string"},
+                            "profile": {
+                                "type": "string",
+                                "enum": ["research_worker", "review_worker", "verification_worker", "general_worker"],
+                            },
+                            "task": {"type": "string"},
+                            "display_role": {"type": "string"},
+                            "depends_on": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["profile", "task"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            required=["tasks"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="subagent_runtime",
+    ),
+    "wait_agent_tasks": _descriptor(
+        name="wait_agent_tasks",
+        description=(
+            "Wait for one or more logical subagent tasks by task_id. "
+            "Timeout returns partial settled results and does not cancel running tasks."
+        ),
+        input_schema=object_schema(
+            properties={
+                "task_ids": {"type": "array", "items": {"type": "string"}},
+                "settle": {"type": "string", "enum": ["all", "first"]},
+                "timeout_seconds": {"type": "number"},
+                "include_consumed": {"type": "boolean"},
+            },
+            required=["task_ids"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="subagent_runtime",
+    ),
+    "stop_agent_task": _descriptor(
+        name="stop_agent_task",
+        description="Cancel a logical subagent task and its active child attempt, if any.",
+        input_schema=object_schema(
+            properties={"task_id": {"type": "string"}, "reason": {"type": "string"}},
+            required=["task_id"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="subagent_runtime",
+        is_destructive=True,
+    ),
+    "report_agent_phase": _descriptor(
+        name="report_agent_phase",
+        description="Child-only tool for reporting current subagent progress without completing the run.",
+        input_schema=object_schema(
+            properties={
+                "phase": {"type": "string"},
+                "message": {"type": "string"},
+                "progress": {"type": "object"},
+            },
+            required=["phase"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="agent_local",
+    ),
+    "report_agent_result": _descriptor(
+        name="report_agent_result",
+        description=(
+            "Child-only tool for submitting the explicit final result. "
+            "The child run ends at the next runtime safe point after this succeeds."
+        ),
+        input_schema=object_schema(
+            properties={
+                "summary": {"type": "string"},
+                "output_preview": {"type": "string"},
+                "diagnostics": {"type": "array", "items": {"type": "object"}},
+            },
+            required=["summary"],
+        ),
+        provider_kind=CapabilityProviderKind.WORKFLOW,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="agent_local",
+    ),
     "enter_plan": _descriptor(
         name="enter_plan",
         description="Enter Plan workflow, narrowing the session to read-only planning.",

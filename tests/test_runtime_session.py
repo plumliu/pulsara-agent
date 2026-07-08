@@ -5,6 +5,7 @@ import pytest
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime import RuntimePublishedEvent, RuntimeSession
 from pulsara_agent.runtime.state import LoopState
@@ -26,6 +27,16 @@ class RecordingSubscriber:
 
     async def on_published_event(self, published: RuntimePublishedEvent) -> None:
         self.events.append(published)
+
+
+class RecordingExtendEventLog(InMemoryEventLog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.extend_calls = 0
+
+    def extend(self, events):
+        self.extend_calls += 1
+        return super().extend(events)
 
 
 def test_runtime_session_create_tool_executor_does_not_record_by_default(tmp_path) -> None:
@@ -158,6 +169,29 @@ def test_runtime_session_emit_and_emit_many_publish_events(tmp_path) -> None:
     assert all(published.state is state for published in subscriber.events)
 
 
+def test_runtime_session_emit_many_uses_event_log_batch_extend(tmp_path) -> None:
+    event_log = RecordingExtendEventLog()
+    runtime = RuntimeSession(
+        tmp_path,
+        event_log=event_log,
+        archive=in_memory_runtime_session(tmp_path).archive,
+        tool_result_artifacts=in_memory_runtime_session(tmp_path).tool_result_artifacts,
+    )
+
+    async def run() -> None:
+        stored = await runtime.emit_many(
+            [
+                TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="one"),
+                TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:2", delta="two"),
+            ]
+        )
+        assert [event.sequence for event in stored] == [1, 2]
+
+    asyncio.run(run())
+
+    assert event_log.extend_calls == 1
+
+
 def test_runtime_session_emit_from_thread_without_bound_loop_only_appends(tmp_path) -> None:
     runtime = in_memory_runtime_session(tmp_path)
     subscriber = RecordingSubscriber()
@@ -231,3 +265,48 @@ def test_runtime_session_emit_from_thread_rejects_preassigned_sequence(tmp_path)
 
     with pytest.raises(ValueError, match="sequence=None"):
         runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="bad", sequence=10))
+
+
+def test_runtime_session_default_event_metadata_is_merged_on_emit(tmp_path) -> None:
+    runtime = in_memory_runtime_session(
+        tmp_path,
+        default_event_metadata={
+            "subagent": {
+                "subagent_run_id": "subagent:1",
+                "parent_runtime_session_id": "runtime:parent",
+            },
+            "scope": "child",
+        },
+    )
+
+    async def run() -> None:
+        stored = await runtime.emit(
+            TextBlockDeltaEvent(
+                **CTX.event_fields(),
+                block_id="text:1",
+                delta="child",
+                metadata={"subagent": {"capability_profile_id": "profile:1"}, "local": "value"},
+            )
+        )
+        assert stored.metadata == {
+            "subagent": {
+                "subagent_run_id": "subagent:1",
+                "parent_runtime_session_id": "runtime:parent",
+                "capability_profile_id": "profile:1",
+            },
+            "scope": "child",
+            "local": "value",
+        }
+
+    asyncio.run(run())
+
+
+def test_runtime_session_default_event_metadata_is_merged_on_emit_from_thread(tmp_path) -> None:
+    runtime = in_memory_runtime_session(
+        tmp_path,
+        default_event_metadata={"subagent": {"subagent_run_id": "subagent:thread"}},
+    )
+
+    stored = runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="thread"))
+
+    assert stored.metadata["subagent"]["subagent_run_id"] == "subagent:thread"

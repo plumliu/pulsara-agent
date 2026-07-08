@@ -29,6 +29,17 @@ from pulsara_agent.tools.builtins.memory_query import (
     MemorySearchTool,
 )
 from pulsara_agent.tools.builtins.plan import AskPlanQuestionTool, EnterPlanTool, ExitPlanTool
+from pulsara_agent.tools.builtins.subagent import (
+    CreateAgentTasksTool,
+    ListAgentsTool,
+    ReportAgentPhaseTool,
+    ReportAgentResultTool,
+    SpawnAgentTool,
+    StopAgentTool,
+    StopAgentTaskTool,
+    WaitAgentTool,
+    WaitAgentTasksTool,
+)
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
@@ -110,6 +121,20 @@ def build_core_tool_registry(
         registry.register(RememberObservationTool(sink=memory_proposal_sink))
         registry.register(RememberActionBoundaryTool(sink=memory_proposal_sink))
         registry.register(RememberDecisionTool(sink=memory_proposal_sink))
+    subagent_context = runtime_session.default_event_metadata.get("subagent")
+    if runtime_session.subagent_runtime is not None and isinstance(subagent_context, dict):
+        subagent_run_id = subagent_context.get("subagent_run_id")
+        if isinstance(subagent_run_id, str) and subagent_run_id:
+            registry.register(ReportAgentPhaseTool(runtime_session.subagent_runtime, subagent_run_id))
+            registry.register(ReportAgentResultTool(runtime_session.subagent_runtime, subagent_run_id))
+    elif runtime_session.subagent_runtime is not None:
+        registry.register(SpawnAgentTool(runtime_session.subagent_runtime))
+        registry.register(WaitAgentTool(runtime_session.subagent_runtime))
+        registry.register(StopAgentTool(runtime_session.subagent_runtime))
+        registry.register(ListAgentsTool(runtime_session.subagent_runtime))
+        registry.register(CreateAgentTasksTool(runtime_session.subagent_runtime))
+        registry.register(WaitAgentTasksTool(runtime_session.subagent_runtime))
+        registry.register(StopAgentTaskTool(runtime_session.subagent_runtime))
     for tool in extra_tools:
         registry.register(tool)
     return registry

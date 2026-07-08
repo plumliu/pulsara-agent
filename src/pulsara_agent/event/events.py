@@ -88,6 +88,25 @@ class EventType(StrEnum):
     CONTEXT_COMPACTION_COMPLETED = "CONTEXT_COMPACTION_COMPLETED"
     CONTEXT_COMPACTION_FAILED = "CONTEXT_COMPACTION_FAILED"
 
+    SUBAGENT_RUN_STARTED = "SUBAGENT_RUN_STARTED"
+    SUBAGENT_MESSAGE_SENT = "SUBAGENT_MESSAGE_SENT"
+    SUBAGENT_RUN_SUSPENDED = "SUBAGENT_RUN_SUSPENDED"
+    SUBAGENT_RUN_COMPLETED = "SUBAGENT_RUN_COMPLETED"
+    SUBAGENT_RUN_FAILED = "SUBAGENT_RUN_FAILED"
+    SUBAGENT_RUN_CANCELLED = "SUBAGENT_RUN_CANCELLED"
+    SUBAGENT_EDGE_RECORDED = "SUBAGENT_EDGE_RECORDED"
+    SUBAGENT_RESULT_DELIVERED = "SUBAGENT_RESULT_DELIVERED"
+    SUBAGENT_TASK_CREATED = "SUBAGENT_TASK_CREATED"
+    SUBAGENT_TASK_SCHEDULED = "SUBAGENT_TASK_SCHEDULED"
+    SUBAGENT_TASK_STARTED = "SUBAGENT_TASK_STARTED"
+    SUBAGENT_TASK_BLOCKED = "SUBAGENT_TASK_BLOCKED"
+    SUBAGENT_TASK_COMPLETED = "SUBAGENT_TASK_COMPLETED"
+    SUBAGENT_TASK_FAILED = "SUBAGENT_TASK_FAILED"
+    SUBAGENT_TASK_CANCELLED = "SUBAGENT_TASK_CANCELLED"
+    SUBAGENT_PHASE_REPORTED = "SUBAGENT_PHASE_REPORTED"
+    SUBAGENT_RESULT_SUBMITTED = "SUBAGENT_RESULT_SUBMITTED"
+    SUBAGENT_RESULT_CONSUMED = "SUBAGENT_RESULT_CONSUMED"
+
     CUSTOM = "CUSTOM"
 
 
@@ -618,6 +637,236 @@ class ContextCompactionFailedEvent(EventBase):
     message: str
 
 
+class SubagentRunStartedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RUN_STARTED] = EventType.SUBAGENT_RUN_STARTED
+    subagent_run_id: str
+    task_id: str | None = None
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    run_index: int | None = None
+    edge_id: str
+    parent_runtime_session_id: str
+    parent_run_id: str
+    parent_turn_id: str | None = None
+    parent_reply_id: str | None = None
+    parent_context_id: str | None = None
+    parent_model_call_index: int | None = None
+    spawning_tool_call_id: str | None = None
+    spawning_tool_name: str | None = None
+    spawn_initiator_kind: Literal["tool_call", "scheduler", "dependency_satisfied"] | None = None
+    spawn_initiator_id: str | None = None
+    child_runtime_session_id: str
+    label: str | None = None
+    role: str
+    profile_id: str | None = None
+    task_preview: str
+    context_policy: dict[str, Any] = Field(default_factory=dict)
+    capability_profile: dict[str, Any] = Field(default_factory=dict)
+
+
+class SubagentMessageSentEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_MESSAGE_SENT] = EventType.SUBAGENT_MESSAGE_SENT
+    edge_id: str
+    subagent_run_id: str
+    parent_runtime_session_id: str
+    parent_run_id: str
+    child_runtime_session_id: str
+    message_artifact_id: str | None = None
+    message_preview: str
+    delivery_kind: Literal["spawn_task", "send", "followup"]
+
+
+class SubagentRunSuspendedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RUN_SUSPENDED] = EventType.SUBAGENT_RUN_SUSPENDED
+    subagent_run_id: str
+    parent_runtime_session_id: str
+    child_runtime_session_id: str
+    pending_kind: str
+    reason_code: str
+    reason_message: str | None = None
+    resumable: bool = False
+
+
+class SubagentRunCompletedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RUN_COMPLETED] = EventType.SUBAGENT_RUN_COMPLETED
+    subagent_run_id: str
+    parent_runtime_session_id: str
+    child_runtime_session_id: str
+    child_run_id: str | None = None
+    result_id: str
+    summary: str
+    result_artifact_id: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    token_usage: dict[str, Any] | None = None
+    tool_call_count: int | None = None
+
+
+class SubagentRunFailedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RUN_FAILED] = EventType.SUBAGENT_RUN_FAILED
+    subagent_run_id: str
+    parent_runtime_session_id: str
+    child_runtime_session_id: str | None = None
+    reason_code: str
+    reason_message: str | None = None
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SubagentRunCancelledEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RUN_CANCELLED] = EventType.SUBAGENT_RUN_CANCELLED
+    subagent_run_id: str
+    parent_runtime_session_id: str
+    child_runtime_session_id: str | None = None
+    reason_code: str
+    reason_message: str | None = None
+    cancelled_by: Literal["user", "parent_agent", "runtime", "host_shutdown"]
+
+
+class SubagentEdgeRecordedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_EDGE_RECORDED] = EventType.SUBAGENT_EDGE_RECORDED
+    edge_id: str
+    edge_kind: Literal["spawn", "send", "followup", "wait", "cancel", "result", "suspend", "resume"]
+    parent_runtime_session_id: str
+    parent_run_id: str
+    parent_turn_id: str | None = None
+    parent_reply_id: str | None = None
+    subagent_run_id: str
+    child_runtime_session_id: str
+    child_run_id: str | None = None
+    source_context_id: str | None = None
+    source_model_call_index: int | None = None
+    source_tool_call_id: str | None = None
+    source_tool_name: str | None = None
+    target_context_id: str | None = None
+    payload_artifact_id: str | None = None
+    result_id: str | None = None
+    result_artifact_id: str | None = None
+    returned_to_tool_call_id: str | None = None
+
+
+class SubagentResultDeliveredEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RESULT_DELIVERED] = EventType.SUBAGENT_RESULT_DELIVERED
+    subagent_run_id: str
+    parent_runtime_session_id: str
+    parent_run_id: str | None = None
+    parent_turn_id: str | None = None
+    parent_reply_id: str | None = None
+    context_id: str | None = None
+    model_call_index: int | None = None
+    section_id: str | None = None
+    delivery_kind: Literal["internal_section"] = "internal_section"
+    result_id: str
+    result_artifact_id: str | None = None
+    summary: str
+
+
+class SubagentTaskCreatedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_TASK_CREATED] = EventType.SUBAGENT_TASK_CREATED
+    task_id: str
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    task_key: str | None = None
+    label: str | None = None
+    profile_id: str
+    display_role: str | None = None
+    objective_preview: str
+    objective_artifact_id: str | None = None
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class SubagentTaskScheduledEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_TASK_SCHEDULED] = EventType.SUBAGENT_TASK_SCHEDULED
+    task_id: str
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    schedule_reason: Literal["immediate", "dependency_satisfied", "manual"] = "immediate"
+
+
+class SubagentTaskStartedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_TASK_STARTED] = EventType.SUBAGENT_TASK_STARTED
+    task_id: str
+    subagent_run_id: str
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    run_index: int = 1
+    spawn_initiator_kind: Literal["tool_call", "scheduler", "dependency_satisfied"]
+    spawn_initiator_id: str
+
+
+class SubagentTaskBlockedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_TASK_BLOCKED] = EventType.SUBAGENT_TASK_BLOCKED
+    task_id: str
+    status: Literal["waiting_dependency", "blocked_dependency_failed"]
+    blocked_reason: Literal["waiting_dependency", "dependency_failed"]
+    blocked_by_task_ids: list[str] = Field(default_factory=list)
+    dependency_status_snapshot: dict[str, str] = Field(default_factory=dict)
+    dependency_terminal_event_ids: dict[str, str] = Field(default_factory=dict)
+    dependency_generation: int | None = None
+
+
+class SubagentTaskCompletedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_TASK_COMPLETED] = EventType.SUBAGENT_TASK_COMPLETED
+    task_id: str
+    subagent_run_id: str | None = None
+    result_id: str | None = None
+    primary_result_artifact_id: str | None = None
+    result_source: Literal["explicit", "inferred"] = "inferred"
+
+
+class SubagentTaskFailedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_TASK_FAILED] = EventType.SUBAGENT_TASK_FAILED
+    task_id: str
+    subagent_run_id: str | None = None
+    reason_code: str
+    reason_message: str | None = None
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SubagentTaskCancelledEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_TASK_CANCELLED] = EventType.SUBAGENT_TASK_CANCELLED
+    task_id: str
+    subagent_run_id: str | None = None
+    reason_code: str
+    reason_message: str | None = None
+    cancelled_by: Literal["user", "parent_agent", "runtime", "host_shutdown"]
+
+
+class SubagentPhaseReportedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_PHASE_REPORTED] = EventType.SUBAGENT_PHASE_REPORTED
+    subagent_run_id: str
+    task_id: str | None = None
+    phase: str
+    message: str | None = None
+    progress: dict[str, Any] = Field(default_factory=dict)
+    source_tool_call_id: str | None = None
+
+
+class SubagentResultSubmittedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RESULT_SUBMITTED] = EventType.SUBAGENT_RESULT_SUBMITTED
+    subagent_run_id: str
+    task_id: str | None = None
+    result_id: str
+    summary: str
+    output_preview: str | None = None
+    result_artifact_id: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    result_source: Literal["explicit"] = "explicit"
+    source_tool_call_id: str | None = None
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SubagentResultConsumedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_RESULT_CONSUMED] = EventType.SUBAGENT_RESULT_CONSUMED
+    consumption_id: str
+    consumer_tool_call_id: str
+    kind: Literal["wait_run", "wait_task"]
+    task_id: str | None = None
+    subagent_run_id: str | None = None
+    result_id: str | None = None
+    consumed_status: Literal["completed", "failed", "cancelled", "blocked_dependency_failed"]
+    terminal_event_id: str | None = None
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class CustomEvent(EventBase):
     type: Literal[EventType.CUSTOM] = EventType.CUSTOM
     name: str
@@ -680,5 +929,23 @@ AgentEvent: TypeAlias = (
     | ContextCompactionStartedEvent
     | ContextCompactionCompletedEvent
     | ContextCompactionFailedEvent
+    | SubagentRunStartedEvent
+    | SubagentMessageSentEvent
+    | SubagentRunSuspendedEvent
+    | SubagentRunCompletedEvent
+    | SubagentRunFailedEvent
+    | SubagentRunCancelledEvent
+    | SubagentEdgeRecordedEvent
+    | SubagentResultDeliveredEvent
+    | SubagentTaskCreatedEvent
+    | SubagentTaskScheduledEvent
+    | SubagentTaskStartedEvent
+    | SubagentTaskBlockedEvent
+    | SubagentTaskCompletedEvent
+    | SubagentTaskFailedEvent
+    | SubagentTaskCancelledEvent
+    | SubagentPhaseReportedEvent
+    | SubagentResultSubmittedEvent
+    | SubagentResultConsumedEvent
     | CustomEvent
 )

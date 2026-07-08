@@ -13,6 +13,7 @@ from uuid import uuid4
 from pulsara_agent.capability.call_classifier import DefaultCapabilityCallClassifier
 from pulsara_agent.capability.descriptor import CapabilityAvailability
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.capability.provider import CapabilityProviderOutput
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResolveContext
 from pulsara_agent.event import (
@@ -23,6 +24,7 @@ from pulsara_agent.event import (
     CustomEvent,
     EventContext,
     ExceedMaxItersEvent,
+    ModelCallStartEvent,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
@@ -39,6 +41,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
     UserConfirmResultEvent,
 )
+from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory.scope import MemoryDomainContext
@@ -105,6 +108,7 @@ from pulsara_agent.runtime.recovery import (
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
+from pulsara_agent.runtime.subagent import InMemoryEventLogLocator, SubagentRun, SubagentRuntime
 from pulsara_agent.runtime.tool_taxonomy import PLAN_WORKFLOW_TOOL_NAMES
 from pulsara_agent.runtime.tool_loop import (
     _ToolBatchTap,
@@ -121,6 +125,7 @@ from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutionSusp
 WorkspaceKind = Literal["project", "transient"]
 
 _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME = "plan_revision_required_instruction"
+_SUBAGENT_RESULTS_SECTION_ID = "subagent:results"
 _TERMINAL_CAPABILITY_CONTEXT_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
 _KNOWN_CAPABILITY_GATE_REASON_CODES = frozenset(
     {
@@ -131,6 +136,7 @@ _KNOWN_CAPABILITY_GATE_REASON_CODES = frozenset(
         "permission_denied",
         "permission_wait_for_user",
         "permission_wait_for_user_batch_suspension",
+        "subagent_requires_bypass_mode",
         "workflow_control_batch_suppressed",
         "mcp_resume_permission_approval_unsupported",
         "hardline_terminal_command_blocked",
@@ -148,6 +154,87 @@ StopReason = Literal[
     "waiting_user",
     "aborted",
 ]
+
+
+class _CachingEventLogLocator:
+    def __init__(self, factory):
+        self._factory = factory
+        self._cache: dict[str, EventLog] = {}
+
+    def register(self, runtime_session_id: str, event_log: EventLog) -> None:
+        self._cache[runtime_session_id] = event_log
+
+    def event_log_for_runtime_session(self, runtime_session_id: str) -> EventLog:
+        event_log = self._cache.get(runtime_session_id)
+        if event_log is None:
+            event_log = self._factory(runtime_session_id)
+            self._cache[runtime_session_id] = event_log
+        return event_log
+
+
+@dataclass(frozen=True, slots=True)
+class _ProfileFilteredCapabilityProvider:
+    provider: Any
+    allowed_tool_names: frozenset[str]
+    allowed_descriptor_ids: frozenset[str]
+
+    @property
+    def provider_id(self) -> str:
+        return str(getattr(self.provider, "provider_id", "profile-filtered"))
+
+    def resolve(self, context: CapabilityResolveContext, *, bound_tool_names: frozenset[str]) -> CapabilityProviderOutput:
+        output = self.provider.resolve(context, bound_tool_names=bound_tool_names)
+        return CapabilityProviderOutput(
+            descriptors=tuple(
+                descriptor
+                for descriptor in output.descriptors
+                if descriptor.name in self.allowed_tool_names or descriptor.id in self.allowed_descriptor_ids
+            ),
+            diagnostics=output.diagnostics,
+        )
+
+
+def _subagent_event_log_backend(runtime_session: RuntimeSession):
+    parent_log = runtime_session.event_log
+    if isinstance(parent_log, InMemoryEventLog):
+        locator = InMemoryEventLogLocator()
+
+        def factory(runtime_session_id: str) -> EventLog:
+            event_log = InMemoryEventLog()
+            locator.register(runtime_session_id, event_log)
+            return event_log
+
+        return factory, locator
+    if isinstance(parent_log, PostgresEventLog):
+        locator = _CachingEventLogLocator(
+            lambda runtime_session_id: PostgresEventLog(
+                dsn=parent_log.dsn,
+                runtime_session_id=runtime_session_id,
+                workspace_root=runtime_session.workspace_root,
+            )
+        )
+        return locator.event_log_for_runtime_session, locator
+    raise TypeError(
+        "SubagentRuntime requires a supported EventLog backend "
+        f"(got {type(parent_log).__name__})"
+    )
+
+
+def _profile_filtered_capability_runtime(parent: CapabilityRuntime, profile: Any) -> CapabilityRuntime:
+    allowed_tool_names = frozenset(getattr(profile, "allowed_tool_names", ()) or ())
+    allowed_descriptor_ids = frozenset(getattr(profile, "allowed_descriptor_ids", ()) or ())
+    if not allowed_tool_names and not allowed_descriptor_ids:
+        return CapabilityRuntime(providers=())
+    return CapabilityRuntime(
+        providers=tuple(
+            _ProfileFilteredCapabilityProvider(
+                provider=provider,
+                allowed_tool_names=allowed_tool_names,
+                allowed_descriptor_ids=allowed_descriptor_ids,
+            )
+            for provider in parent.providers
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +467,8 @@ class AgentRuntime:
         workspace_kind: WorkspaceKind = "transient",
         permission_policy: EffectivePermissionPolicy | None = None,
         context_compactor: RuntimeContextCompactorProtocol | None = None,
+        subagent_runtime: SubagentRuntime | None = None,
+        enable_subagents: bool = True,
     ) -> None:
         if capability_runtime is None:
             raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
@@ -408,6 +497,19 @@ class AgentRuntime:
         )
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
+        self._is_subagent_child = isinstance(runtime_session.default_event_metadata.get("subagent"), dict)
+        self._subagent_parent_features_enabled = enable_subagents and not self._is_subagent_child
+        self.subagent_runtime = subagent_runtime
+        if self._subagent_parent_features_enabled and self.subagent_runtime is None:
+            child_event_log_factory, event_log_locator = _subagent_event_log_backend(runtime_session)
+            self.subagent_runtime = SubagentRuntime(
+                parent_runtime_session=runtime_session,
+                child_event_log_factory=child_event_log_factory,
+                event_log_locator=event_log_locator,
+                child_runner=self._run_child_agent,
+            )
+        self.runtime_session.subagent_runtime = self.subagent_runtime
+        self._subagent_dangling_repair_done = False
         self.tool_executor = runtime_session.create_tool_executor(
             memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
             memory_recall_service=getattr(self.memory_hooks, "recall", None),
@@ -593,6 +695,70 @@ class AgentRuntime:
     def close(self) -> None:
         self.runtime_session.close()
 
+    async def _run_child_agent(self, subagent_runtime: SubagentRuntime, run: SubagentRun) -> None:
+        child_session = subagent_runtime.child_runtime_session(run.subagent_run_id)
+        child_agent = AgentRuntime(
+            runtime_session=child_session,
+            llm_runtime=self.llm_runtime,
+            memory_hooks=NoopMemoryHooks(),
+            tool_result_persistence_hook=self.tool_result_persistence_hook,
+            model_role=self.model_role,
+            options=self.options,
+            budget=self.budget,
+            system_prompt=self.system_prompt,
+            capability_runtime=_profile_filtered_capability_runtime(self.capability_runtime, run.capability_profile),
+            memory_domain=None,
+            workspace_kind=self.workspace_kind,
+            permission_policy=self.permission_policy,
+            context_compactor=NoopRuntimeContextCompactor(),
+            subagent_runtime=subagent_runtime,
+            enable_subagents=False,
+        )
+        result = await child_agent.run_task(run.task, prior_messages=[])
+        subagent_runtime.set_child_run_id(run.subagent_run_id, result.state.run_id)
+        if result.status is LoopStatus.FINISHED:
+            submitted = subagent_runtime.submitted_result(run.subagent_run_id)
+            if submitted is not None:
+                await subagent_runtime.complete_submitted_result(
+                    run.subagent_run_id,
+                    token_usage=result.state.token_usage.model_dump(),
+                    tool_call_count=result.state.tool_call_count,
+                )
+                return
+            summary = result.final_text.strip() or "(child agent finished without final text)"
+            await subagent_runtime.complete(
+                run.subagent_run_id,
+                summary=summary,
+                output_preview=result.final_text,
+            )
+            return
+        if result.status is LoopStatus.WAITING_USER:
+            await subagent_runtime.fail(
+                run.subagent_run_id,
+                reason_code="subagent_pending_unsupported",
+                reason_message="Child agent entered a pending interaction that V1 subagent runtime cannot route.",
+                diagnostics=[
+                    {
+                        "status": result.status.value,
+                        "stop_reason": result.stop_reason,
+                        "pending_interaction_kind": result.state.pending_interaction_kind,
+                    }
+                ],
+            )
+            return
+        await subagent_runtime.fail(
+            run.subagent_run_id,
+            reason_code=f"subagent_{result.status.value}",
+            reason_message=result.error_message or result.stop_reason or result.status.value,
+            diagnostics=[
+                {
+                    "status": result.status.value,
+                    "stop_reason": result.stop_reason,
+                    "error_message": result.error_message,
+                }
+            ],
+        )
+
     def new_state(self) -> LoopState:
         return LoopState(session_id=self.runtime_session.runtime_session_id, budget=self.budget)
 
@@ -604,6 +770,13 @@ class AgentRuntime:
         prior_messages: list[Msg] | None = None,
         active_skill_names: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        if (
+            self._subagent_parent_features_enabled
+            and self.subagent_runtime is not None
+            and not self._subagent_dangling_repair_done
+        ):
+            await self.subagent_runtime.repair_dangling_children()
+            self._subagent_dangling_repair_done = True
         state.messages.extend(message.model_copy(deep=True) for message in (prior_messages or []))
         state.messages.append(
             UserMsg(
@@ -641,6 +814,12 @@ class AgentRuntime:
             active_skill_names=active_skill_names,
         )
         state.scratchpad["capability_exposure"] = exposure
+        if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
+            self.subagent_runtime.refresh_parent_capability_snapshot(
+                exposure=exposure,
+                permission_mode=self.permission_mode.value if self.permission_mode is not None else None,
+                permission_policy=self.permission_policy.to_dict(),
+            )
         yield await self.runtime_session.emit(
             CustomEvent(
                 **self._event_context(state).event_fields(),
@@ -710,6 +889,10 @@ class AgentRuntime:
             reason_code_override=reason_code_override,
         )
         capability_context = _terminal_capability_context(call, exposure)
+        subagent_context = self.runtime_session.default_event_metadata.get("subagent")
+        if isinstance(subagent_context, dict):
+            capability_context = dict(capability_context or {})
+            capability_context["subagent"] = dict(subagent_context)
         return CapabilityGateDecisionFact(
             tool_call_id=call.id,
             tool_name=call.name,
@@ -912,6 +1095,12 @@ class AgentRuntime:
                 ),
             )
             memory_prompt = getattr(self.memory_hooks, "memory_context_prompt", lambda: None)()
+            subagent_results_prompt: str | None = None
+            pending_subagent_results = ()
+            if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
+                subagent_results_prompt, pending_subagent_results = self.subagent_runtime.render_pending_results_section(
+                    max_results=self.budget.max_subagent_results_per_parent_compile,
+                )
             compiled_context = None
             compile_attempt_index = 0
             context_retry_index = 0
@@ -936,6 +1125,7 @@ class AgentRuntime:
                                 ("memory:hook_prompt", memory_prompt),
                                 ("capability:catalog", exposure.catalog_prompt),
                                 ("capability:active_skill", exposure.active_skill_prompt),
+                                (_SUBAGENT_RESULTS_SECTION_ID, subagent_results_prompt),
                             )
                             if text
                         ),
@@ -1022,6 +1212,8 @@ class AgentRuntime:
                     break
             if compiled_context is None:
                 break
+            state.scratchpad["current_context_id"] = compiled_context.context_id
+            state.scratchpad["current_model_call_index"] = model_call_index
             yield await self.runtime_session.emit(
                 ContextCompiledEvent(
                     **self._event_context(state).event_fields(),
@@ -1052,6 +1244,12 @@ class AgentRuntime:
                 state=state,
             )
             context = compiled_context.llm_context
+            deliverable_subagent_results = (
+                pending_subagent_results
+                if _compiled_section_included(compiled_context, _SUBAGENT_RESULTS_SECTION_ID)
+                else ()
+            )
+            delivered_subagent_results = False
 
             reply_had_run_error = False
             try:
@@ -1065,6 +1263,25 @@ class AgentRuntime:
                     if isinstance(stored, RunErrorEvent):
                         reply_had_run_error = True
                     yield stored
+                    if (
+                        isinstance(stored, ModelCallStartEvent)
+                        and deliverable_subagent_results
+                        and not delivered_subagent_results
+                        and self.subagent_runtime is not None
+                        and self._subagent_parent_features_enabled
+                        and stored.context_id == compiled_context.context_id
+                        and stored.model_call_index == model_call_index
+                    ):
+                        delivered_subagent_results = True
+                        delivered_events = await self.subagent_runtime.mark_results_delivered(
+                            deliverable_subagent_results,
+                            event_context=self._event_context(state),
+                            context_id=compiled_context.context_id,
+                            model_call_index=model_call_index,
+                            section_id=_SUBAGENT_RESULTS_SECTION_ID,
+                        )
+                        for delivered_event in delivered_events:
+                            yield delivered_event
             except Exception as exc:
                 event = await self.runtime_session.emit(
                     RunErrorEvent(
@@ -1710,6 +1927,9 @@ class AgentRuntime:
             yield event
 
     async def _after_tool_results(self, state: LoopState) -> AsyncIterator[AgentEvent]:
+        if self._finish_child_run_after_report_result(state):
+            return
+
         tool_error_count = sum(1 for result in state.tool_results if result.state is not ToolResultState.SUCCESS)
         if tool_error_count:
             state.consecutive_tool_failures += tool_error_count
@@ -1759,6 +1979,22 @@ class AgentRuntime:
                 ),
                 state=state,
             )
+
+    def _finish_child_run_after_report_result(self, state: LoopState) -> bool:
+        if not self._is_subagent_child or self.subagent_runtime is None:
+            return False
+        subagent_context = self.runtime_session.default_event_metadata.get("subagent")
+        if not isinstance(subagent_context, dict):
+            return False
+        subagent_run_id = subagent_context.get("subagent_run_id")
+        if not isinstance(subagent_run_id, str):
+            return False
+        if self.subagent_runtime.submitted_result(subagent_run_id) is None:
+            return False
+        state.status = LoopStatus.FINISHED
+        state.stop_reason = "final"
+        state.transition(LoopTransition.FINISH)
+        return True
 
     async def _finalize_run(
         self,
@@ -2643,6 +2879,8 @@ class AgentRuntime:
                     call,
                     event_context=self._event_context(state),
                     descriptor=descriptor,
+                    context_id=_optional_scratchpad_str(state, "current_context_id"),
+                    model_call_index=_optional_scratchpad_int(state, "current_model_call_index"),
                 )
             return await asyncio.to_thread(
                 executor.execute,
@@ -2758,6 +2996,20 @@ def _context_budget_pressure_is_recoverable(exc: ContextBudgetExceeded) -> bool:
         }
         for diagnostic in diagnostics
     )
+
+
+def _compiled_section_included(compiled_context, section_id: str) -> bool:
+    return any(section.id == section_id and section.included for section in compiled_context.sections)
+
+
+def _optional_scratchpad_str(state: LoopState, key: str) -> str | None:
+    value = state.scratchpad.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _optional_scratchpad_int(state: LoopState, key: str) -> int | None:
+    value = state.scratchpad.get(key)
+    return value if isinstance(value, int) else None
 
 
 def _is_overridden_hook(instance: object, name: str, base: type) -> bool:
