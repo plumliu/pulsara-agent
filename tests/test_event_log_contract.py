@@ -8,6 +8,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.rows import dict_row
+
+from tests.conftest import run_start_permission_fields
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (

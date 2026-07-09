@@ -1,6 +1,7 @@
 from pulsara_agent.event import EventContext, PlanModeEnteredEvent, PlanModeExitedEvent
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.runtime import reduce_plan_workflow_state
+from tests.conftest import run_start_permission_fields
 
 
 def test_plan_workflow_reducer_tracks_active_and_exited_state() -> None:

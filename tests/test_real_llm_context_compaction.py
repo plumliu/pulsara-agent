@@ -8,6 +8,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from tests.conftest import run_start_permission_fields
+
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     EventContext,

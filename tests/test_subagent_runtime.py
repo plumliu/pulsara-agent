@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from tests.conftest import run_start_permission_fields
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
