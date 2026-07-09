@@ -143,7 +143,12 @@ def test_block_hooks_fire_on_completed_text_and_tool_result_blocks() -> None:
         TextBlockEndEvent(**CTX.event_fields(), block_id="text:1"),
         ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:1", tool_call_name="lookup"),
         ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:1", delta="found"),
-        ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:1", state=ToolResultState.SUCCESS),
+        ToolResultEndEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:1",
+            state=ToolResultState.SUCCESS,
+            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+        ),
     ]:
         asyncio.run(manager.dispatch_observer_event(_ctx(), event))
 

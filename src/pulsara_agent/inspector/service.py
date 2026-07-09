@@ -606,6 +606,7 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "included_section_count": len(event.sections) - len(omitted),
         "omitted_section_count": len(omitted),
         "sections": sections,
+        "section_timings": _section_timing_projection(sections),
         "tool_specs": [_json_safe(tool) for tool in event.tool_specs],
         "diagnostics": [_json_safe(diagnostic) for diagnostic in event.diagnostics],
         "lifecycle_decisions": [
@@ -614,8 +615,106 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "tool_result_render_decisions": [
             _json_safe(decision) for decision in event.tool_result_render_decisions
         ],
+        "tool_result_timings": _tool_result_timing_projection(event.tool_result_render_decisions),
         "tool_result_budget_report": _json_safe(event.tool_result_budget_report),
     }
+
+
+def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    for index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            projected.append(
+                {
+                    "section_index": index,
+                    "section_id": None,
+                    "status": "missing",
+                    "freshness": "unknown",
+                    "timing": None,
+                }
+            )
+            continue
+        metadata = section.get("metadata")
+        timing = metadata.get("timing") if isinstance(metadata, dict) else None
+        if isinstance(timing, dict):
+            source = timing.get("source") if isinstance(timing.get("source"), dict) else {}
+            freshness = source.get("freshness") if isinstance(source, dict) else None
+            status = "present"
+        else:
+            source = {}
+            freshness = None
+            status = "missing"
+        observed_at = (
+            source.get("observed_at")
+            or source.get("source_ended_at")
+            or source.get("source_started_at")
+            if isinstance(source, dict)
+            else None
+        )
+        projected.append(
+            {
+                "section_index": index,
+                "section_id": section.get("id"),
+                "source_id": section.get("source_id"),
+                "channel": section.get("channel"),
+                "status": status,
+                "freshness": freshness or "unknown",
+                "compiled_at_utc": timing.get("compiled_at_utc") if isinstance(timing, dict) else None,
+                "observed_at": observed_at,
+                "source_started_at": source.get("source_started_at") if isinstance(source, dict) else None,
+                "source_ended_at": source.get("source_ended_at") if isinstance(source, dict) else None,
+                "age_seconds": timing.get("age_seconds") if isinstance(timing, dict) else None,
+                "timing": _json_safe(timing) if isinstance(timing, dict) else None,
+            }
+        )
+    return projected
+
+
+def _tool_result_timing_projection(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    for index, decision in enumerate(decisions):
+        timing = decision.get("tool_observation_timing")
+        if not isinstance(timing, dict):
+            timing = decision.get("tool_timing")
+        timing_policy = decision.get("timing_policy")
+        if isinstance(timing, dict):
+            status = "present"
+            freshness = timing.get("freshness") or "unknown"
+            observed_at = timing.get("observed_at")
+        elif timing_policy == "not_applicable":
+            status = "not_applicable"
+            freshness = "unknown"
+            observed_at = None
+        else:
+            status = "missing"
+            freshness = "unknown"
+            observed_at = None
+        projected.append(
+            {
+                "decision_index": index,
+                "tool_call_id": decision.get("tool_call_id"),
+                "tool_name": decision.get("tool_name"),
+                "model_tool_name": decision.get("model_tool_name"),
+                "tool_origin": timing.get("tool_origin") if isinstance(timing, dict) else None,
+                "status": status,
+                "observed_at": observed_at,
+                "source_started_at": timing.get("source_started_at") if isinstance(timing, dict) else None,
+                "source_ended_at": timing.get("source_ended_at") if isinstance(timing, dict) else None,
+                "observation_duration_seconds": (
+                    timing.get("observation_duration_seconds") if isinstance(timing, dict) else None
+                ),
+                "tool_reported_duration_seconds": (
+                    timing.get("tool_reported_duration_seconds") if isinstance(timing, dict) else None
+                ),
+                "freshness": freshness,
+                "clock_source": timing.get("clock_source") if isinstance(timing, dict) else None,
+                "timing_policy": timing_policy or "unknown",
+                "rendered_timing_chars": decision.get("rendered_timing_chars", 0),
+                "diagnostics": _json_safe(decision.get("diagnostics", [])),
+                "timing": _json_safe(timing) if isinstance(timing, dict) else None,
+            }
+        )
+    return projected
 
 
 def _assistant_replies(events: Iterable[AgentEvent]) -> list[dict[str, Any]]:

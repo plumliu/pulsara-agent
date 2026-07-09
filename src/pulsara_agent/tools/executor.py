@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Callable
 
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
+    ToolObservationTiming,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    utc_now,
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactService
@@ -47,7 +50,7 @@ class ToolExecutor:
         permission_mode: str | None = None,
         permission_policy: dict | None = None,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
-        self._append(
+        start_event = self._append(
             ToolResultStartEvent(
                 **event_context.event_fields(),
                 tool_call_id=call.id,
@@ -95,7 +98,21 @@ class ToolExecutor:
                 status=ToolResultState.ERROR,
                 output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
             )
-        return self._finalize_result(call, event_context=event_context, result=result, descriptor=descriptor)
+        if isinstance(result, ToolExecutionSuspended):
+            return _with_tool_observation_timing_seed(
+                result,
+                start_event=start_event,
+                descriptor=descriptor,
+                context_id=context_id,
+                model_call_index=model_call_index,
+            )
+        return self._finalize_result(
+            call,
+            event_context=event_context,
+            result=result,
+            descriptor=descriptor,
+            start_event=start_event,
+        )
 
     async def execute_async(
         self,
@@ -108,8 +125,8 @@ class ToolExecutor:
         permission_snapshot_id: str | None = None,
         permission_mode: str | None = None,
         permission_policy: dict | None = None,
-    ) -> ToolExecutionResult:
-        self._append(
+    ) -> ToolExecutionResult | ToolExecutionSuspended:
+        start_event = self._append(
             ToolResultStartEvent(
                 **event_context.event_fields(),
                 tool_call_id=call.id,
@@ -136,7 +153,13 @@ class ToolExecutor:
                 ),
             )
             if isinstance(result, ToolExecutionSuspended):
-                return result
+                return _with_tool_observation_timing_seed(
+                    result,
+                    start_event=start_event,
+                    descriptor=descriptor,
+                    context_id=context_id,
+                    model_call_index=model_call_index,
+                )
         except Exception as exc:
             result = ToolExecutionResult(
                 call_id=call.id,
@@ -144,7 +167,13 @@ class ToolExecutor:
                 status=ToolResultState.ERROR,
                 output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
             )
-        return self._finalize_result(call, event_context=event_context, result=result, descriptor=descriptor)
+        return self._finalize_result(
+            call,
+            event_context=event_context,
+            result=result,
+            descriptor=descriptor,
+            start_event=start_event,
+        )
 
     def _finalize_result(
         self,
@@ -153,6 +182,7 @@ class ToolExecutor:
         event_context: EventContext,
         result: ToolExecutionResult,
         descriptor: CapabilityDescriptor | None = None,
+        start_event: AgentEvent,
     ) -> ToolExecutionResult:
         artifact_refs = ()
         if self.artifact_service is not None:
@@ -170,13 +200,33 @@ class ToolExecutor:
                     delta=result.output,
                 )
             )
+        end_created_at = utc_now()
+        timing = build_tool_observation_timing(
+            start_event=start_event,
+            end_created_at=end_created_at,
+            call_id=call.id,
+            tool_name=call.name,
+            result_metadata=result.metadata,
+            descriptor=descriptor,
+        )
+        timing_payload = timing.model_dump(mode="json", exclude_none=True)
+        result = replace(
+            result,
+            metadata={
+                **result.metadata,
+                "tool_observation_timing": timing_payload,
+            },
+        )
+        end_event = ToolResultEndEvent(
+            **event_context.event_fields(),
+            created_at=end_created_at,
+            tool_call_id=call.id,
+            state=result.status,
+            artifacts=list(artifact_refs),
+            metadata={"tool_observation_timing": timing_payload},
+        )
         self._append(
-            ToolResultEndEvent(
-                **event_context.event_fields(),
-                tool_call_id=call.id,
-                state=result.status,
-                artifacts=list(artifact_refs),
-            )
+            end_event
         )
         return result
 
@@ -200,3 +250,141 @@ class ToolExecutor:
             )
 
         return emit
+
+
+def build_tool_observation_timing(
+    *,
+    start_event: AgentEvent,
+    end_event: AgentEvent | None = None,
+    end_created_at: str | None = None,
+    call_id: str,
+    tool_name: str,
+    result_metadata: dict | None = None,
+    descriptor: CapabilityDescriptor | None = None,
+) -> ToolObservationTiming:
+    metadata = result_metadata or {}
+    observed_at = end_event.created_at if end_event is not None else end_created_at
+    if observed_at is None:
+        raise ValueError("build_tool_observation_timing requires end_event or end_created_at")
+    return ToolObservationTiming(
+        observed_at=observed_at,
+        source_started_at=start_event.created_at,
+        source_ended_at=observed_at,
+        observation_duration_seconds=_duration_seconds(start_event.created_at, observed_at),
+        tool_reported_duration_seconds=_trusted_tool_reported_duration_seconds(tool_name, metadata),
+        freshness=_tool_observation_freshness(tool_name, metadata),
+        clock_source="tool_result_events",
+        tool_origin=_tool_origin_from_descriptor(descriptor),
+        tool_name=tool_name,
+        tool_call_id=call_id,
+    )
+
+
+def synthetic_tool_observation_timing(
+    *,
+    start_event: AgentEvent,
+    end_event: AgentEvent | None = None,
+    end_created_at: str | None = None,
+    call_id: str,
+    tool_name: str,
+    tool_origin: str = "unknown",
+) -> ToolObservationTiming:
+    observed_at = end_event.created_at if end_event is not None else end_created_at
+    if observed_at is None:
+        raise ValueError("synthetic_tool_observation_timing requires end_event or end_created_at")
+    return ToolObservationTiming(
+        observed_at=observed_at,
+        source_started_at=start_event.created_at,
+        source_ended_at=observed_at,
+        observation_duration_seconds=_duration_seconds(start_event.created_at, observed_at),
+        freshness="current_tool_observation",
+        clock_source="tool_result_events",
+        tool_origin=tool_origin,  # type: ignore[arg-type]
+        tool_name=tool_name,
+        tool_call_id=call_id,
+    )
+
+
+def _with_tool_observation_timing_seed(
+    suspended: ToolExecutionSuspended,
+    *,
+    start_event: AgentEvent,
+    descriptor: CapabilityDescriptor | None,
+    context_id: str | None,
+    model_call_index: int | None,
+) -> ToolExecutionSuspended:
+    payload = dict(suspended.payload)
+    seed = dict(payload.get("tool_observation_timing_seed") or {})
+    seed.update(
+        {
+            "tool_call_id": suspended.tool_call_id,
+            "tool_name": suspended.tool_name,
+            "tool_origin": _tool_origin_from_descriptor(descriptor),
+            "source_started_at": start_event.created_at,
+            "suspended_at": seed.get("suspended_at") or utc_now(),
+            "start_event_id": start_event.id,
+            "start_event_sequence": start_event.sequence,
+            "source_context_id": context_id,
+            "source_model_call_index": model_call_index,
+        }
+    )
+    payload["tool_observation_timing_seed"] = seed
+    return replace(suspended, payload=payload)
+
+
+def _tool_origin_from_descriptor(descriptor: CapabilityDescriptor | None) -> str:
+    if descriptor is None:
+        return "unknown"
+    provider_kind = getattr(descriptor.provider_kind, "value", str(descriptor.provider_kind))
+    if provider_kind == "mcp":
+        return "mcp"
+    if provider_kind == "workflow":
+        if descriptor.permission_category == "subagent_runtime":
+            return "subagent_system"
+        return "workflow"
+    if provider_kind in {"builtin", "memory", "skill"}:
+        return "builtin"
+    return "custom"
+
+
+def _tool_observation_freshness(tool_name: str, metadata: dict) -> str:
+    if tool_name == "terminal_process":
+        return "background_process_observation"
+    if tool_name == "terminal" and metadata.get("process_id"):
+        return "background_process_observation"
+    return "current_tool_observation"
+
+
+def _trusted_tool_reported_duration_seconds(tool_name: str, metadata: dict) -> float | None:
+    if tool_name not in {"terminal", "terminal_process"}:
+        return None
+    timing = metadata.get("timing")
+    if isinstance(timing, dict):
+        return _float_or_none(timing.get("duration_seconds"))
+    return _float_or_none(metadata.get("duration_seconds"))
+
+
+def _float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _duration_seconds(start: str | None, end: str | None) -> float | None:
+    start_dt = _parse_datetime(start)
+    end_dt = _parse_datetime(end)
+    if start_dt is None or end_dt is None:
+        return None
+    duration = (end_dt - start_dt).total_seconds()
+    return max(0.0, duration)
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None

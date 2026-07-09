@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.message.blocks import (
@@ -216,6 +217,89 @@ class EventBase(BaseModel):
     reply_id: str
     sequence: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolObservationTiming(BaseModel):
+    """Pulsara-owned timing facts for a completed or suspended tool observation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observed_at: str
+    source_started_at: str | None = None
+    source_ended_at: str | None = None
+    observation_duration_seconds: float | None = None
+    tool_reported_duration_seconds: float | None = None
+    freshness: Literal[
+        "current_tool_observation",
+        "background_process_observation",
+        "historical_tool_observation",
+        "suspended_tool_observation",
+        "unknown",
+    ] = "current_tool_observation"
+    clock_source: Literal[
+        "tool_result_events",
+        "tool_runtime_metadata",
+        "mixed",
+    ] = "tool_result_events"
+    tool_origin: Literal[
+        "builtin",
+        "mcp",
+        "custom",
+        "workflow",
+        "subagent_system",
+        "unknown",
+    ] = "unknown"
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    suspended_at: str | None = None
+    resumed_at: str | None = None
+
+    @field_validator(
+        "observed_at",
+        "source_started_at",
+        "source_ended_at",
+        "suspended_at",
+        "resumed_at",
+    )
+    @classmethod
+    def _validate_utc_timestamp(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = _parse_utc_timestamp(value)
+        if parsed is None:
+            raise ValueError("timestamp must be an ISO-8601 datetime with UTC offset")
+        return _format_utc_timestamp(parsed)
+
+    @field_validator("observation_duration_seconds", "tool_reported_duration_seconds")
+    @classmethod
+    def _validate_non_negative_duration(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError("duration must be finite and non-negative")
+        return value
+
+
+def _validate_tool_observation_timing_payload(value: object, *, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} requires a tool observation timing object")
+    try:
+        timing = ToolObservationTiming.model_validate(value)
+    except ValidationError as exc:
+        raise ValueError(f"{context} is invalid") from exc
+    return timing.model_dump(mode="json", exclude_none=True)
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class RunStartEvent(EventBase):
@@ -433,6 +517,18 @@ class ToolResultEndEvent(EventBase):
     state: ToolResultState
     artifacts: list[ToolResultArtifactRef] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _validate_tool_observation_timing(self) -> "ToolResultEndEvent":
+        timing = _validate_tool_observation_timing_payload(
+            self.metadata.get("tool_observation_timing"),
+            context="ToolResultEndEvent.metadata.tool_observation_timing",
+        )
+        embedded_tool_call_id = timing.get("tool_call_id")
+        if embedded_tool_call_id is not None and embedded_tool_call_id != self.tool_call_id:
+            raise ValueError("ToolResultEndEvent timing tool_call_id mismatch")
+        self.metadata["tool_observation_timing"] = timing
+        return self
+
 
 class RequireUserConfirmEvent(EventBase):
     type: Literal[EventType.REQUIRE_USER_CONFIRM] = EventType.REQUIRE_USER_CONFIRM
@@ -458,6 +554,51 @@ class RequireExternalExecutionEvent(EventBase):
 class ExternalExecutionResultEvent(EventBase):
     type: Literal[EventType.EXTERNAL_EXECUTION_RESULT] = EventType.EXTERNAL_EXECUTION_RESULT
     execution_results: list[ToolResultBlock]
+
+    @model_validator(mode="after")
+    def _validate_tool_observation_timing_map(self) -> "ExternalExecutionResultEvent":
+        timing_by_call_id = self.metadata.get("tool_observation_timing_by_call_id")
+        if not isinstance(timing_by_call_id, dict):
+            raise ValueError(
+                "ExternalExecutionResultEvent requires metadata.tool_observation_timing_by_call_id"
+            )
+        result_ids = [result.id for result in self.execution_results]
+        duplicate_ids = sorted({result_id for result_id in result_ids if result_ids.count(result_id) > 1})
+        if duplicate_ids:
+            raise ValueError(
+                "ExternalExecutionResultEvent execution_results contain duplicate ids: "
+                + ", ".join(duplicate_ids)
+            )
+        result_id_set = set(result_ids)
+        missing = [
+            result.id
+            for result in self.execution_results
+            if not isinstance(timing_by_call_id.get(result.id), dict)
+        ]
+        if missing:
+            raise ValueError(
+                "ExternalExecutionResultEvent timing map is missing tool result ids: "
+                + ", ".join(missing)
+            )
+        extra = sorted(str(key) for key in timing_by_call_id if key not in result_id_set)
+        if extra:
+            raise ValueError(
+                "ExternalExecutionResultEvent timing map contains unknown tool result ids: "
+                + ", ".join(extra)
+            )
+        for tool_call_id, timing_payload in list(timing_by_call_id.items()):
+            timing = _validate_tool_observation_timing_payload(
+                timing_payload,
+                context=f"ExternalExecutionResultEvent timing for {tool_call_id!r}",
+            )
+            embedded_tool_call_id = timing.get("tool_call_id")
+            if embedded_tool_call_id is not None and embedded_tool_call_id != tool_call_id:
+                raise ValueError(
+                    "ExternalExecutionResultEvent timing tool_call_id mismatch for "
+                    f"{tool_call_id!r}"
+                )
+            timing_by_call_id[tool_call_id] = timing
+        return self
 
 
 class TerminalProcessCompletedEvent(EventBase):

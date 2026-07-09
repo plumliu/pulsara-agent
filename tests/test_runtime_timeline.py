@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.conftest import run_start_permission_fields
 
 from pulsara_agent.event import (
     EventContext,
@@ -60,7 +61,12 @@ def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:read"),
             ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"),
             ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:read", delta="hello"),
-            ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:read", state=ToolResultState.SUCCESS),
+            ToolResultEndEvent(
+                **CTX.event_fields(),
+                tool_call_id="call:read",
+                state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            ),
             ReplyEndEvent(**CTX.event_fields()),
         ]:
             await runtime.emit(event)
@@ -148,7 +154,12 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
             ),
             ToolResultStartEvent(**CTX.event_fields(), tool_call_id=tool_call.id, tool_call_name=tool_call.name),
             ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id=tool_call.id, delta="ok"),
-            ToolResultEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id, state=ToolResultState.SUCCESS),
+            ToolResultEndEvent(
+                **CTX.event_fields(),
+                tool_call_id=tool_call.id,
+                state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            ),
         ]:
             await runtime.emit(event)
 
@@ -325,7 +336,12 @@ def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:read"),
             ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"),
             ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:read", delta="PULSARA_TRACE_OK"),
-            ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:read", state=ToolResultState.SUCCESS),
+            ToolResultEndEvent(
+                **CTX.event_fields(),
+                tool_call_id="call:read",
+                state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            ),
             ReplyEndEvent(**CTX.event_fields()),
             RunEndEvent(
                 **CTX.event_fields(),

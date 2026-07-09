@@ -389,6 +389,7 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
                 reply_id=candidate.source_reply_id,
                 tool_call_id="call:remember",
                 state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
             ),
         ]
     )

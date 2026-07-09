@@ -181,6 +181,7 @@ def test_completed_tool_result_from_events_folds_text_and_data_blocks() -> None:
             tool_call_id="call:tool",
             state=ToolResultState.SUCCESS,
             sequence=6,
+            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
         ),
     ]
 
@@ -208,7 +209,15 @@ def test_completed_tool_result_from_events_is_strict_for_malformed_slice() -> No
 
     for events in [
         [ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:bad", delta="orphan", sequence=1)],
-        [ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:bad", state=ToolResultState.ERROR, sequence=1)],
+        [
+            ToolResultEndEvent(
+                **CTX.event_fields(),
+                tool_call_id="call:bad",
+                state=ToolResultState.ERROR,
+                sequence=1,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            )
+        ],
         [ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:bad", tool_call_name="lookup", sequence=1)],
     ]:
         try:
@@ -230,6 +239,20 @@ def test_block_assembler_external_execution_result_completes_tool_result_blocks(
 
     external_result = ExternalExecutionResultEvent(
         **CTX.event_fields(),
+        metadata={
+            "tool_observation_timing_by_call_id": {
+                "call:ext": {
+                    "observed_at": "2026-07-09T00:00:00+00:00",
+                    "source_started_at": "2026-07-09T00:00:00+00:00",
+                    "source_ended_at": "2026-07-09T00:00:00+00:00",
+                    "freshness": "current_tool_observation",
+                    "clock_source": "tool_runtime_metadata",
+                    "tool_origin": "unknown",
+                    "tool_name": "external_lookup",
+                    "tool_call_id": "call:ext",
+                }
+            }
+        },
         execution_results=[result],
         sequence=10,
     )

@@ -11,6 +11,7 @@ from pulsara_agent.llm.input import LLMMessage, ToolSpec
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import Msg
+from pulsara_agent.event.events import utc_now
 from pulsara_agent.runtime.context_engine import (
     CompiledContext,
     ContextCompileInputs,
@@ -109,6 +110,8 @@ def build_compiled_context(
     )
     current_user = _message_by_id(state, anchor) if anchor is not None else None
     current_user_input = _message_text(current_user) if current_user is not None else ""
+    compiled_at_utc = utc_now()
+    user_observed_at_utc = current_user.created_at if current_user is not None and current_user.created_at else compiled_at_utc
     request = ContextCompileRequest(
         context_id=actual_context_id,
         runtime_session_id=runtime_session_id or state.session_id,
@@ -116,6 +119,8 @@ def build_compiled_context(
         turn_id=state.turn_id,
         reply_id=state.reply_id,
         model_call_index=model_call_index,
+        compiled_at_utc=compiled_at_utc,
+        user_observed_at_utc=user_observed_at_utc,
         model_role=model_role,
         state=state,
         current_user_message=current_user,

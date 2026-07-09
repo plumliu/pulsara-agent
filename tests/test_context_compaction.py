@@ -3,6 +3,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import AsyncIterator
 
+from tests.conftest import run_start_permission_fields
+
 from pulsara_agent.event import (
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
@@ -705,6 +707,7 @@ def test_compaction_plan_collects_tool_result_artifact_ids() -> None:
             **_ctx("artifact").event_fields(),
             tool_call_id="call:firecrawl",
             state=ToolResultState.SUCCESS,
+            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
             artifacts=[
                 ToolResultArtifactRef(
                     artifact_id="artifact:tool-result:run:call:firecrawl:output:0",
@@ -1707,6 +1710,7 @@ def test_compaction_input_coalesces_deltas_and_clips_large_tool_result() -> None
                 **ctx.event_fields(),
                 tool_call_id="call:search",
                 state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
                 artifacts=[
                     ToolResultArtifactRef(
                         artifact_id="artifact:search:full",

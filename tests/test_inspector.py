@@ -7,6 +7,8 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from tests.conftest import run_start_permission_fields
+
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     ContextCompiledEvent,
@@ -258,6 +260,35 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: P
                             "included": True,
                             "render_mode": "full",
                             "estimated_tokens": 2,
+                            "metadata": {
+                                "timing": {
+                                    "compiled_at_utc": "2026-07-09T01:02:03+00:00",
+                                    "source": {
+                                        "freshness": "current_turn",
+                                        "source_started_at": "2026-07-09T01:02:00+00:00",
+                                        "source_ended_at": "2026-07-09T01:02:00+00:00",
+                                    },
+                                    "age_seconds": 3,
+                                }
+                            },
+                        },
+                        {
+                            "id": "component:memory",
+                            "source_id": "memory",
+                            "channel": "leading_user",
+                            "included": True,
+                            "render_mode": "full",
+                            "estimated_tokens": 4,
+                            "metadata": {
+                                "timing": {
+                                    "compiled_at_utc": "2026-07-09T01:02:03+00:00",
+                                    "source": {
+                                        "freshness": "memory_projection",
+                                        "observed_at": "2026-07-09T01:01:59+00:00",
+                                    },
+                                    "age_seconds": 4,
+                                }
+                            },
                         }
                     ],
                     tool_specs=[{"name": "read_file", "estimated_tokens": 42, "included": True}],
@@ -269,6 +300,28 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: P
                             "decision": "invalidated",
                             "reason": "dependency_fingerprint_changed",
                         }
+                    ],
+                    tool_result_render_decisions=[
+                        {
+                            "tool_call_id": "call:terminal",
+                            "tool_name": "terminal",
+                            "model_tool_name": "terminal",
+                            "tool_timing": {
+                                "observed_at": "2026-07-09T01:02:03Z",
+                                "freshness": "current_tool_observation",
+                            },
+                            "timing_policy": "minimal",
+                            "rendered_timing_chars": 92,
+                            "diagnostics": [],
+                        },
+                        {
+                            "tool_call_id": "call:old",
+                            "tool_name": "read_file",
+                            "model_tool_name": "read_file",
+                            "timing_policy": "not_applicable",
+                            "rendered_timing_chars": 0,
+                            "diagnostics": [],
+                        },
                     ],
                 ),
                 ModelCallStartEvent(
@@ -294,6 +347,19 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: P
         assert contexts["latest"]["context_id"] == context_id
         assert contexts["latest"]["tools_estimated_tokens"] == 42
         assert contexts["latest"]["sections"][0]["channel"] == "current_user"
+        assert contexts["latest"]["section_timings"][0]["status"] == "present"
+        assert contexts["latest"]["section_timings"][0]["freshness"] == "current_turn"
+        assert contexts["latest"]["section_timings"][0]["source_started_at"] == "2026-07-09T01:02:00+00:00"
+        assert contexts["latest"]["section_timings"][0]["source_ended_at"] == "2026-07-09T01:02:00+00:00"
+        assert contexts["latest"]["section_timings"][0]["age_seconds"] == 3
+        assert contexts["latest"]["section_timings"][1]["freshness"] == "memory_projection"
+        assert contexts["latest"]["section_timings"][1]["observed_at"] == "2026-07-09T01:01:59+00:00"
+        assert contexts["latest"]["section_timings"][1]["source_started_at"] is None
+        assert contexts["latest"]["section_timings"][1]["source_ended_at"] is None
+        assert contexts["latest"]["tool_result_timings"][0]["status"] == "present"
+        assert contexts["latest"]["tool_result_timings"][0]["observed_at"] == "2026-07-09T01:02:03Z"
+        assert contexts["latest"]["tool_result_timings"][0]["timing_policy"] == "minimal"
+        assert contexts["latest"]["tool_result_timings"][1]["status"] == "not_applicable"
         assert contexts["latest"]["lifecycle_decisions"][0]["decision"] == "invalidated"
         assert contexts["model_call_joins"][0]["join_status"] == "matched"
         assert contexts["model_call_joins"][0]["context_compiled_sequence"] is not None
@@ -878,6 +944,7 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
                     **ctx.event_fields(),
                     tool_call_id=call_id,
                     state=ToolResultState.SUCCESS,
+                    metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
                     artifacts=[
                         ToolResultArtifactRef(
                             artifact_id="artifact:missing",

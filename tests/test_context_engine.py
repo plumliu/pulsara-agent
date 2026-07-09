@@ -5,6 +5,7 @@ from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.message import (
     AssistantMsg,
     Msg,
+    SystemMsg,
     TextBlock,
     ToolCallBlock,
     ToolResultArtifactRef,
@@ -17,16 +18,46 @@ from pulsara_agent.runtime.context import build_compiled_context
 import pytest
 
 from pulsara_agent.runtime.context_engine import (
+    ContextCompileInputs,
     ContextBudgetExceeded,
     ContextCompileRequest,
     ContextLifecycleCoordinator,
     ContextSection,
+    compile_context,
 )
 from pulsara_agent.runtime.context_engine.tool_results import (
     commit_tool_result_render_decision_cache,
     make_tool_result_render_decision_cache,
 )
 from pulsara_agent.runtime.state import LoopBudget, LoopState
+
+_TEST_COMPILED_AT = "2026-07-09T01:02:03+00:00"
+_TEST_USER_OBSERVED_AT = "2026-07-09T01:02:00+00:00"
+
+
+def _tool_observation_timing(
+    tool_call_id: str,
+    tool_name: str,
+    *,
+    observed_at: str = "2026-07-09T00:00:05+00:00",
+    freshness: str = "current_tool_observation",
+    tool_origin: str = "builtin",
+) -> dict[str, object]:
+    return {
+        "observed_at": observed_at,
+        "source_started_at": "2026-07-09T00:00:00+00:00",
+        "source_ended_at": observed_at,
+        "observation_duration_seconds": 5.0,
+        "freshness": freshness,
+        "clock_source": "tool_result_events",
+        "tool_origin": tool_origin,
+        "tool_name": tool_name,
+        "tool_call_id": tool_call_id,
+    }
+
+
+def _token_estimate(text: str) -> int:
+    return max(1, (len(text) + 3) // 4) if text else 0
 
 
 def test_context_compiler_reports_current_user_and_current_run_tail() -> None:
@@ -86,6 +117,187 @@ def test_context_compiler_reports_current_user_and_current_run_tail() -> None:
     assert compiled.tool_specs[0].name == "read_file"
     assert compiled.budget.tools_estimated_tokens == compiled.tool_specs[0].estimated_tokens
     assert compiled.estimated_tokens >= compiled.budget.tools_estimated_tokens
+
+
+def test_context_compiler_records_section_timing_metadata_and_headers() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="current timed request",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+        created_at="2026-07-09T00:00:00+00:00",
+    )
+    assistant = AssistantMsg(
+        name="assistant",
+        content=[
+            ToolCallBlock(id="call:timed", name="read_file", input='{"path":"README.md"}'),
+        ],
+        created_at="2026-07-09T00:00:02+00:00",
+    )
+    result = Msg(
+        role="tool_result",
+        name="read_file",
+        id="tool-result-message:call:timed",
+        content=[
+            ToolResultBlock(
+                id="call:timed",
+                name="read_file",
+                output=[TextBlock(text="timed result")],
+                state=ToolResultState.SUCCESS,
+            )
+        ],
+        created_at="2026-07-09T00:00:03+00:00",
+        finished_at="2026-07-09T00:00:04+00:00",
+    )
+    state.messages.extend([UserMsg(name="user", content="older", created_at="2026-07-08T23:59:00+00:00"), user, assistant, result])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:timing",
+        model_call_index=2,
+        current_user_anchor=user.id,
+        component_prompts=(
+            ("runtime_context", "Runtime facts"),
+            ("subagent:results", "Child result summary"),
+        ),
+    )
+
+    sections = {section.id: section for section in compiled.sections}
+    current_user = sections["transcript:current_user"]
+    assert current_user.metadata["source_timing"]["freshness"] == "current_turn"
+    assert "compiled_at_utc" not in current_user.metadata["source_timing"]
+    assert current_user.metadata["timing"]["compiled_at_utc"]
+    assert current_user.metadata["timing"]["source"]["source_started_at"] == "2026-07-09T00:00:00+00:00"
+    assert "timing_header_text" not in current_user.metadata
+
+    tail = sections["transcript:current_run_tail"]
+    assert tail.metadata["source_timing"]["freshness"] == "current_run_tail"
+    assert tail.metadata["timing"]["source"]["source_ended_at"] == "2026-07-09T00:00:04+00:00"
+
+    runtime_section = sections["runtime_context"]
+    assert runtime_section.metadata["source_timing"]["freshness"] == "current_turn"
+    assert runtime_section.metadata["timing_header_text"].startswith("[context timing:")
+    assert "freshness=current_turn" in runtime_section.metadata["timing_header_text"]
+    assert runtime_section.estimated_tokens >= _token_estimate(
+        runtime_section.metadata["timing_header_text"] + "\n" + "Runtime facts"
+    )
+    leading_context = compiled.llm_context.messages[0].content[0]
+    assert "## Runtime Context\n[context timing: freshness=current_turn;" in leading_context
+    assert "Runtime facts" in leading_context
+
+    subagent_section = sections["subagent:results"]
+    assert subagent_section.metadata["source_timing"]["freshness"] == "subagent_result"
+    assert "## Subagent Results\n[context timing: freshness=subagent_result;" in (
+        compiled.llm_context.system_prompt or ""
+    )
+    assert compiled.llm_context.system_prompt.startswith("System\n\n## Subagent Results")
+    assert "System\n[context timing:" not in (compiled.llm_context.system_prompt or "")
+
+
+def test_context_lifecycle_reused_section_gets_fresh_render_timing_overlay() -> None:
+    coordinator = ContextLifecycleCoordinator()
+    state = LoopState(session_id="runtime:test")
+
+    def request(context_id: str, compiled_at: str, model_call_index: int) -> ContextCompileRequest:
+        return ContextCompileRequest(
+            context_id=context_id,
+            runtime_session_id=state.session_id,
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+            model_call_index=model_call_index,
+            compiled_at_utc=compiled_at,
+            user_observed_at_utc=compiled_at,
+            model_role=ModelRole.PRO,
+            state=state,
+            current_user_message=None,
+            current_user_input="",
+            current_user_anchor=None,
+            tools=(),
+            budget=state.budget,
+            exposure=None,
+        )
+
+    first = compile_context(
+        request("context:timing:1", "2026-07-09T01:00:00+00:00", 1),
+        inputs=ContextCompileInputs(
+            system_prompt="System",
+            prior_messages=(),
+            component_prompts=(("runtime_context", "Workspace facts"),),
+        ),
+        lifecycle_coordinator=coordinator,
+    )
+    second = compile_context(
+        request("context:timing:2", "2026-07-09T01:05:00+00:00", 2),
+        inputs=ContextCompileInputs(
+            system_prompt="System",
+            prior_messages=(),
+            component_prompts=(("runtime_context", "Workspace facts"),),
+        ),
+        lifecycle_coordinator=coordinator,
+    )
+
+    first_runtime = next(section for section in first.sections if section.id == "runtime_context")
+    second_runtime = next(section for section in second.sections if section.id == "runtime_context")
+    assert first_runtime.lifecycle_status == "freshly_collected"
+    assert second_runtime.lifecycle_status == "reused"
+    assert first_runtime.metadata["source_timing"] == second_runtime.metadata["source_timing"]
+    assert first_runtime.metadata["timing"]["compiled_at_utc"] == "2026-07-09T01:00:00+00:00"
+    assert second_runtime.metadata["timing"]["compiled_at_utc"] == "2026-07-09T01:05:00+00:00"
+    assert "2026-07-09T01:05:00+00:00" in second_runtime.metadata["timing_header_text"]
+    assert "compiled_at_utc=2026-07-09T01:00:00+00:00" not in second_runtime.metadata["timing_header_text"]
+
+
+def test_context_compiler_records_compaction_summary_timing_metadata_in_transcript_section() -> None:
+    state = LoopState(session_id="runtime:test")
+    summary = SystemMsg(
+        name="pulsara",
+        content="<context-compaction-summary>summary</context-compaction-summary>",
+        id="context-compaction-summary:context_compaction:abc",
+        created_at="2026-07-09T00:30:00+00:00",
+        metadata={
+            "kind": "context_compaction_summary",
+            "artifact_id": "context_compaction_abc:summary",
+            "compaction_id": "context_compaction:abc",
+            "through_sequence": 42,
+            "keep_after_sequence": 42,
+        },
+    )
+    user = UserMsg(
+        name="user",
+        content="current",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    state.messages.extend([summary, user])
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=state.budget,
+        context_id="context:compaction-summary-timing",
+        model_call_index=1,
+        current_user_anchor=user.id,
+    )
+
+    prior = next(section for section in compiled.sections if section.id == "transcript:prior_history")
+    summaries = prior.metadata["compaction_summary_messages"]
+    assert summaries == [
+        {
+            "compaction_id": "context_compaction:abc",
+            "summary_artifact_id": "context_compaction_abc:summary",
+            "compacted_at": "2026-07-09T00:30:00+00:00",
+            "keep_after_sequence": 42,
+            "through_sequence": 42,
+            "source_sequence_start": None,
+            "freshness": "compacted_history",
+        }
+    ]
 
 
 def test_context_compiler_lowers_leading_user_before_history_and_preserves_current_run_order() -> None:
@@ -204,7 +416,10 @@ def test_context_compiler_lowers_subagent_results_as_handoff_not_user_request() 
     section = next(section for section in compiled.sections if section.id == "subagent:results")
     assert section.channel == "handoff_hint"
     assert section.metadata["lowered_to"] == "system_prompt"
-    assert "## Subagent Results\nchild result summary" in (compiled.llm_context.system_prompt or "")
+    assert "## Subagent Results\n[context timing: freshness=subagent_result;" in (
+        compiled.llm_context.system_prompt or ""
+    )
+    assert "child result summary" in (compiled.llm_context.system_prompt or "")
     assert not compiled.llm_context.messages
 
 
@@ -253,6 +468,8 @@ def test_context_lifecycle_reuses_and_invalidates_turn_sections() -> None:
         turn_id=state.turn_id,
         reply_id=state.reply_id,
         model_call_index=1,
+        compiled_at_utc=_TEST_COMPILED_AT,
+        user_observed_at_utc=_TEST_USER_OBSERVED_AT,
         model_role=ModelRole.PRO,
         state=state,
         current_user_message=user,
@@ -381,8 +598,15 @@ def test_context_budget_compacts_memory_projection_before_lowering() -> None:
     projection = sections["memory:projection"]
     assert projection.render_mode == "compact"
     assert projection.included is True
+    assert projection.metadata["source_timing"]["freshness"] == "memory_projection"
+    assert projection.metadata["timing_header_text"].startswith("[context timing: freshness=memory_projection;")
+    assert projection.metadata["rendered_timing_header_tokens"] == _token_estimate(
+        projection.metadata["timing_header_text"]
+    )
+    assert projection.estimated_tokens > projection.metadata["rendered_timing_header_tokens"]
     assert projection.metadata["original_estimated_tokens"] > projection.estimated_tokens
     rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    assert "## Recalled Memory and Working Context\n[context timing: freshness=memory_projection;" in rendered
     assert "MEMORY_SENTINEL" in rendered
     assert "MEMORY PROJECTION COMPACTED" in rendered
     assert any(
@@ -729,7 +953,6 @@ def test_prior_envelopes_do_not_borrow_through_current_tail_protected_pool() -> 
         model_call_index=2,
         current_user_anchor=user.id,
     )
-
     rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
     assert "FRESH_TAIL_STILL_VISIBLE" in rendered
     fresh_decision = next(
@@ -1759,6 +1982,512 @@ def test_terminal_essential_envelope_respects_per_result_hard_cap() -> None:
     assert len(rendered) == decision["rendered_total_chars"]
     payload = json.loads(rendered.split("\n", 1)[1])
     assert payload["tool_result_body_omitted"] is True
+
+
+def test_terminal_essential_envelope_preserves_timing_when_budget_allows() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="check background process",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    timing = {
+        "observed_at": "2026-07-09T01:02:03Z",
+        "duration_seconds": 12.5,
+        "freshness": "background_process_observation",
+        "clock_source": "tool_payload",
+    }
+    observation = _tool_observation_timing(
+        "call:timing",
+        "terminal",
+        observed_at="2026-07-09T01:02:04+00:00",
+        freshness="background_process_observation",
+    )
+    payload = {
+        "status": "running",
+        "output": "x" * 2_000,
+        "exit_code": -1,
+        "cwd": "/workspace",
+        "timed_out": False,
+        "truncated": True,
+        "process_id": "proc:timing",
+        "yielded_to_background": True,
+        "terminal_session_id": "default",
+        "backend_type": "local",
+        "timing": timing,
+    }
+    state.messages.extend(
+        [
+            user,
+            AssistantMsg(
+                name="assistant",
+                content=[ToolCallBlock(id="call:timing", name="terminal", input="{}")],
+            ),
+            AssistantMsg(
+                name="assistant",
+                metadata={"tool_observation_timing_by_call_id": {"call:timing": observation}},
+                content=[
+                    ToolResultBlock(
+                        id="call:timing",
+                        name="terminal",
+                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        state=ToolResultState.SUCCESS,
+                    )
+                ],
+            ),
+        ]
+    )
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=2_000,
+            current_tail_tool_result_context_chars=0,
+            latest_tool_result_reserved_chars=0,
+            tool_result_per_envelope_cap_chars=700,
+        ),
+        context_id="context:terminal-timing-envelope",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+    second = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=8_000),
+        context_id="context:terminal-timing-envelope:wider",
+        model_call_index=3,
+        current_user_anchor=user.id,
+    )
+
+    rendered = next(
+        text
+        for message in compiled.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    envelope = json.loads(rendered.split("\n", 1)[1])
+    decision = compiled.tool_result_render_decisions[0]
+
+    assert envelope["tool_result_body_omitted"] is True
+    assert envelope["pulsara_tool_observation"]["observed_at"] == observation["observed_at"]
+    assert envelope["timing"]["observed_at"] == timing["observed_at"]
+    assert decision["tool_timing"]["observed_at"] == observation["observed_at"]
+    assert decision["timing_policy"] in {"full", "minimal"}
+    assert decision["rendered_timing_chars"] > 0
+    assert decision["terminal_payload_timing"] == {
+        "observed_at": timing["observed_at"],
+        "duration_seconds": timing["duration_seconds"],
+        "freshness": timing["freshness"],
+    }
+    assert decision["terminal_payload_timing_policy"] == "minimal"
+    assert decision["rendered_terminal_payload_timing_chars"] > 0
+    assert decision["rendered_envelope_chars"] <= 700
+    second_rendered = next(
+        text
+        for message in second.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    second_envelope = json.loads(second_rendered.split("\n", 1)[1])
+    second_decision = second.tool_result_render_decisions[0]
+    assert second_decision["render_decision_cache_status"] == "freshly_collected"
+    assert second_decision["terminal_payload_timing_policy"] == "full"
+    assert second_decision["terminal_payload_timing"] == timing
+    assert second_envelope["timing"] == timing
+
+
+def test_artifact_backed_terminal_result_preserves_timing_in_normal_envelope_and_cache() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="run archived terminal command",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    timing = {
+        "observed_at": "2026-07-09T02:03:04Z",
+        "duration_seconds": 1.25,
+        "freshness": "current_tool_observation",
+        "clock_source": "tool_payload",
+    }
+    observation = _tool_observation_timing(
+        "call:artifact-timing",
+        "terminal",
+        observed_at="2026-07-09T02:03:05+00:00",
+    )
+    payload = {
+        "status": "success",
+        "output": "ARCHIVED_TERMINAL_OK",
+        "exit_code": 0,
+        "cwd": "/workspace",
+        "timed_out": False,
+        "truncated": False,
+        "terminal_session_id": "default",
+        "backend_type": "local",
+        "timing": timing,
+    }
+    text = json.dumps(payload, ensure_ascii=False)
+    artifact = ToolResultArtifactRef(
+        artifact_id="artifact:terminal:combined",
+        role="combined_output",
+        media_type="text/plain; charset=utf-8",
+        size_bytes=len(text.encode("utf-8")),
+        stored_complete=True,
+        preview=ToolResultPreviewMetadata(
+            preview_policy="full",
+            preview_chars=len(text),
+            original_chars=len(text),
+            original_bytes=len(text.encode("utf-8")),
+            omitted_middle_chars=0,
+            visible_head_chars=len(text),
+            visible_tail_chars=0,
+            read_more={"tool": "artifact_read", "artifact_id": "artifact:terminal:combined"},
+        ),
+    )
+    state.messages.extend(
+        [
+            user,
+            AssistantMsg(
+                name="assistant",
+                content=[ToolCallBlock(id="call:artifact-timing", name="terminal", input="{}")],
+            ),
+            AssistantMsg(
+                name="assistant",
+                metadata={"tool_observation_timing_by_call_id": {"call:artifact-timing": observation}},
+                content=[
+                    ToolResultBlock(
+                        id="call:artifact-timing",
+                        name="terminal",
+                        output=[TextBlock(text=text)],
+                        state=ToolResultState.SUCCESS,
+                        artifacts=[artifact],
+                    )
+                ],
+            ),
+        ]
+    )
+
+    first = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=8_000),
+        context_id="context:artifact-terminal-timing:first",
+        model_call_index=1,
+        current_user_anchor=user.id,
+    )
+    second = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=8_000),
+        context_id="context:artifact-terminal-timing:second",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    rendered = next(
+        text
+        for message in first.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    envelope = json.loads(rendered.split("\n", 1)[1])
+    first_decision = first.tool_result_render_decisions[0]
+    second_decision = second.tool_result_render_decisions[0]
+
+    assert envelope["timing"] == timing
+    assert envelope["pulsara_tool_observation"] == observation
+    assert first_decision["timing_policy"] == "full"
+    assert first_decision["tool_timing"] == observation
+    assert first_decision["terminal_payload_timing_policy"] == "full"
+    assert first_decision["terminal_payload_timing"] == timing
+    assert not any(
+        diagnostic.get("code") == "tool_observation_timing_omitted_for_envelope_cap"
+        for diagnostic in first_decision["diagnostics"]
+    )
+    assert not any(
+        diagnostic.get("code") == "terminal_payload_timing_omitted_for_envelope_cap"
+        for diagnostic in first_decision["diagnostics"]
+    )
+    assert second_decision["render_decision_cache_status"] == "reused"
+    assert second_decision["timing_policy"] == "full"
+    assert second_decision["tool_timing"] == observation
+    assert second_decision["terminal_payload_timing_policy"] == "full"
+    assert second_decision["terminal_payload_timing"] == timing
+
+
+def test_terminal_essential_envelope_omits_timing_when_cap_is_tiny() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="check background process with tiny cap",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    payload = {
+        "status": "running",
+        "output": "x" * 2_000,
+        "exit_code": -1,
+        "cwd": "/workspace/" + ("deep/" * 20),
+        "process_id": "proc:" + ("x" * 80),
+        "terminal_session_id": "default",
+        "backend_type": "local",
+        "timing": {
+            "observed_at": "2026-07-09T01:02:03Z",
+            "duration_seconds": 12.5,
+            "freshness": "background_process_observation",
+            "clock_source": "tool_payload",
+        },
+    }
+    observation = _tool_observation_timing(
+        "call:tiny-timing",
+        "terminal",
+        observed_at="2026-07-09T01:02:04+00:00",
+        freshness="background_process_observation",
+    )
+    state.messages.extend(
+        [
+            user,
+            AssistantMsg(
+                name="assistant",
+                content=[ToolCallBlock(id="call:tiny-timing", name="terminal", input="{}")],
+            ),
+            AssistantMsg(
+                name="assistant",
+                metadata={"tool_observation_timing_by_call_id": {"call:tiny-timing": observation}},
+                content=[
+                    ToolResultBlock(
+                        id="call:tiny-timing",
+                        name="terminal",
+                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        state=ToolResultState.SUCCESS,
+                    )
+                ],
+            ),
+        ]
+    )
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(
+            tool_result_context_chars=2_000,
+            current_tail_tool_result_context_chars=0,
+            latest_tool_result_reserved_chars=0,
+            tool_result_per_envelope_cap_chars=180,
+        ),
+        context_id="context:terminal-timing-omitted",
+        model_call_index=2,
+        current_user_anchor=user.id,
+    )
+
+    rendered = next(
+        text
+        for message in compiled.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    envelope = json.loads(rendered.split("\n", 1)[1])
+    decision = compiled.tool_result_render_decisions[0]
+
+    assert "timing" not in envelope
+    assert "pulsara_tool_observation" not in envelope
+    assert decision["timing_policy"] == "omitted_for_cap"
+    assert decision["rendered_timing_chars"] == 0
+    assert decision["terminal_payload_timing_policy"] == "omitted_for_cap"
+    assert decision["rendered_terminal_payload_timing_chars"] == 0
+    assert any(
+        diagnostic.get("code") == "tool_observation_timing_omitted_for_envelope_cap"
+        for diagnostic in decision["diagnostics"]
+    )
+    assert any(
+        diagnostic.get("code") == "terminal_payload_timing_omitted_for_envelope_cap"
+        for diagnostic in decision["diagnostics"]
+    )
+
+
+def test_non_terminal_json_timing_field_is_business_payload_not_pulsara_timing() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="read mcp-ish business json",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    payload = {
+        "timing": {"phase": "p95", "observed_at": "external-business-clock"},
+        "result": "BUSINESS_TIMING_OK",
+    }
+    state.messages.extend(
+        [
+            user,
+            AssistantMsg(
+                name="assistant",
+                content=[ToolCallBlock(id="call:business", name="mcp__docs__search", input="{}")],
+            ),
+            AssistantMsg(
+                name="assistant",
+                content=[
+                    ToolResultBlock(
+                        id="call:business",
+                        name="mcp__docs__search",
+                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        state=ToolResultState.SUCCESS,
+                    )
+                ],
+            ),
+        ]
+    )
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=8_000),
+        context_id="context:business-timing",
+        model_call_index=1,
+        current_user_anchor=user.id,
+    )
+
+    rendered = next(
+        text
+        for message in compiled.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    decision = compiled.tool_result_render_decisions[0]
+
+    assert "BUSINESS_TIMING_OK" in rendered
+    assert "external-business-clock" in rendered
+    assert "pulsara_tool_observation" not in rendered
+    assert decision["timing_policy"] == "not_applicable"
+    assert decision["tool_timing"] is None
+
+
+def test_json_full_raw_tool_result_uses_pulsara_header_without_wrapping_payload() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="read json result",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    observation = _tool_observation_timing(
+        "call:json",
+        "read_file",
+        observed_at="2026-07-09T03:04:05+00:00",
+    )
+    payload = {"path": "config.json", "timing": {"business": True}, "ok": True}
+    state.messages.extend(
+        [
+            user,
+            AssistantMsg(
+                name="assistant",
+                content=[ToolCallBlock(id="call:json", name="read_file", input="{}")],
+            ),
+            AssistantMsg(
+                name="assistant",
+                metadata={"tool_observation_timing_by_call_id": {"call:json": observation}},
+                content=[
+                    ToolResultBlock(
+                        id="call:json",
+                        name="read_file",
+                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        state=ToolResultState.SUCCESS,
+                    )
+                ],
+            ),
+        ]
+    )
+
+    compiled = build_compiled_context(
+        state=state,
+        tools=(),
+        system_prompt="System",
+        budget=LoopBudget(tool_result_context_chars=8_000),
+        context_id="context:json-full-raw",
+        model_call_index=1,
+        current_user_anchor=user.id,
+    )
+
+    rendered = next(
+        text
+        for message in compiled.llm_context.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for text in message.content
+    )
+    header, raw_payload = rendered.split("\n", 1)
+    decision = compiled.tool_result_render_decisions[0]
+
+    assert header.startswith("[tool_result:read_file:success; observed_at=2026-07-09T03:04:05+00:00")
+    assert json.loads(raw_payload) == payload
+    assert "pulsara_tool_observation" not in raw_payload
+    assert decision["framing"] == "pulsara_tool_result_header"
+    assert decision["payload_preserved"] is True
+    assert decision["payload_format"] == "json"
+    assert decision["timing_policy"] == "full"
+    assert decision["tool_timing"] == observation
+
+
+def test_missing_production_tool_observation_timing_fails_context_compile_without_model_call() -> None:
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="use production event-derived result",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    state.messages.extend(
+        [
+            user,
+            AssistantMsg(
+                name="assistant",
+                content=[ToolCallBlock(id="call:missing-timing", name="read_file", input="{}")],
+            ),
+            AssistantMsg(
+                name="assistant",
+                metadata={
+                    "source_timing": {
+                        "observed_at": "2026-07-09T00:00:01+00:00",
+                        "source_started_at": "2026-07-09T00:00:00+00:00",
+                        "source_ended_at": "2026-07-09T00:00:01+00:00",
+                    }
+                },
+                content=[
+                    ToolResultBlock(
+                        id="call:missing-timing",
+                        name="read_file",
+                        output=[TextBlock(text="PRODUCTION_MISSING_TIMING")],
+                        state=ToolResultState.SUCCESS,
+                    )
+                ],
+            ),
+        ]
+    )
+
+    with pytest.raises(ContextBudgetExceeded) as exc_info:
+        build_compiled_context(
+            state=state,
+            tools=(),
+            system_prompt="System",
+            budget=LoopBudget(tool_result_context_chars=8_000),
+            context_id="context:missing-tool-observation",
+            model_call_index=1,
+            current_user_anchor=user.id,
+        )
+
+    assert "tool_observation_timing_missing" in str(exc_info.value)
+    report = exc_info.value.tool_result_budget_report
+    assert any(
+        diagnostic.get("code") == "tool_observation_timing_missing"
+        for diagnostic in report["diagnostics"]
+    )
 
 
 def test_memory_projection_lifecycle_fingerprint_tracks_visible_text_changes() -> None:

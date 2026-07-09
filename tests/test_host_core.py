@@ -3,6 +3,7 @@ import json
 from typing import AsyncIterator
 
 import pytest
+from tests.conftest import run_start_permission_fields
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -481,7 +482,12 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
             ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
             RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
             ToolResultTextDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta="done"),
-            ToolResultEndEvent(**ctx.event_fields(), tool_call_id="call:terminal", state=ToolResultState.SUCCESS),
+            ToolResultEndEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:terminal",
+                state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            ),
         ]
     )
 

@@ -211,6 +211,7 @@ def raise_if_tool_result_budget_unsatisfied(
     fail_codes = {
         "tool_result_total_budget_unsatisfied",
         "max_tool_results_per_context_exceeded",
+        "tool_observation_timing_missing",
     }
     failures = [
         diagnostic
@@ -348,7 +349,15 @@ def _assistant_messages(
             flush_assistant_turn()
             messages.extend(
                 _tool_result_messages(
-                    Msg(role="tool_result", name=block.name, content=[block], id=source_message_id),
+                    Msg(
+                        role="tool_result",
+                        name=block.name,
+                        content=[block],
+                        id=source_message_id,
+                        metadata=dict(message.metadata),
+                        created_at=message.created_at,
+                        finished_at=message.finished_at,
+                    ),
                     tool_budget,
                     segment=segment,
                     source_message_id=source_message_id,
@@ -376,6 +385,8 @@ def _tool_result_messages(
         if not isinstance(block, ToolResultBlock):
             continue
         actual_block_index = content_block_index if content_block_index is not None else fallback_block_index
+        tool_observation_timing = _tool_observation_timing_for_block(message, block)
+        tool_observation_timing_required = _tool_observation_timing_required(message)
         body = _render_tool_result_body(
             block,
             tool_budget,
@@ -384,12 +395,12 @@ def _tool_result_messages(
             source_message_index=source_message_index,
             content_block_index=actual_block_index,
             source_assistant_message_id=source_assistant_message_id,
+            tool_observation_timing=tool_observation_timing,
+            tool_observation_timing_required=tool_observation_timing_required,
         )
-        model_tool_name = _model_tool_name(block.name)
-        header = _tool_result_header(model_tool_name, block.state.value)
         messages.append(
             LLMMessage.tool_result(
-                f"{header}{body}",
+                body,
                 tool_call_id=block.id,
             )
         )
@@ -410,6 +421,8 @@ def _textual_parts(
         if isinstance(block, TextBlock):
             parts.append(block.text)
         elif isinstance(block, ToolResultBlock):
+            tool_observation_timing = _tool_observation_timing_for_block(message, block)
+            tool_observation_timing_required = _tool_observation_timing_required(message)
             body = _render_tool_result_body(
                 block,
                 tool_budget,
@@ -418,9 +431,10 @@ def _textual_parts(
                 source_message_index=source_message_index,
                 content_block_index=content_block_index,
                 source_assistant_message_id=source_assistant_message_id,
+                tool_observation_timing=tool_observation_timing,
+                tool_observation_timing_required=tool_observation_timing_required,
             )
-            model_tool_name = _model_tool_name(block.name)
-            parts.append(f"{_tool_result_header(model_tool_name, block.state.value)}{body}")
+            parts.append(body)
         elif isinstance(block, DataBlock):
             parts.append(_data_placeholder(block))
         else:
@@ -550,10 +564,13 @@ class _ToolResultRenderAllocator:
         source_message_index: int,
         content_block_index: int,
         source_assistant_message_id: str | None,
+        tool_observation_timing: dict[str, Any] | None,
+        tool_observation_timing_required: bool,
     ) -> str:
         self._render_order += 1
         text = _tool_result_text(block)
         parsed = _parse_tool_result_json(text)
+        timing = _normalize_tool_observation_timing(tool_observation_timing)
         render_source_fingerprint = _text_fingerprint(text)
         artifact_fingerprint = _artifact_fingerprint(block.artifacts)
         original_chars = _tool_result_original_chars(block, text)
@@ -566,6 +583,7 @@ class _ToolResultRenderAllocator:
             artifact_fingerprint=artifact_fingerprint,
             body_candidate_chars=body_candidate_chars,
             original_chars=original_chars,
+            tool_observation_timing=timing,
         )
         latest_candidate = block.id in self.latest_tool_result_ids
         latest_short = (
@@ -583,7 +601,8 @@ class _ToolResultRenderAllocator:
             or batch_before >= min(self.latest_reserved_chars, body_candidate_chars)
         )
         model_tool_name = _model_tool_name(block.name)
-        header_chars = len(_tool_result_header(model_tool_name, block.state.value))
+        basic_header_chars = len(_tool_result_header(model_tool_name, block.state.value, None))
+        max_header_chars = len(_tool_result_header(model_tool_name, block.state.value, timing))
         use_reserved = (
             latest_short
             and block.id in self.latest_reserved_tool_result_ids
@@ -595,13 +614,14 @@ class _ToolResultRenderAllocator:
         body_allowed = min(body_allowed, batch_before)
         body_allowed = min(body_allowed, self.per_tool_cap_chars) if self.per_tool_cap_chars > 0 else body_allowed
         total_allowed = self._total_allowed_for_segment(segment)
-        body_payload_total_allowed = max(0, total_allowed - header_chars)
+        body_payload_total_allowed = max(0, total_allowed - max_header_chars)
+        envelope_payload_total_allowed = max(0, total_allowed - basic_header_chars)
         body_allowed = min(body_allowed, body_payload_total_allowed)
-        body_payload_envelope_allowed = max(0, self.per_envelope_cap_chars - header_chars)
+        body_payload_envelope_allowed = max(0, self.per_envelope_cap_chars - basic_header_chars)
         envelope_allowed = min(
             self.envelope_remaining,
             body_payload_envelope_allowed,
-            body_payload_total_allowed,
+            envelope_payload_total_allowed,
         )
 
         cache_status = "not_cacheable"
@@ -611,11 +631,16 @@ class _ToolResultRenderAllocator:
             cached_entry = self.decision_cache.get(unit_fingerprint)
             cache_status = "freshly_collected"
             if cached_entry is not None:
+                cached_header_chars = (
+                    max_header_chars
+                    if cached_entry.get("payload_preserved") is True
+                    else basic_header_chars
+                )
                 cached_output = _cached_render_output(
                     cached_entry,
                     body_allowed=body_allowed,
                     total_allowed=total_allowed,
-                    header_chars=header_chars,
+                    header_chars=cached_header_chars,
                     per_envelope_cap_chars=self.per_envelope_cap_chars,
                 )
                 if cached_output is None:
@@ -635,15 +660,39 @@ class _ToolResultRenderAllocator:
                 self._render_with_allowance(
                     block,
                     text,
+                    tool_observation_timing=timing,
                     body_allowed=body_allowed,
                     envelope_allowed=envelope_allowed,
-                    total_allowed=body_payload_total_allowed,
+                    total_allowed=envelope_payload_total_allowed,
                 )
             )
         else:
             rendered, visible_body_chars, body_policy, envelope_policy, primary_artifact_id, artifact_ids, reason = (
                 cached_output
             )
+        raw_payload_preserved = (
+            not block.artifacts
+            and body_policy == "full_visible"
+            and envelope_policy == "full_envelope"
+            and rendered == text
+        )
+        header_timing = timing if raw_payload_preserved else None
+        header = _tool_result_header(model_tool_name, block.state.value, header_timing)
+        rendered_content = f"{header}{rendered}"
+        timing_policy, rendered_timing, rendered_timing_chars, timing_diagnostics = _tool_timing_render_decision(
+            source_timing=timing,
+            rendered=rendered,
+            header_includes_timing=header_timing is not None,
+        )
+        (
+            terminal_payload_timing_policy,
+            rendered_terminal_payload_timing,
+            rendered_terminal_payload_timing_chars,
+            terminal_payload_timing_diagnostics,
+        ) = _terminal_payload_timing_render_decision(
+            source_timing=_terminal_payload_timing(block, parsed),
+            rendered=rendered,
+        )
         reserved_applied = use_reserved and _latest_reserved_was_satisfied(
             body_candidate_chars=body_candidate_chars,
             visible_body_chars=visible_body_chars,
@@ -655,7 +704,7 @@ class _ToolResultRenderAllocator:
         else:
             self.segment_remaining[budget_key] = max(0, budget_before - visible_body_chars)
         self.batch_remaining[tool_batch_id] = max(0, batch_before - visible_body_chars)
-        rendered_header_chars = header_chars
+        rendered_header_chars = len(header)
         rendered_envelope_chars = max(0, len(rendered) - visible_body_chars) + rendered_header_chars
         rendered_total_chars = len(rendered) + rendered_header_chars
         self.body_remaining = max(0, self.body_remaining - visible_body_chars)
@@ -673,8 +722,12 @@ class _ToolResultRenderAllocator:
             block,
             primary_artifact_id,
             segment=segment,
+            tool_observation_timing_required=tool_observation_timing_required,
+            tool_observation_timing_present=timing is not None,
         )
         decision_diagnostics.extend(cache_diagnostics)
+        decision_diagnostics.extend(timing_diagnostics)
+        decision_diagnostics.extend(terminal_payload_timing_diagnostics)
         decision = {
             "tool_call_id": block.id,
             "source_block_id": block.id,
@@ -701,9 +754,28 @@ class _ToolResultRenderAllocator:
             "latest_reserved_applied": reserved_applied,
             "latest_reserved_reason": latest_reason,
             "visible_body_chars": visible_body_chars,
+            "tool_observation_timing": rendered_timing,
+            "tool_timing": rendered_timing,
+            "observed_at": (
+                rendered_timing.get("observed_at")
+                if isinstance(rendered_timing, dict)
+                else None
+            ),
+            "timing_policy": timing_policy,
+            "rendered_timing_chars": rendered_timing_chars,
+            "terminal_payload_timing": rendered_terminal_payload_timing,
+            "terminal_payload_timing_policy": terminal_payload_timing_policy,
+            "rendered_terminal_payload_timing_chars": rendered_terminal_payload_timing_chars,
             "rendered_header_chars": rendered_header_chars,
             "rendered_envelope_chars": rendered_envelope_chars,
             "rendered_total_chars": rendered_total_chars,
+            "framing": (
+                "pulsara_tool_result_header"
+                if raw_payload_preserved
+                else "pulsara_tool_result_envelope"
+            ),
+            "payload_preserved": raw_payload_preserved,
+            "payload_format": _payload_format(text),
             "body_budget_remaining": remaining_after,
             "batch_body_budget_remaining": self.batch_remaining[tool_batch_id],
             "envelope_budget_remaining": self.envelope_remaining,
@@ -724,13 +796,14 @@ class _ToolResultRenderAllocator:
             and _is_cacheable_render_decision(decision)
         ):
             self.cache_candidates[unit_fingerprint] = _decision_cache_entry(decision, rendered)
-        return rendered
+        return rendered_content
 
     def _render_with_allowance(
         self,
         block: ToolResultBlock,
         text: str,
         *,
+        tool_observation_timing: dict[str, Any] | None,
         body_allowed: int,
         envelope_allowed: int,
         total_allowed: int,
@@ -746,6 +819,7 @@ class _ToolResultRenderAllocator:
                     parsed=parsed,
                     artifact_refs=(),
                     per_envelope_cap_chars=envelope_allowed,
+                    tool_observation_timing=tool_observation_timing,
                 )
                 if essential is not None:
                     return (
@@ -764,6 +838,7 @@ class _ToolResultRenderAllocator:
                         parsed=parsed,
                         artifact_refs=(),
                         per_envelope_cap_chars=envelope_allowed,
+                        tool_observation_timing=tool_observation_timing,
                     )
                     if essential is not None:
                         return (
@@ -793,6 +868,7 @@ class _ToolResultRenderAllocator:
                     parsed=parsed,
                     artifact_refs=(),
                     per_envelope_cap_chars=envelope_allowed,
+                    tool_observation_timing=tool_observation_timing,
                 )
                 if essential is not None:
                     return (
@@ -812,41 +888,61 @@ class _ToolResultRenderAllocator:
             len(text) > body_allowed
             and not _has_room_for_clipped_preview(text, body_allowed)
         ):
-            compact = _compact_artifact_envelope(block, per_envelope_cap_chars=envelope_allowed)
+            compact = _compact_artifact_envelope(
+                block,
+                per_envelope_cap_chars=envelope_allowed,
+                tool_observation_timing=tool_observation_timing,
+            )
             return compact, 0, "artifact_preview", "essential_envelope", primary_artifact_id, artifact_ids, "budget_exhausted"
 
+        parsed = _parse_tool_result_json(text)
         artifact_payloads = _artifact_refs_for_model(block, primary_artifact=primary_artifact)
-        envelope_overhead = len(
-            json.dumps(
-                {
-                    "output_preview": "",
-                    "output_truncated": False,
-                    "artifacts": artifact_payloads,
-                },
-                ensure_ascii=False,
-            )
+        envelope_base: dict[str, object] = {
+            "output_preview": "",
+            "output_truncated": True,
+            "artifacts": artifact_payloads,
+        }
+        observation_timing = _select_tool_observation_for_envelope(
+            tool_observation_timing,
+            envelope_base,
+            envelope_allowed=envelope_allowed,
+            total_allowed=total_allowed,
         )
+        if observation_timing is not None:
+            envelope_base["pulsara_tool_observation"] = observation_timing
+        terminal_payload_timing = _select_terminal_payload_timing_for_envelope(
+            block,
+            parsed,
+            envelope_base,
+            envelope_allowed=envelope_allowed,
+            total_allowed=total_allowed,
+        )
+        if terminal_payload_timing is not None:
+            envelope_base["timing"] = terminal_payload_timing
+        if block.artifacts and primary_artifact is None:
+            envelope_base["primary_artifact_id"] = None
+            envelope_base["artifact_ids"] = artifact_ids
+            envelope_base["artifact_ref_count"] = len(block.artifacts)
+            envelope_base["diagnostics"] = [{"code": "tool_result_primary_text_artifact_missing"}]
+        envelope_overhead = len(json.dumps(envelope_base, ensure_ascii=False))
         body_budget = min(body_allowed, max(0, total_allowed - envelope_overhead))
         clipped, _ = _clip_with_remaining(text, body_budget)
         output_truncated = len(clipped) < len(text) or any(
             len(clipped.encode("utf-8")) < artifact.size_bytes for artifact in block.artifacts
         )
-        envelope = {
-            "output_preview": clipped,
-            "output_truncated": output_truncated,
-            "artifacts": artifact_payloads,
-        }
-        if block.artifacts and primary_artifact is None:
-            envelope["primary_artifact_id"] = None
-            envelope["artifact_ids"] = artifact_ids
-            envelope["artifact_ref_count"] = len(block.artifacts)
-            envelope["diagnostics"] = [{"code": "tool_result_primary_text_artifact_missing"}]
+        envelope = dict(envelope_base)
+        envelope["output_preview"] = clipped
+        envelope["output_truncated"] = output_truncated
         rendered = json.dumps(envelope, ensure_ascii=False)
         rendered_envelope_chars = max(0, len(rendered) - len(clipped))
         if rendered_envelope_chars <= envelope_allowed and len(rendered) <= total_allowed:
             body_policy = "full_visible" if not output_truncated else "artifact_preview"
             return rendered, len(clipped), body_policy, "full_envelope", primary_artifact_id, artifact_ids, "within_budget"
-        compact = _compact_artifact_envelope(block, per_envelope_cap_chars=envelope_allowed)
+        compact = _compact_artifact_envelope(
+            block,
+            per_envelope_cap_chars=envelope_allowed,
+            tool_observation_timing=tool_observation_timing,
+        )
         return compact, 0, "artifact_preview", "essential_envelope", primary_artifact_id, artifact_ids, "envelope_over_budget"
 
     def _latest_reserved_reason(
@@ -918,6 +1014,8 @@ class _ToolResultRenderAllocator:
             diagnostics.append({"severity": "warning", "code": "tool_result_primary_text_artifact_missing"})
         if any(_decision_has_diagnostic(decision, "tool_result_in_current_user_segment") for decision in self.decisions):
             diagnostics.append({"severity": "error", "code": "tool_result_in_current_user_segment"})
+        if any(_decision_has_diagnostic(decision, "tool_observation_timing_missing") for decision in self.decisions):
+            diagnostics.append({"severity": "error", "code": "tool_observation_timing_missing"})
         if rendered_total > self.caps["tool_result_total_context_chars"]:
             diagnostics.append(
                 {
@@ -1012,6 +1110,8 @@ def _render_tool_result_body(
     source_message_index: int,
     content_block_index: int,
     source_assistant_message_id: str | None,
+    tool_observation_timing: dict[str, Any] | None,
+    tool_observation_timing_required: bool,
 ) -> str:
     return budget.render(
         block,
@@ -1020,6 +1120,8 @@ def _render_tool_result_body(
         source_message_index=source_message_index,
         content_block_index=content_block_index,
         source_assistant_message_id=source_assistant_message_id,
+        tool_observation_timing=tool_observation_timing,
+        tool_observation_timing_required=tool_observation_timing_required,
     )
 
 
@@ -1036,9 +1138,20 @@ def _decision_cache_entry(decision: dict[str, object], rendered: str) -> dict[st
 
     stable_keys = (
         "visible_body_chars",
+        "tool_observation_timing",
+        "tool_timing",
+        "observed_at",
+        "timing_policy",
+        "rendered_timing_chars",
+        "terminal_payload_timing",
+        "terminal_payload_timing_policy",
+        "rendered_terminal_payload_timing_chars",
         "rendered_header_chars",
         "rendered_envelope_chars",
         "rendered_total_chars",
+        "framing",
+        "payload_preserved",
+        "payload_format",
         "body_policy",
         "envelope_policy",
         "primary_artifact_id",
@@ -1118,6 +1231,14 @@ def _is_cacheable_render_decision(decision: dict[str, object]) -> bool:
     if decision.get("envelope_policy") != "full_envelope":
         return False
     if decision.get("reason") != "within_budget":
+        return False
+    if decision.get("timing_policy") not in (None, "not_applicable", "full"):
+        return False
+    if decision.get("terminal_payload_timing_policy") not in (None, "not_applicable", "full"):
+        return False
+    if _decision_has_diagnostic(decision, "tool_observation_timing_omitted_for_envelope_cap"):
+        return False
+    if _decision_has_diagnostic(decision, "terminal_payload_timing_omitted_for_envelope_cap"):
         return False
     body_candidate_chars = decision.get("body_candidate_chars")
     visible_body_chars = _int_decision(decision.get("visible_body_chars"))
@@ -1338,8 +1459,60 @@ def _model_tool_name(
     return normalized[: max(1, max_chars - len(suffix))] + suffix
 
 
-def _tool_result_header(model_tool_name: str, state: str) -> str:
-    return f"[tool_result:{model_tool_name}:{state}]\n"
+def _tool_result_header(
+    model_tool_name: str,
+    state: str,
+    tool_observation_timing: dict[str, Any] | None = None,
+) -> str:
+    if not tool_observation_timing:
+        return f"[tool_result:{model_tool_name}:{state}]\n"
+    fields = [
+        f"tool_result:{model_tool_name}:{state}",
+        f"observed_at={tool_observation_timing.get('observed_at')}",
+    ]
+    duration = tool_observation_timing.get("observation_duration_seconds")
+    if isinstance(duration, (int, float)):
+        fields.append(f"observation_duration={float(duration):.3f}s")
+    freshness = tool_observation_timing.get("freshness")
+    if freshness:
+        fields.append(f"freshness={freshness}")
+    origin = tool_observation_timing.get("tool_origin")
+    if origin:
+        fields.append(f"origin={origin}")
+    return "[" + "; ".join(fields) + "]\n"
+
+
+def _timing_header_chars(tool_observation_timing: dict[str, Any]) -> int:
+    # Count only the timing-bearing portion, not the stable tool_result prefix.
+    return len(
+        "; ".join(
+            part
+            for part in (
+                f"observed_at={tool_observation_timing.get('observed_at')}",
+                (
+                    f"observation_duration={float(tool_observation_timing['observation_duration_seconds']):.3f}s"
+                    if isinstance(tool_observation_timing.get("observation_duration_seconds"), (int, float))
+                    else ""
+                ),
+                f"freshness={tool_observation_timing.get('freshness')}" if tool_observation_timing.get("freshness") else "",
+                f"origin={tool_observation_timing.get('tool_origin')}" if tool_observation_timing.get("tool_origin") else "",
+            )
+            if part
+        )
+    )
+
+
+def _payload_format(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "text"
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            json.loads(stripped)
+        except json.JSONDecodeError:
+            return "mixed"
+        return "json"
+    return "text"
 
 
 def _text_fingerprint(text: str) -> str:
@@ -1375,9 +1548,10 @@ def _unit_fingerprint(
     artifact_fingerprint: str | None,
     body_candidate_chars: int | None,
     original_chars: int | None,
+    tool_observation_timing: dict[str, Any] | None,
 ) -> str:
     payload = {
-        "render_policy_version": 1,
+        "render_policy_version": 2,
         "tool_call_id": block.id,
         "tool_name": block.name,
         "state": block.state.value,
@@ -1387,6 +1561,7 @@ def _unit_fingerprint(
         "artifact_fingerprint": artifact_fingerprint,
         "body_candidate_chars": body_candidate_chars,
         "original_chars": original_chars,
+        "tool_observation_timing": tool_observation_timing,
     }
     return "sha256:" + sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
@@ -1402,6 +1577,189 @@ def _parse_tool_result_json(text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _tool_observation_timing_for_block(message: Msg, block: ToolResultBlock) -> dict[str, Any] | None:
+    by_call_id = message.metadata.get("tool_observation_timing_by_call_id")
+    if isinstance(by_call_id, dict):
+        timing = by_call_id.get(block.id)
+        if isinstance(timing, dict):
+            return _normalize_tool_observation_timing(timing)
+    timing = message.metadata.get("tool_observation_timing")
+    if isinstance(timing, dict):
+        tool_result_blocks = [
+            candidate for candidate in message.content if isinstance(candidate, ToolResultBlock)
+        ]
+        if len(tool_result_blocks) == 1:
+            return _normalize_tool_observation_timing(timing)
+    return None
+
+
+def _tool_observation_timing_required(message: Msg) -> bool:
+    if message.metadata.get("tool_observation_timing_required") is True:
+        return True
+    # Live production tool-result messages created from event slices already
+    # carry source_timing. Under the hard-cut contract, those messages must also
+    # carry the Pulsara-owned observation timing fact; otherwise context compile
+    # must fail before model call instead of falling back to payload guessing.
+    return isinstance(message.metadata.get("source_timing"), dict)
+
+
+def _normalize_tool_observation_timing(timing: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(timing, dict):
+        return None
+    observed_at = timing.get("observed_at")
+    if not isinstance(observed_at, str) or not observed_at:
+        return None
+    normalized = {
+        key: value
+        for key, value in timing.items()
+        if value is not None
+        and key
+        in {
+            "observed_at",
+            "source_started_at",
+            "source_ended_at",
+            "observation_duration_seconds",
+            "tool_reported_duration_seconds",
+            "freshness",
+            "clock_source",
+            "tool_origin",
+            "tool_name",
+            "tool_call_id",
+            "suspended_at",
+            "resumed_at",
+        }
+    }
+    return dict(normalized)
+
+
+def _minimal_tool_observation_payload(timing: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: timing[key]
+        for key in ("observed_at", "observation_duration_seconds", "freshness", "tool_origin")
+        if key in timing
+    }
+
+
+def _terminal_payload_timing(block: ToolResultBlock, parsed: dict[str, Any]) -> dict[str, Any] | None:
+    if not _is_terminal_like_payload(block, parsed):
+        return None
+    timing = parsed.get("timing")
+    return dict(timing) if isinstance(timing, dict) else None
+
+
+def _minimal_terminal_payload_timing(timing: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: timing[key]
+        for key in ("observed_at", "duration_seconds", "freshness")
+        if key in timing
+    }
+
+
+def _timing_chars(timing: dict[str, Any] | None) -> int:
+    if not timing:
+        return 0
+    return len(json.dumps(timing, ensure_ascii=False, sort_keys=True))
+
+
+def _tool_timing_render_decision(
+    *,
+    source_timing: dict[str, Any] | None,
+    rendered: str,
+    header_includes_timing: bool,
+) -> tuple[str, dict[str, Any] | None, int, list[dict[str, object]]]:
+    if source_timing is None:
+        return "not_applicable", None, 0, []
+    if header_includes_timing:
+        return "full", dict(source_timing), _timing_header_chars(source_timing), []
+    rendered_timing = _pulsara_tool_observation_payload(_parse_tool_result_json(rendered))
+    if rendered_timing is None:
+        return (
+            "omitted_for_cap",
+            None,
+            0,
+            [{"code": "tool_observation_timing_omitted_for_envelope_cap"}],
+        )
+    if rendered_timing == source_timing:
+        return "full", rendered_timing, _timing_chars(rendered_timing), []
+    return "minimal", rendered_timing, _timing_chars(rendered_timing), []
+
+
+def _terminal_payload_timing_render_decision(
+    *,
+    source_timing: dict[str, Any] | None,
+    rendered: str,
+) -> tuple[str, dict[str, Any] | None, int, list[dict[str, object]]]:
+    if source_timing is None:
+        return "not_applicable", None, 0, []
+    rendered_timing = _terminal_payload_timing_payload(_parse_tool_result_json(rendered))
+    if rendered_timing is None:
+        return (
+            "omitted_for_cap",
+            None,
+            0,
+            [{"code": "terminal_payload_timing_omitted_for_envelope_cap"}],
+        )
+    if rendered_timing == source_timing:
+        return "full", rendered_timing, _timing_chars(rendered_timing), []
+    return "minimal", rendered_timing, _timing_chars(rendered_timing), []
+
+
+def _pulsara_tool_observation_payload(parsed: dict[str, Any]) -> dict[str, Any] | None:
+    timing = parsed.get("pulsara_tool_observation")
+    return dict(timing) if isinstance(timing, dict) else None
+
+
+def _terminal_payload_timing_payload(parsed: dict[str, Any]) -> dict[str, Any] | None:
+    timing = parsed.get("timing")
+    return dict(timing) if isinstance(timing, dict) else None
+
+
+def _select_tool_observation_for_envelope(
+    source_timing: dict[str, Any] | None,
+    envelope_base: dict[str, object],
+    *,
+    envelope_allowed: int,
+    total_allowed: int,
+) -> dict[str, Any] | None:
+    if source_timing is None:
+        return None
+    candidates = [source_timing]
+    minimal = _minimal_tool_observation_payload(source_timing)
+    if minimal and minimal != source_timing:
+        candidates.append(minimal)
+    for timing in candidates:
+        probe = dict(envelope_base)
+        probe["pulsara_tool_observation"] = timing
+        rendered_chars = len(json.dumps(probe, ensure_ascii=False))
+        if rendered_chars <= envelope_allowed and rendered_chars <= total_allowed:
+            return timing
+    return None
+
+
+def _select_terminal_payload_timing_for_envelope(
+    block: ToolResultBlock,
+    parsed: dict[str, Any],
+    envelope_base: dict[str, object],
+    *,
+    envelope_allowed: int,
+    total_allowed: int,
+) -> dict[str, Any] | None:
+    source_timing = _terminal_payload_timing(block, parsed)
+    if source_timing is None:
+        return None
+    candidates = [source_timing]
+    minimal = _minimal_terminal_payload_timing(source_timing)
+    if minimal and minimal != source_timing:
+        candidates.append(minimal)
+    for timing in candidates:
+        probe = dict(envelope_base)
+        probe["timing"] = timing
+        rendered_chars = len(json.dumps(probe, ensure_ascii=False))
+        if rendered_chars <= envelope_allowed and rendered_chars <= total_allowed:
+            return timing
+    return None
 
 
 def _primary_text_artifact(block: ToolResultBlock) -> ToolResultArtifactRef | None:
@@ -1479,12 +1837,22 @@ def _tool_result_decision_diagnostics(
     primary_artifact_id: str | None,
     *,
     segment: str,
+    tool_observation_timing_required: bool,
+    tool_observation_timing_present: bool,
 ) -> list[dict[str, object]]:
     diagnostics: list[dict[str, object]] = []
     if block.artifacts and primary_artifact_id is None:
         diagnostics.append({"code": "tool_result_primary_text_artifact_missing"})
     if segment == "current_user":
         diagnostics.append({"code": "tool_result_in_current_user_segment"})
+    if tool_observation_timing_required and not tool_observation_timing_present:
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "tool_observation_timing_missing",
+                "reason": "production_tool_result_message_has_source_timing_but_no_tool_observation_timing",
+            }
+        )
     return diagnostics
 
 
@@ -1514,7 +1882,12 @@ def _decision_read_more(artifact_id: str | None, block: ToolResultBlock) -> dict
     return _compact_read_more_payload(artifact)
 
 
-def _compact_artifact_envelope(block: ToolResultBlock, *, per_envelope_cap_chars: int = 1_200) -> str:
+def _compact_artifact_envelope(
+    block: ToolResultBlock,
+    *,
+    per_envelope_cap_chars: int = 1_200,
+    tool_observation_timing: dict[str, Any] | None,
+) -> str:
     artifact = _primary_text_artifact(block)
     refs = [_compact_artifact_ref_payload(artifact)] if artifact is not None else []
     omitted = max(0, len(block.artifacts) - len(refs))
@@ -1524,6 +1897,7 @@ def _compact_artifact_envelope(block: ToolResultBlock, *, per_envelope_cap_chars
         parsed=parsed,
         artifact_refs=tuple(refs),
         per_envelope_cap_chars=per_envelope_cap_chars,
+        tool_observation_timing=tool_observation_timing,
     )
     if essential is not None:
         payload = json.loads(essential)
@@ -1537,6 +1911,14 @@ def _compact_artifact_envelope(block: ToolResultBlock, *, per_envelope_cap_chars
             "output_truncated": True,
             "artifacts": refs,
         }
+        observation_timing = _select_tool_observation_for_envelope(
+            tool_observation_timing,
+            payload,
+            envelope_allowed=per_envelope_cap_chars,
+            total_allowed=per_envelope_cap_chars,
+        )
+        if observation_timing is not None:
+            payload["pulsara_tool_observation"] = observation_timing
     if block.artifacts and artifact is None:
         payload["primary_artifact_id"] = None
         payload["artifact_ids"] = [candidate.artifact_id for candidate in block.artifacts]
@@ -1559,6 +1941,7 @@ def _terminal_essential_envelope(
     parsed: dict[str, Any],
     artifact_refs: tuple[dict[str, object], ...],
     per_envelope_cap_chars: int,
+    tool_observation_timing: dict[str, Any] | None,
 ) -> str | None:
     if not _is_terminal_like_payload(block, parsed):
         return None
@@ -1567,6 +1950,7 @@ def _terminal_essential_envelope(
         parsed=parsed,
         artifact_refs=artifact_refs,
         per_envelope_cap_chars=per_envelope_cap_chars,
+        tool_observation_timing=tool_observation_timing,
     )
 
 
@@ -1586,6 +1970,7 @@ def _essential_tool_result_envelope(
     parsed: dict[str, Any],
     artifact_refs: tuple[dict[str, object], ...],
     per_envelope_cap_chars: int,
+    tool_observation_timing: dict[str, Any] | None,
 ) -> str | None:
     if not parsed:
         return None
@@ -1618,12 +2003,23 @@ def _essential_tool_result_envelope(
         "tool_result_body_omitted": True,
         "tool_result_body_omitted_reason": "tool_result_render_budget_exhausted",
     }
+    terminal_payload_timing = _terminal_payload_timing(block, parsed)
     for key in essential_keys:
         value = parsed.get(key)
         if value is not None:
             if key == "error" and _string_would_clip(value, max_string_chars=240):
                 payload["error_truncated"] = True
             payload[key] = _clip_envelope_value(value, max_string_chars=240)
+    observation_timing = _select_tool_observation_for_envelope(
+        tool_observation_timing,
+        payload,
+        envelope_allowed=per_envelope_cap_chars,
+        total_allowed=per_envelope_cap_chars,
+    )
+    if observation_timing is not None:
+        payload["pulsara_tool_observation"] = observation_timing
+    if terminal_payload_timing is not None:
+        payload["timing"] = dict(terminal_payload_timing)
     if parsed.get("terminal_process_action") == "list" and isinstance(parsed.get("processes"), list):
         processes, omitted = _summarize_terminal_processes(parsed["processes"])
         payload["processes_summary"] = processes
@@ -1635,6 +2031,18 @@ def _essential_tool_result_envelope(
     if len(rendered) <= per_envelope_cap_chars:
         return rendered
     clipped_payload = dict(payload)
+    if tool_observation_timing is not None:
+        minimal_observation = _minimal_tool_observation_payload(tool_observation_timing)
+        if minimal_observation:
+            clipped_payload["pulsara_tool_observation"] = minimal_observation
+        else:
+            clipped_payload.pop("pulsara_tool_observation", None)
+    if terminal_payload_timing is not None:
+        minimal_timing = _minimal_terminal_payload_timing(terminal_payload_timing)
+        if minimal_timing:
+            clipped_payload["timing"] = minimal_timing
+        else:
+            clipped_payload.pop("timing", None)
     for key in ("error", "cwd", "command"):
         if isinstance(clipped_payload.get(key), str):
             if key == "error" and _string_would_clip(clipped_payload[key], max_string_chars=96):
@@ -1658,8 +2066,21 @@ def _essential_tool_result_envelope(
             if key == "error" and _string_would_clip(payload[key], max_string_chars=72):
                 minimal["error_truncated"] = True
             minimal[key] = _clip_envelope_value(payload[key], max_string_chars=72)
+    if tool_observation_timing is not None:
+        minimal_observation = _minimal_tool_observation_payload(tool_observation_timing)
+        if minimal_observation:
+            minimal["pulsara_tool_observation"] = minimal_observation
+    if terminal_payload_timing is not None:
+        minimal_timing = _minimal_terminal_payload_timing(terminal_payload_timing)
+        if minimal_timing:
+            minimal["timing"] = minimal_timing
     if artifact_refs:
         minimal["artifacts"] = list(artifact_refs[:1])
+    rendered = json.dumps(minimal, ensure_ascii=False)
+    if len(rendered) <= per_envelope_cap_chars:
+        return rendered
+    minimal.pop("timing", None)
+    minimal.pop("pulsara_tool_observation", None)
     rendered = json.dumps(minimal, ensure_ascii=False)
     if len(rendered) <= per_envelope_cap_chars:
         return rendered
