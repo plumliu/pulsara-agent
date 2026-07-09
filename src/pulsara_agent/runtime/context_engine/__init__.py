@@ -30,6 +30,8 @@ from pulsara_agent.runtime.context_engine.types import (
     ContextLifecycleStatus,
     ContextRenderMode,
     ContextSection,
+    ContextSectionRenderTiming,
+    ContextSectionSourceTiming,
     ContextStability,
 )
 
@@ -49,6 +51,8 @@ __all__ = [
     "ContextLifecycleStatus",
     "ContextRenderMode",
     "ContextSection",
+    "ContextSectionRenderTiming",
+    "ContextSectionSourceTiming",
     "ContextStability",
     "SegmentedLLMMessages",
     "compile_context",

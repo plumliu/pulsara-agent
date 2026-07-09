@@ -12,6 +12,7 @@ from pulsara_agent.event import (
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     CustomEvent,
     ModelCallStartEvent,
@@ -51,6 +52,8 @@ _REQUIRED_TABLES = (
     "memory_search_index",
     "memory_vector_index",
     "memory_write_outbox",
+    "memory_candidates",
+    "memory_governance_decisions",
     "recall_traces",
     "recall_usages",
 )
@@ -446,6 +449,15 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "estimated_tokens_after",
         "threshold_tokens",
         "context_window_tokens",
+        "source_event_id",
+        "source_event_sequence",
+        "candidate_entry_ids",
+        "attempted_count",
+        "proposed_count",
+        "skipped_count",
+        "duplicate_count",
+        "error_count",
+        "extractor_version",
         "context_id",
         "model_call_index",
         "estimated_tokens",
@@ -594,6 +606,7 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "included_section_count": len(event.sections) - len(omitted),
         "omitted_section_count": len(omitted),
         "sections": sections,
+        "section_timings": _section_timing_projection(sections),
         "tool_specs": [_json_safe(tool) for tool in event.tool_specs],
         "diagnostics": [_json_safe(diagnostic) for diagnostic in event.diagnostics],
         "lifecycle_decisions": [
@@ -602,8 +615,106 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "tool_result_render_decisions": [
             _json_safe(decision) for decision in event.tool_result_render_decisions
         ],
+        "tool_result_timings": _tool_result_timing_projection(event.tool_result_render_decisions),
         "tool_result_budget_report": _json_safe(event.tool_result_budget_report),
     }
+
+
+def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    for index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            projected.append(
+                {
+                    "section_index": index,
+                    "section_id": None,
+                    "status": "missing",
+                    "freshness": "unknown",
+                    "timing": None,
+                }
+            )
+            continue
+        metadata = section.get("metadata")
+        timing = metadata.get("timing") if isinstance(metadata, dict) else None
+        if isinstance(timing, dict):
+            source = timing.get("source") if isinstance(timing.get("source"), dict) else {}
+            freshness = source.get("freshness") if isinstance(source, dict) else None
+            status = "present"
+        else:
+            source = {}
+            freshness = None
+            status = "missing"
+        observed_at = (
+            source.get("observed_at")
+            or source.get("source_ended_at")
+            or source.get("source_started_at")
+            if isinstance(source, dict)
+            else None
+        )
+        projected.append(
+            {
+                "section_index": index,
+                "section_id": section.get("id"),
+                "source_id": section.get("source_id"),
+                "channel": section.get("channel"),
+                "status": status,
+                "freshness": freshness or "unknown",
+                "compiled_at_utc": timing.get("compiled_at_utc") if isinstance(timing, dict) else None,
+                "observed_at": observed_at,
+                "source_started_at": source.get("source_started_at") if isinstance(source, dict) else None,
+                "source_ended_at": source.get("source_ended_at") if isinstance(source, dict) else None,
+                "age_seconds": timing.get("age_seconds") if isinstance(timing, dict) else None,
+                "timing": _json_safe(timing) if isinstance(timing, dict) else None,
+            }
+        )
+    return projected
+
+
+def _tool_result_timing_projection(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    for index, decision in enumerate(decisions):
+        timing = decision.get("tool_observation_timing")
+        if not isinstance(timing, dict):
+            timing = decision.get("tool_timing")
+        timing_policy = decision.get("timing_policy")
+        if isinstance(timing, dict):
+            status = "present"
+            freshness = timing.get("freshness") or "unknown"
+            observed_at = timing.get("observed_at")
+        elif timing_policy == "not_applicable":
+            status = "not_applicable"
+            freshness = "unknown"
+            observed_at = None
+        else:
+            status = "missing"
+            freshness = "unknown"
+            observed_at = None
+        projected.append(
+            {
+                "decision_index": index,
+                "tool_call_id": decision.get("tool_call_id"),
+                "tool_name": decision.get("tool_name"),
+                "model_tool_name": decision.get("model_tool_name"),
+                "tool_origin": timing.get("tool_origin") if isinstance(timing, dict) else None,
+                "status": status,
+                "observed_at": observed_at,
+                "source_started_at": timing.get("source_started_at") if isinstance(timing, dict) else None,
+                "source_ended_at": timing.get("source_ended_at") if isinstance(timing, dict) else None,
+                "observation_duration_seconds": (
+                    timing.get("observation_duration_seconds") if isinstance(timing, dict) else None
+                ),
+                "tool_reported_duration_seconds": (
+                    timing.get("tool_reported_duration_seconds") if isinstance(timing, dict) else None
+                ),
+                "freshness": freshness,
+                "clock_source": timing.get("clock_source") if isinstance(timing, dict) else None,
+                "timing_policy": timing_policy or "unknown",
+                "rendered_timing_chars": decision.get("rendered_timing_chars", 0),
+                "diagnostics": _json_safe(decision.get("diagnostics", [])),
+                "timing": _json_safe(timing) if isinstance(timing, dict) else None,
+            }
+        )
+    return projected
 
 
 def _assistant_replies(events: Iterable[AgentEvent]) -> list[dict[str, Any]]:
@@ -637,10 +748,19 @@ def _projection_to_dict(event: ProjectionReadyEvent) -> dict[str, Any]:
 
 def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
-    for event in events:
+    events_list = list(events)
+    proposals_by_compaction: dict[str, list[ContextCompactionMemoryCandidatesProposedEvent]] = {}
+    for event in events_list:
+        if isinstance(event, ContextCompactionMemoryCandidatesProposedEvent):
+            proposals_by_compaction.setdefault(event.compaction_id, []).append(event)
+    for event in events_list:
         if not isinstance(event, ContextCompactionCompletedEvent):
             continue
         artifact = store.artifact(event.summary_artifact_id)
+        candidates = [
+            _memory_candidate_projection(row, store)
+            for row in store.memory_candidates_for_compaction(event.compaction_id)
+        ]
         windows.append(
             {
                 "sequence": event.sequence,
@@ -664,9 +784,54 @@ def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorSt
                 "context_window_tokens": event.context_window_tokens,
                 "included_run_ids": list(event.included_run_ids),
                 "included_artifact_ids": list(event.included_artifact_ids),
+                "candidate_proposals": [
+                    _compaction_candidate_proposal_projection(proposal)
+                    for proposal in proposals_by_compaction.get(event.compaction_id, [])
+                ],
+                "memory_candidates": candidates,
             }
         )
     return windows
+
+
+def _compaction_candidate_proposal_projection(
+    event: ContextCompactionMemoryCandidatesProposedEvent,
+) -> dict[str, Any]:
+    return {
+        "sequence": event.sequence,
+        "source_event_id": event.source_event_id,
+        "source_event_sequence": event.source_event_sequence,
+        "summary_artifact_id": event.summary_artifact_id,
+        "candidate_entry_ids": list(event.candidate_entry_ids),
+        "attempted_count": event.attempted_count,
+        "proposed_count": event.proposed_count,
+        "skipped_count": event.skipped_count,
+        "duplicate_count": event.duplicate_count,
+        "error_count": event.error_count,
+        "extractor_version": event.extractor_version,
+        "diagnostics": [diagnostic.model_dump(mode="json") for diagnostic in event.diagnostics],
+    }
+
+
+def _memory_candidate_projection(row: dict[str, Any], store: PostgresInspectorStore) -> dict[str, Any]:
+    entry_id = str(row["entry_id"])
+    return {
+        "entry_id": entry_id,
+        "origin": row.get("origin"),
+        "payload": _json_safe(row.get("payload")),
+        "source_run_id": row.get("source_run_id"),
+        "source_turn_id": row.get("source_turn_id"),
+        "source_reply_id": row.get("source_reply_id"),
+        "source_event_id": row.get("source_event_id"),
+        "source_artifact_id": row.get("source_artifact_id"),
+        "intent_fingerprint": row.get("intent_fingerprint"),
+        "metadata": _json_safe(row.get("metadata") or {}),
+        "created_at": str(row.get("created_at")),
+        "governance_decisions": [
+            _json_safe(decision)
+            for decision in store.governance_decisions_for_candidate(entry_id)
+        ],
+    }
 
 
 def _phase_from_reason(reason: str) -> str:

@@ -65,6 +65,7 @@ from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext
 from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.compaction import ContextCompactionPolicy, ContextCompactionService
+from pulsara_agent.runtime.compaction.candidates import CandidatePoolCompactionMemoryCandidateSink
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
 from pulsara_agent.runtime.mcp.manager import CompositeMcpClientManager, McpClientManager
@@ -508,6 +509,15 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
             llm_runtime=llm_runtime,
             runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
             policy=ContextCompactionPolicy(),
+            candidate_sink=(
+                CandidatePoolCompactionMemoryCandidateSink(
+                    candidate_pool=runtime_wiring.candidate_pool,
+                    memory_domain=runtime_wiring.memory_domain,
+                    runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
+                )
+                if runtime_wiring.memory_domain is not None
+                else None
+            ),
         )
         if isinstance(runtime_wiring.event_log, PostgresEventLog)
         else None,

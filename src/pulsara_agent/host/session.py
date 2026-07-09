@@ -13,6 +13,7 @@ from pulsara_agent.event import (
     AgentEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
@@ -901,6 +902,7 @@ class HostSession:
                 (
                     ContextCompactionStartedEvent,
                     ContextCompactionCompletedEvent,
+                    ContextCompactionMemoryCandidatesProposedEvent,
                     ContextCompactionFailedEvent,
                 ),
             )

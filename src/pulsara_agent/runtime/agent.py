@@ -39,8 +39,10 @@ from pulsara_agent.event import (
     RunErrorEvent,
     RunStartEvent,
     ToolResultEndEvent,
+    ToolResultStartEvent,
     UserConfirmResultEvent,
 )
+from pulsara_agent.event.events import utc_now
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.request import LLMOptions
@@ -867,6 +869,7 @@ class AgentRuntime:
             await self.subagent_runtime.repair_dangling_children()
             self._subagent_dangling_repair_done = True
         permission_snapshot = self._capture_run_permission_snapshot(state)
+        user_observed_at_utc = utc_now()
         state.messages.extend(message.model_copy(deep=True) for message in (prior_messages or []))
         state.messages.append(
             UserMsg(
@@ -874,11 +877,13 @@ class AgentRuntime:
                 content=user_input,
                 id=f"user-message:{state.run_id}",
                 metadata={"run_id": state.run_id},
+                created_at=user_observed_at_utc,
             )
         )
         yield await self.runtime_session.emit(
             RunStartEvent(
                 **self._event_context(state).event_fields(),
+                created_at=user_observed_at_utc,
                 user_input_chars=len(user_input),
                 **permission_snapshot.to_event_fields(),
                 metadata={"user_input": user_input},
@@ -1041,6 +1046,7 @@ class AgentRuntime:
         *,
         exposure: CapabilityExposurePlan,
         decision: PermissionDecision,
+        tool_observation_timing_seed: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         result_state = (
             ToolResultState.ERROR
@@ -1053,6 +1059,7 @@ class AgentRuntime:
             tool_call_name=call.name,
             output=decision.reason or "tool call denied by capability exposure",
             result_state=result_state,
+            tool_observation_timing_seed=tool_observation_timing_seed,
         ):
             yield event
         fact = self._capability_gate_decision_fact(
@@ -1072,6 +1079,7 @@ class AgentRuntime:
         *,
         exposure: CapabilityExposurePlan,
         decision: PermissionDecision,
+        tool_observation_timing_seed: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         result_state = (
             ToolResultState.ERROR
@@ -1085,6 +1093,7 @@ class AgentRuntime:
                 tool_call_name=call.name,
                 message=decision.reason or "tool call denied by permission gate",
                 state=result_state,
+                tool_observation_timing_seed=tool_observation_timing_seed,
             ),
             state=state,
         )
@@ -1102,14 +1111,7 @@ class AgentRuntime:
         result_block = _tool_result_from_event_slice(stored_events, call.id)
         _remember_tool_result_event_span(state, stored_events, call.id)
         state.tool_results.append(result_block)
-        state.messages.append(
-            Msg(
-                role="tool_result",
-                name=call.name,
-                id=f"tool-result-message:{call.id}",
-                content=[result_block],
-            )
-        )
+        state.messages.append(_tool_result_message_from_events(stored_events, call.name, result_block))
 
     async def _stream_capability_access_filtered_calls(
         self,
@@ -1664,6 +1666,7 @@ class AgentRuntime:
         input_requests = _mcp_input_requests_from_payload(payload.get("input_requests"))
         round_count = int(payload.get("round_count") or 1)
         deadline_monotonic = _optional_float(payload.get("deadline_monotonic"))
+        timing_seed = dict(payload.get("tool_observation_timing_seed") or {})
         original_pending_payload = dict(state.pending_interaction_payload)
 
         if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
@@ -1691,6 +1694,7 @@ class AgentRuntime:
                 tool_call_name=tool_name,
                 output="MCP input-required interaction expired before it was resumed.",
                 result_state=ToolResultState.ERROR,
+                tool_observation_timing_seed={**timing_seed, "resumed_at": utc_now()} if timing_seed else None,
             ):
                 yield event
             async for event in self._after_mcp_resume_terminal_result(state):
@@ -1721,6 +1725,7 @@ class AgentRuntime:
         )
         exposure = self._exposure_from_state_or_resolve(state)
         exposure_decision = evaluate_capability_exposure_access(gate_call, exposure)
+        resume_timing_seed = {**timing_seed, "resumed_at": utc_now()} if timing_seed else None
         if exposure_decision is not None:
             state.pending_interaction_kind = None
             state.pending_interaction_payload = {}
@@ -1731,6 +1736,7 @@ class AgentRuntime:
                 gate_call,
                 exposure=exposure,
                 decision=exposure_decision,
+                tool_observation_timing_seed=resume_timing_seed,
             ):
                 yield event
         else:
@@ -1745,6 +1751,7 @@ class AgentRuntime:
                     gate_call,
                     exposure=exposure,
                     decision=permission_decision,
+                    tool_observation_timing_seed=resume_timing_seed,
                 ):
                     yield event
             elif permission_decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
@@ -1769,6 +1776,7 @@ class AgentRuntime:
                             }
                         ],
                     ),
+                    tool_observation_timing_seed=resume_timing_seed,
                 ):
                     yield event
             else:
@@ -1785,6 +1793,7 @@ class AgentRuntime:
                         tool_call_name=tool_name,
                         output=f"tool {tool_name!r} cannot resume MCP input-required",
                         result_state=ToolResultState.ERROR,
+                        tool_observation_timing_seed=resume_timing_seed,
                     ):
                         yield event
                 else:
@@ -1837,6 +1846,9 @@ class AgentRuntime:
                                 tool_call_name=tool_name,
                                 output="MCP input-required interaction exceeded the maximum round count.",
                                 result_state=ToolResultState.ERROR,
+                                tool_observation_timing_seed=(
+                                    {**timing_seed, "resumed_at": utc_now()} if timing_seed else None
+                                ),
                             ):
                                 yield event
                             async for event in self._after_mcp_resume_terminal_result(state):
@@ -1851,6 +1863,7 @@ class AgentRuntime:
                         tool_call_name=tool_name,
                         output=result.output,
                         result_state=result.status,
+                        tool_observation_timing_seed={**timing_seed, "resumed_at": utc_now()} if timing_seed else None,
                     ):
                         yield event
 
@@ -2330,14 +2343,7 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
                 _remember_tool_result_event_span(state, stored_events, block.id)
                 state.tool_results.append(result_block)
-                state.messages.append(
-                    Msg(
-                        role="tool_result",
-                        name=block.name,
-                        id=f"tool-result-message:{block.id}",
-                        content=[result_block],
-                    )
-                )
+                state.messages.append(_tool_result_message_from_events(stored_events, block.name, result_block))
 
         if not parsed_calls:
             return
@@ -2363,14 +2369,7 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, call.id)
                 _remember_tool_result_event_span(state, stored_events, call.id)
                 state.tool_results.append(result_block)
-                state.messages.append(
-                    Msg(
-                        role="tool_result",
-                        name=call.name,
-                        id=f"tool-result-message:{call.id}",
-                        content=[result_block],
-                    )
-                )
+                state.messages.append(_tool_result_message_from_events(stored_events, call.name, result_block))
             parsed_calls = unique_calls
             if not parsed_calls:
                 return
@@ -2735,6 +2734,7 @@ class AgentRuntime:
         tool_call_name: str,
         output: str,
         result_state: ToolResultState,
+        tool_observation_timing_seed: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         stored_events = await self.runtime_session.emit_many(
             build_tool_result_error_events(
@@ -2743,6 +2743,7 @@ class AgentRuntime:
                 tool_call_name=tool_call_name,
                 message=output,
                 state=result_state,
+                tool_observation_timing_seed=tool_observation_timing_seed,
             ),
             state=state,
         )
@@ -2751,14 +2752,7 @@ class AgentRuntime:
         result_block = _tool_result_from_event_slice(stored_events, tool_call_id)
         _remember_tool_result_event_span(state, stored_events, tool_call_id)
         state.tool_results.append(result_block)
-        state.messages.append(
-            Msg(
-                role="tool_result",
-                name=tool_call_name,
-                id=f"tool-result-message:{tool_call_id}",
-                content=[result_block],
-            )
-        )
+        state.messages.append(_tool_result_message_from_events(stored_events, tool_call_name, result_block))
 
     def _plan_state(self, state: LoopState) -> PlanWorkflowState:
         plan_state = state.scratchpad.get("plan_state")
@@ -2891,14 +2885,7 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
                 _remember_tool_result_event_span(state, stored_events, block.id)
                 state.tool_results.append(result_block)
-                state.messages.append(
-                    Msg(
-                        role="tool_result",
-                        name=block.name,
-                        id=f"tool-result-message:{block.id}",
-                        content=[result_block],
-                    )
-                )
+                state.messages.append(_tool_result_message_from_events(stored_events, block.name, result_block))
                 continue
             try:
                 parsed_calls.append(_parse_tool_call(block))
@@ -2919,14 +2906,7 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
                 _remember_tool_result_event_span(state, stored_events, block.id)
                 state.tool_results.append(result_block)
-                state.messages.append(
-                    Msg(
-                        role="tool_result",
-                        name=block.name,
-                        id=f"tool-result-message:{block.id}",
-                        content=[result_block],
-                    )
-                )
+                state.messages.append(_tool_result_message_from_events(stored_events, block.name, result_block))
         async for event in flush_parsed_calls():
             yield event
 
@@ -2949,9 +2929,7 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(batch_events, call.id)
                 _remember_tool_result_event_span(state, batch_events, call.id)
                 state.tool_results.append(result_block)
-                state.messages.append(
-                    Msg(role="tool_result", name=call.name, id=f"tool-result-message:{call.id}", content=[result_block])
-                )
+                state.messages.append(_tool_result_message_from_events(batch_events, call.name, result_block))
                 state.tool_call_count += 1
 
     async def _stream_tool_batch_events(
@@ -3140,6 +3118,51 @@ def _remove_plan_runtime_instructions(state: LoopState) -> None:
         if message.metadata.get("runtime_instruction")
         not in {"plan_entry", "plan_active", "plan_revision_required"}
     ]
+
+
+def _tool_result_message_from_events(
+    events: list[AgentEvent],
+    tool_name: str,
+    result_block,
+) -> Msg:
+    start = next(
+        (
+            event
+            for event in events
+            if isinstance(event, ToolResultStartEvent) and event.tool_call_id == result_block.id
+        ),
+        None,
+    )
+    end = next(
+        (
+            event
+            for event in reversed(events)
+            if isinstance(event, ToolResultEndEvent) and event.tool_call_id == result_block.id
+        ),
+        None,
+    )
+    metadata: dict[str, object] = {}
+    if start is not None or end is not None:
+        metadata["source_timing"] = {
+            "observed_at": end.created_at if end is not None else (start.created_at if start is not None else None),
+            "source_started_at": start.created_at if start is not None else None,
+            "source_ended_at": end.created_at if end is not None else None,
+            "freshness": "current_tool_observation",
+            "clock_source": "event_created_at",
+        }
+    if end is not None and isinstance(end.metadata.get("tool_observation_timing"), dict):
+        timing = dict(end.metadata["tool_observation_timing"])
+        metadata["tool_observation_timing_by_call_id"] = {result_block.id: timing}
+        metadata["tool_observation_timing"] = timing
+    return Msg(
+        role="tool_result",
+        name=tool_name,
+        id=f"tool-result-message:{result_block.id}",
+        content=[result_block],
+        metadata=metadata,
+        created_at=start.created_at if start is not None else None,
+        finished_at=end.created_at if end is not None else None,
+    )
 
 
 def _plan_exit_resolution_output(resolution: PlanExitResolution) -> dict[str, object]:

@@ -79,7 +79,12 @@ def test_completed_call_is_not_unfinished_even_when_result_end_is_late() -> None
     events = [
         ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
         ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
-        ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:terminal", state=ToolResultState.SUCCESS),
+        ToolResultEndEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:terminal",
+            state=ToolResultState.SUCCESS,
+            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+        ),
     ]
 
     assert classify_unfinished_tool_calls(events) == []

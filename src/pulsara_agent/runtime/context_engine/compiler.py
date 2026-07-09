@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
+from datetime import datetime
 from hashlib import sha256
+from typing import Any
 
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext
@@ -20,6 +22,8 @@ from pulsara_agent.runtime.context_engine.types import (
     ContextLifecycleDecisionDiagnostic,
     ContextRenderMode,
     ContextSection,
+    ContextSectionRenderTiming,
+    ContextSectionSourceTiming,
 )
 
 from pulsara_agent.runtime.context_engine.lifecycle import ContextLifecycleCoordinator
@@ -63,6 +67,7 @@ def compile_context(
         messages=tuple(transcript_messages),
         lifecycle_coordinator=lifecycle_coordinator,
     )
+    sections = _apply_timing_overlay(request, sections)
     tool_units = _compile_tool_units(request)
     context_window_tokens = _context_window_tokens(request)
     reserved_output_tokens = _reserved_output_tokens(request)
@@ -121,7 +126,7 @@ def _lower_system_prompt(sections: tuple[ContextSection, ...]) -> str:
     system_section = next((section for section in sections if section.id == "system:prompt"), None)
     parts = [system_section.text if system_section is not None else ""]
     parts.extend(
-        section.text
+        _render_section_text_with_timing(section)
         for section in sections
         if section.id != "system:prompt"
         and section.channel == "system"
@@ -129,7 +134,7 @@ def _lower_system_prompt(sections: tuple[ContextSection, ...]) -> str:
         and section.text
     )
     parts.extend(
-        f"## {_component_label(section.id)}\n{section.text}"
+        f"## {_component_label(section.id)}\n{_render_section_text_with_timing(section)}"
         for section in sections
         if section.channel == "handoff_hint"
         and section.id != "recovery:prompt"
@@ -180,7 +185,7 @@ def _leading_user_context_text(sections: tuple[ContextSection, ...]) -> str:
         if section.channel != "leading_user" or not section.included or not section.text:
             continue
         label = _component_label(section.id)
-        parts.append(f"## {label}\n{section.text}")
+        parts.append(f"## {label}\n{_render_section_text_with_timing(section)}")
     if not parts:
         return ""
     return "\n\n".join(
@@ -255,7 +260,14 @@ def _collect_sections(
             text=inputs.system_prompt,
             estimated_tokens=estimate_text_tokens(inputs.system_prompt),
             provenance={"source": "compose_system_prompt"},
-            metadata={"chars": len(inputs.system_prompt)},
+            metadata={
+                "chars": len(inputs.system_prompt),
+                "source_timing": _source_timing(
+                    observed_at=request.compiled_at_utc,
+                    freshness="unknown",
+                    clock_source="compiler_wall_clock",
+                ),
+            },
         ),
     ]
     for component_id, text in inputs.component_prompts:
@@ -265,6 +277,11 @@ def _collect_sections(
         metadata = {
             "chars": len(text),
             "lowered_to": "system_prompt" if channel in {"system", "handoff_hint"} else "messages",
+            "source_timing": _component_source_timing(
+                request,
+                component_id=component_id,
+                channel=channel,
+            ),
         }
         sections.append(
             ContextSection(
@@ -307,7 +324,16 @@ def _collect_sections(
                 text=_llm_messages_text(messages),
                 estimated_tokens=estimate_messages_tokens(messages),
                 provenance={"source": "msg_to_llm_messages"},
-                metadata={"message_count": len(messages), "split": "legacy"},
+                metadata=_transcript_metadata(
+                    messages=request.state.messages,
+                    llm_message_count=len(messages),
+                    split="legacy",
+                    source_timing=_messages_source_timing(
+                        request.state.messages,
+                        freshness="historical_replay",
+                        fallback_observed_at=None,
+                    ),
+                ),
                 dependency_fingerprint=_messages_dependency_fingerprint(request.state.messages),
             )
         )
@@ -329,6 +355,12 @@ def _collect_sections(
                     metadata={
                         "message_count": len(prior),
                         "llm_message_count": len(inputs.prior_history_messages or ()),
+                        "source_timing": _messages_source_timing(
+                            prior,
+                            freshness="historical_replay",
+                            fallback_observed_at=None,
+                        ),
+                        **_compaction_summary_messages_metadata(prior),
                     },
                     dependency_fingerprint=_messages_dependency_fingerprint(prior),
                 )
@@ -344,7 +376,10 @@ def _collect_sections(
                 text=request.current_user_input or _messages_text([current_user]),
                 estimated_tokens=estimate_text_tokens(request.current_user_input or _messages_text([current_user])),
                 provenance={"message_id": current_user.id},
-                metadata={"anchor": request.current_user_anchor},
+                metadata={
+                    "anchor": request.current_user_anchor,
+                    "source_timing": _current_user_source_timing(request, current_user),
+                },
                 dependency_fingerprint=f"current_user:{current_user.id}",
             )
         )
@@ -366,6 +401,11 @@ def _collect_sections(
                         "llm_message_count": len(inputs.current_run_tail_messages or ()),
                         "structure_must_keep": True,
                         "body_may_degrade": True,
+                        "source_timing": _messages_source_timing(
+                            tail,
+                            freshness="current_run_tail",
+                            fallback_observed_at=None,
+                        ),
                     },
                     dependency_fingerprint=_messages_dependency_fingerprint(tail),
                 )
@@ -383,13 +423,292 @@ def _collect_sections(
                 text=text,
                 estimated_tokens=estimate_text_tokens(text),
                 provenance={"source": "project_recovery_from_state"},
-                metadata={},
+                metadata={
+                    "source_timing": _source_timing(
+                        observed_at=request.compiled_at_utc,
+                        freshness="historical_replay",
+                        clock_source="compiler_wall_clock",
+                    )
+                },
             )
         )
     lifecycle_decisions: tuple[ContextLifecycleDecisionDiagnostic, ...] = ()
     if lifecycle_coordinator is not None:
         sections, lifecycle_decisions = lifecycle_coordinator.apply(request, tuple(sections))
     return tuple(sections), tuple(diagnostics), lifecycle_decisions
+
+
+def _apply_timing_overlay(
+    request: ContextCompileRequest,
+    sections: tuple[ContextSection, ...],
+) -> tuple[ContextSection, ...]:
+    overlaid: list[ContextSection] = []
+    for section in sections:
+        source = _coerce_source_timing(section.metadata.get("source_timing"))
+        timing = ContextSectionRenderTiming(
+            compiled_at_utc=request.compiled_at_utc,
+            session_timezone=request.session_timezone,
+            compiled_local_date=request.compiled_local_date,
+            age_seconds=_age_seconds(
+                compiled_at_utc=request.compiled_at_utc,
+                source=source,
+            ),
+            source=source,
+        )
+        timing_header_text = _timing_header_text(timing) if _section_renders_timing_header(section) else None
+        metadata: dict[str, Any] = {
+            **section.metadata,
+            "source_timing": source.to_event_value(),
+            "timing": timing.to_event_value(),
+        }
+        if timing_header_text:
+            metadata["timing_header_text"] = timing_header_text
+            metadata["rendered_timing_header_tokens"] = estimate_text_tokens(timing_header_text)
+            metadata["rendered_timing_header_chars"] = len(timing_header_text)
+        else:
+            metadata.pop("timing_header_text", None)
+            metadata.pop("rendered_timing_header_tokens", None)
+            metadata.pop("rendered_timing_header_chars", None)
+        overlaid.append(
+            replace(
+                section,
+                metadata=metadata,
+                estimated_tokens=_estimate_section_tokens(section, text=section.text, metadata=metadata),
+            )
+        )
+    return tuple(overlaid)
+
+
+def _source_timing(
+    *,
+    observed_at: str | None = None,
+    source_started_at: str | None = None,
+    source_ended_at: str | None = None,
+    source_sequence_start: int | None = None,
+    source_sequence_end: int | None = None,
+    freshness: str = "unknown",
+    clock_source: str = "mixed",
+) -> dict[str, Any]:
+    return ContextSectionSourceTiming(
+        observed_at=observed_at,
+        source_started_at=source_started_at,
+        source_ended_at=source_ended_at,
+        source_sequence_start=source_sequence_start,
+        source_sequence_end=source_sequence_end,
+        freshness=freshness,  # type: ignore[arg-type]
+        clock_source=clock_source,  # type: ignore[arg-type]
+    ).to_event_value()
+
+
+def _coerce_source_timing(value: object) -> ContextSectionSourceTiming:
+    if isinstance(value, ContextSectionSourceTiming):
+        return value
+    if isinstance(value, dict):
+        return ContextSectionSourceTiming(
+            observed_at=_str_or_none(value.get("observed_at")),
+            source_started_at=_str_or_none(value.get("source_started_at")),
+            source_ended_at=_str_or_none(value.get("source_ended_at")),
+            source_sequence_start=_int_or_none(value.get("source_sequence_start")),
+            source_sequence_end=_int_or_none(value.get("source_sequence_end")),
+            freshness=value.get("freshness", "unknown"),  # type: ignore[arg-type]
+            clock_source=value.get("clock_source", "mixed"),  # type: ignore[arg-type]
+        )
+    return ContextSectionSourceTiming()
+
+
+def _current_user_source_timing(request: ContextCompileRequest, message: Msg) -> dict[str, Any]:
+    started_at = message.created_at or request.user_observed_at_utc
+    ended_at = message.finished_at or started_at
+    clock_source = "message_created_at" if message.created_at else "compiler_wall_clock"
+    return _source_timing(
+        observed_at=ended_at,
+        source_started_at=started_at,
+        source_ended_at=ended_at,
+        freshness="current_turn",
+        clock_source=clock_source,
+    )
+
+
+def _messages_source_timing(
+    messages: list[Msg],
+    *,
+    freshness: str,
+    fallback_observed_at: str | None,
+) -> dict[str, Any]:
+    started_at = next((message.created_at for message in messages if message.created_at), None)
+    ended_at = next(
+        (
+            message.finished_at or message.created_at
+            for message in reversed(messages)
+            if message.finished_at or message.created_at
+        ),
+        None,
+    )
+    observed_at = ended_at or started_at or fallback_observed_at
+    if started_at or ended_at:
+        clock_source = "message_created_at"
+    elif fallback_observed_at:
+        clock_source = "compiler_wall_clock"
+    else:
+        clock_source = "mixed"
+    return _source_timing(
+        observed_at=observed_at,
+        source_started_at=started_at,
+        source_ended_at=ended_at,
+        freshness=freshness,
+        clock_source=clock_source,
+    )
+
+
+def _component_source_timing(
+    request: ContextCompileRequest,
+    *,
+    component_id: str,
+    channel: str,
+) -> dict[str, Any]:
+    del channel
+    if component_id.startswith("memory:"):
+        freshness = "memory_projection"
+    elif component_id.startswith("subagent:results"):
+        freshness = "subagent_result"
+    elif component_id.startswith("runtime_context"):
+        freshness = "current_turn"
+    elif component_id.startswith("capability:"):
+        freshness = "cached_snapshot"
+    else:
+        freshness = "unknown"
+    return _source_timing(
+        observed_at=request.compiled_at_utc,
+        freshness=freshness,
+        clock_source="compiler_wall_clock",
+    )
+
+
+def _transcript_metadata(
+    *,
+    messages: list[Msg],
+    llm_message_count: int,
+    split: str,
+    source_timing: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "message_count": len(messages),
+        "llm_message_count": llm_message_count,
+        "split": split,
+        "source_timing": source_timing,
+        **_compaction_summary_messages_metadata(messages),
+    }
+
+
+def _compaction_summary_messages_metadata(messages: list[Msg]) -> dict[str, Any]:
+    summaries: list[dict[str, Any]] = []
+    for message in messages:
+        metadata = message.metadata or {}
+        if metadata.get("kind") != "context_compaction_summary" and not str(message.id).startswith(
+            "context-compaction-summary:"
+        ):
+            continue
+        summaries.append(
+            {
+                "compaction_id": metadata.get("compaction_id"),
+                "summary_artifact_id": metadata.get("artifact_id") or metadata.get("summary_artifact_id"),
+                "compacted_at": message.created_at,
+                "keep_after_sequence": metadata.get("keep_after_sequence"),
+                "through_sequence": metadata.get("through_sequence"),
+                "source_sequence_start": metadata.get("source_sequence_start"),
+                "freshness": "compacted_history",
+            }
+        )
+    if not summaries:
+        return {}
+    return {"compaction_summary_messages": summaries}
+
+
+def _age_seconds(*, compiled_at_utc: str, source: ContextSectionSourceTiming) -> float | None:
+    source_time = source.source_ended_at or source.observed_at or source.source_started_at
+    if not source_time:
+        return None
+    compiled = _parse_iso_datetime(compiled_at_utc)
+    observed = _parse_iso_datetime(source_time)
+    if compiled is None or observed is None:
+        return None
+    return max(0.0, round((compiled - observed).total_seconds(), 3))
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _section_renders_timing_header(section: ContextSection) -> bool:
+    if section.id == "system:prompt":
+        return False
+    return section.channel in {"leading_user", "handoff_hint", "system"}
+
+
+def _timing_header_text(timing: ContextSectionRenderTiming) -> str:
+    source = timing.source
+    parts = [
+        f"freshness={source.freshness}",
+        f"compiled_at_utc={timing.compiled_at_utc}",
+    ]
+    if timing.session_timezone:
+        parts.append(f"session_timezone={timing.session_timezone}")
+    if timing.compiled_local_date:
+        parts.append(f"local_date={timing.compiled_local_date}")
+    if source.source_started_at and source.source_ended_at:
+        parts.append(f"source={source.source_started_at}..{source.source_ended_at}")
+    elif source.observed_at:
+        parts.append(f"source={source.observed_at}")
+    else:
+        parts.append("source=unknown")
+    if timing.age_seconds is not None:
+        parts.append(f"age={_format_duration(timing.age_seconds)}")
+    return "[context timing: " + "; ".join(parts) + "]"
+
+
+def _format_duration(seconds: float) -> str:
+    whole = max(0, int(seconds))
+    if whole < 60:
+        return f"{whole}s"
+    minutes, sec = divmod(whole, 60)
+    if minutes < 60:
+        return f"{minutes}m{sec:02d}s"
+    hours, minute = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{minute:02d}m"
+    days, hour = divmod(hours, 24)
+    return f"{days}d{hour:02d}h"
+
+
+def _render_section_text_with_timing(section: ContextSection) -> str:
+    header = section.metadata.get("timing_header_text")
+    if not isinstance(header, str) or not header:
+        return section.text
+    return f"{header}\n{section.text}" if section.text else header
+
+
+def _estimate_section_tokens(
+    section: ContextSection,
+    *,
+    text: str,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    metadata = metadata if metadata is not None else section.metadata
+    header = metadata.get("timing_header_text")
+    if isinstance(header, str) and header:
+        return estimate_text_tokens(f"{header}\n{text}" if text else header)
+    return estimate_text_tokens(text)
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None
 
 
 def _apply_section_budget(
@@ -493,7 +812,7 @@ def _replace_with_compact_text(
     return replace(
         section,
         text=text,
-        estimated_tokens=estimate_text_tokens(text),
+        estimated_tokens=_estimate_section_tokens(section, text=text),
         render_mode=render_mode,
         metadata={
             **section.metadata,

@@ -161,6 +161,7 @@ class PendingMcpElicitation:
     request_id: str
     prompt: str
     schema: dict[str, Any] = field(default_factory=dict)
+    tool_observation_timing_seed: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.monotonic)
 
     def to_dict(self) -> dict[str, object]:
@@ -178,6 +179,7 @@ class PendingMcpElicitation:
             "request_id": self.request_id,
             "prompt": self.prompt,
             "schema": dict(self.schema),
+            "tool_observation_timing_seed": dict(self.tool_observation_timing_seed),
             "created_at": self.created_at,
         }
 
@@ -198,6 +200,7 @@ class PendingMcpInputRequired:
     request_state: str | None
     input_requests: tuple[dict[str, Any], ...]
     original_request: dict[str, Any]
+    tool_observation_timing_seed: dict[str, Any] = field(default_factory=dict)
     round_count: int = 1
     deadline_monotonic: float | None = None
     created_at: float = field(default_factory=time.monotonic)
@@ -218,6 +221,7 @@ class PendingMcpInputRequired:
             "request_state": self.request_state,
             "input_requests": [dict(item) for item in self.input_requests],
             "original_request": dict(self.original_request),
+            "tool_observation_timing_seed": dict(self.tool_observation_timing_seed),
             "round_count": self.round_count,
             "created_at": self.created_at,
         }
@@ -320,6 +324,7 @@ def pending_mcp_elicitation_from_state(state: LoopState, host_session_id: str) -
         request_id=str(payload["request_id"]),
         prompt=str(payload.get("prompt") or ""),
         schema=dict(payload.get("schema") or {}),
+        tool_observation_timing_seed=dict(payload.get("tool_observation_timing_seed") or {}),
     )
 
 
@@ -346,6 +351,7 @@ def pending_mcp_input_required_from_state(state: LoopState, host_session_id: str
         request_state=str(payload["request_state"]) if payload.get("request_state") is not None else None,
         input_requests=tuple(dict(item) for item in payload.get("input_requests") or ()),
         original_request=dict(payload.get("original_request") or {}),
+        tool_observation_timing_seed=dict(payload.get("tool_observation_timing_seed") or {}),
         round_count=int(payload.get("round_count") or 1),
         deadline_monotonic=(
             float(payload["deadline_monotonic"]) if payload.get("deadline_monotonic") is not None else None

@@ -7,10 +7,13 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from tests.conftest import run_start_permission_fields
+
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
+    ContextCompactionMemoryCandidatesProposedEvent,
     CustomEvent,
     EventContext,
     ModelCallStartEvent,
@@ -257,6 +260,35 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: P
                             "included": True,
                             "render_mode": "full",
                             "estimated_tokens": 2,
+                            "metadata": {
+                                "timing": {
+                                    "compiled_at_utc": "2026-07-09T01:02:03+00:00",
+                                    "source": {
+                                        "freshness": "current_turn",
+                                        "source_started_at": "2026-07-09T01:02:00+00:00",
+                                        "source_ended_at": "2026-07-09T01:02:00+00:00",
+                                    },
+                                    "age_seconds": 3,
+                                }
+                            },
+                        },
+                        {
+                            "id": "component:memory",
+                            "source_id": "memory",
+                            "channel": "leading_user",
+                            "included": True,
+                            "render_mode": "full",
+                            "estimated_tokens": 4,
+                            "metadata": {
+                                "timing": {
+                                    "compiled_at_utc": "2026-07-09T01:02:03+00:00",
+                                    "source": {
+                                        "freshness": "memory_projection",
+                                        "observed_at": "2026-07-09T01:01:59+00:00",
+                                    },
+                                    "age_seconds": 4,
+                                }
+                            },
                         }
                     ],
                     tool_specs=[{"name": "read_file", "estimated_tokens": 42, "included": True}],
@@ -268,6 +300,28 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: P
                             "decision": "invalidated",
                             "reason": "dependency_fingerprint_changed",
                         }
+                    ],
+                    tool_result_render_decisions=[
+                        {
+                            "tool_call_id": "call:terminal",
+                            "tool_name": "terminal",
+                            "model_tool_name": "terminal",
+                            "tool_timing": {
+                                "observed_at": "2026-07-09T01:02:03Z",
+                                "freshness": "current_tool_observation",
+                            },
+                            "timing_policy": "minimal",
+                            "rendered_timing_chars": 92,
+                            "diagnostics": [],
+                        },
+                        {
+                            "tool_call_id": "call:old",
+                            "tool_name": "read_file",
+                            "model_tool_name": "read_file",
+                            "timing_policy": "not_applicable",
+                            "rendered_timing_chars": 0,
+                            "diagnostics": [],
+                        },
                     ],
                 ),
                 ModelCallStartEvent(
@@ -293,6 +347,19 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(tmp_path: P
         assert contexts["latest"]["context_id"] == context_id
         assert contexts["latest"]["tools_estimated_tokens"] == 42
         assert contexts["latest"]["sections"][0]["channel"] == "current_user"
+        assert contexts["latest"]["section_timings"][0]["status"] == "present"
+        assert contexts["latest"]["section_timings"][0]["freshness"] == "current_turn"
+        assert contexts["latest"]["section_timings"][0]["source_started_at"] == "2026-07-09T01:02:00+00:00"
+        assert contexts["latest"]["section_timings"][0]["source_ended_at"] == "2026-07-09T01:02:00+00:00"
+        assert contexts["latest"]["section_timings"][0]["age_seconds"] == 3
+        assert contexts["latest"]["section_timings"][1]["freshness"] == "memory_projection"
+        assert contexts["latest"]["section_timings"][1]["observed_at"] == "2026-07-09T01:01:59+00:00"
+        assert contexts["latest"]["section_timings"][1]["source_started_at"] is None
+        assert contexts["latest"]["section_timings"][1]["source_ended_at"] is None
+        assert contexts["latest"]["tool_result_timings"][0]["status"] == "present"
+        assert contexts["latest"]["tool_result_timings"][0]["observed_at"] == "2026-07-09T01:02:03Z"
+        assert contexts["latest"]["tool_result_timings"][0]["timing_policy"] == "minimal"
+        assert contexts["latest"]["tool_result_timings"][1]["status"] == "not_applicable"
         assert contexts["latest"]["lifecycle_decisions"][0]["decision"] == "invalidated"
         assert contexts["model_call_joins"][0]["join_status"] == "matched"
         assert contexts["model_call_joins"][0]["context_compiled_sequence"] is not None
@@ -337,6 +404,155 @@ def test_inspect_session_reports_missing_context_compaction_summary_artifact(tmp
             for diagnostic in report["diagnostics"]
         )
     finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspect_session_links_context_compaction_memory_candidates(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    ctx = _ctx("compaction-candidates")
+    candidate_entry_id = f"pool:inspector:{uuid4().hex}"
+    decision_id = f"decision:inspector:{uuid4().hex}"
+    governance_batch_id = f"governance:inspector:{uuid4().hex}"
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        log.extend(_simple_run_events(ctx, user_input="compact me", text="done"))
+        archive = PostgresArtifactStore(dsn)
+        summary_artifact_id = f"context_compaction_summary:{uuid4().hex}"
+        archive.put_text(
+            summary_artifact_id,
+            "Compaction summary mentions release sync workflow.",
+            session_id=runtime_session_id,
+            run_id=ctx.run_id,
+            metadata={"kind": "context_compaction_summary", "do_not_write_back": True},
+        )
+        completed = log.append(
+            ContextCompactionCompletedEvent(
+                **ctx.event_fields(),
+                compaction_id=f"context_compaction:{uuid4().hex}",
+                trigger="manual",
+                reason="user_requested",
+                window_number=1,
+                window_id=f"context_window:{uuid4().hex}",
+                summary_artifact_id=summary_artifact_id,
+                summary_chars=48,
+                estimated_tokens_before=200_001,
+                estimated_tokens_after=4_000,
+                threshold_tokens=200_000,
+                context_window_tokens=256_000,
+                through_sequence=10,
+                keep_after_sequence=10,
+                included_run_ids=[ctx.run_id],
+            )
+        )
+        log.append(
+            ContextCompactionMemoryCandidatesProposedEvent(
+                **ctx.event_fields(),
+                compaction_id=completed.compaction_id,
+                source_event_id=completed.id,
+                source_event_sequence=completed.sequence or 0,
+                summary_artifact_id=summary_artifact_id,
+                candidate_entry_ids=[candidate_entry_id],
+                attempted_count=1,
+                proposed_count=1,
+            )
+        )
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(CANDIDATE_POOL_SCHEMA_SQL)
+                cursor.execute(
+                    """
+                    insert into memory_candidates (
+                        entry_id,
+                        payload,
+                        origin,
+                        source_session_id,
+                        source_run_id,
+                        source_turn_id,
+                        source_reply_id,
+                        source_event_id,
+                        source_artifact_id,
+                        intent_fingerprint,
+                        metadata
+                    )
+                    values (%s, %s, 'compaction', %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        candidate_entry_id,
+                        Jsonb(
+                            {
+                                "payload_kind": "valid",
+                                "candidate": {
+                                    "kind": "Preference",
+                                    "candidate_id": "candidate:compaction-inspector",
+                                    "statement": "The user prefers syncing release before pushing GitHub.",
+                                    "scope": "ctx:workspace/test",
+                                    "source_authority": "conversation_evidence",
+                                    "verification_status": "inferred",
+                                    "evidence_ids": [],
+                                },
+                            }
+                        ),
+                        runtime_session_id,
+                        ctx.run_id,
+                        ctx.turn_id,
+                        ctx.reply_id,
+                        completed.id,
+                        summary_artifact_id,
+                        "sha256:inspector",
+                        Jsonb(
+                            {
+                                "source": "context_compaction",
+                                "compaction_id": completed.compaction_id,
+                                "summary_artifact_id": summary_artifact_id,
+                                "summary_excerpt": "Compaction summary mentions release sync workflow.",
+                            }
+                        ),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    insert into memory_governance_decisions (
+                        decision_id,
+                        governance_batch_id,
+                        decision,
+                        write_outcome
+                    )
+                    values (%s, %s, %s, %s)
+                    """,
+                    (
+                        decision_id,
+                        governance_batch_id,
+                        Jsonb(
+                            {
+                                "kind": "skip",
+                                "target_entry_ids": [candidate_entry_id],
+                                "reason": "weak",
+                                "skip_reason": "not_durable",
+                            }
+                        ),
+                        Jsonb({"kind": "no_write"}),
+                    ),
+                )
+
+        report = _service(dsn).inspect_session(runtime_session_id)
+
+        window = next(
+            item for item in report["compaction_windows"] if item["compaction_id"] == completed.compaction_id
+        )
+        assert window["candidate_proposals"][0]["candidate_entry_ids"] == [candidate_entry_id]
+        assert window["candidate_proposals"][0]["proposed_count"] == 1
+        assert window["memory_candidates"][0]["entry_id"] == candidate_entry_id
+        assert window["memory_candidates"][0]["origin"] == "compaction"
+        assert window["memory_candidates"][0]["source_event_id"] == completed.id
+        assert window["memory_candidates"][0]["metadata"]["summary_excerpt"].startswith("Compaction summary")
+        assert window["memory_candidates"][0]["governance_decisions"][0]["decision_id"] == decision_id
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("delete from memory_governance_decisions where decision_id = %s", (decision_id,))
+                cursor.execute("delete from memory_candidates where entry_id = %s", (candidate_entry_id,))
         _cleanup_session(dsn, runtime_session_id)
 
 
@@ -728,6 +944,7 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
                     **ctx.event_fields(),
                     tool_call_id=call_id,
                     state=ToolResultState.SUCCESS,
+                    metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
                     artifacts=[
                         ToolResultArtifactRef(
                             artifact_id="artifact:missing",

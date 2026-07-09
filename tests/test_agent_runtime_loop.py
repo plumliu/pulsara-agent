@@ -77,13 +77,10 @@ from pulsara_agent.runtime import (
 from pulsara_agent.runtime.compaction.inline import MidTurnCompactionResult
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
-    ApprovalPolicy,
     EffectivePermissionPolicy,
     PermissionMode,
     PermissionDecision,
     PermissionDecisionKind,
-    PermissionProfile,
-    TerminalAccess,
     preset_to_policy,
 )
 from pulsara_agent.runtime.terminal import TerminalStatus
@@ -95,6 +92,12 @@ from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
 from pulsara_agent.tools.registry import ToolRegistry
 from pulsara_agent.tools.builtins.memory_query import MemorySearchTool
+
+
+def _without_context_timing_lines(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines() if not line.startswith("[context timing:")
+    )
 
 
 class ScriptedTransport:
@@ -1683,6 +1686,7 @@ def test_tool_result_from_event_slice_folds_text_and_data_blocks() -> None:
             **context.event_fields(),
             tool_call_id="call:slice",
             state=ToolResultState.SUCCESS,
+            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
         ),
     ]
 
@@ -1711,7 +1715,14 @@ def test_tool_result_from_event_slice_rejects_missing_or_malformed_slice() -> No
 
     for events in [
         [ToolResultTextDeltaEvent(**context.event_fields(), tool_call_id="call:bad", delta="orphan")],
-        [ToolResultEndEvent(**context.event_fields(), tool_call_id="call:bad", state=ToolResultState.ERROR)],
+        [
+            ToolResultEndEvent(
+                **context.event_fields(),
+                tool_call_id="call:bad",
+                state=ToolResultState.ERROR,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            )
+        ],
         [ToolResultStartEvent(**context.event_fields(), tool_call_id="call:bad", tool_call_name="lookup")],
     ]:
         try:
@@ -1897,7 +1908,9 @@ Use the review checklist.
     assert provider.calls[0].memory_domain == domain
     assert provider.calls[0].available_tool_names == frozenset({"noop"})
     assert len(transport.contexts) == 2
-    assert transport.contexts[0].system_prompt == transport.contexts[1].system_prompt
+    assert _without_context_timing_lines(transport.contexts[0].system_prompt or "") == _without_context_timing_lines(
+        transport.contexts[1].system_prompt or ""
+    )
     first_context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
     assert "Available Skills:" in first_context_text
     assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")

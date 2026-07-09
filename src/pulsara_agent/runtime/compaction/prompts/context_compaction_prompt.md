@@ -3,7 +3,7 @@ CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 - Do NOT use terminal, file, memory, browser, network, or any other tool.
 - You already have all context needed in the compaction input.
 - Tool calls will be rejected and this compaction attempt will fail.
-- Your entire response must be plain text: an <analysis> block followed by a <summary> block.
+- Your entire response must be plain text: an <analysis> block followed by a <summary> block, plus an optional <memory_candidates_json> block only when durable-memory candidate extraction is useful.
 
 You are performing a Pulsara CONTEXT COMPACTION.
 
@@ -49,7 +49,8 @@ Then write a <summary> block with the exact sections below.
    - Distinguish durable user-provided facts from memory recall results, working-context projection, and recovery notes.
    - If memory recall or working context influenced the conversation, describe it as recalled/projection context.
    - Do NOT convert recalled/projection content into a claim that the user just said it.
-   - Do NOT write any compact-summary content as a durable memory candidate.
+   - Do NOT write any compact-summary content as durable memory.
+   - You may optionally propose durable-memory candidates in <memory_candidates_json>; those proposals are pending observations only and governance decides whether to persist them.
 
 6. Errors, Corrections, and User Feedback
    - Record important errors, failed assumptions, user corrections, and how they were fixed.
@@ -70,6 +71,26 @@ Then write a <summary> block with the exact sections below.
    - Quote or paraphrase the grounding recent user request.
    - If the safe next step is to wait for user approval or input, say that clearly.
 </summary>
+
+Optional memory-candidate block:
+
+Only include this block when the compacted history shows a repeated, durable, future-useful user preference or project habit. Do not include it for one-off task details, transient implementation steps, secrets, credentials, private .env contents, API keys, auth headers, or memory recall/projection content.
+
+V1 accepts only Preference candidates. Do not choose scope, source_authority, verification_status, or evidence_ids; Pulsara runtime will force those fields. Keep statements concise and avoid commands that imply automatic execution.
+
+<memory_candidates_json>
+{
+  "candidates": [
+    {
+      "kind": "Preference",
+      "statement": "In this workspace, the user prefers ...",
+      "reason": "Observed repeated workflow across compacted runs.",
+      "confidence": "medium"
+    }
+  ],
+  "skipped": []
+}
+</memory_candidates_json>
 
 Rules:
 

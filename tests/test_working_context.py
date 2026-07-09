@@ -74,6 +74,7 @@ def test_working_context_guard_rejects_empty_memory_search_run() -> None:
                 **ctx.event_fields(),
                 tool_call_id="call:search",
                 state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
             ),
             TextBlockDeltaEvent(
                 **ctx.event_fields(),
@@ -153,7 +154,12 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
                 tool_call_id="call:read",
                 delta="Read MEMORY_SCOPE_DOMAIN_V1_IMPLEMENTATION.zh.md and verified the scope/domain plan.",
             ),
-            ToolResultEndEvent(**ctx.event_fields(), tool_call_id="call:read", state=ToolResultState.SUCCESS),
+            ToolResultEndEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:read",
+                state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            ),
             TextBlockDeltaEvent(
                 **ctx.event_fields(),
                 block_id="text:1",

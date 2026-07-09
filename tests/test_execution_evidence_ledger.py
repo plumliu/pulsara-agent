@@ -63,6 +63,7 @@ def _tool_events(
                 tool_call_id=tool_call_id,
                 state=state,
                 artifacts=artifacts,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
             )
         )
     return events
@@ -461,7 +462,12 @@ def test_record_tool_result_from_event_slice_merges_text_and_appends_data_blocks
                 media_type="text/uri-list",
                 url="https://example.com",
             ),
-            ToolResultEndEvent(**ctx.event_fields(), tool_call_id="call:data", state=ToolResultState.SUCCESS),
+            ToolResultEndEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:data",
+                state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            ),
         ]
     )
 

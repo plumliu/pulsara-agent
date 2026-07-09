@@ -29,6 +29,7 @@ from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import (
     ToolCall,
     ToolExecutionResult,
+    ToolExecutionSuspended,
     ToolExecutor,
     ToolResultArtifactCandidate,
     ToolRuntimeContext,
@@ -67,6 +68,28 @@ class _AsyncContextProbeTool:
             tool_name=call.name,
             status=ToolResultState.SUCCESS,
             output="ok",
+        )
+
+
+class _AsyncSuspendingTool:
+    name = "async_suspending_probe"
+    description = "Return a suspended tool execution for timing seed tests."
+    parameters = {"type": "object", "properties": {}}
+    is_read_only = True
+    is_concurrency_safe = True
+
+    async def execute_async(
+        self,
+        call: ToolCall,
+        *,
+        runtime_context: ToolRuntimeContext,
+    ) -> ToolExecutionSuspended:
+        del runtime_context
+        return ToolExecutionSuspended(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            interaction_kind="mcp_input_required",
+            payload={"request_state": "needs-more-input"},
         )
 
 
@@ -113,6 +136,35 @@ def test_async_tool_runs_on_calling_loop_with_runtime_context() -> None:
         runtime_session_id="runtime:async-probe",
         event_context=CTX,
     )
+
+
+def test_async_suspended_tool_payload_gets_observation_timing_seed() -> None:
+    tool = _AsyncSuspendingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ToolExecutor(registry=registry, runtime_session_id="runtime:async-suspend")
+
+    async def run_probe() -> ToolExecutionSuspended:
+        result = await executor.execute_async(
+            ToolCall(id="call:async-suspend", name=tool.name),
+            event_context=CTX,
+            context_id="context:suspend",
+            model_call_index=3,
+        )
+        assert isinstance(result, ToolExecutionSuspended)
+        return result
+
+    suspended = asyncio.run(run_probe())
+
+    seed = suspended.payload["tool_observation_timing_seed"]
+    assert seed["tool_call_id"] == "call:async-suspend"
+    assert seed["tool_name"] == tool.name
+    assert seed["tool_origin"] == "unknown"
+    assert seed["source_started_at"]
+    assert seed["suspended_at"]
+    assert seed["start_event_id"]
+    assert seed["source_context_id"] == "context:suspend"
+    assert seed["source_model_call_index"] == 3
 
 
 def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
@@ -559,7 +611,12 @@ def test_terminal_process_tool_uses_shared_process_registry(tmp_path) -> None:
     assert start.status is ToolResultState.SUCCESS
     assert start_payload["status"] == "running"
     assert process_id
-    assert json.loads(poll.output)["status"] == "running"
+    poll_payload = json.loads(poll.output)
+    assert poll_payload["status"] == "running"
+    assert poll_payload["terminal_process_action"] == "poll"
+    assert poll_payload["timing"]["observed_at"].endswith("Z")
+    assert poll_payload["timing"]["freshness"] == "background_process_observation"
+    assert poll.metadata["timing"] == poll_payload["timing"]
     assert json.loads(kill.output)["status"] == "killed"
 
 
@@ -610,6 +667,12 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
     assert log_payload["process_id"] == process_id
     assert log_payload["output"] == "LIST_LOG_OK"
     assert log_payload["process"]["duration_seconds"] >= 0
+    assert list_payload["timing"]["observed_at"].endswith("Z")
+    assert list_payload["timing"]["freshness"] == "background_process_observation"
+    assert listed.metadata["timing"] == list_payload["timing"]
+    assert log_payload["timing"]["observed_at"].endswith("Z")
+    assert log_payload["timing"]["freshness"] == "background_process_observation"
+    assert logged.metadata["timing"] == log_payload["timing"]
 
 
 def test_terminal_process_wait_without_timeout_uses_finite_default(monkeypatch, tmp_path) -> None:
@@ -705,6 +768,23 @@ def test_terminal_long_running_command_yields_to_process_id(tmp_path) -> None:
     assert payload["status"] == "running"
     assert payload["process_id"]
     assert payload["yielded_to_background"] is True
+    assert payload["timing"]["observed_at"].endswith("Z")
+    assert payload["timing"]["freshness"] == "background_process_observation"
+    assert result.metadata["timing"] == payload["timing"]
+
+
+def test_terminal_result_timing_is_shared_by_payload_metadata_and_artifact(tmp_path) -> None:
+    _, result = execute_tool(tmp_path, "terminal", {"command": "printf TIMING_OK"})
+    payload = json.loads(result.output)
+
+    assert result.status is ToolResultState.SUCCESS
+    assert payload["timing"]["observed_at"].endswith("Z")
+    assert payload["timing"]["freshness"] == "current_tool_observation"
+    assert result.metadata["timing"] == payload["timing"]
+    assert result.artifact_candidates
+    artifact_timing = result.artifact_candidates[0].metadata["timing"]
+    assert artifact_timing["observed_at"] == payload["timing"]["observed_at"]
+    assert artifact_timing["freshness"] == payload["timing"]["freshness"]
 
 
 def test_terminal_max_lifetime_argument_is_not_model_facing(tmp_path) -> None:
@@ -874,6 +954,8 @@ def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
     assert submit.status is ToolResultState.SUCCESS
     assert submit_payload["terminal_process_action"] == "submit"
     assert close_payload["terminal_process_action"] == "close_stdin"
+    assert submit_payload["timing"]["freshness"] == "background_process_observation"
+    assert close_payload["timing"]["freshness"] == "background_process_observation"
     assert wait_payload["status"] == "success"
     assert wait_payload["output"] == "GOT:hello"
 
@@ -1102,6 +1184,15 @@ def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) 
     assert msg.content[0].name == "terminal"
     assert msg.content[0].state is ToolResultState.SUCCESS
     assert json.loads(msg.content[0].output[0].text)["output"] == "ok"
+    result_timing = result.metadata["tool_observation_timing"]
+    end_event = next(event for event in event_log.iter(reply_id="reply:tools") if isinstance(event, ToolResultEndEvent))
+    assert end_event.metadata["tool_observation_timing"] == result_timing
+    assert msg.metadata["tool_observation_timing_by_call_id"]["call:terminal"] == result_timing
+    assert result_timing["tool_call_id"] == "call:terminal"
+    assert result_timing["tool_name"] == "terminal"
+    assert result_timing["observed_at"] == end_event.created_at.replace("+00:00", "Z")
+    assert result_timing["source_started_at"] is not None
+    assert result_timing["observation_duration_seconds"] >= 0
 
 
 def test_tool_executor_archives_generic_large_output(tmp_path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from pulsara_agent.event import AgentEvent, EventContext
@@ -213,10 +214,19 @@ class TerminalTool(WorkspaceTool):
                 metadata=metadata,
             )
         )
+        timing = terminal_timing_payload(
+            duration_seconds=_float_or_none(result.metadata.get("duration_seconds")),
+            freshness=(
+                "background_process_observation"
+                if result.status is TerminalStatus.RUNNING and result.process_id is not None
+                else "current_tool_observation"
+            ),
+        )
         payload = terminal_result_payload(
             result,
             terminal_session_id=terminal_session.session_id,
             backend_type=terminal_session.state.backend_type.value,
+            timing=timing,
         )
         return self._result(
             call,
@@ -233,8 +243,9 @@ class TerminalTool(WorkspaceTool):
                 "backend_type": terminal_session.state.backend_type.value,
                 "shell": result.metadata.get("shell"),
                 "env": result.metadata.get("env"),
+                "timing": timing,
             },
-            artifact_candidates=terminal_artifact_candidates(result),
+            artifact_candidates=terminal_artifact_candidates(result, timing=timing),
         )
 
     def _blocked_result(
@@ -248,6 +259,7 @@ class TerminalTool(WorkspaceTool):
         suggested_args: dict[str, Any] | None = None,
         policy_code: str | None = None,
     ) -> ToolExecutionResult:
+        timing = terminal_timing_payload(freshness="current_tool_observation")
         return self._result(
             call,
             status=ToolResultState.ERROR,
@@ -266,6 +278,7 @@ class TerminalTool(WorkspaceTool):
                     "yielded_to_background": False,
                     "terminal_session_id": session_id,
                     "backend_type": "local",
+                    "timing": timing,
                 },
                 ensure_ascii=False,
             ),
@@ -278,8 +291,46 @@ class TerminalTool(WorkspaceTool):
                 "process_id": None,
                 "terminal_session_id": session_id,
                 "backend_type": "local",
+                "timing": timing,
             },
         )
+
+
+def terminal_timing_payload(
+    *,
+    observed_at: str | None = None,
+    duration_seconds: float | int | None = None,
+    freshness: str,
+    clock_source: str = "tool_payload",
+    command_started_at: str | None = None,
+    process_started_at: str | None = None,
+    last_output_at: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "observed_at": observed_at or _utc_now_z(),
+        "freshness": freshness,
+        "clock_source": clock_source,
+    }
+    duration = _float_or_none(duration_seconds)
+    if duration is not None:
+        payload["duration_seconds"] = duration
+    if command_started_at:
+        payload["command_started_at"] = command_started_at
+    if process_started_at:
+        payload["process_started_at"] = process_started_at
+    if last_output_at:
+        payload["last_output_at"] = last_output_at
+    return payload
+
+
+def terminal_timing_metadata_subset(timing: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(timing, dict):
+        return {}
+    return {
+        key: timing[key]
+        for key in ("observed_at", "duration_seconds", "freshness", "clock_source")
+        if key in timing
+    }
 
 
 def terminal_result_payload(
@@ -287,7 +338,9 @@ def terminal_result_payload(
     *,
     terminal_session_id: str,
     backend_type: str,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    result_timing = timing or _metadata_timing(getattr(result, "metadata", {}))
     payload = {
         "status": result.status.value,
         "output": result.output,
@@ -302,6 +355,8 @@ def terminal_result_payload(
         "backend_type": backend_type,
         "io_mode": result.metadata.get("io_mode"),
     }
+    if result_timing is not None:
+        payload["timing"] = dict(result_timing)
     if "command" in result.metadata:
         payload["command"] = result.metadata.get("command")
     if "duration_seconds" in result.metadata:
@@ -319,10 +374,23 @@ def terminal_result_payload(
     return payload
 
 
-def terminal_artifact_candidates(result) -> tuple[ToolResultArtifactCandidate, ...]:
+def terminal_artifact_candidates(
+    result,
+    *,
+    timing: dict[str, Any] | None = None,
+) -> tuple[ToolResultArtifactCandidate, ...]:
     text = getattr(result, "full_output_text", None)
     if text is None:
         return ()
+    result_timing = timing or _metadata_timing(getattr(result, "metadata", {}))
+    metadata: dict[str, Any] = {
+        "terminal_status": result.status.value,
+        "process_id": result.process_id,
+        "cwd": result.cwd,
+    }
+    timing_subset = terminal_timing_metadata_subset(result_timing)
+    if timing_subset:
+        metadata["timing"] = timing_subset
     return (
         ToolResultArtifactCandidate(
             role="combined_output",
@@ -330,11 +398,7 @@ def terminal_artifact_candidates(result) -> tuple[ToolResultArtifactCandidate, .
             text=text,
             redacted=True,
             stored_complete=True,
-            metadata={
-                "terminal_status": result.status.value,
-                "process_id": result.process_id,
-                "cwd": result.cwd,
-            },
+            metadata=metadata,
         ),
     )
 
@@ -361,6 +425,25 @@ def _max_output_chars_arg(args: dict[str, Any]) -> int:
         minimum=MIN_TERMINAL_OUTPUT_CHARS,
         maximum=DEFAULT_MAX_OUTPUT_CHARS,
     )
+
+
+def _utc_now_z() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _metadata_timing(metadata: object) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    timing = metadata.get("timing")
+    return dict(timing) if isinstance(timing, dict) else None
 
 
 class _StreamingTerminalJsonBuilder:

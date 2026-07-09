@@ -16,6 +16,7 @@ SUMMARY_MESSAGE_KIND = "context_compaction_summary"
 
 _ANALYSIS_RE = re.compile(r"<analysis>[\s\S]*?</analysis>", re.IGNORECASE)
 _SUMMARY_RE = re.compile(r"<summary>([\s\S]*?)</summary>", re.IGNORECASE)
+_MEMORY_CANDIDATES_TAG_RE = re.compile(r"<memory_candidates_json\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,8 @@ def strip_compaction_analysis(raw_text: str) -> str:
     summary_match = _SUMMARY_RE.search(without_analysis)
     if summary_match is not None:
         return summary_match.group(1).strip()
+    if _MEMORY_CANDIDATES_TAG_RE.search(without_analysis):
+        return ""
     if re.search(r"<analysis\b", raw_text, re.IGNORECASE):
         return ""
     if re.search(r"<summary\b", raw_text, re.IGNORECASE):

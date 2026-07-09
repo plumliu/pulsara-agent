@@ -1,3 +1,5 @@
+import pytest
+
 from pulsara_agent.event import (
     DataBlockDeltaEvent,
     DataBlockEndEvent,
@@ -18,6 +20,7 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolObservationTiming,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -36,6 +39,19 @@ from pulsara_agent.message import (
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+
+
+def _external_timing(tool_call_id: str, tool_name: str) -> dict[str, object]:
+    return {
+        "observed_at": "2026-07-09T00:00:00+00:00",
+        "source_started_at": "2026-07-09T00:00:00+00:00",
+        "source_ended_at": "2026-07-09T00:00:00+00:00",
+        "freshness": "current_tool_observation",
+        "clock_source": "tool_runtime_metadata",
+        "tool_origin": "unknown",
+        "tool_name": tool_name,
+        "tool_call_id": tool_call_id,
+    }
 
 
 def test_message_reducer_replays_text_thinking_tool_events() -> None:
@@ -71,9 +87,15 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
                 **CTX.event_fields(),
                 tool_call_id="call:1",
                 state=ToolResultState.SUCCESS,
+                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
             ),
             ExternalExecutionResultEvent(
                 **CTX.event_fields(),
+                metadata={
+                    "tool_observation_timing_by_call_id": {
+                        "call:external": _external_timing("call:external", "external_lookup")
+                    }
+                },
                 execution_results=[
                     ToolResultBlock(
                         id="call:external",
@@ -106,6 +128,10 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
     assert msg.content[4].state is ToolResultState.SUCCESS
     assert msg.content[5].type == "tool_result"
     assert msg.content[5].output[0].text == "external result"
+    assert (
+        msg.metadata["tool_observation_timing_by_call_id"]["call:external"]["observed_at"]
+        == "2026-07-09T00:00:00Z"
+    )
     assert msg.usage is not None
     assert msg.usage.input_tokens == 4
     assert msg.usage.output_tokens == 6
@@ -125,6 +151,7 @@ def test_tool_result_end_event_artifacts_round_trip_into_block() -> None:
         tool_call_id="call:1",
         state=ToolResultState.SUCCESS,
         artifacts=[artifact],
+        metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
     )
     loaded = load_agent_event(dump_agent_event(event))
     assert isinstance(loaded, ToolResultEndEvent)
@@ -142,6 +169,130 @@ def test_tool_result_end_event_artifacts_round_trip_into_block() -> None:
     msg = event_log.replay("reply:test")
     assert isinstance(msg.content[0], ToolResultBlock)
     assert msg.content[0].artifacts == [artifact]
+
+
+def test_external_execution_result_requires_tool_observation_timing_map() -> None:
+    with pytest.raises(ValueError, match="tool_observation_timing_by_call_id"):
+        ExternalExecutionResultEvent(
+            **CTX.event_fields(),
+            execution_results=[
+                ToolResultBlock(
+                    id="call:external",
+                    name="external_lookup",
+                    output=[TextBlock(text="external result")],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+
+    with pytest.raises(ValueError, match="ExternalExecutionResultEvent timing"):
+        ExternalExecutionResultEvent(
+            **CTX.event_fields(),
+            metadata={"tool_observation_timing_by_call_id": {"call:external": {}}},
+            execution_results=[
+                ToolResultBlock(
+                    id="call:external",
+                    name="external_lookup",
+                    output=[TextBlock(text="external result")],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+
+    with pytest.raises(ValueError, match="unknown tool result ids"):
+        ExternalExecutionResultEvent(
+            **CTX.event_fields(),
+            metadata={
+                "tool_observation_timing_by_call_id": {
+                    "call:external": _external_timing("call:external", "external_lookup"),
+                    "junk": {},
+                }
+            },
+            execution_results=[
+                ToolResultBlock(
+                    id="call:external",
+                    name="external_lookup",
+                    output=[TextBlock(text="external result")],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+
+    with pytest.raises(ValueError, match="tool_call_id mismatch"):
+        ExternalExecutionResultEvent(
+            **CTX.event_fields(),
+            metadata={
+                "tool_observation_timing_by_call_id": {
+                    "call:external": _external_timing("call:other", "external_lookup")
+                }
+            },
+            execution_results=[
+                ToolResultBlock(
+                    id="call:external",
+                    name="external_lookup",
+                    output=[TextBlock(text="external result")],
+                    state=ToolResultState.SUCCESS,
+                )
+            ],
+        )
+
+
+def test_tool_observation_timing_requires_utc_iso_and_non_negative_duration() -> None:
+    normalized = ToolObservationTiming(observed_at="2026-07-09T08:00:00+08:00")
+    assert normalized.observed_at == "2026-07-09T00:00:00Z"
+
+    with pytest.raises(ValueError, match="UTC offset"):
+        ToolObservationTiming(observed_at="2026-07-09T00:00:00")
+
+    with pytest.raises(ValueError, match="duration must be finite and non-negative"):
+        ToolObservationTiming(
+            observed_at="2026-07-09T00:00:00Z",
+            observation_duration_seconds=-0.1,
+        )
+
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="duration must be finite and non-negative"):
+            ToolObservationTiming(
+                observed_at="2026-07-09T00:00:00Z",
+                observation_duration_seconds=value,
+            )
+
+
+def test_tool_result_end_timing_tool_call_id_must_match_carrier() -> None:
+    with pytest.raises(ValueError, match="tool_call_id mismatch"):
+        ToolResultEndEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:a",
+            state=ToolResultState.SUCCESS,
+            metadata={
+                "tool_observation_timing": {
+                    "observed_at": "2026-07-09T00:00:00Z",
+                    "tool_call_id": "call:b",
+                }
+            },
+        )
+
+
+def test_external_execution_result_rejects_duplicate_result_ids() -> None:
+    with pytest.raises(ValueError, match="duplicate ids"):
+        ExternalExecutionResultEvent(
+            **CTX.event_fields(),
+            metadata={"tool_observation_timing_by_call_id": {"call:external": _external_timing("call:external", "external_lookup")}},
+            execution_results=[
+                ToolResultBlock(
+                    id="call:external",
+                    name="external_lookup",
+                    output=[TextBlock(text="first")],
+                    state=ToolResultState.SUCCESS,
+                ),
+                ToolResultBlock(
+                    id="call:external",
+                    name="external_lookup",
+                    output=[TextBlock(text="second")],
+                    state=ToolResultState.SUCCESS,
+                ),
+            ],
+        )
 
 
 def test_message_reducer_preserves_block_start_order_for_interleaved_events() -> None:
@@ -182,6 +333,11 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
             RequireExternalExecutionEvent(**CTX.event_fields(), tool_calls=[tool_call]),
             ExternalExecutionResultEvent(
                 **CTX.event_fields(),
+                metadata={
+                    "tool_observation_timing_by_call_id": {
+                        tool_call.id: _external_timing(tool_call.id, tool_call.name)
+                    }
+                },
                 execution_results=[
                     ToolResultBlock(
                         id=tool_call.id,

@@ -34,6 +34,7 @@ from pulsara_agent.event import (
     TextBlockStartEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ToolResultEndEvent,
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
@@ -98,7 +99,12 @@ from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolExecutio
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 
 
-def _tool(name: str = "lookup", *, read_only: bool | None = None) -> McpDiscoveredTool:
+def _tool(
+    name: str = "lookup",
+    *,
+    read_only: bool | None = None,
+    destructive: bool | None = None,
+) -> McpDiscoveredTool:
     return McpDiscoveredTool(
         server_id="docs",
         name=name,
@@ -108,7 +114,7 @@ def _tool(name: str = "lookup", *, read_only: bool | None = None) -> McpDiscover
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
         },
-        annotations=McpToolAnnotations(read_only_hint=read_only),
+        annotations=McpToolAnnotations(read_only_hint=read_only, destructive_hint=destructive),
     )
 
 
@@ -142,6 +148,8 @@ def _snapshot_for_config(
 
 def _mcp_input_required_host_session(
     tmp_path: Path,
+    *,
+    tool: McpDiscoveredTool | None = None,
 ) -> tuple[HostSession, MockMcpClientManager, AgentRuntimeWiring, AgentRuntime]:
     def request_input(args: dict[str, object]) -> McpInputRequired:
         return McpInputRequired(
@@ -163,7 +171,7 @@ def _mcp_input_required_host_session(
             ),
         )
 
-    manager = MockMcpClientManager((_snapshot(_tool()),), handlers={("docs", "lookup"): request_input})
+    manager = MockMcpClientManager((_snapshot(tool or _tool()),), handlers={("docs", "lookup"): request_input})
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
@@ -194,6 +202,32 @@ def _mcp_input_required_host_session(
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
     return session, manager, runtime_wiring, agent
+
+
+def _latest_tool_result_end(
+    runtime_wiring: AgentRuntimeWiring,
+    tool_call_id: str = "call:mcp-input",
+) -> ToolResultEndEvent:
+    return next(
+        event
+        for event in reversed(runtime_wiring.event_log.iter())
+        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == tool_call_id
+    )
+
+
+def _assert_mcp_resume_timing_preserves_seed(
+    runtime_wiring: AgentRuntimeWiring,
+    seed: dict[str, object],
+) -> None:
+    timing = _latest_tool_result_end(runtime_wiring).metadata["tool_observation_timing"]
+    assert timing["source_started_at"] == _utc_z(seed["source_started_at"])
+    assert timing["suspended_at"] == _utc_z(seed["suspended_at"])
+    assert timing["resumed_at"]
+    assert timing["freshness"] == "suspended_tool_observation"
+
+
+def _utc_z(value: object) -> str:
+    return str(value).replace("+00:00", "Z")
 
 
 @dataclass(slots=True)
@@ -1279,7 +1313,7 @@ def test_host_session_captures_and_resolves_mcp_elicitation(tmp_path: Path) -> N
 
 
 def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -> None:
-    session, manager, _, _ = _mcp_input_required_host_session(tmp_path)
+    session, manager, runtime_wiring, _ = _mcp_input_required_host_session(tmp_path)
 
     first = asyncio.run(session.run_turn("call mcp"))
 
@@ -1295,6 +1329,10 @@ def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -
         "tool_name": "lookup",
         "arguments": {"query": "pulsara"},
     }
+    seed = pending.tool_observation_timing_seed
+    assert seed["tool_call_id"] == "call:mcp-input"
+    assert seed["source_started_at"]
+    assert seed["suspended_at"]
 
     manager.handlers[("docs", "lookup")] = lambda args: {"resumed": args["query"]}
     final = asyncio.run(
@@ -1310,6 +1348,7 @@ def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -
     assert final.status.value == "finished"
     assert session.get_pending_interaction() is None
     assert manager.calls[-1] == ("docs", "lookup", {"query": "pulsara"})
+    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
 
 
 def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path: Path) -> None:
@@ -1318,6 +1357,7 @@ def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path:
     assert first.status.value == "waiting_user"
     pending = session.get_pending_interaction()
     assert isinstance(pending, PendingMcpInputRequired)
+    seed = pending.tool_observation_timing_seed
 
     agent.refresh_capability_runtime(CapabilityRuntime(providers=()))
     if session._suspended_state is not None:
@@ -1342,6 +1382,112 @@ def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path:
     assert gate_decisions[-1].decision == "deny"
     assert gate_decisions[-1].reason_code == "capability_descriptor_missing"
     assert gate_decisions[-1].result_state is ToolResultState.ERROR
+    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
+
+
+def test_mcp_input_required_resume_permission_denial_preserves_timing_seed(tmp_path: Path) -> None:
+    session, _manager, runtime_wiring, _agent = _mcp_input_required_host_session(tmp_path)
+    first = asyncio.run(session.run_turn("call mcp"))
+    assert first.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingMcpInputRequired)
+    seed = pending.tool_observation_timing_seed
+    assert session._suspended_state is not None
+    session._suspended_state.permission_snapshot = snapshot_from_mode(
+        runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
+        run_id=session._suspended_state.run_id,
+        permission_mode=PermissionMode.READ_ONLY,
+        permission_snapshot_source="session_default",
+    )
+
+    final = asyncio.run(
+        session.resolve_mcp_input_required(
+            McpInputRequiredInteractionResolution(
+                interaction_id=pending.interaction_id,
+                responses={"token": {"value": "secret"}},
+                cancelled=False,
+            )
+        )
+    )
+
+    assert final.status.value == "finished"
+    gate_decisions = [
+        event
+        for event in runtime_wiring.event_log.iter()
+        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+    ]
+    assert gate_decisions[-1].decision == "deny"
+    assert gate_decisions[-1].result_state is ToolResultState.DENIED
+    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
+
+
+def test_mcp_input_required_resume_wait_unsupported_preserves_timing_seed(tmp_path: Path) -> None:
+    session, _manager, runtime_wiring, _agent = _mcp_input_required_host_session(
+        tmp_path,
+        tool=_tool(destructive=True),
+    )
+    first = asyncio.run(session.run_turn("call mcp"))
+    assert first.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingMcpInputRequired)
+    seed = pending.tool_observation_timing_seed
+    assert session._suspended_state is not None
+    session._suspended_state.permission_snapshot = snapshot_from_mode(
+        runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
+        run_id=session._suspended_state.run_id,
+        permission_mode=PermissionMode.ASK_PERMISSIONS,
+        permission_snapshot_source="session_default",
+    )
+
+    final = asyncio.run(
+        session.resolve_mcp_input_required(
+            McpInputRequiredInteractionResolution(
+                interaction_id=pending.interaction_id,
+                responses={"token": {"value": "secret"}},
+                cancelled=False,
+            )
+        )
+    )
+
+    assert final.status.value == "finished"
+    gate_decisions = [
+        event
+        for event in runtime_wiring.event_log.iter()
+        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+    ]
+    assert gate_decisions[-1].decision == "deny"
+    assert gate_decisions[-1].reason_code == "mcp_resume_permission_approval_unsupported"
+    assert gate_decisions[-1].result_state is ToolResultState.DENIED
+    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
+
+
+def test_mcp_input_required_resume_missing_resume_method_preserves_timing_seed(tmp_path: Path) -> None:
+    session, _manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
+    first = asyncio.run(session.run_turn("call mcp"))
+    assert first.status.value == "waiting_user"
+    pending = session.get_pending_interaction()
+    assert isinstance(pending, PendingMcpInputRequired)
+    seed = pending.tool_observation_timing_seed
+    agent.tool_executor.registry._tools["mcp__docs__lookup"] = SimpleNamespace(
+        name="mcp__docs__lookup",
+        description="fixture without resume_input_required",
+        parameters={"type": "object"},
+    )
+
+    final = asyncio.run(
+        session.resolve_mcp_input_required(
+            McpInputRequiredInteractionResolution(
+                interaction_id=pending.interaction_id,
+                responses={"token": {"value": "secret"}},
+                cancelled=False,
+            )
+        )
+    )
+
+    assert final.status.value == "finished"
+    end = _latest_tool_result_end(runtime_wiring)
+    assert end.state is ToolResultState.ERROR
+    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
 
 
 def test_mcp_input_required_resume_uses_original_run_snapshot_after_read_only_default_switch(

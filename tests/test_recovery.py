@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.conftest import run_start_permission_fields
 
 from pulsara_agent.event import (
     EventContext,
@@ -102,7 +103,12 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
             stop_reason="aborted",
             abort_kind=AbortKind.USER_STOP.value,
         ),
-        ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:terminal", state=ToolResultState.SUCCESS),
+        ToolResultEndEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:terminal",
+            state=ToolResultState.SUCCESS,
+            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+        ),
     ]
 
     projection = project_recovery_from_events(events)
@@ -191,7 +197,12 @@ def test_classify_unfinished_tool_calls_omits_completed_terminal_after_late_resu
     events = [
         ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
         ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
-        ToolResultEndEvent(**CTX.event_fields(), tool_call_id="call:terminal", state=ToolResultState.SUCCESS),
+        ToolResultEndEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:terminal",
+            state=ToolResultState.SUCCESS,
+            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+        ),
     ]
 
     assert classify_unfinished_tool_calls(events) == []

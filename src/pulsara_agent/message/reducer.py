@@ -56,6 +56,11 @@ class MessageReducer:
                 call = self._find_block("tool_call", event.tool_call_id)
                 if isinstance(call, ToolCallBlock):
                     call.state = ToolCallState.FINISHED
+                _remember_tool_observation_timing(
+                    self.message,
+                    tool_call_id=event.tool_call_id,
+                    timing=event.metadata.get("tool_observation_timing"),
+                )
 
             case EventType.REQUIRE_USER_CONFIRM:
                 assert isinstance(event, RequireUserConfirmEvent)
@@ -85,6 +90,13 @@ class MessageReducer:
                     block = self._find_block("tool_call", result.id)
                     if isinstance(block, ToolCallBlock):
                         block.state = ToolCallState.FINISHED
+                    timing_by_call_id = event.metadata.get("tool_observation_timing_by_call_id")
+                    timing = timing_by_call_id.get(result.id) if isinstance(timing_by_call_id, dict) else None
+                    _remember_tool_observation_timing(
+                        self.message,
+                        tool_call_id=result.id,
+                        timing=timing,
+                    )
 
         return self.message
 
@@ -97,3 +109,18 @@ class MessageReducer:
     def _append_block_once(self, block) -> None:
         if not any(existing is block for existing in self.message.content):
             self.message.content.append(block)
+
+
+def _remember_tool_observation_timing(message: Msg, *, tool_call_id: str, timing: object) -> None:
+    if not isinstance(timing, dict):
+        return
+    by_call_id = message.metadata.setdefault("tool_observation_timing_by_call_id", {})
+    if isinstance(by_call_id, dict):
+        by_call_id[tool_call_id] = dict(timing)
+    tool_result_blocks = [
+        block
+        for block in message.content
+        if getattr(block, "type", None) == "tool_result"
+    ]
+    if len(tool_result_blocks) == 1 and getattr(tool_result_blocks[0], "id", None) == tool_call_id:
+        message.metadata["tool_observation_timing"] = dict(timing)

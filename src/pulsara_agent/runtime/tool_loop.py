@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
+from typing import Any
 
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
+    ToolObservationTiming,
     ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
+    utc_now,
 )
 from pulsara_agent.memory.foundation.provenance import runtime_event_span_from_events
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, ToolResultState
@@ -20,6 +24,7 @@ from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.runtime.publisher import RuntimeEventSubscriber, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.tools import ToolCall, ToolExecutor
+from pulsara_agent.tools.executor import synthetic_tool_observation_timing
 
 
 class _ToolBatchTap(RuntimeEventSubscriber):
@@ -51,24 +56,87 @@ def build_tool_result_error_events(
     tool_call_name: str,
     message: str,
     state: ToolResultState = ToolResultState.ERROR,
+    tool_observation_timing_seed: dict[str, Any] | None = None,
 ) -> list[AgentEvent]:
+    start = ToolResultStartEvent(
+        **event_context.event_fields(),
+        tool_call_id=tool_call_id,
+        tool_call_name=tool_call_name,
+    )
+    text = ToolResultTextDeltaEvent(
+        **event_context.event_fields(),
+        tool_call_id=tool_call_id,
+        delta=message,
+    )
+    end_created_at = utc_now()
+    timing = _synthetic_timing_payload(
+        start=start,
+        end_created_at=end_created_at,
+        tool_call_id=tool_call_id,
+        tool_call_name=tool_call_name,
+        seed=tool_observation_timing_seed,
+    )
+    end = ToolResultEndEvent(
+        **event_context.event_fields(),
+        created_at=end_created_at,
+        tool_call_id=tool_call_id,
+        state=state,
+        metadata={"tool_observation_timing": timing},
+    )
     return [
-        ToolResultStartEvent(
-            **event_context.event_fields(),
-            tool_call_id=tool_call_id,
-            tool_call_name=tool_call_name,
-        ),
-        ToolResultTextDeltaEvent(
-            **event_context.event_fields(),
-            tool_call_id=tool_call_id,
-            delta=message,
-        ),
-        ToolResultEndEvent(
-            **event_context.event_fields(),
-            tool_call_id=tool_call_id,
-            state=state,
-        ),
+        start,
+        text,
+        end,
     ]
+
+
+def _synthetic_timing_payload(
+    *,
+    start: ToolResultStartEvent,
+    end_created_at: str,
+    tool_call_id: str,
+    tool_call_name: str,
+    seed: dict[str, Any] | None,
+) -> dict[str, object]:
+    if not seed:
+        return synthetic_tool_observation_timing(
+            start_event=start,
+            end_created_at=end_created_at,
+            call_id=tool_call_id,
+            tool_name=tool_call_name,
+            tool_origin="unknown",
+        ).model_dump(mode="json", exclude_none=True)
+    source_started_at = str(seed.get("source_started_at") or start.created_at)
+    return ToolObservationTiming(
+        observed_at=end_created_at,
+        source_started_at=source_started_at,
+        source_ended_at=end_created_at,
+        observation_duration_seconds=_duration_seconds(source_started_at, end_created_at),
+        freshness="suspended_tool_observation",
+        clock_source="mixed",
+        tool_origin=str(seed.get("tool_origin") or "unknown"),  # type: ignore[arg-type]
+        tool_name=tool_call_name,
+        tool_call_id=tool_call_id,
+        suspended_at=str(seed.get("suspended_at")) if seed.get("suspended_at") is not None else None,
+        resumed_at=str(seed.get("resumed_at")) if seed.get("resumed_at") is not None else None,
+    ).model_dump(mode="json", exclude_none=True)
+
+
+def _duration_seconds(start: str | None, end: str | None) -> float | None:
+    start_dt = _parse_datetime(start)
+    end_dt = _parse_datetime(end)
+    if start_dt is None or end_dt is None:
+        return None
+    return max(0.0, (end_dt - start_dt).total_seconds())
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _parse_tool_call(block: ToolCallBlock) -> ToolCall:

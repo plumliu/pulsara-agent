@@ -25,6 +25,25 @@ ContextStability = Literal["stable", "turn", "step", "ephemeral"]
 ContextBudgetClass = Literal["must_keep", "important", "optional", "debug"]
 ContextRenderMode = Literal["full", "compact", "summary", "ref_only", "omitted"]
 ContextLifecycleStatus = Literal["freshly_collected", "reused", "not_cacheable"]
+ContextTimingFreshness = Literal[
+    "current_turn",
+    "current_run_tail",
+    "historical_replay",
+    "compacted_history",
+    "memory_projection",
+    "current_tool_observation",
+    "cached_snapshot",
+    "background_process_observation",
+    "subagent_result",
+    "unknown",
+]
+ContextTimingClockSource = Literal[
+    "event_created_at",
+    "message_created_at",
+    "tool_payload",
+    "compiler_wall_clock",
+    "mixed",
+]
 
 
 class ContextBudgetExceeded(ValueError):
@@ -93,6 +112,55 @@ class ContextLifecycleDecisionDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextSectionSourceTiming:
+    """Cacheable source-time facts for a context section.
+
+    This object intentionally excludes compile-time facts such as
+    ``compiled_at_utc`` and derived age. Those are render-time overlay data and
+    must not participate in lifecycle dependency fingerprints.
+    """
+
+    observed_at: str | None = None
+    source_started_at: str | None = None
+    source_ended_at: str | None = None
+    source_sequence_start: int | None = None
+    source_sequence_end: int | None = None
+    freshness: ContextTimingFreshness = "unknown"
+    clock_source: ContextTimingClockSource = "mixed"
+
+    def to_event_value(self) -> dict[str, Any]:
+        return {
+            "observed_at": self.observed_at,
+            "source_started_at": self.source_started_at,
+            "source_ended_at": self.source_ended_at,
+            "source_sequence_start": self.source_sequence_start,
+            "source_sequence_end": self.source_sequence_end,
+            "freshness": self.freshness,
+            "clock_source": self.clock_source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSectionRenderTiming:
+    """Final render-time timing facts emitted to inspect/model-visible headers."""
+
+    compiled_at_utc: str
+    session_timezone: str | None = None
+    compiled_local_date: str | None = None
+    age_seconds: float | None = None
+    source: ContextSectionSourceTiming = field(default_factory=ContextSectionSourceTiming)
+
+    def to_event_value(self) -> dict[str, Any]:
+        return {
+            "compiled_at_utc": self.compiled_at_utc,
+            "session_timezone": self.session_timezone,
+            "compiled_local_date": self.compiled_local_date,
+            "age_seconds": self.age_seconds,
+            "source": self.source.to_event_value(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ContextSection:
     """A candidate fact projection before final lowering into LLMContext."""
 
@@ -144,6 +212,8 @@ class ContextCompileRequest:
     turn_id: str
     reply_id: str
     model_call_index: int
+    compiled_at_utc: str
+    user_observed_at_utc: str
     model_role: ModelRole
     state: LoopState
     current_user_message: Msg | None
@@ -152,6 +222,8 @@ class ContextCompileRequest:
     tools: tuple[ToolSpec, ...]
     exposure: CapabilityExposurePlan | None
     budget: LoopBudget
+    session_timezone: str | None = None
+    compiled_local_date: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

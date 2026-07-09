@@ -20,7 +20,11 @@ from pulsara_agent.tools.builtins.schemas import (
     object_schema,
     required_str_arg,
 )
-from pulsara_agent.tools.builtins.terminal import terminal_artifact_candidates, terminal_result_payload
+from pulsara_agent.tools.builtins.terminal import (
+    terminal_artifact_candidates,
+    terminal_result_payload,
+    terminal_timing_payload,
+)
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
 
@@ -204,12 +208,14 @@ class TerminalProcessTool(WorkspaceTool):
     def _list_result(self, call: ToolCall, processes, *, action: str) -> ToolExecutionResult:
         live_count = self.terminal_sessions.live_process_count(owner_host_session_id=self.owner_host_session_id)
         finished_count = self.terminal_sessions.finished_process_count(owner_host_session_id=self.owner_host_session_id)
+        timing = terminal_timing_payload(freshness="background_process_observation")
         payload = {
             "status": "success",
             "terminal_process_action": action,
             "processes": [process.to_payload() for process in processes],
             "live_process_count": live_count,
             "finished_process_count": finished_count,
+            "timing": timing,
         }
         return self._result(
             call,
@@ -219,14 +225,20 @@ class TerminalProcessTool(WorkspaceTool):
                 "terminal_process_action": action,
                 "live_process_count": live_count,
                 "finished_process_count": finished_count,
+                "timing": timing,
             },
         )
 
     def _log_result(self, call: ToolCall, log, *, action: str) -> ToolExecutionResult:
+        timing = terminal_timing_payload(
+            duration_seconds=log.process.duration_seconds,
+            freshness="background_process_observation",
+        )
         payload = {
             "status": "success",
             "terminal_process_action": action,
             "process_id": log.process.process_id,
+            "timing": timing,
             **log.to_payload(),
         }
         return self._result(
@@ -239,6 +251,7 @@ class TerminalProcessTool(WorkspaceTool):
                 "terminal_session_id": log.process.terminal_session_id,
                 "backend_type": log.process.backend_type,
                 "truncated": log.truncated,
+                "timing": timing,
             },
             artifact_candidates=(
                 ()
@@ -250,6 +263,7 @@ class TerminalProcessTool(WorkspaceTool):
                             process_id=log.process.process_id,
                             cwd=log.process.cwd,
                             full_output_text=log.full_output_text,
+                            metadata={"timing": timing},
                         )
                     )
                 )
@@ -257,10 +271,15 @@ class TerminalProcessTool(WorkspaceTool):
         )
 
     def _process_result(self, call: ToolCall, result, *, action: str) -> ToolExecutionResult:
+        timing = terminal_timing_payload(
+            duration_seconds=result.metadata.get("duration_seconds"),
+            freshness="background_process_observation",
+        )
         payload = terminal_result_payload(
             result,
             terminal_session_id=result.metadata.get("terminal_session_id", "default"),
             backend_type=result.metadata.get("backend_type", "local"),
+            timing=timing,
         )
         payload["terminal_process_action"] = action
         return self._result(
@@ -276,8 +295,9 @@ class TerminalProcessTool(WorkspaceTool):
                 "terminal_process_action": action,
                 "terminal_session_id": payload["terminal_session_id"],
                 "backend_type": payload["backend_type"],
+                "timing": timing,
             },
-            artifact_candidates=terminal_artifact_candidates(result),
+            artifact_candidates=terminal_artifact_candidates(result, timing=timing),
         )
 
     def _error_result(
@@ -289,6 +309,7 @@ class TerminalProcessTool(WorkspaceTool):
         status: str = "error",
         policy_code: str | None = None,
     ) -> ToolExecutionResult:
+        timing = terminal_timing_payload(freshness="background_process_observation")
         return self._result(
             call,
             status=ToolResultState.ERROR,
@@ -305,6 +326,7 @@ class TerminalProcessTool(WorkspaceTool):
                     "terminal_session_id": "default",
                     "backend_type": "local",
                     "policy_code": policy_code,
+                    "timing": timing,
                 },
                 ensure_ascii=False,
             ),
@@ -317,6 +339,7 @@ class TerminalProcessTool(WorkspaceTool):
                 "terminal_session_id": "default",
                 "backend_type": "local",
                 "policy_code": policy_code,
+                "timing": timing,
             },
         )
 
@@ -342,3 +365,4 @@ class _LogArtifactResult:
     process_id: str | None
     cwd: str
     full_output_text: str | None
+    metadata: dict[str, Any] = field(default_factory=dict)
