@@ -13,6 +13,8 @@ from uuid import uuid4
 
 import pytest
 
+from tests.conftest import run_start_permission_fields
+
 from pulsara_agent.capability import (
     CapabilityResolveContext,
     LocalSkillCapabilityProvider,
