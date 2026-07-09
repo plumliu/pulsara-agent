@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.message.blocks import (
@@ -165,6 +165,7 @@ class EventType(StrEnum):
 
     CONTEXT_COMPACTION_STARTED = "CONTEXT_COMPACTION_STARTED"
     CONTEXT_COMPACTION_COMPLETED = "CONTEXT_COMPACTION_COMPLETED"
+    CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED = "CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED"
     CONTEXT_COMPACTION_FAILED = "CONTEXT_COMPACTION_FAILED"
 
     SUBAGENT_RUN_STARTED = "SUBAGENT_RUN_STARTED"
@@ -733,6 +734,33 @@ class ContextCompactionCompletedEvent(EventBase):
     included_artifact_ids: list[str] = Field(default_factory=list)
 
 
+class CompactionCandidateDiagnosticEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    field: str | None = None
+    message: str = ""
+    redacted: bool = False
+
+
+class ContextCompactionMemoryCandidatesProposedEvent(EventBase):
+    type: Literal[
+        EventType.CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED
+    ] = EventType.CONTEXT_COMPACTION_MEMORY_CANDIDATES_PROPOSED
+    compaction_id: str
+    source_event_id: str
+    source_event_sequence: int
+    summary_artifact_id: str
+    candidate_entry_ids: list[str] = Field(default_factory=list)
+    attempted_count: int = 0
+    proposed_count: int
+    skipped_count: int = 0
+    duplicate_count: int = 0
+    error_count: int = 0
+    extractor_version: str = "compaction-memory-candidates:v1"
+    diagnostics: list[CompactionCandidateDiagnosticEvent] = Field(default_factory=list)
+
+
 class ContextCompactionFailedEvent(EventBase):
     type: Literal[EventType.CONTEXT_COMPACTION_FAILED] = EventType.CONTEXT_COMPACTION_FAILED
     compaction_id: str
@@ -1040,6 +1068,7 @@ AgentEvent: TypeAlias = (
     | ProjectionFailedEvent
     | ContextCompactionStartedEvent
     | ContextCompactionCompletedEvent
+    | ContextCompactionMemoryCandidatesProposedEvent
     | ContextCompactionFailedEvent
     | SubagentRunStartedEvent
     | SubagentMessageSentEvent

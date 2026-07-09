@@ -154,6 +154,33 @@ class PostgresInspectorStore:
             (session_id,),
         )
 
+    def memory_candidates_for_compaction(self, compaction_id: str) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select *
+            from memory_candidates
+            where metadata->>'compaction_id' = %s
+            order by created_at asc, entry_id asc
+            """,
+            (compaction_id,),
+        )
+
+    def governance_decisions_for_candidate(self, entry_id: str) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select *
+            from memory_governance_decisions
+            where decision->>'target_entry_id' = %s
+               or exists (
+                   select 1
+                   from jsonb_array_elements_text(coalesce(decision->'target_entry_ids', '[]'::jsonb)) as target(id)
+                   where target.id = %s
+               )
+            order by created_at asc, decision_id asc
+            """,
+            (entry_id, entry_id),
+        )
+
     def outbox_for_run(self, run_id: str) -> list[dict[str, Any]]:
         return self._fetchall(
             """

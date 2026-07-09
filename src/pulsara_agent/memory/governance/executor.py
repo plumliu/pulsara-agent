@@ -86,11 +86,12 @@ class MemoryGovernanceExecutor:
         relatedness_context: RelatednessExecutionContext | None = None,
     ) -> MemoryGovernanceApplyResult:
         batch_id = governance_batch_id or new_governance_batch_id()
-        self._validate_target_entries(decision)
+        target_entries = self._validate_target_entries(decision)
         return self._apply_decision_with_uow(
             decision,
             governance_batch_id=batch_id,
             relatedness_context=relatedness_context,
+            target_entries=target_entries,
         )
 
     def _apply_decision_with_uow(
@@ -99,6 +100,7 @@ class MemoryGovernanceExecutor:
         *,
         governance_batch_id: str,
         relatedness_context: RelatednessExecutionContext | None,
+        target_entries: tuple[PooledMemoryCandidate, ...],
     ) -> MemoryGovernanceApplyResult:
         if isinstance(decision, SkipDecision):
             record = _decision_record(
@@ -129,6 +131,27 @@ class MemoryGovernanceExecutor:
             with self.memory_write_uow_factory() as uow:
                 uow.decisions.append_decision(record)
             return MemoryGovernanceApplyResult(decision_record=record, events=[])
+        compaction_lifecycle_block = self._compaction_lifecycle_block_reason(
+            decision,
+            target_entries=target_entries,
+        )
+        if compaction_lifecycle_block is not None:
+            record = _decision_record(
+                decision=SkipDecision(
+                    target_entry_ids=_target_entry_ids(decision),
+                    reason="Compaction-origin candidates cannot perform replacement lifecycle decisions in V1.",
+                    skip_reason=compaction_lifecycle_block,
+                ),
+                governance_batch_id=governance_batch_id,
+                write_outcome=NoWriteOutcome(),
+            )
+            with self.memory_write_uow_factory() as uow:
+                uow.decisions.append_decision(record)
+            return MemoryGovernanceApplyResult(
+                decision_record=record,
+                events=[],
+                diagnostics=(compaction_lifecycle_block,),
+            )
 
         with self.memory_write_uow_factory() as uow:
             if already_exists(candidate, uow.graph, graph_id=uow.resolved_graph_id):
@@ -154,7 +177,10 @@ class MemoryGovernanceExecutor:
                     decision.superseded_memory_ids,
                     governance_batch_id=governance_batch_id,
                     relatedness_context=relatedness_context,
-                ) or self._replacement_evidence_block_reason(decision)
+                ) or self._replacement_evidence_block_reason(
+                    decision,
+                    target_entry=_single_target_entry(decision.target_entry_id, target_entries),
+                )
                 if supersede_blocked_reason is None:
                     valid_old_ids, supersede_blocked_reason = self._validate_supersede_targets(
                         decision, uow
@@ -368,6 +394,18 @@ class MemoryGovernanceExecutor:
             targets.append(target)
         return tuple(targets)
 
+    def _compaction_lifecycle_block_reason(
+        self,
+        decision: GovernanceDecision,
+        *,
+        target_entries: tuple[PooledMemoryCandidate, ...],
+    ) -> str | None:
+        if not isinstance(decision, (SupersedeAndSubmitDecision, ContradictAndSubmitDecision)):
+            return None
+        if any(target.origin is CandidateOrigin.COMPACTION for target in target_entries):
+            return "compaction_origin_replacement_evidence_unsupported"
+        return None
+
     def _validate_supersede_targets(
         self,
         decision: SupersedeAndSubmitDecision,
@@ -423,15 +461,16 @@ class MemoryGovernanceExecutor:
     def _replacement_evidence_block_reason(
         self,
         decision: SupersedeAndSubmitDecision,
+        *,
+        target_entry: PooledMemoryCandidate,
     ) -> str | None:
         if not decision.replacement_evidence_refs:
             return "missing_replacement_evidence"
-        pooled = self.candidate_pool.get_candidate(decision.target_entry_id)
         allowed: set[str] = set()
-        if isinstance(pooled.payload, ValidCandidatePayload):
-            allowed.update(pooled.payload.candidate.evidence_ids)
-        allowed.update(event.id for event in self.event_log.iter(run_id=pooled.source_run_id))
-        if pooled.user_quote:
+        if isinstance(target_entry.payload, ValidCandidatePayload):
+            allowed.update(target_entry.payload.candidate.evidence_ids)
+        allowed.update(event.id for event in self.event_log.iter(run_id=target_entry.source_run_id))
+        if target_entry.user_quote:
             allowed.add("candidate_user_quote")
         for ref in decision.replacement_evidence_refs:
             if ref not in allowed:
@@ -534,6 +573,16 @@ def _target_entry_ids(decision: GovernanceDecision) -> tuple[str, ...]:
     if isinstance(decision, SkipDecision | MergeAndSubmitDecision):
         return decision.target_entry_ids
     return (decision.target_entry_id,)
+
+
+def _single_target_entry(
+    entry_id: str,
+    target_entries: tuple[PooledMemoryCandidate, ...],
+) -> PooledMemoryCandidate:
+    for target in target_entries:
+        if target.entry_id == entry_id:
+            return target
+    raise KeyError(entry_id)
 
 
 def _downgrade_to_coexist(decision: SupersedeAndSubmitDecision, reason: str) -> CorrectAndSubmitDecision:

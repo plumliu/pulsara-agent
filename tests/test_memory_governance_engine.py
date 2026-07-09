@@ -212,6 +212,58 @@ def test_memory_governance_engine_invalid_json_does_not_write_or_decide() -> Non
     assert graph.find_by_type(memory.PREFERENCE) == []
 
 
+def test_governance_compaction_candidate_uses_bounded_window_evidence_view() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    source_ctx = EventContext(run_id="run:source:compaction", turn_id="turn:source:compaction", reply_id="reply:source:compaction")
+    first = log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:one", delta="The user asks to sync release."))
+    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:two", delta="The user asks to push GitHub."))
+    candidate = pool.append_candidate(
+        _pooled_preference(
+            source_run_id="run:compaction:attribution",
+            statement="The user prefers syncing release before pushing GitHub in this workspace.",
+        ).model_copy(
+            update={
+                "origin": CandidateOrigin.COMPACTION,
+                "source_event_id": "event:compaction-completed",
+                "source_artifact_id": "context_compaction:test:summary",
+                "intent_fingerprint": "sha256:compaction",
+                "metadata": {
+                    "compaction_id": "context_compaction:test",
+                    "summary_artifact_id": "context_compaction:test:summary",
+                    "summary_excerpt": "The user repeatedly asks to sync release before pushing.",
+                    "summary_excerpt_chars": 62,
+                    "summary_excerpt_truncated": False,
+                    "included_run_ids": [source_ctx.run_id],
+                    "included_run_count": 1,
+                    "through_sequence": first.sequence,
+                    "keep_after_sequence": first.sequence,
+                    "source_event_id": "event:compaction-completed",
+                    "source_event_sequence": 99,
+                },
+            }
+        )
+    )
+    engine = MemoryGovernanceEngine(
+        llm_runtime=_llm_runtime(_ScriptedTransport([])),
+        executor=_executor(pool=pool, graph=graph, log=log),
+    )
+
+    snapshot = engine._candidate_snapshot(candidate)
+
+    assert snapshot["origin"] == "compaction"
+    assert snapshot["metadata"]["summary_excerpt"].startswith("The user repeatedly")
+    assert snapshot["attribution_context"]["source_run_id"] == "run:compaction:attribution"
+    evidence_view = snapshot["compaction_evidence_view"]
+    assert evidence_view["compaction_id"] == "context_compaction:test"
+    assert evidence_view["summary_artifact_id"] == "context_compaction:test:summary"
+    assert evidence_view["summary_excerpt"].startswith("The user repeatedly")
+    assert evidence_view["included_run_ids"] == [source_ctx.run_id]
+    assert evidence_view["source_event_count"] == 1
+    assert [item["event_id"] for item in snapshot["source_events"]] == [first.id]
+
+
 def test_memory_governance_parser_accepts_contradict_and_submit() -> None:
     output = _parse_governance_output(
         json.dumps(

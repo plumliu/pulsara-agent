@@ -12,6 +12,7 @@ from pulsara_agent.event import (
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     CustomEvent,
     ModelCallStartEvent,
@@ -51,6 +52,8 @@ _REQUIRED_TABLES = (
     "memory_search_index",
     "memory_vector_index",
     "memory_write_outbox",
+    "memory_candidates",
+    "memory_governance_decisions",
     "recall_traces",
     "recall_usages",
 )
@@ -446,6 +449,15 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "estimated_tokens_after",
         "threshold_tokens",
         "context_window_tokens",
+        "source_event_id",
+        "source_event_sequence",
+        "candidate_entry_ids",
+        "attempted_count",
+        "proposed_count",
+        "skipped_count",
+        "duplicate_count",
+        "error_count",
+        "extractor_version",
         "context_id",
         "model_call_index",
         "estimated_tokens",
@@ -637,10 +649,19 @@ def _projection_to_dict(event: ProjectionReadyEvent) -> dict[str, Any]:
 
 def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
-    for event in events:
+    events_list = list(events)
+    proposals_by_compaction: dict[str, list[ContextCompactionMemoryCandidatesProposedEvent]] = {}
+    for event in events_list:
+        if isinstance(event, ContextCompactionMemoryCandidatesProposedEvent):
+            proposals_by_compaction.setdefault(event.compaction_id, []).append(event)
+    for event in events_list:
         if not isinstance(event, ContextCompactionCompletedEvent):
             continue
         artifact = store.artifact(event.summary_artifact_id)
+        candidates = [
+            _memory_candidate_projection(row, store)
+            for row in store.memory_candidates_for_compaction(event.compaction_id)
+        ]
         windows.append(
             {
                 "sequence": event.sequence,
@@ -664,9 +685,54 @@ def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorSt
                 "context_window_tokens": event.context_window_tokens,
                 "included_run_ids": list(event.included_run_ids),
                 "included_artifact_ids": list(event.included_artifact_ids),
+                "candidate_proposals": [
+                    _compaction_candidate_proposal_projection(proposal)
+                    for proposal in proposals_by_compaction.get(event.compaction_id, [])
+                ],
+                "memory_candidates": candidates,
             }
         )
     return windows
+
+
+def _compaction_candidate_proposal_projection(
+    event: ContextCompactionMemoryCandidatesProposedEvent,
+) -> dict[str, Any]:
+    return {
+        "sequence": event.sequence,
+        "source_event_id": event.source_event_id,
+        "source_event_sequence": event.source_event_sequence,
+        "summary_artifact_id": event.summary_artifact_id,
+        "candidate_entry_ids": list(event.candidate_entry_ids),
+        "attempted_count": event.attempted_count,
+        "proposed_count": event.proposed_count,
+        "skipped_count": event.skipped_count,
+        "duplicate_count": event.duplicate_count,
+        "error_count": event.error_count,
+        "extractor_version": event.extractor_version,
+        "diagnostics": [diagnostic.model_dump(mode="json") for diagnostic in event.diagnostics],
+    }
+
+
+def _memory_candidate_projection(row: dict[str, Any], store: PostgresInspectorStore) -> dict[str, Any]:
+    entry_id = str(row["entry_id"])
+    return {
+        "entry_id": entry_id,
+        "origin": row.get("origin"),
+        "payload": _json_safe(row.get("payload")),
+        "source_run_id": row.get("source_run_id"),
+        "source_turn_id": row.get("source_turn_id"),
+        "source_reply_id": row.get("source_reply_id"),
+        "source_event_id": row.get("source_event_id"),
+        "source_artifact_id": row.get("source_artifact_id"),
+        "intent_fingerprint": row.get("intent_fingerprint"),
+        "metadata": _json_safe(row.get("metadata") or {}),
+        "created_at": str(row.get("created_at")),
+        "governance_decisions": [
+            _json_safe(decision)
+            for decision in store.governance_decisions_for_candidate(entry_id)
+        ],
+    }
 
 
 def _phase_from_reason(reason: str) -> str:

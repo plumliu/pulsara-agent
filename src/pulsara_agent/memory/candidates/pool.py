@@ -26,6 +26,7 @@ from pulsara_agent.ontology import memory
 class CandidateOrigin(StrEnum):
     MAIN_AGENT_TOOL = "main_agent_tool"
     REFLECTION = "reflection"
+    COMPACTION = "compaction"
     GOVERNANCE = "governance"
 
 
@@ -41,6 +42,10 @@ class PooledMemoryCandidate(BaseModel):
     source_reply_id: str
     source_tool_call_id: str | None = None
     user_quote: str | None = None
+    source_event_id: str | None = None
+    source_artifact_id: str | None = None
+    intent_fingerprint: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -51,7 +56,10 @@ class CandidatePoolProposal(BaseModel):
     origin: CandidateOrigin
     source_tool_call_id: str | None = None
     user_quote: str | None = None
+    source_event_id: str | None = None
+    source_artifact_id: str | None = None
     intent_fingerprint: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     def to_pooled(self, *, source_session_id: str, source_run_id: str, source_turn_id: str, source_reply_id: str) -> PooledMemoryCandidate:
         return PooledMemoryCandidate(
@@ -63,6 +71,10 @@ class CandidatePoolProposal(BaseModel):
             source_reply_id=source_reply_id,
             source_tool_call_id=self.source_tool_call_id,
             user_quote=self.user_quote,
+            source_event_id=self.source_event_id,
+            source_artifact_id=self.source_artifact_id,
+            intent_fingerprint=self.intent_fingerprint,
+            metadata=dict(self.metadata),
         )
 
 
@@ -262,9 +274,13 @@ class PostgresCandidatePool:
                         source_reply_id,
                         source_tool_call_id,
                         user_quote,
+                        source_event_id,
+                        source_artifact_id,
+                        intent_fingerprint,
+                        metadata,
                         created_at
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                     """,
                     (
                         candidate.entry_id,
@@ -276,6 +292,10 @@ class PostgresCandidatePool:
                         candidate.source_reply_id,
                         candidate.source_tool_call_id,
                         candidate.user_quote,
+                        candidate.source_event_id,
+                        candidate.source_artifact_id,
+                        candidate.intent_fingerprint,
+                        Jsonb(candidate.metadata),
                         candidate.created_at,
                     ),
                 )
@@ -414,6 +434,10 @@ def _candidate_from_row(row: dict[str, Any]) -> PooledMemoryCandidate:
         source_reply_id=row["source_reply_id"],
         source_tool_call_id=row["source_tool_call_id"],
         user_quote=row["user_quote"],
+        source_event_id=row.get("source_event_id"),
+        source_artifact_id=row.get("source_artifact_id"),
+        intent_fingerprint=row.get("intent_fingerprint"),
+        metadata=dict(row.get("metadata") or {}),
         created_at=created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
     )
 
@@ -445,14 +469,34 @@ CREATE TABLE IF NOT EXISTS memory_candidates (
     source_reply_id TEXT NOT NULL,
     source_tool_call_id TEXT,
     user_quote TEXT,
+    source_event_id TEXT,
+    source_artifact_id TEXT,
+    intent_fingerprint TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE memory_candidates
+    ADD COLUMN IF NOT EXISTS source_event_id TEXT;
+
+ALTER TABLE memory_candidates
+    ADD COLUMN IF NOT EXISTS source_artifact_id TEXT;
+
+ALTER TABLE memory_candidates
+    ADD COLUMN IF NOT EXISTS intent_fingerprint TEXT;
+
+ALTER TABLE memory_candidates
+    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_memory_candidates_source_run
     ON memory_candidates(source_run_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_memory_candidates_origin
     ON memory_candidates(origin);
+
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_session_origin_fingerprint
+    ON memory_candidates(source_session_id, origin, intent_fingerprint)
+    WHERE intent_fingerprint IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memory_governance_decisions (
     decision_id TEXT PRIMARY KEY,

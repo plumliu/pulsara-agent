@@ -282,9 +282,13 @@ class CandidateDecisionRepository:
                     source_reply_id,
                     source_tool_call_id,
                     user_quote,
+                    source_event_id,
+                    source_artifact_id,
+                    intent_fingerprint,
+                    metadata,
                     created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                 """,
                 (
                     candidate.entry_id,
@@ -296,6 +300,10 @@ class CandidateDecisionRepository:
                     candidate.source_reply_id,
                     candidate.source_tool_call_id,
                     candidate.user_quote,
+                    candidate.source_event_id,
+                    candidate.source_artifact_id,
+                    candidate.intent_fingerprint,
+                    Jsonb(candidate.metadata),
                     candidate.created_at,
                 ),
             )

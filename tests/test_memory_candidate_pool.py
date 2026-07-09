@@ -11,15 +11,17 @@ from pulsara_agent.event.candidates import InvalidAttemptPayload, PreferenceCand
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory import (
     MemoryGovernanceDecisionRecord,
+    MemoryWriteUnitOfWork,
     NoWriteOutcome,
     PooledMemoryCandidate,
+    PostgresArtifactStore,
     PostgresCandidatePool,
     SkipDecision,
     SubmitAsIsDecision,
     WriteFailedOutcome,
     WriteSucceededOutcome,
 )
-from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool
+from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool, CandidatePoolProposal
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
 
@@ -139,6 +141,104 @@ def test_governance_origin_candidates_are_audit_rows_not_pending(pool_case: _Poo
 
     assert pool_case.pool.list_candidates()[0].entry_id == candidate.entry_id
     assert pool_case.pool.list_pending() == []
+
+
+def test_compaction_origin_candidate_round_trips_provenance(pool_case: _PoolCase) -> None:
+    candidate = _pooled_valid(
+        pool_case,
+        entry_id=f"pool:test:{uuid4().hex}",
+        origin=CandidateOrigin.COMPACTION,
+    ).model_copy(
+        update={
+            "source_event_id": "event:context-compaction-completed",
+            "source_artifact_id": "context_compaction:test:summary",
+            "intent_fingerprint": "sha256:test-intent",
+            "metadata": {
+                "source": "context_compaction",
+                "compaction_id": "context_compaction:test",
+                "summary_artifact_id": "context_compaction:test:summary",
+                "summary_excerpt": "The user repeatedly asks to sync release before pushing.",
+                "included_run_ids": [pool_case.ctx.run_id],
+                "included_run_count": 1,
+            },
+        }
+    )
+
+    pool_case.pool.append_candidate(candidate)
+
+    fetched = pool_case.pool.get_candidate(candidate.entry_id)
+    assert fetched.origin is CandidateOrigin.COMPACTION
+    assert fetched.source_event_id == "event:context-compaction-completed"
+    assert fetched.source_artifact_id == "context_compaction:test:summary"
+    assert fetched.intent_fingerprint == "sha256:test-intent"
+    assert fetched.metadata["compaction_id"] == "context_compaction:test"
+    assert fetched.metadata["summary_excerpt"].startswith("The user repeatedly asks")
+    assert [pending.entry_id for pending in pool_case.pool.list_pending()] == [candidate.entry_id]
+
+
+def test_candidate_pool_proposal_preserves_provenance_metadata(pool_case: _PoolCase) -> None:
+    proposal = CandidatePoolProposal(
+        payload=ValidCandidatePayload(candidate=_preference(f"candidate:test:{uuid4().hex}")),
+        origin=CandidateOrigin.COMPACTION,
+        source_event_id="event:context-compaction-completed",
+        source_artifact_id="context_compaction:test:summary",
+        intent_fingerprint="sha256:test-intent",
+        metadata={"compaction_id": "context_compaction:test", "summary_excerpt": "bounded"},
+    )
+
+    pooled = proposal.to_pooled(
+        source_session_id=pool_case.session_id,
+        source_run_id=pool_case.ctx.run_id,
+        source_turn_id=pool_case.ctx.turn_id,
+        source_reply_id=pool_case.ctx.reply_id,
+    )
+
+    assert pooled.origin is CandidateOrigin.COMPACTION
+    assert pooled.source_event_id == proposal.source_event_id
+    assert pooled.source_artifact_id == proposal.source_artifact_id
+    assert pooled.intent_fingerprint == proposal.intent_fingerprint
+    assert pooled.metadata == proposal.metadata
+
+
+def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(tmp_path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    ctx = _ctx("uow")
+    _connect_or_skip(dsn).close()
+    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:seed", delta="seed"))
+    candidate = _pooled_valid(
+        _PoolCase(pool=PostgresCandidatePool(dsn), session_id=runtime_session_id, ctx=ctx),
+        entry_id=f"pool:test:{uuid4().hex}",
+        origin=CandidateOrigin.COMPACTION,
+    ).model_copy(
+        update={
+            "source_event_id": "event:context-compaction-completed",
+            "source_artifact_id": "context_compaction:test:summary",
+            "intent_fingerprint": "sha256:uow-test",
+            "metadata": {"compaction_id": "context_compaction:uow", "summary_excerpt": "bounded"},
+        }
+    )
+    try:
+        with MemoryWriteUnitOfWork(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+            archive=PostgresArtifactStore(dsn),
+        ) as uow:
+            uow.decisions.append_candidate(candidate)
+
+        fetched = PostgresCandidatePool(dsn).get_candidate(candidate.entry_id)
+
+        assert fetched.origin is CandidateOrigin.COMPACTION
+        assert fetched.source_event_id == candidate.source_event_id
+        assert fetched.source_artifact_id == candidate.source_artifact_id
+        assert fetched.intent_fingerprint == candidate.intent_fingerprint
+        assert fetched.metadata == candidate.metadata
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("delete from memory_candidates where entry_id = %s", (candidate.entry_id,))
+                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
 
 
 def _preference(candidate_id: str) -> PreferenceCandidate:

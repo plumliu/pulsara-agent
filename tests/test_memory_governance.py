@@ -19,7 +19,9 @@ from pulsara_agent.memory import (
     PooledMemoryCandidate,
     PostgresCandidatePool,
     PostgresMemoryQuery,
+    ContradictAndSubmitDecision,
     SubmitAsIsDecision,
+    SupersedeAndSubmitDecision,
     CorrectAndSubmitDecision,
 )
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, WriteFailedOutcome, WriteSucceededOutcome
@@ -155,6 +157,71 @@ def test_governance_write_failed_does_not_terminally_remove_candidate() -> None:
     ]
     assert isinstance(result.decision_record.write_outcome, WriteFailedOutcome)
     assert [pending.entry_id for pending in pool.list_pending()] == [candidate.entry_id]
+    assert graph.find_by_type(memory.PREFERENCE) == []
+
+
+def test_governance_compaction_origin_supersede_fails_closed_without_write() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    candidate = pool.append_candidate(
+        _pooled_valid().model_copy(
+            update={
+                "origin": CandidateOrigin.COMPACTION,
+                "metadata": {"compaction_id": "context_compaction:test"},
+            }
+        )
+    )
+    executor = _executor(pool=pool, graph=graph, log=log)
+
+    result = executor.apply_decision(
+        SupersedeAndSubmitDecision(
+            target_entry_id=candidate.entry_id,
+            candidate=_preference("candidate:new"),
+            superseded_memory_ids=("preference:old",),
+            replacement_evidence_refs=("event:source",),
+            reason="bad lifecycle decision for compaction candidate",
+        ),
+        governance_batch_id="governance:test:compaction-supersede",
+    )
+
+    assert result.events == []
+    assert result.diagnostics == ("compaction_origin_replacement_evidence_unsupported",)
+    assert result.decision_record.decision.kind == "skip"
+    assert result.decision_record.write_outcome.kind == "no_write"
+    assert pool.list_pending() == []
+    assert graph.find_by_type(memory.PREFERENCE) == []
+
+
+def test_governance_compaction_origin_contradict_fails_closed_without_write() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    candidate = pool.append_candidate(
+        _pooled_valid().model_copy(
+            update={
+                "origin": CandidateOrigin.COMPACTION,
+                "metadata": {"compaction_id": "context_compaction:test"},
+            }
+        )
+    )
+    executor = _executor(pool=pool, graph=graph, log=log)
+
+    result = executor.apply_decision(
+        ContradictAndSubmitDecision(
+            target_entry_id=candidate.entry_id,
+            candidate=_preference("candidate:new"),
+            contradicted_memory_ids=("preference:old",),
+            reason="bad contradiction decision for compaction candidate",
+        ),
+        governance_batch_id="governance:test:compaction-contradict",
+    )
+
+    assert result.events == []
+    assert result.diagnostics == ("compaction_origin_replacement_evidence_unsupported",)
+    assert result.decision_record.decision.kind == "skip"
+    assert result.decision_record.write_outcome.kind == "no_write"
+    assert pool.list_pending() == []
     assert graph.find_by_type(memory.PREFERENCE) == []
 
 

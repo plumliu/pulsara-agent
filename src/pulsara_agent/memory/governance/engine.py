@@ -16,6 +16,7 @@ from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.candidates.pool import (
+    CandidateOrigin,
     GovernanceDecision,
     MemoryGovernanceDecisionRecord,
     PooledMemoryCandidate,
@@ -201,7 +202,10 @@ class MemoryGovernanceEngine:
         *,
         relatedness: RelatednessBatchResult | None = None,
     ) -> dict[str, Any]:
-        source_events = self.executor.event_log.iter(run_id=candidate.source_run_id)
+        if candidate.origin is CandidateOrigin.COMPACTION:
+            source_events = _compaction_source_events(self.executor.event_log, candidate)
+        else:
+            source_events = self.executor.event_log.iter(run_id=candidate.source_run_id)
         decisions = [
             decision
             for decision in self.executor.candidate_pool.list_decisions()
@@ -209,6 +213,13 @@ class MemoryGovernanceEngine:
         ]
         snapshot = candidate.model_dump(mode="json")
         snapshot["source_events"] = _source_event_summaries(source_events)
+        if candidate.origin is CandidateOrigin.COMPACTION:
+            snapshot["compaction_evidence_view"] = _compaction_evidence_view(candidate, source_events)
+            snapshot["attribution_context"] = {
+                "source_run_id": candidate.source_run_id,
+                "source_turn_id": candidate.source_turn_id,
+                "source_reply_id": candidate.source_reply_id,
+            }
         snapshot["prior_governance_decisions"] = _decision_summaries(decisions)
         if relatedness is None:
             snapshot["related_existing_memories"] = _related_existing_memories(
@@ -337,6 +348,15 @@ Rules:
   provide all missing semantics.
 - Do not output write results; the host owns write outcomes.
 - Use candidate entry_id values exactly as provided.
+- Compaction-origin candidates are model-inferred observations from context
+  compression. Treat them as weaker than explicit user memory-tool proposals.
+  Submit only if durable, repeated, project-relevant, and useful for future
+  runs. Prefer skip for one-off task details, transient implementation steps,
+  secrets, projection echoes, or overgeneralized habits.
+- For origin=compaction, do not use supersede_and_submit or
+  contradict_and_submit in V1. Use submit_as_is, skip, merge_and_submit, or
+  correct_and_submit. Replacement evidence refs from compaction windows are not
+  accepted by the executor in V1.
 - If there is nothing to govern, decisions=[].
 
 Few-shot examples:
@@ -472,6 +492,70 @@ def _source_event_summaries(events, *, limit: int = 80) -> list[dict[str, Any]]:
     if len(events) > limit:
         summaries.append({"event_type": "TRUNCATED", "omitted_event_count": len(events) - limit})
     return summaries
+
+
+def _compaction_source_events(event_log, candidate: PooledMemoryCandidate, *, limit: int = 80):
+    metadata = candidate.metadata or {}
+    included_run_ids = _bounded_strings(metadata.get("included_run_ids"), limit=5)
+    through_sequence = _int_or_none(metadata.get("through_sequence"))
+    keep_after_sequence = _int_or_none(metadata.get("keep_after_sequence"))
+    events = []
+    seen: set[str] = set()
+    for run_id in included_run_ids:
+        for event in event_log.iter(run_id=run_id):
+            if event.id in seen:
+                continue
+            sequence = event.sequence
+            if through_sequence is not None and sequence is not None and sequence > through_sequence:
+                continue
+            if keep_after_sequence is not None and sequence is not None and sequence > keep_after_sequence:
+                continue
+            seen.add(event.id)
+            events.append(event)
+    if not events and through_sequence is not None:
+        for event in event_log.iter():
+            sequence = event.sequence
+            if sequence is None or sequence > through_sequence:
+                continue
+            seen.add(event.id)
+            events.append(event)
+            if len(events) >= limit:
+                break
+    events.sort(key=lambda event: (event.sequence or 0, event.id))
+    return events[:limit]
+
+
+def _compaction_evidence_view(candidate: PooledMemoryCandidate, source_events) -> dict[str, Any]:
+    metadata = candidate.metadata or {}
+    return {
+        "kind": "context_compaction",
+        "compaction_id": metadata.get("compaction_id"),
+        "summary_artifact_id": metadata.get("summary_artifact_id") or candidate.source_artifact_id,
+        "summary_excerpt": metadata.get("summary_excerpt"),
+        "summary_excerpt_chars": metadata.get("summary_excerpt_chars"),
+        "summary_excerpt_truncated": metadata.get("summary_excerpt_truncated", False),
+        "included_run_ids": _bounded_strings(metadata.get("included_run_ids"), limit=5),
+        "included_run_count": metadata.get("included_run_count"),
+        "included_run_ids_truncated": metadata.get("included_run_ids_truncated", False),
+        "through_sequence": metadata.get("through_sequence"),
+        "keep_after_sequence": metadata.get("keep_after_sequence"),
+        "source_event_id": candidate.source_event_id or metadata.get("source_event_id"),
+        "source_event_sequence": metadata.get("source_event_sequence"),
+        "source_event_count": len(source_events),
+    }
+
+
+def _bounded_strings(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item) for item in value[:limit]]
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _decision_summaries(decisions: list[MemoryGovernanceDecisionRecord]) -> list[dict[str, Any]]:

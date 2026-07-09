@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from typing import Literal
 from uuid import uuid4
 
 from pulsara_agent.event import (
     AgentEvent,
+    CompactionCandidateDiagnosticEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     ExceedMaxItersEvent,
     EventContext,
@@ -51,6 +53,14 @@ from pulsara_agent.runtime.compaction.planner import (
     latest_completed_boundary,
     strip_compaction_analysis,
 )
+from pulsara_agent.runtime.compaction.candidates import (
+    CompactionCandidateAppendResult,
+    CompactionCandidateDiagnostic,
+    CompactionCandidateParseResult,
+    CompactionMemoryCandidateSink,
+    ContextCompactionMemoryCandidatePolicy,
+    parse_compaction_memory_candidates,
+)
 
 ContextCompactionTrigger = Literal["manual", "auto"]
 
@@ -79,6 +89,9 @@ class ContextCompactionPolicy:
     event_chars_per_token: float = 2.0
     estimate_safety_margin: float = 1.25
     summary_max_output_tokens: int = 8_192
+    memory_candidates: ContextCompactionMemoryCandidatePolicy = field(
+        default_factory=ContextCompactionMemoryCandidatePolicy
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +120,7 @@ class ContextCompactionService:
     runtime_session_id: str
     policy: ContextCompactionPolicy = ContextCompactionPolicy()
     model_role: ModelRole = ModelRole.FLASH
+    candidate_sink: CompactionMemoryCandidateSink | None = None
     _consecutive_failures: int = 0
 
     def should_auto_compact(
@@ -220,7 +234,8 @@ class ContextCompactionService:
         await asyncio.to_thread(self.event_log.append, started)
 
         try:
-            raw_summary = await self._summarize(plan)
+            phase = str(metadata.get("phase")) if metadata.get("phase") is not None else None
+            raw_summary = await self._summarize(plan, trigger=trigger, phase=phase)
             summary = strip_compaction_analysis(raw_summary)
             if not summary:
                 raise RuntimeError("compact model returned an empty summary")
@@ -277,6 +292,13 @@ class ContextCompactionService:
                 metadata=metadata,
             )
             stored = await asyncio.to_thread(self.event_log.append, completed)
+            await self._append_memory_candidate_proposals_if_enabled(
+                raw_summary=raw_summary,
+                summary=summary,
+                completed=stored,
+                summary_artifact_id=artifact_id,
+                phase=phase,
+            )
             self._consecutive_failures = 0
             return stored
         except Exception as exc:
@@ -302,8 +324,21 @@ class ContextCompactionService:
                 raise
             return None
 
-    async def _summarize(self, plan: CompactionPlan) -> str:
-        prompt = production_compaction_prompt()
+    async def _summarize(
+        self,
+        plan: CompactionPlan,
+        *,
+        trigger: ContextCompactionTrigger,
+        phase: str | None,
+    ) -> str:
+        prompt = production_compaction_prompt(
+            memory_candidates_enabled=_memory_candidate_extraction_enabled(
+                self.candidate_sink,
+                trigger,
+                phase=phase,
+                policy=self.policy.memory_candidates,
+            )
+        )
         input_text = build_compaction_input(plan)
         context = LLMContext(
             messages=(
@@ -331,6 +366,117 @@ class ContextCompactionService:
             elif isinstance(event, ModelCallEndEvent):
                 continue
         return "".join(parts)
+
+    async def _append_memory_candidate_proposals_if_enabled(
+        self,
+        *,
+        raw_summary: str,
+        summary: str,
+        completed: ContextCompactionCompletedEvent,
+        summary_artifact_id: str,
+        phase: str | None,
+    ) -> None:
+        sink = self.candidate_sink
+        policy = self.policy.memory_candidates
+        if not _memory_candidate_extraction_enabled(
+            sink,
+            completed.trigger,
+            phase=phase,
+            policy=policy,
+        ):
+            return
+        assert sink is not None
+        parse_result = parse_compaction_memory_candidates(
+            raw_summary,
+            workspace_scope=sink.workspace_scope,
+            workspace_kind=sink.workspace_kind,
+            policy=policy,
+        )
+        if not _extraction_attempted(parse_result):
+            return
+        try:
+            append_result = await asyncio.to_thread(
+                sink.append_compaction_candidates,
+                completed_event=completed,
+                summary_artifact_id=summary_artifact_id,
+                summary_text=summary,
+                parse_result=parse_result,
+                policy=policy,
+            )
+            await self._append_memory_candidates_proposed_event(
+                completed=completed,
+                summary_artifact_id=summary_artifact_id,
+                parse_result=parse_result,
+                append_result=append_result,
+                diagnostics=(),
+            )
+        except Exception as exc:
+            diagnostic = CompactionCandidateDiagnostic(
+                code="compaction_candidate_append_failed",
+                message=type(exc).__name__,
+                redacted=True,
+            )
+            fallback_result = CompactionCandidateAppendResult(
+                source_event_id=completed.id,
+                source_event_sequence=int(completed.sequence or 0),
+                source_artifact_id=summary_artifact_id,
+                entry_ids=(),
+                diagnostics=(diagnostic,),
+            )
+            await self._append_memory_candidates_proposed_event(
+                completed=completed,
+                summary_artifact_id=summary_artifact_id,
+                parse_result=parse_result,
+                append_result=fallback_result,
+                diagnostics=(),
+            )
+
+    async def _append_memory_candidates_proposed_event(
+        self,
+        *,
+        completed: ContextCompactionCompletedEvent,
+        summary_artifact_id: str,
+        parse_result: CompactionCandidateParseResult,
+        append_result: CompactionCandidateAppendResult,
+        diagnostics: tuple[CompactionCandidateDiagnostic, ...],
+    ) -> None:
+        all_diagnostics = (
+            *parse_result.diagnostics,
+            *append_result.diagnostics,
+            *_skipped_item_diagnostics(parse_result),
+            *_skipped_item_diagnostics(append_result),
+            *diagnostics,
+        )
+        skipped_count = len(parse_result.skipped) + len(append_result.skipped)
+        error_count = sum(
+            1
+            for diagnostic in all_diagnostics
+            if not diagnostic.code.startswith("compaction_candidate_skipped:")
+            and ("failed" in diagnostic.code or "malformed" in diagnostic.code)
+        )
+        event = ContextCompactionMemoryCandidatesProposedEvent(
+            **EventContext(
+                run_id=completed.run_id,
+                turn_id=completed.turn_id,
+                reply_id=completed.reply_id,
+            ).event_fields(),
+            compaction_id=completed.compaction_id,
+            source_event_id=append_result.source_event_id,
+            source_event_sequence=append_result.source_event_sequence,
+            summary_artifact_id=summary_artifact_id,
+            candidate_entry_ids=list(append_result.entry_ids),
+            attempted_count=parse_result.attempted_count,
+            proposed_count=len(append_result.entry_ids),
+            skipped_count=skipped_count,
+            duplicate_count=append_result.duplicate_count,
+            error_count=error_count,
+            extractor_version=self.policy.memory_candidates.extractor_version,
+            diagnostics=[_event_diagnostic(diagnostic) for diagnostic in all_diagnostics],
+        )
+        try:
+            await asyncio.to_thread(self.event_log.append, event)
+        except Exception:
+            return
 
     def _build_plan(
         self,
@@ -412,8 +558,89 @@ class ContextCompactionService:
         )
 
 
-def production_compaction_prompt() -> str:
-    return resources.files(_PRODUCTION_PROMPT_PACKAGE).joinpath(_PRODUCTION_PROMPT_FILE).read_text(encoding="utf-8")
+def production_compaction_prompt(*, memory_candidates_enabled: bool = True) -> str:
+    prompt = resources.files(_PRODUCTION_PROMPT_PACKAGE).joinpath(_PRODUCTION_PROMPT_FILE).read_text(encoding="utf-8")
+    if memory_candidates_enabled:
+        return prompt
+    return _without_memory_candidate_instructions(prompt)
+
+
+def _without_memory_candidate_instructions(prompt: str) -> str:
+    prompt = prompt.replace(
+        "- Your entire response must be plain text: an <analysis> block followed by a <summary> block, plus an optional <memory_candidates_json> block only when durable-memory candidate extraction is useful.",
+        "- Your entire response must be plain text: an <analysis> block followed by a <summary> block.",
+    )
+    prompt = prompt.replace(
+        "   - You may optionally propose durable-memory candidates in <memory_candidates_json>; those proposals are pending observations only and governance decides whether to persist them.\n",
+        "",
+    )
+    optional_start = prompt.find("\nOptional memory-candidate block:")
+    rules_start = prompt.find("\nRules:", optional_start)
+    if optional_start != -1 and rules_start != -1:
+        prompt = prompt[:optional_start] + prompt[rules_start:]
+    return prompt
+
+
+def _memory_candidate_extraction_enabled(
+    sink: CompactionMemoryCandidateSink | None,
+    trigger: ContextCompactionTrigger,
+    *,
+    phase: str | None,
+    policy: ContextCompactionMemoryCandidatePolicy,
+) -> bool:
+    if sink is None:
+        return False
+    if sink.workspace_kind == "transient":
+        return False
+    if not sink.workspace_scope:
+        return False
+    return _should_extract_memory_candidates(trigger, phase=phase, policy=policy)
+
+
+def _should_extract_memory_candidates(
+    trigger: ContextCompactionTrigger,
+    *,
+    phase: str | None,
+    policy: ContextCompactionMemoryCandidatePolicy,
+) -> bool:
+    if not policy.enabled:
+        return False
+    if phase == "mid_turn":
+        return policy.extract_on_mid_turn
+    if trigger == "manual":
+        return policy.extract_on_manual
+    return policy.extract_on_preflight
+
+
+def _extraction_attempted(parse_result: CompactionCandidateParseResult) -> bool:
+    return bool(
+        parse_result.attempted_count
+        or parse_result.candidates
+        or parse_result.skipped
+        or parse_result.diagnostics
+    )
+
+
+def _event_diagnostic(diagnostic: CompactionCandidateDiagnostic) -> CompactionCandidateDiagnosticEvent:
+    return CompactionCandidateDiagnosticEvent(
+        code=diagnostic.code,
+        field=diagnostic.field,
+        message=diagnostic.message,
+        redacted=diagnostic.redacted,
+    )
+
+
+def _skipped_item_diagnostics(
+    result: CompactionCandidateParseResult | CompactionCandidateAppendResult,
+) -> tuple[CompactionCandidateDiagnostic, ...]:
+    return tuple(
+        CompactionCandidateDiagnostic(
+            code=f"compaction_candidate_skipped:{item.code}",
+            message=item.reason,
+            redacted=item.redacted,
+        )
+        for item in result.skipped
+    )
 
 
 def build_compaction_input(plan: CompactionPlan) -> str:

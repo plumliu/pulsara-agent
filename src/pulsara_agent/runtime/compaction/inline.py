@@ -10,6 +10,7 @@ from pulsara_agent.event import (
     AgentEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     CustomEvent,
     RunStartEvent,
@@ -224,6 +225,7 @@ class RuntimeContextCompactor:
                 (
                     ContextCompactionStartedEvent,
                     ContextCompactionCompletedEvent,
+                    ContextCompactionMemoryCandidatesProposedEvent,
                     ContextCompactionFailedEvent,
                 ),
             )
