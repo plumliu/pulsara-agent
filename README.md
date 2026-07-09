@@ -46,6 +46,8 @@ Long-horizon agent work has become a living runtime lifecycle:
   and errors.
 - Context keeps growing, so the system must compact it while preserving the
   thread of the task.
+- Model-visible context must be compiled from structured runtime facts instead
+  of blindly replaying an ever-growing transcript.
 - Important facts become long-term memory instead of getting buried in a long
   transcript.
 - Future operations remain traceable, answering both “what happened?” and “why
@@ -57,10 +59,11 @@ Pulsara treats this complete lifecycle as the product.
 | --- | --- |
 | Sessions fade when the window closes | **Persistent Runtime**: sessions, runs, turns, replies, and resume are first-class. |
 | Conversation history is hard to reconstruct | **Replayable event stream**: typed runtime facts with inspectable projections. |
-| Context gets heavier with every turn | **Elegant context compaction**: coherent handoff summaries for future model interactions. |
+| Context gets heavier with every turn | **Context compiler + compaction**: budgeted, sectioned, time-aware context for future model interactions. |
 | Memory lacks a source trail | **Grounded long-term memory**: memories are tied to evidence, artifacts, relations, and conflicts. |
-| Tool calls are hard to explain | **Auditable tool execution**: permission decisions, artifact creation, and skill attribution stay transparent. |
+| Tool calls are hard to explain | **Auditable tool execution**: permission decisions, artifact creation, skill attribution, and observation timing stay transparent. |
 | Capabilities live in static prompts | **Progressive capability surface**: tools, skills, MCP-style interfaces, and local workflows share one runtime surface. |
+| Delegation becomes hidden side chat | **Subagent runtime graph**: child agents are runtime sessions with typed parent-child events, not invisible scripts. |
 
 Pulsara goes beyond a conventional model API wrapper and grows toward a full
 agent operating system: conversation, tools, memory, permissions, events,
@@ -75,8 +78,9 @@ semantic memory can each do their job.
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │                         Agent Runtime                         │
-│  model loop · tool execution · plan mode · permission gate     │
-│  capability exposure · streaming · resume · compaction         │
+│  model loop · context compiler · tool execution · subagents    │
+│  plan mode · permission gate · capability exposure · resume    │
+│  compaction · time-aware observations                          │
 └──────────────────────────────┬───────────────────────────────┘
                                │ typed events
 ┌──────────────────────────────▼───────────────────────────────┐
@@ -116,9 +120,11 @@ Pulsara's event system forms the factual skeleton of the agent. The runtime emit
 typed events for key transitions:
 
 - model text generation and tool-call streaming;
-- tool results, artifacts, and adaptive previews;
+- tool results, artifacts, adaptive previews, and observation timing;
 - permission decisions and capability gate outcomes;
 - plan mode entry, questions, revisions, approval, and cancellation;
+- context compile attempts, section budgets, render decisions, and diagnostics;
+- subagent graph events, task states, child results, and result delivery;
 - context compaction started, completed, or failed;
 - durable session and run boundaries;
 - memory recall traces and governance outcomes.
@@ -131,6 +137,31 @@ This event engine powers three essential capabilities:
    archaeology.
 3. **Compaction** — summarize long context from real runtime history, keeping the
    handoff coherent and grounded.
+
+## Context Compiler: Model-Visible State Is Built, Not Dumped
+
+Pulsara now treats prompt construction as a runtime subsystem. The context
+compiler collects typed facts, partitions them into sections, applies lifecycle
+caching, budgets each section, and then lowers the result into the provider
+request.
+
+That means model-visible context has a structure:
+
+- stable system instructions remain separate from runtime facts;
+- memory projection, capability catalog, active-skill hints, runtime context,
+  recovery notes, and subagent results are sectioned and inspectable;
+- the current user message is anchored before the current-run tool tail so
+  provider-native tool-call ordering stays valid;
+- large or historical tool results are rendered through an allocator with
+  per-result decisions, artifact-backed previews, and bounded envelopes;
+- timing headers tell the model whether a section is current, historical,
+  cached, compacted, or a background-process observation;
+- `ContextCompiledEvent` records sections, estimates, diagnostics, and
+  tool-result render decisions for inspection.
+
+The goal is simple: the model should see the smallest useful version of the
+truth, while humans and recovery paths can still explain how that context was
+assembled.
 
 ## Memory as an Asset for Future Decisions
 
@@ -187,6 +218,47 @@ For high-risk tasks, the agent can first explore in read-only mode, ask
 structured human-in-the-loop questions, produce a draft plan, and execute only
 after approval. Planning is integrated with the permission model and the event
 log.
+
+### Subagent Runtime
+
+Pulsara can delegate bounded subtasks to child agent runtimes. A subagent is a
+runtime session with its own event stream, capability profile, lifecycle, and
+result, not a function call hidden inside the parent prompt.
+
+The parent records a graph of subagent runs and tasks:
+
+- `spawn_agent`, `wait_agent`, and `stop_agent` expose low-level run control;
+- `create_agent_tasks`, `wait_agent_tasks`, and `stop_agent_task` expose a
+  task-board layer with dependencies and batch status;
+- child-only report tools let workers publish phase updates and explicit
+  results;
+- child results enter parent context as internal evidence, not as fake user
+  messages;
+- `list_agents` and inspector projections show running, blocked, completed,
+  consumed, and delivered work.
+
+This keeps delegation auditable. The parent can use subagent reports as
+secondary evidence, while filesystem reads, terminal runs, artifacts, and event
+logs remain the highest-confidence sources of truth.
+
+### Time-Aware Tool Observations
+
+Long-running local work is time-sensitive. Pulsara records tool observation
+timing as a runtime fact for tool results, including terminal and
+`terminal_process` observations.
+
+Model-visible tool context can include:
+
+- when the observation was seen;
+- when the tool result started and ended;
+- observation duration;
+- whether the output is a current tool result, a background process observation,
+  a suspended/resumed interaction, or historical replay;
+- terminal-domain timing such as process duration for running commands.
+
+This lets the model reason about streaming logs, background training jobs,
+process polling, stale results, and “what happened since the last observation”
+without guessing from text alone.
 
 ### Context handoff
 
