@@ -98,6 +98,10 @@ Explicit close 的语义：
 - 标记 manifest `closed_at`；
 - 默认不删除 event log / artifacts。
 
+并发 close intent 必须单调合并：`detach < explicit close`。同一物理 close attempt 中，只要任一仍在参与该 attempt 的 caller 请求 explicit close，最终 manifest 就必须写入 `closed_at`；detach/shutdown caller不能把它降级。attempt owner在registry线性化边界内seal合并后的intent，再执行manifest mutation。若更强intent在线性化seal之后才到达，它必须等待物理close并完成幂等manifest close，不能成功返回却遗漏`closed_at`。
+
+Manifest mutation失败不允许退化为“session已移除，所以后续close是no-op”。物理HostSession关闭后，registry必须保留bounded finalization tombstone，仅含`host_session_id/runtime_session_id/conversation_id/manifest_close_pending`及当前retry attempt；再次explicit close或下一次shutdown必须重试`mark_closed()`。成功后原子删除tombstone，失败则保留并把同一异常交给所有retry waiters。tombstone存在期间禁止复用同一host/conversation identity，也禁止resume对应runtime_session_id。
+
 `HostCore.shutdown()` 是 host process teardown，不等价于用户关闭 conversation。它必须按照 workspace terminal lifecycle 契约 finalization active/suspended runs，但不得擅自 archive durable conversation。
 
 ---
@@ -122,7 +126,7 @@ Explicit close 的语义：
 
 如果上一个 host 进程崩溃、被杀或机器重启，Postgres projection 里可能存在 `runs.status='running'` 且没有 `RUN_END` 的 run。
 
-Resume 前必须执行 `repair_dangling_runs_for_resume()`：
+Resume 必须先在`HostSessionRegistry`同一临界区原子取得携带`runtime_session_id`的reservation；live/reserved/tombstoned runtime identity会在此处fail closed，且此时不得修改event ledger/projection。只有reservation成功后、session wiring构造前，才执行 `repair_dangling_runs_for_resume()`：
 
 - 读取该 runtime session 中 running 且没有 RUN_END 的 runs。
 - 找到每个 run 最新 event 的 turn/reply context。
@@ -131,6 +135,8 @@ Resume 前必须执行 `repair_dangling_runs_for_resume()`：
 - 然后修复 projection rows。
 
 禁止只更新 `runs.status` 而不写 `RUN_END` 事件。事件优先是为了让 transcript/recovery/inspector 都能解释中断。
+
+若repair失败，open transaction必须释放刚取得的reservation且不构造session wiring。禁止在reservation前repair，否则一个最终被pending-close tombstone拒绝的resume也会先污染durable ledger。
 
 ---
 

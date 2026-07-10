@@ -32,6 +32,7 @@ from pulsara_agent.runtime.plan import PendingInteraction, PlanInteractionResolu
 from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
+    PendingTerminalCompletionError,
     TerminalOwnerContext,
     WorkspaceTerminalLease,
 )
@@ -51,6 +52,12 @@ class HostCoreLifecycle(StrEnum):
     CLOSED = "closed"
 
 
+@dataclass(frozen=True, slots=True)
+class _HostShutdownAttempt:
+    attempt_id: str
+    completion: asyncio.Future[None]
+
+
 @dataclass(slots=True)
 class HostCore:
     settings: PulsaraSettings
@@ -65,9 +72,7 @@ class HostCore:
     _governance_coordinator: MemoryGovernanceCoordinator | None = field(default=None, init=False, repr=False)
     _lifecycle: HostCoreLifecycle = field(default=HostCoreLifecycle.OPEN, init=False, repr=False)
     _lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _session_close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _session_close_events: dict[str, asyncio.Event] = field(default_factory=dict, init=False, repr=False)
-    _shutdown_complete: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    _shutdown_attempt: _HostShutdownAttempt | None = field(default=None, init=False, repr=False)
 
     # -- Lifecycle gate -------------------------------------------------------
 
@@ -104,6 +109,7 @@ class HostCore:
             memory_reflection=memory_reflection,
             permission_policy=permission_policy,
             created_by="host_open",
+            repair_dangling_on_resume=False,
         )
 
     async def resume_session(
@@ -131,12 +137,6 @@ class HostCore:
             raise RuntimeError(f"runtime session is closed or archived: {runtime_session_id}")
         resolved_workspace_input = workspace_input or manifest.to_workspace_input()
         resolved_model_role = model_role or ModelRole(manifest.model_role)
-        if repair_dangling:
-            repair_dangling_runs_for_resume(
-                dsn=self.settings.storage.postgres_dsn,
-                runtime_session_id=runtime_session_id,
-                workspace_root=manifest.workspace_root,
-            )
         return await self._open_session_with_runtime_id(
             resolved_workspace_input,
             runtime_session_id=runtime_session_id,
@@ -148,6 +148,7 @@ class HostCore:
             memory_reflection=memory_reflection,
             permission_policy=permission_policy or permission_policy_from_manifest(manifest),
             created_by="host_resume",
+            repair_dangling_on_resume=repair_dangling,
         )
 
     async def resume_most_recent_session(
@@ -221,6 +222,7 @@ class HostCore:
         memory_reflection: bool,
         permission_policy: EffectivePermissionPolicy | None,
         created_by: str,
+        repair_dangling_on_resume: bool,
     ) -> HostSession:
         self._raise_if_not_accepting("open a session")
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root)
@@ -228,11 +230,23 @@ class HostCore:
         conversation_id = conversation_id or f"conversation:{uuid4().hex}"
         # Reserve identity first: fail-closed on duplicate id before any resource
         # is built, so two borrowers can never share a terminal owner principal.
-        reservation = await self.registry.reserve(host_session_id, conversation_id)
+        reservation = await self.registry.reserve(
+            host_session_id,
+            conversation_id,
+            runtime_session_id=runtime_session_id,
+        )
         lease: WorkspaceTerminalLease | None = None
         wiring = None
         mcp_supervisor: McpServerSupervisor | None = None
         try:
+            if repair_dangling_on_resume:
+                if runtime_session_id is None:
+                    raise RuntimeError("dangling repair requires a runtime_session_id")
+                repair_dangling_runs_for_resume(
+                    dsn=self.settings.storage.postgres_dsn,
+                    runtime_session_id=runtime_session_id,
+                    workspace_root=str(workspace.workspace_root),
+                )
             lease = await self._attach_supervisor(workspace, host_session_id, conversation_id)
             mcp_supervisor = await self._build_mcp_supervisor(workspace)
             wiring = build_agent_runtime_wiring(
@@ -422,51 +436,112 @@ class HostCore:
 
     async def close_session(self, host_session_id: str, *, close_conversation: bool = False) -> None:
         """Sole session-close coordinator. Concurrent callers await one close."""
-        async with self._session_close_lock:
-            session = await self.registry.begin_close(host_session_id)
-            if session is None:
-                close_event = self._session_close_events.get(host_session_id)
-                is_closer = False
-            else:
-                close_event = asyncio.Event()
-                self._session_close_events[host_session_id] = close_event
-                is_closer = True
-        if not is_closer:
-            if close_event is not None:
-                await close_event.wait()
+        claim = await self.registry.claim_close(
+            host_session_id,
+            close_conversation=close_conversation,
+        )
+        manifest_retry = claim.manifest_retry_attempt
+        if manifest_retry is not None:
+            if not claim.is_owner:
+                await asyncio.shield(manifest_retry.completion)
+                return
+            manifest_error: BaseException | None = None
+            try:
+                self._manifest_store().mark_closed(manifest_retry.runtime_session_id)
+            except BaseException as exc:
+                manifest_error = exc
+            try:
+                await self.registry.finish_manifest_close_retry(
+                    manifest_retry,
+                    error=manifest_error,
+                )
+            except BaseException as exc:
+                if not manifest_retry.completion.done():
+                    await asyncio.shield(
+                        self.registry.abort_manifest_close_retry(
+                            manifest_retry,
+                            error=exc,
+                        )
+                    )
+                if manifest_retry.completion.done():
+                    manifest_retry.completion.result()
+                raise
+            manifest_retry.completion.result()
             return
-        lease = self._session_leases.pop(host_session_id, None)
+        attempt = claim.attempt
+        if attempt is None:
+            return
+        if not claim.is_owner:
+            await asyncio.shield(attempt.completion)
+            if claim.requires_manifest_close_after_wait and self.durable:
+                self._manifest_store().mark_closed(attempt.session.runtime_session_id)
+                await self.registry.complete_manifest_close(
+                    host_session_id=host_session_id,
+                    runtime_session_id=attempt.session.runtime_session_id,
+                )
+            return
+        session = attempt.session
         errors: list[BaseException] = []
+        manifest_error: BaseException | None = None
         try:
             try:
                 await session.aclose(reason=AbortKind.HOST_TEARDOWN)
             except BaseException as exc:
-                errors.append(exc)
+                # Child/run drain failure is not cleanup noise. Preserve the
+                # indexed session, terminal lease, workspace, and closing
+                # runtime so a later close call can retry the safe point.
+                await self.registry.abort_close(attempt, error=exc)
+                attempt.completion.result()
+                raise AssertionError("unreachable")
+            lease = self._session_leases.get(host_session_id)
             if lease is not None:
+                preserve_lease = False
                 try:
                     await self._release_supervisor_lease(lease)
+                except PendingTerminalCompletionError as exc:
+                    # A pending canonical terminal completion is physical close
+                    # work, not cleanup noise. Keep the session, lease and
+                    # workspace indexed so a later close attempt can retry.
+                    preserve_lease = True
+                    await self.registry.abort_close(attempt, error=exc)
+                    attempt.completion.result()
+                    raise AssertionError("unreachable")
                 except BaseException as exc:
                     errors.append(exc)
-            try:
-                await self.registry.finish_close(host_session_id)
-            except BaseException as exc:
-                errors.append(exc)
+                finally:
+                    if (
+                        not preserve_lease
+                        and self._session_leases.get(host_session_id) is lease
+                    ):
+                        self._session_leases.pop(host_session_id, None)
             try:
                 self._cleanup_workspace_root(session.workspace)
             except BaseException as exc:
                 errors.append(exc)
-            if close_conversation and self.durable:
+            merged_close_conversation = await self.registry.seal_close_intent(attempt)
+            if merged_close_conversation and self.durable:
                 try:
                     self._manifest_store().mark_closed(session.runtime_session_id)
                 except BaseException as exc:
+                    manifest_error = exc
                     errors.append(exc)
-        finally:
-            assert close_event is not None
-            close_event.set()
-            async with self._session_close_lock:
-                self._session_close_events.pop(host_session_id, None)
-        if errors:
-            raise errors[0]
+            error = errors[0] if errors else None
+            await self.registry.finish_close(
+                attempt,
+                error=error,
+                manifest_close_pending=manifest_error is not None,
+            )
+            attempt.completion.result()
+        except BaseException as exc:
+            # The drain-failure path already resolved the shared attempt. For
+            # unexpected owner failures, resolve it here without deleting a
+            # newer retry attempt (registry completion is identity-conditional).
+            if not attempt.completion.done():
+                await self.registry.abort_close(attempt, error=exc)
+            # Consume/re-raise the exact shared result so owner and waiters see
+            # the same outcome.
+            attempt.completion.result()
+            raise AssertionError("unreachable")
 
     async def close_workspace(self, workspace_key: str) -> None:
         async with self._supervisor_lock:
@@ -486,16 +561,32 @@ class HostCore:
         async with self._lifecycle_lock:
             if self._lifecycle is HostCoreLifecycle.CLOSED:
                 return
-            if self._lifecycle is HostCoreLifecycle.CLOSING:
+            if self._shutdown_attempt is not None:
+                attempt = self._shutdown_attempt
                 is_shutdown_owner = False
             else:
                 self._lifecycle = HostCoreLifecycle.CLOSING
+                attempt = _HostShutdownAttempt(
+                    attempt_id=uuid4().hex,
+                    completion=asyncio.get_running_loop().create_future(),
+                )
+                self._shutdown_attempt = attempt
                 is_shutdown_owner = True
         if not is_shutdown_owner:
-            await self._shutdown_complete.wait()
+            await asyncio.shield(attempt.completion)
             return
         errors: list[BaseException] = []
+        blocked_by_close_work = False
         try:
+            pending_manifest_closes = await self.registry.list_manifest_close_tombstones()
+            for host_session_id, _runtime_session_id in pending_manifest_closes:
+                try:
+                    await self.close_session(
+                        host_session_id,
+                        close_conversation=True,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
             summaries = await self.registry.list_sessions()
             # Close every session first so each run's finally completes
             # (governance notify) and each terminal lease is released, before
@@ -507,34 +598,54 @@ class HostCore:
                     await self.close_session(summary.host_session_id)
                 except BaseException as exc:
                     errors.append(exc)
-            async with self._supervisor_lock:
-                supervisors = list(self._supervisors.values())
-                self._supervisors.clear()
-            for supervisor in supervisors:
-                supervisor.mark_closed()
-                try:
-                    await asyncio.to_thread(supervisor.terminal_sessions.shutdown)
-                except BaseException as exc:
-                    errors.append(exc)
-            async with self._retrieval_lock:
-                resources = self._retrieval_resources
-                self._retrieval_resources = None
-                self._governance_coordinator = None
-            if resources is not None:
-                try:
-                    await resources.aclose()
-                except BaseException as exc:
-                    errors.append(exc)
+            blocked_by_close_work = bool(
+                await self.registry.list_sessions()
+                or await self.registry.list_manifest_close_tombstones()
+            )
+            if blocked_by_close_work and not errors:
+                errors.append(
+                    RuntimeError(
+                        "HostCore shutdown is blocked by incomplete session finalization"
+                    )
+                )
+            if not blocked_by_close_work:
+                async with self._supervisor_lock:
+                    supervisors = list(self._supervisors.values())
+                    self._supervisors.clear()
+                for supervisor in supervisors:
+                    supervisor.mark_closed()
+                    try:
+                        await asyncio.to_thread(supervisor.terminal_sessions.shutdown)
+                    except BaseException as exc:
+                        errors.append(exc)
+                async with self._retrieval_lock:
+                    resources = self._retrieval_resources
+                    self._retrieval_resources = None
+                    self._governance_coordinator = None
+                if resources is not None:
+                    try:
+                        await resources.aclose()
+                    except BaseException as exc:
+                        errors.append(exc)
         except BaseException as exc:
             # Even an unexpected coordinator failure must not strand every
             # concurrent waiter behind a permanently-CLOSING HostCore.
             errors.append(exc)
         finally:
             async with self._lifecycle_lock:
-                self._lifecycle = HostCoreLifecycle.CLOSED
-                self._shutdown_complete.set()
-        if errors:
-            raise errors[0]
+                self._lifecycle = (
+                    HostCoreLifecycle.OPEN
+                    if blocked_by_close_work
+                    else HostCoreLifecycle.CLOSED
+                )
+                if self._shutdown_attempt is attempt:
+                    self._shutdown_attempt = None
+                    error = errors[0] if errors else None
+                    if error is None:
+                        attempt.completion.set_result(None)
+                    else:
+                        attempt.completion.set_exception(error)
+        attempt.completion.result()
 
     # -- Internal helpers -----------------------------------------------------
 
@@ -591,11 +702,22 @@ class HostCore:
         thread off the lock, then prune the supervisor if it is empty and open."""
         async with self._supervisor_lock:
             supervisor = self._supervisors.get(lease.workspace_key)
-            owner_id = supervisor.release_lease(lease) if supervisor is not None else None
-        if owner_id is not None:
-            await asyncio.to_thread(lease.manager.release_owner, owner_id)
+            current = (
+                supervisor is not None
+                and supervisor.is_current_lease(lease)
+            )
+        if not current:
+            return
+        # Durable completion drain must succeed before dropping the supervisor
+        # lease. A failure leaves the exact lease generation retryable.
+        await asyncio.to_thread(
+            lease.manager.release_owner,
+            lease.owner.host_session_id,
+        )
         async with self._supervisor_lock:
             supervisor = self._supervisors.get(lease.workspace_key)
+            if supervisor is not None:
+                supervisor.release_lease(lease)
             if (
                 supervisor is not None
                 and supervisor.is_accepting

@@ -6,8 +6,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Mapping
 
+from pulsara_agent.runtime.subagent.immutable import (
+    freeze_json_mapping,
+    thaw_json_mapping,
+)
 
-SubagentStatus = Literal["starting", "running", "suspended", "completed", "failed", "cancelled"]
+
+SubagentStatus = Literal["running", "suspended", "completed", "failed", "cancelled"]
 SubagentTaskStatus = Literal[
     "created",
     "waiting_dependency",
@@ -63,6 +68,32 @@ class SubagentBudget:
     max_result_summary_chars_per_child: int = 4_000
     max_subagent_results_per_parent_compile: int = 8
 
+    @classmethod
+    def from_event_snapshot(cls, snapshot: object) -> SubagentBudget:
+        """Hydrate a convenience value from one immutable event snapshot."""
+
+        return cls(
+            max_concurrent_children_per_parent_run=int(
+                getattr(snapshot, "max_concurrent_children_per_parent_run")
+            ),
+            max_concurrent_children_per_host_session=int(
+                getattr(snapshot, "max_concurrent_children_per_host_session")
+            ),
+            max_spawn_depth_from_root=int(
+                getattr(snapshot, "max_spawn_depth_from_root")
+            ),
+            child_timeout_seconds=getattr(snapshot, "child_timeout_seconds"),
+            max_total_child_runs_per_parent_run=int(
+                getattr(snapshot, "max_total_child_runs_per_parent_run")
+            ),
+            max_result_summary_chars_per_child=int(
+                getattr(snapshot, "max_result_summary_chars_per_child")
+            ),
+            max_subagent_results_per_parent_compile=int(
+                getattr(snapshot, "max_subagent_results_per_parent_compile")
+            ),
+        )
+
     def to_event_value(self) -> dict[str, Any]:
         return {
             "max_concurrent_children_per_parent_run": self.max_concurrent_children_per_parent_run,
@@ -92,82 +123,35 @@ class SubagentCapabilityProfile:
     computed_from_parent_exposure_generation: int | None = None
     diagnostics: tuple[Mapping[str, object], ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "permission_policy",
+            freeze_json_mapping(self.permission_policy),
+        )
+        object.__setattr__(
+            self,
+            "diagnostics",
+            tuple(freeze_json_mapping(item) for item in self.diagnostics),
+        )
+
     def to_event_value(self) -> dict[str, Any]:
         return {
             "profile_id": self.profile_id,
             "profile_name": self.profile_name,
             "inherited_from_parent_context_id": self.inherited_from_parent_context_id,
             "permission_mode": self.permission_mode,
-            "permission_policy": dict(self.permission_policy),
-            "allowed_tool_names": list(self.allowed_tool_names),
-            "allowed_descriptor_ids": list(self.allowed_descriptor_ids),
-            "allowed_skill_names": list(self.allowed_skill_names),
-            "allowed_mcp_server_ids": list(self.allowed_mcp_server_ids),
+            "permission_policy": thaw_json_mapping(self.permission_policy),
+            "allowed_tool_names": sorted(set(self.allowed_tool_names)),
+            "allowed_descriptor_ids": sorted(set(self.allowed_descriptor_ids)),
+            "allowed_skill_names": sorted(set(self.allowed_skill_names)),
+            "allowed_mcp_server_ids": sorted(set(self.allowed_mcp_server_ids)),
             "can_spawn_subagents": self.can_spawn_subagents,
             "max_spawn_depth_from_root": self.max_spawn_depth_from_root,
             "memory_enabled": self.memory_enabled,
             "computed_from_parent_exposure_generation": self.computed_from_parent_exposure_generation,
-            "diagnostics": [dict(diagnostic) for diagnostic in self.diagnostics],
+            "diagnostics": [thaw_json_mapping(diagnostic) for diagnostic in self.diagnostics],
         }
-
-
-@dataclass(frozen=True, slots=True)
-class SubagentTask:
-    task_id: str
-    batch_id: str | None
-    create_tool_call_id: str | None
-    task_key: str | None
-    label: str | None
-    profile_id: str
-    display_role: str | None
-    objective: str
-    objective_preview: str
-    status: SubagentTaskStatus
-    depends_on: tuple[str, ...]
-    current_run_id: str | None
-    has_child_run: bool
-    phase: str | None
-    result_id: str | None
-    primary_result_artifact_id: str | None
-    created_at: datetime
-    updated_at: datetime
-    completed_at: datetime | None = None
-    metadata: Mapping[str, object] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class SubagentRun:
-    subagent_run_id: str
-    parent_runtime_session_id: str
-    parent_run_id: str
-    parent_turn_id: str | None
-    parent_reply_id: str | None
-    parent_context_id: str | None
-    parent_model_call_index: int | None
-    spawning_tool_call_id: str | None
-    spawning_tool_name: str | None
-    child_runtime_session_id: str
-    child_run_id: str | None
-    label: str | None
-    role: SubagentRole
-    status: SubagentStatus
-    task: str
-    created_at: datetime
-    updated_at: datetime
-    context_policy: SubagentContextPolicy
-    capability_profile: SubagentCapabilityProfile
-    budget: SubagentBudget
-    task_id: str | None = None
-    batch_id: str | None = None
-    create_tool_call_id: str | None = None
-    run_index: int | None = None
-    spawn_initiator_kind: SubagentSpawnInitiatorKind | None = None
-    spawn_initiator_id: str | None = None
-    profile_id: str | None = None
-    phase: str | None = None
-    result_id: str | None = None
-    result_source: SubagentResultSource = "none"
-    metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +193,15 @@ class SubagentResult:
     completed_at: datetime
     task_id: str | None = None
     result_source: Literal["explicit", "inferred"] = "inferred"
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentRunTerminalOutcome:
+    subagent_run_id: str
+    status: Literal["failed", "cancelled"]
+    reason_code: str
+    terminal_event_id: str
+    task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

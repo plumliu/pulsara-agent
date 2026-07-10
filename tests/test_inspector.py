@@ -46,6 +46,8 @@ from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.memory.candidates.pool import CANDIDATE_POOL_SCHEMA_SQL
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
+from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.runtime.subagent.facts import subagent_dependency_generation
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
@@ -78,6 +80,49 @@ def _cleanup_session(dsn: str, runtime_session_id: str) -> None:
 
 def _service(dsn: str) -> InspectorService:
     return InspectorService(PostgresInspectorStore(dsn), oxigraph_url=None)
+
+
+def _subagent_context_snapshot() -> dict[str, object]:
+    return {
+        "mode": "isolated",
+        "include_parent_summary": False,
+        "include_parent_current_task": True,
+        "include_parent_memory_projection": False,
+        "include_parent_artifact_refs": False,
+        "max_parent_context_chars": None,
+        "fork_source_context_id": None,
+    }
+
+
+def _subagent_capability_snapshot() -> dict[str, object]:
+    return {
+        "profile_id": "subagent_capability_profile:test",
+        "profile_name": "review_worker",
+        "inherited_from_parent_context_id": "context:parent",
+        "permission_mode": PermissionMode.READ_ONLY.value,
+        "permission_policy": preset_to_policy(PermissionMode.READ_ONLY).to_dict(),
+        "allowed_tool_names": ["artifact_read", "read_file", "report_agent_phase", "report_agent_result"],
+        "allowed_descriptor_ids": [],
+        "allowed_skill_names": [],
+        "allowed_mcp_server_ids": [],
+        "can_spawn_subagents": False,
+        "max_spawn_depth_from_root": 0,
+        "memory_enabled": False,
+        "computed_from_parent_exposure_generation": None,
+        "diagnostics": [],
+    }
+
+
+def _subagent_budget_snapshot() -> dict[str, object]:
+    return {
+        "max_concurrent_children_per_parent_run": 4,
+        "max_concurrent_children_per_host_session": 8,
+        "max_spawn_depth_from_root": 0,
+        "child_timeout_seconds": None,
+        "max_total_child_runs_per_parent_run": 16,
+        "max_result_summary_chars_per_child": 4_000,
+        "max_subagent_results_per_parent_compile": 8,
+    }
 
 
 def _simple_run_events(ctx: EventContext, *, user_input: str, text: str):
@@ -751,6 +796,15 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
         result_id = f"subagent_result:{uuid4().hex}"
         result_artifact_id = f"{subagent_run_id}:result"
         edge_id = f"subagent_edge:{subagent_run_id}:spawn"
+        prepare_failed_event = SubagentTaskFailedEvent(
+            **ctx.event_fields(),
+            task_id=prepare_task_id,
+            subagent_run_id=None,
+            batch_id="subagent_batch:test",
+            create_tool_call_id="tool:create-tasks",
+            reason_code="synthetic_prepare_failed",
+            reason_message="prepare failed",
+        )
         log.extend(
             [
                 *_simple_run_events(ctx, user_input="delegate", text="parent done"),
@@ -763,6 +817,7 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
                     label="Review",
                     profile_id="review_worker",
                     objective_preview="Review the change",
+                    objective_artifact_id=f"{review_task_id}:objective",
                     depends_on=[],
                 ),
                 SubagentTaskCreatedEvent(
@@ -774,6 +829,7 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
                     label="Prepare",
                     profile_id="review_worker",
                     objective_preview="Prepare evidence",
+                    objective_artifact_id=f"{prepare_task_id}:objective",
                     depends_on=[],
                 ),
                 SubagentTaskCreatedEvent(
@@ -785,15 +841,10 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
                     label="Verify",
                     profile_id="verification_worker",
                     objective_preview="Verify the review",
+                    objective_artifact_id=f"{verify_task_id}:objective",
                     depends_on=[prepare_task_id],
                 ),
-                SubagentTaskFailedEvent(
-                    **ctx.event_fields(),
-                    task_id=prepare_task_id,
-                    subagent_run_id=None,
-                    reason_code="synthetic_prepare_failed",
-                    reason_message="prepare failed",
-                ),
+                prepare_failed_event,
                 SubagentRunStartedEvent(
                     **ctx.event_fields(),
                     subagent_run_id=subagent_run_id,
@@ -804,15 +855,20 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
                     parent_reply_id=ctx.reply_id,
                     parent_context_id="context:parent",
                     parent_model_call_index=1,
-                    spawning_tool_call_id="tool:spawn",
                     spawning_tool_name="spawn_agent",
+                    spawn_initiator_kind="tool_call",
+                    spawn_initiator_id="tool:spawn",
                     child_runtime_session_id=child_runtime_session_id,
                     label="worker",
                     role="worker",
                     task_preview="child task",
-                    task_id=review_task_id,
-                    batch_id="subagent_batch:test",
-                    create_tool_call_id="tool:create-tasks",
+                        task_id=review_task_id,
+                        batch_id="subagent_batch:test",
+                        create_tool_call_id="tool:create-tasks",
+                        run_index=1,
+                    context_policy=_subagent_context_snapshot(),
+                    capability_profile=_subagent_capability_snapshot(),
+                    budget_snapshot=_subagent_budget_snapshot(),
                 ),
                 SubagentTaskStartedEvent(
                     **ctx.event_fields(),
@@ -831,7 +887,7 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
                     parent_runtime_session_id=runtime_session_id,
                     parent_run_id=ctx.run_id,
                     child_runtime_session_id=child_runtime_session_id,
-                    message_artifact_id=f"{subagent_run_id}:task",
+                        message_artifact_id=f"{review_task_id}:objective",
                     message_preview="child task",
                     delivery_kind="spawn_task",
                 ),
@@ -860,8 +916,10 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
                     blocked_reason="dependency_failed",
                     blocked_by_task_ids=[prepare_task_id],
                     dependency_status_snapshot={prepare_task_id: "failed"},
-                    dependency_terminal_event_ids={prepare_task_id: "event_sequence:999"},
-                    dependency_generation=999,
+                    dependency_terminal_event_ids={prepare_task_id: prepare_failed_event.id},
+                    dependency_generation=subagent_dependency_generation(
+                        {prepare_task_id: prepare_failed_event.id}
+                    ),
                 ),
                 SubagentEdgeRecordedEvent(
                     **ctx.event_fields(),
@@ -919,7 +977,7 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
         assert tasks_by_key["verify"]["status"] == "blocked_dependency_failed"
         assert tasks_by_key["verify"]["blocked_by_task_ids"] == [prepare_task_id]
         assert tasks_by_key["verify"]["dependency_terminal_event_ids"] == {
-            prepare_task_id: "event_sequence:999"
+            prepare_task_id: prepare_failed_event.id
         }
     finally:
         _cleanup_session(dsn, runtime_session_id)

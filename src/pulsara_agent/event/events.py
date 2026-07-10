@@ -918,6 +918,125 @@ class ContextCompactionFailedEvent(EventBase):
     message: str
 
 
+SubagentPermissionMode = Literal[
+    "read-only",
+    "ask-permissions",
+    "accept-edits",
+    "bypass-permissions",
+]
+SubagentCapabilityProfileName = Literal[
+    "general_worker",
+    "research_worker",
+    "review_worker",
+    "verification_worker",
+    "synthesizer",
+    "orchestrator",
+]
+
+
+class SubagentContextPolicySnapshotEvent(BaseModel):
+    """Immutable event-visible child context policy."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mode: Literal["isolated", "fork"]
+    include_parent_summary: bool
+    include_parent_current_task: bool
+    include_parent_memory_projection: bool
+    include_parent_artifact_refs: bool
+    max_parent_context_chars: int | None
+    fork_source_context_id: str | None
+
+    @model_validator(mode="after")
+    def _validate_context_policy(self) -> SubagentContextPolicySnapshotEvent:
+        if self.max_parent_context_chars is not None and self.max_parent_context_chars <= 0:
+            raise ValueError("max_parent_context_chars must be positive when provided")
+        if self.mode == "isolated" and self.fork_source_context_id is not None:
+            raise ValueError("isolated context policy cannot set fork_source_context_id")
+        if self.mode == "fork" and not self.fork_source_context_id:
+            raise ValueError("fork context policy requires fork_source_context_id")
+        return self
+
+
+class SubagentCapabilityProfileSnapshotEvent(BaseModel):
+    """Immutable event-visible child capability contract."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    profile_id: str
+    profile_name: SubagentCapabilityProfileName
+    inherited_from_parent_context_id: str | None
+    permission_mode: SubagentPermissionMode
+    permission_policy: dict[str, Any]
+    allowed_tool_names: tuple[str, ...]
+    allowed_descriptor_ids: tuple[str, ...]
+    allowed_skill_names: tuple[str, ...]
+    allowed_mcp_server_ids: tuple[str, ...]
+    can_spawn_subagents: bool
+    max_spawn_depth_from_root: int
+    memory_enabled: bool
+    computed_from_parent_exposure_generation: int | None
+    diagnostics: tuple[dict[str, Any], ...]
+
+    @model_validator(mode="after")
+    def _validate_capability_profile(self) -> SubagentCapabilityProfileSnapshotEvent:
+        _validate_preset_permission_payload(
+            mode=self.permission_mode,
+            policy=self.permission_policy,
+            context="SubagentCapabilityProfileSnapshotEvent",
+        )
+        if self.can_spawn_subagents:
+            raise ValueError("V1 child capability profile cannot spawn subagents")
+        if self.max_spawn_depth_from_root != 0:
+            raise ValueError("V1 child capability profile max_spawn_depth_from_root must be 0")
+        if self.memory_enabled:
+            raise ValueError("V1 child capability profile cannot enable memory")
+        for field_name in (
+            "allowed_tool_names",
+            "allowed_descriptor_ids",
+            "allowed_skill_names",
+            "allowed_mcp_server_ids",
+        ):
+            values = getattr(self, field_name)
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"{field_name} must be unique and canonically sorted")
+        return self
+
+
+class SubagentBudgetSnapshotEvent(BaseModel):
+    """Immutable event-visible limits for one child runtime."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_concurrent_children_per_parent_run: int
+    max_concurrent_children_per_host_session: int
+    max_spawn_depth_from_root: int
+    child_timeout_seconds: float | None
+    max_total_child_runs_per_parent_run: int
+    max_result_summary_chars_per_child: int
+    max_subagent_results_per_parent_compile: int
+
+    @model_validator(mode="after")
+    def _validate_budget(self) -> SubagentBudgetSnapshotEvent:
+        positive_fields = (
+            "max_concurrent_children_per_parent_run",
+            "max_concurrent_children_per_host_session",
+            "max_total_child_runs_per_parent_run",
+            "max_subagent_results_per_parent_compile",
+        )
+        for field_name in positive_fields:
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name} must be >= 1")
+        if self.max_spawn_depth_from_root != 0:
+            raise ValueError("V1 subagent budget max_spawn_depth_from_root must be 0")
+        if self.max_result_summary_chars_per_child < 0:
+            raise ValueError("max_result_summary_chars_per_child must be >= 0")
+        if self.child_timeout_seconds is not None:
+            if not math.isfinite(self.child_timeout_seconds) or self.child_timeout_seconds <= 0:
+                raise ValueError("child_timeout_seconds must be finite and > 0 when provided")
+        return self
+
+
 class SubagentRunStartedEvent(EventBase):
     type: Literal[EventType.SUBAGENT_RUN_STARTED] = EventType.SUBAGENT_RUN_STARTED
     subagent_run_id: str
@@ -932,7 +1051,6 @@ class SubagentRunStartedEvent(EventBase):
     parent_reply_id: str | None = None
     parent_context_id: str | None = None
     parent_model_call_index: int | None = None
-    spawning_tool_call_id: str | None = None
     spawning_tool_name: str | None = None
     spawn_initiator_kind: Literal["tool_call", "scheduler", "dependency_satisfied"] | None = None
     spawn_initiator_id: str | None = None
@@ -941,8 +1059,27 @@ class SubagentRunStartedEvent(EventBase):
     role: str
     profile_id: str | None = None
     task_preview: str
-    context_policy: dict[str, Any] = Field(default_factory=dict)
-    capability_profile: dict[str, Any] = Field(default_factory=dict)
+    context_policy: SubagentContextPolicySnapshotEvent
+    capability_profile: SubagentCapabilityProfileSnapshotEvent
+    budget_snapshot: SubagentBudgetSnapshotEvent
+
+    @model_validator(mode="after")
+    def _validate_spawn_initiator(self) -> SubagentRunStartedEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        if self.task_id is None:
+            if self.run_index is not None:
+                raise ValueError("primitive subagent run cannot set run_index")
+        elif self.run_index != 1:
+            raise ValueError("V1 task-backed subagent run requires run_index=1")
+        if self.spawn_initiator_kind == "tool_call":
+            if not self.spawn_initiator_id:
+                raise ValueError("tool_call spawn initiator requires spawn_initiator_id")
+        elif self.spawn_initiator_kind is not None and not self.spawn_initiator_id:
+            raise ValueError("non-tool spawn initiator requires spawn_initiator_id")
+        elif self.spawning_tool_name is not None:
+            raise ValueError("spawning_tool_name is only valid for tool_call initiators")
+        return self
 
 
 class SubagentMessageSentEvent(EventBase):
@@ -952,7 +1089,7 @@ class SubagentMessageSentEvent(EventBase):
     parent_runtime_session_id: str
     parent_run_id: str
     child_runtime_session_id: str
-    message_artifact_id: str | None = None
+    message_artifact_id: str
     message_preview: str
     delivery_kind: Literal["spawn_task", "send", "followup"]
 
@@ -976,10 +1113,18 @@ class SubagentRunCompletedEvent(EventBase):
     child_run_id: str | None = None
     result_id: str
     summary: str
-    result_artifact_id: str | None = None
+    result_artifact_id: str
     artifact_ids: list[str] = Field(default_factory=list)
     token_usage: dict[str, Any] | None = None
     tool_call_count: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_result_artifact(self) -> SubagentRunCompletedEvent:
+        if self.result_artifact_id not in self.artifact_ids:
+            raise ValueError("result_artifact_id must be present in artifact_ids")
+        if len(self.artifact_ids) != len(set(self.artifact_ids)):
+            raise ValueError("artifact_ids must be unique")
+        return self
 
 
 class SubagentRunFailedEvent(EventBase):
@@ -990,6 +1135,15 @@ class SubagentRunFailedEvent(EventBase):
     reason_code: str
     reason_message: str | None = None
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    repair_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_creation_attribution(self) -> SubagentRunFailedEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        return self
 
 
 class SubagentRunCancelledEvent(EventBase):
@@ -1000,6 +1154,15 @@ class SubagentRunCancelledEvent(EventBase):
     reason_code: str
     reason_message: str | None = None
     cancelled_by: Literal["user", "parent_agent", "runtime", "host_shutdown"]
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    repair_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_creation_attribution(self) -> SubagentRunCancelledEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        return self
 
 
 class SubagentEdgeRecordedEvent(EventBase):
@@ -1028,16 +1191,24 @@ class SubagentResultDeliveredEvent(EventBase):
     type: Literal[EventType.SUBAGENT_RESULT_DELIVERED] = EventType.SUBAGENT_RESULT_DELIVERED
     subagent_run_id: str
     parent_runtime_session_id: str
-    parent_run_id: str | None = None
+    parent_run_id: str
     parent_turn_id: str | None = None
     parent_reply_id: str | None = None
-    context_id: str | None = None
-    model_call_index: int | None = None
-    section_id: str | None = None
+    context_id: str
+    model_call_index: int
+    section_id: str
     delivery_kind: Literal["internal_section"] = "internal_section"
     result_id: str
-    result_artifact_id: str | None = None
+    result_artifact_id: str
     summary: str
+
+    @model_validator(mode="after")
+    def _validate_delivery_join(self) -> SubagentResultDeliveredEvent:
+        if self.model_call_index < 0:
+            raise ValueError("model_call_index must be >= 0")
+        if not self.context_id or not self.section_id or not self.result_artifact_id:
+            raise ValueError("delivery join fields must be non-empty")
+        return self
 
 
 class SubagentTaskCreatedEvent(EventBase):
@@ -1050,8 +1221,18 @@ class SubagentTaskCreatedEvent(EventBase):
     profile_id: str
     display_role: str | None = None
     objective_preview: str
-    objective_artifact_id: str | None = None
+    objective_artifact_id: str
     depends_on: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_task_creation(self) -> SubagentTaskCreatedEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        if self.task_id in self.depends_on:
+            raise ValueError("task cannot depend on itself")
+        if len(self.depends_on) != len(set(self.depends_on)):
+            raise ValueError("depends_on must be unique")
+        return self
 
 
 class SubagentTaskScheduledEvent(EventBase):
@@ -1060,6 +1241,12 @@ class SubagentTaskScheduledEvent(EventBase):
     batch_id: str | None = None
     create_tool_call_id: str | None = None
     schedule_reason: Literal["immediate", "dependency_satisfied", "manual"] = "immediate"
+
+    @model_validator(mode="after")
+    def _validate_creation_attribution(self) -> SubagentTaskScheduledEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        return self
 
 
 class SubagentTaskStartedEvent(EventBase):
@@ -1072,6 +1259,16 @@ class SubagentTaskStartedEvent(EventBase):
     spawn_initiator_kind: Literal["tool_call", "scheduler", "dependency_satisfied"]
     spawn_initiator_id: str
 
+    @model_validator(mode="after")
+    def _validate_task_start(self) -> SubagentTaskStartedEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        if self.run_index != 1:
+            raise ValueError("V1 task-backed run_index must be 1")
+        if not self.spawn_initiator_id:
+            raise ValueError("spawn_initiator_id must be non-empty")
+        return self
+
 
 class SubagentTaskBlockedEvent(EventBase):
     type: Literal[EventType.SUBAGENT_TASK_BLOCKED] = EventType.SUBAGENT_TASK_BLOCKED
@@ -1083,13 +1280,38 @@ class SubagentTaskBlockedEvent(EventBase):
     dependency_terminal_event_ids: dict[str, str] = Field(default_factory=dict)
     dependency_generation: int | None = None
 
+    @model_validator(mode="after")
+    def _validate_dependency_facts(self) -> SubagentTaskBlockedEvent:
+        blocked_ids = set(self.blocked_by_task_ids)
+        if len(blocked_ids) != len(self.blocked_by_task_ids):
+            raise ValueError("blocked_by_task_ids must be unique")
+        if set(self.dependency_status_snapshot) != blocked_ids:
+            raise ValueError("dependency_status_snapshot keys must match blocked_by_task_ids")
+        terminal = self.status == "blocked_dependency_failed"
+        if terminal:
+            if self.blocked_reason != "dependency_failed" or not blocked_ids:
+                raise ValueError("terminal dependency block requires failed dependency facts")
+            if set(self.dependency_terminal_event_ids) != blocked_ids:
+                raise ValueError(
+                    "dependency_terminal_event_ids keys must match blocked_by_task_ids"
+                )
+            if self.dependency_generation is None or self.dependency_generation < 0:
+                raise ValueError("terminal dependency block requires dependency_generation")
+        elif (
+            self.blocked_reason != "waiting_dependency"
+            or self.dependency_terminal_event_ids
+            or self.dependency_generation is not None
+        ):
+            raise ValueError("waiting dependency block cannot carry terminal dependency facts")
+        return self
+
 
 class SubagentTaskCompletedEvent(EventBase):
     type: Literal[EventType.SUBAGENT_TASK_COMPLETED] = EventType.SUBAGENT_TASK_COMPLETED
     task_id: str
-    subagent_run_id: str | None = None
-    result_id: str | None = None
-    primary_result_artifact_id: str | None = None
+    subagent_run_id: str
+    result_id: str
+    primary_result_artifact_id: str
     result_source: Literal["explicit", "inferred"] = "inferred"
 
 
@@ -1100,6 +1322,15 @@ class SubagentTaskFailedEvent(EventBase):
     reason_code: str
     reason_message: str | None = None
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    repair_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_creation_attribution(self) -> SubagentTaskFailedEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        return self
 
 
 class SubagentTaskCancelledEvent(EventBase):
@@ -1109,6 +1340,15 @@ class SubagentTaskCancelledEvent(EventBase):
     reason_code: str
     reason_message: str | None = None
     cancelled_by: Literal["user", "parent_agent", "runtime", "host_shutdown"]
+    batch_id: str | None = None
+    create_tool_call_id: str | None = None
+    repair_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_creation_attribution(self) -> SubagentTaskCancelledEvent:
+        if (self.batch_id is None) != (self.create_tool_call_id is None):
+            raise ValueError("batch_id and create_tool_call_id must be provided together")
+        return self
 
 
 class SubagentPhaseReportedEvent(EventBase):
@@ -1128,11 +1368,19 @@ class SubagentResultSubmittedEvent(EventBase):
     result_id: str
     summary: str
     output_preview: str | None = None
-    result_artifact_id: str | None = None
+    result_artifact_id: str
     artifact_ids: list[str] = Field(default_factory=list)
     result_source: Literal["explicit"] = "explicit"
     source_tool_call_id: str | None = None
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_result_artifact(self) -> SubagentResultSubmittedEvent:
+        if self.result_artifact_id not in self.artifact_ids:
+            raise ValueError("result_artifact_id must be present in artifact_ids")
+        if len(self.artifact_ids) != len(set(self.artifact_ids)):
+            raise ValueError("artifact_ids must be unique")
+        return self
 
 
 class SubagentResultConsumedEvent(EventBase):
@@ -1146,6 +1394,20 @@ class SubagentResultConsumedEvent(EventBase):
     consumed_status: Literal["completed", "failed", "cancelled", "blocked_dependency_failed"]
     terminal_event_id: str | None = None
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_consumption(self) -> SubagentResultConsumedEvent:
+        if self.task_id is None and self.subagent_run_id is None:
+            raise ValueError("consumption requires task_id or subagent_run_id")
+        if self.kind == "wait_run" and self.subagent_run_id is None:
+            raise ValueError("wait_run consumption requires subagent_run_id")
+        if self.kind == "wait_task" and self.task_id is None:
+            raise ValueError("wait_task consumption requires task_id")
+        if self.result_id is None and self.terminal_event_id is None:
+            raise ValueError("consumption without result_id requires terminal_event_id")
+        if self.consumed_status == "completed" and self.result_id is None:
+            raise ValueError("completed consumption requires result_id")
+        return self
 
 
 class CustomEvent(EventBase):

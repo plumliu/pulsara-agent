@@ -227,6 +227,9 @@ class HostSession:
             "has_live_processes": terminal_sessions.has_live_processes(owner_host_session_id=self.host_session_id),
             "live_process_count": terminal_sessions.live_process_count(owner_host_session_id=self.host_session_id),
             "finished_process_count": terminal_sessions.finished_process_count(owner_host_session_id=self.host_session_id),
+            "pending_completion_count": terminal_sessions.pending_completion_count(
+                owner_host_session_id=self.host_session_id
+            ),
             "processes": [process.to_payload() for process in processes],
         }
 

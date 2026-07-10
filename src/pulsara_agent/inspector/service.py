@@ -37,6 +37,7 @@ from pulsara_agent.message.blocks import DataBlock, TextBlock, ToolCallBlock, To
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime.timeline import build_run_timeline
 from pulsara_agent.runtime.subagent.projection import project_subagent_graph
+from pulsara_agent.runtime.subagent.reducer import fold_subagent_graph
 
 
 _REQUIRED_TABLES = (
@@ -377,9 +378,10 @@ def _subagent_graph_projection(
     *,
     parent_run_id: str | None = None,
 ) -> dict[str, Any]:
+    state = fold_subagent_graph(events)
     projection = project_subagent_graph(
         session_id,
-        _BoundedEventLog(events),
+        state,
         locator=_InspectorEventLogLocator(store),
     )
     edges = list(projection.edges)

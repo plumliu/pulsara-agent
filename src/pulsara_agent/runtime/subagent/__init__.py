@@ -1,8 +1,41 @@
 """Subagent runtime primitives."""
 
+from pulsara_agent.runtime.subagent.facts import (
+    SubagentConsumptionFact,
+    SubagentDeliveryFact,
+    SubagentEdgeFact,
+    SubagentFactProvenance,
+    SubagentGraphDiagnostic,
+    SubagentGraphState,
+    SubagentResultFact,
+    SubagentRunFact,
+    SubagentTaskFact,
+)
+from pulsara_agent.runtime.subagent.execution import (
+    ChildCapacityReservation,
+    ChildExecutionDiagnostic,
+    ChildExecutionHandle,
+    ChildExecutionRegistry,
+)
+from pulsara_agent.runtime.subagent.commands import (
+    PlannedChildReservation,
+    PlannedSubagentWrite,
+    SubagentCommandDiagnostic,
+    SubagentCommandPlanError,
+    SubagentCommandPlanner,
+    validate_planned_transitions,
+)
+from pulsara_agent.runtime.subagent.hydration import (
+    HydratedSubagentResultView,
+    HydratedSubagentRunView,
+    HydratedSubagentTaskView,
+    SubagentGraphHydrator,
+    SubagentHydrationDiagnostic,
+)
 from pulsara_agent.runtime.subagent.projection import (
     EventLogLocator,
     InMemoryEventLogLocator,
+    PostgresEventLogLocator,
     project_subagent_graph,
 )
 from pulsara_agent.runtime.subagent.runtime import (
@@ -11,6 +44,11 @@ from pulsara_agent.runtime.subagent.runtime import (
     SubagentNotReady,
     SubagentRuntime,
     SubagentRuntimeError,
+)
+from pulsara_agent.runtime.subagent.reducer import apply_subagent_event, fold_subagent_graph
+from pulsara_agent.runtime.subagent.store import (
+    SubagentGraphStateStore,
+    SubagentReducerApplyError,
 )
 from pulsara_agent.runtime.subagent.types import (
     SubagentBudget,
@@ -24,38 +62,65 @@ from pulsara_agent.runtime.subagent.types import (
     SubagentResult,
     SubagentResultSource,
     SubagentRole,
-    SubagentRun,
+    SubagentRunTerminalOutcome,
     SubagentSpawnInitiatorKind,
     SubagentStatus,
-    SubagentTask,
     SubagentTaskProjection,
     SubagentTaskStatus,
 )
 
 __all__ = [
     "EventLogLocator",
+    "ChildCapacityReservation",
+    "ChildExecutionDiagnostic",
+    "ChildExecutionHandle",
+    "ChildExecutionRegistry",
     "InMemoryEventLogLocator",
+    "PostgresEventLogLocator",
+    "PlannedChildReservation",
+    "PlannedSubagentWrite",
+    "HydratedSubagentResultView",
+    "HydratedSubagentRunView",
+    "HydratedSubagentTaskView",
+    "SubagentConsumptionFact",
+    "SubagentCommandDiagnostic",
+    "SubagentCommandPlanError",
+    "SubagentCommandPlanner",
+    "SubagentDeliveryFact",
     "SubagentBudget",
     "SubagentCapabilityProfile",
     "SubagentCapabilityProfileName",
     "SubagentContextPolicy",
     "SubagentEdge",
+    "SubagentEdgeFact",
     "SubagentEdgeKind",
     "SubagentGraphNode",
     "SubagentGraphProjection",
+    "SubagentGraphDiagnostic",
+    "SubagentGraphState",
+    "SubagentGraphStateStore",
+    "SubagentGraphHydrator",
+    "SubagentHydrationDiagnostic",
+    "SubagentFactProvenance",
     "SubagentLimitExceeded",
     "SubagentNotFound",
     "SubagentNotReady",
     "SubagentResult",
+    "SubagentResultFact",
     "SubagentResultSource",
     "SubagentRole",
-    "SubagentRun",
+    "SubagentRunTerminalOutcome",
+    "SubagentRunFact",
     "SubagentSpawnInitiatorKind",
     "SubagentRuntime",
     "SubagentRuntimeError",
+    "SubagentReducerApplyError",
     "SubagentStatus",
-    "SubagentTask",
+    "SubagentTaskFact",
     "SubagentTaskProjection",
     "SubagentTaskStatus",
     "project_subagent_graph",
+    "apply_subagent_event",
+    "fold_subagent_graph",
+    "validate_planned_transitions",
 ]

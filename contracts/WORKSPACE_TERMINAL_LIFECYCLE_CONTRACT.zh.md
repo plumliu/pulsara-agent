@@ -122,8 +122,8 @@ class WorkspaceTerminalLease:
 
 - `attach(owner)` 在 `OPEN` 下返回唯一 lease（带单调 `generation`）；**workspace `CLOSING/CLOSED` 后 attach 必须失败**；同一 `host_session_id` 重复 attach 失败（uniqueness 已由 registry 保证，supervisor 是第二道防线）。
 - release 幂等且按 `generation` 校验：stale / superseded lease 的 release 是 no-op，不误删新 borrower。
-- release 负责**完整 owner cleanup**：kill/drain owner process、删除 owner 的 terminal session 与 cwd state、释放 owner 占用的 manager capacity、清掉强引用 RuntimeSession 的 completion recorder。**不能只 `kill_owned()` 而留下 stale `_sessions` key**（否则 shared 路径容量被已关闭 owner 永久挤占，最终触发 `max_sessions`）。
-- shared manager 与 process registry 的容器访问必须有内部线程同步；`release_owner` 先 revoke owner、再 prune/kill，使旧 `TerminalSession` 引用不能在 cleanup snapshot 后重新注册 process。manager shutdown 是永久状态，之后不得再创建 terminal session/process。
+- release 负责**完整 owner cleanup**：kill/drain owner process、bounded drain该owner的pending canonical completion、删除 owner 的 terminal session 与 cwd state、释放 owner 占用的 manager capacity、清掉强引用 RuntimeSession 的 completion recorder。**不能只 `kill_owned()` 而留下 stale `_sessions` key**（否则 shared 路径容量被已关闭 owner 永久挤占，最终触发 `max_sessions`）。
+- shared manager 与 process registry 的容器访问必须有内部线程同步；`release_owner`先关闭HostSession mutation gate并处理running process，再以后台recording attempt + caller deadline等待的方式drain pending completion；卡住的recorder不得突破close timeout。只有drain成功后才revoke owner、prune terminal sessions与drop supervisor lease。drain失败保留同一lease/close ownership供重试。manager shutdown 是永久状态，之后不得再创建 terminal session/process。
 - shutdown 负责 all-kill 兜底，并清空 lease registry。
 - supervisor 的状态转换是同步、快速的；**真正的同步 kill 由 HostCore 在锁外的 thread 执行**，supervisor 不在持有 asyncio lock 时自行 block，也不偷偷起 background task。
 - manager 不作为 HostCore 之外的生命周期 API 暴露。
@@ -191,7 +191,7 @@ OPEN -> CLOSING -> CLOSED
 6. registry `finish_close`；
 7. 若 transient root 由 host 创建且允许清理，最后删目录。
 
-上述 finalize 是 fail-safe 的：某个 teardown step 失败不得跳过 registry `finish_close`，也不得让并发 close 永久等待。错误在尽可能完成其余清理后上抛。
+上述 finalize 区分安全关键drain与best-effort cleanup：run/subagent/pending terminal completion等安全关键drain失败时，必须abort当前close attempt、保留indexed session/lease/workspace并让并发waiter收到同一异常；后续close可重试。只有不影响canonical fact和execution ownership的best-effort cleanup才允许收集错误后继续`finish_close`。
 
 ### 7.2 Workspace close
 

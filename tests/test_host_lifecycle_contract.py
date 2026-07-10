@@ -43,6 +43,7 @@ from pulsara_agent.host import (
     HostWorkspaceInput,
     WorkspaceClosingError,
 )
+from pulsara_agent.host.session_manifest import SessionManifest
 from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
@@ -50,6 +51,7 @@ from pulsara_agent.runtime import AbortKind, ApprovalResolution, ToolApprovalDec
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode, preset_to_policy
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
+    PendingTerminalCompletionError,
     TerminalOwnerContext,
     TerminalRequest,
     TerminalSessionManager,
@@ -355,6 +357,691 @@ def test_session_cleanup_failure_does_not_wedge_registry_close(tmp_path, monkeyp
         return session.lifecycle
 
     assert asyncio.run(run()) is HostSessionLifecycle.CLOSED
+
+
+def test_session_drain_failure_preserves_lease_and_allows_close_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    original_close = HostSession.aclose
+    attempts = 0
+
+    async def fail_once(self, *, reason=AbortKind.HOST_TEARDOWN, drain_timeout_seconds=5.0):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("synthetic child drain timeout")
+        return await original_close(
+            self,
+            reason=reason,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
+
+    monkeypatch.setattr(HostSession, "aclose", fail_once)
+
+    async def run() -> None:
+        session = await _open(core, tmp_path, host_session_id="host:drain-retry")
+        lease = core._session_leases[session.host_session_id]  # noqa: SLF001
+
+        with pytest.raises(TimeoutError, match="child drain timeout"):
+            await core.close_session(session.host_session_id)
+
+        assert await core.registry.get(session.host_session_id) is session
+        assert core._session_leases[session.host_session_id] is lease  # noqa: SLF001
+        assert session.lifecycle is HostSessionLifecycle.CLOSING
+        assert lease.workspace_key in core._supervisors  # noqa: SLF001
+
+        await core.close_session(session.host_session_id)
+        assert await core.list_sessions() == []
+        assert session.host_session_id not in core._session_leases  # noqa: SLF001
+        await core.shutdown()
+
+    asyncio.run(run())
+
+
+def test_concurrent_session_close_waiters_share_failure_and_retry_attempt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    original_close = HostSession.aclose
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    retry_entered = asyncio.Event()
+    release_retry = asyncio.Event()
+    attempts = 0
+
+    async def controlled_close(
+        self,
+        *,
+        reason=AbortKind.HOST_TEARDOWN,
+        drain_timeout_seconds=5.0,
+    ):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            first_entered.set()
+            await release_first.wait()
+            raise TimeoutError("shared close attempt failed")
+        retry_entered.set()
+        await release_retry.wait()
+        return await original_close(
+            self,
+            reason=reason,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
+
+    monkeypatch.setattr(HostSession, "aclose", controlled_close)
+
+    async def run() -> None:
+        session = await _open(core, tmp_path, host_session_id="host:shared-close-result")
+        owner = asyncio.create_task(core.close_session(session.host_session_id))
+        await first_entered.wait()
+        waiter = asyncio.create_task(core.close_session(session.host_session_id))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        release_first.set()
+        outcomes = await asyncio.gather(owner, waiter, return_exceptions=True)
+        assert all(isinstance(item, TimeoutError) for item in outcomes)
+        assert all("shared close attempt failed" in str(item) for item in outcomes)
+
+        retry_owner = asyncio.create_task(core.close_session(session.host_session_id))
+        await retry_entered.wait()
+        retry_waiter = asyncio.create_task(core.close_session(session.host_session_id))
+        await asyncio.sleep(0)
+        assert not retry_waiter.done()
+
+        release_retry.set()
+        await asyncio.gather(retry_owner, retry_waiter)
+        assert await core.list_sessions() == []
+        await core.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("explicit_owner", [False, True])
+def test_close_attempt_monotonically_merges_detach_and_explicit_close_intent(
+    tmp_path,
+    monkeypatch,
+    explicit_owner: bool,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    original_close = HostSession.aclose
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    marked_closed: list[str] = []
+
+    class _ManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            marked_closed.append(runtime_session_id)
+
+    async def delayed_close(
+        self,
+        *,
+        reason=AbortKind.HOST_TEARDOWN,
+        drain_timeout_seconds=5.0,
+    ):
+        close_entered.set()
+        await release_close.wait()
+        return await original_close(
+            self,
+            reason=reason,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
+
+    monkeypatch.setattr(HostSession, "aclose", delayed_close)
+    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+
+    async def run() -> str:
+        session = await _open(core, tmp_path, host_session_id="host:close-intent")
+        core.durable = True
+        owner = asyncio.create_task(
+            core.close_session(
+                session.host_session_id,
+                close_conversation=explicit_owner,
+            )
+        )
+        await close_entered.wait()
+        waiter = asyncio.create_task(
+            core.close_session(
+                session.host_session_id,
+                close_conversation=not explicit_owner,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        release_close.set()
+        await asyncio.gather(owner, waiter)
+        return session.runtime_session_id
+
+    runtime_session_id = asyncio.run(run())
+    assert marked_closed == [runtime_session_id]
+
+
+def test_shutdown_close_attempt_merges_competing_explicit_close_intent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    original_close = HostSession.aclose
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    marked_closed: list[str] = []
+
+    class _ManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            marked_closed.append(runtime_session_id)
+
+    async def delayed_close(
+        self,
+        *,
+        reason=AbortKind.HOST_TEARDOWN,
+        drain_timeout_seconds=5.0,
+    ):
+        close_entered.set()
+        await release_close.wait()
+        return await original_close(
+            self,
+            reason=reason,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
+
+    monkeypatch.setattr(HostSession, "aclose", delayed_close)
+    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+
+    async def run() -> str:
+        session = await _open(core, tmp_path, host_session_id="host:shutdown-close-intent")
+        core.durable = True
+        shutdown = asyncio.create_task(core.shutdown())
+        await close_entered.wait()
+        explicit_close = asyncio.create_task(
+            core.close_session(session.host_session_id, close_conversation=True)
+        )
+        await asyncio.sleep(0)
+        assert not explicit_close.done()
+        release_close.set()
+        await asyncio.gather(shutdown, explicit_close)
+        return session.runtime_session_id
+
+    runtime_session_id = asyncio.run(run())
+    assert marked_closed == [runtime_session_id]
+
+
+def test_explicit_close_arriving_after_detach_intent_seal_closes_manifest(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    original_seal = HostSessionRegistry.seal_close_intent
+    sealed = asyncio.Event()
+    release_seal = asyncio.Event()
+    marked_closed: list[str] = []
+
+    class _ManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            marked_closed.append(runtime_session_id)
+
+    async def delayed_after_seal(self, attempt):
+        merged = await original_seal(self, attempt)
+        sealed.set()
+        await release_seal.wait()
+        return merged
+
+    monkeypatch.setattr(HostSessionRegistry, "seal_close_intent", delayed_after_seal)
+    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+
+    async def run() -> str:
+        session = await _open(core, tmp_path, host_session_id="host:late-explicit-intent")
+        core.durable = True
+        detach = asyncio.create_task(core.detach_session(session.host_session_id))
+        await sealed.wait()
+        explicit_close = asyncio.create_task(
+            core.close_session(session.host_session_id, close_conversation=True)
+        )
+        await asyncio.sleep(0)
+        assert not explicit_close.done()
+        release_seal.set()
+        await asyncio.gather(detach, explicit_close)
+        return session.runtime_session_id
+
+    runtime_session_id = asyncio.run(run())
+    assert marked_closed == [runtime_session_id]
+
+
+def test_explicit_close_manifest_failure_keeps_tombstone_for_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    calls = 0
+    marked_closed: list[str] = []
+
+    class _FailOnceManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("manifest unavailable")
+            marked_closed.append(runtime_session_id)
+
+    monkeypatch.setattr(
+        HostCore,
+        "_manifest_store",
+        lambda self: _FailOnceManifestStore(),
+    )
+
+    async def run() -> str:
+        session = await _open(core, tmp_path, host_session_id="host:manifest-retry")
+        core.durable = True
+        with pytest.raises(RuntimeError, match="manifest unavailable"):
+            await core.close_session(
+                session.host_session_id,
+                close_conversation=True,
+            )
+        assert await core.list_sessions() == []
+        assert await core.registry.list_manifest_close_tombstones() == (
+            (session.host_session_id, session.runtime_session_id),
+        )
+
+        await core.close_session(
+            session.host_session_id,
+            close_conversation=True,
+        )
+        assert await core.registry.list_manifest_close_tombstones() == ()
+        await core.shutdown()
+        return session.runtime_session_id
+
+    runtime_session_id = asyncio.run(run())
+    assert calls == 2
+    assert marked_closed == [runtime_session_id]
+
+
+def test_late_explicit_manifest_failure_keeps_tombstone_for_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    original_seal = HostSessionRegistry.seal_close_intent
+    sealed = asyncio.Event()
+    release_seal = asyncio.Event()
+    calls = 0
+    marked_closed: list[str] = []
+
+    class _FailOnceManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("late manifest unavailable")
+            marked_closed.append(runtime_session_id)
+
+    async def delayed_after_seal(self, attempt):
+        merged = await original_seal(self, attempt)
+        sealed.set()
+        await release_seal.wait()
+        return merged
+
+    monkeypatch.setattr(HostSessionRegistry, "seal_close_intent", delayed_after_seal)
+    monkeypatch.setattr(
+        HostCore,
+        "_manifest_store",
+        lambda self: _FailOnceManifestStore(),
+    )
+
+    async def run() -> str:
+        session = await _open(core, tmp_path, host_session_id="host:late-manifest-retry")
+        core.durable = True
+        detach = asyncio.create_task(core.detach_session(session.host_session_id))
+        await sealed.wait()
+        late_explicit = asyncio.create_task(
+            core.close_session(session.host_session_id, close_conversation=True)
+        )
+        release_seal.set()
+        await detach
+        with pytest.raises(RuntimeError, match="late manifest unavailable"):
+            await late_explicit
+        assert await core.registry.list_manifest_close_tombstones() == (
+            (session.host_session_id, session.runtime_session_id),
+        )
+
+        await core.close_session(session.host_session_id, close_conversation=True)
+        assert await core.registry.list_manifest_close_tombstones() == ()
+        await core.shutdown()
+        return session.runtime_session_id
+
+    runtime_session_id = asyncio.run(run())
+    assert calls == 2
+    assert marked_closed == [runtime_session_id]
+
+
+def test_shutdown_retries_pending_manifest_close_before_shared_teardown(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    calls = 0
+
+    class _FailOnceManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("manifest unavailable before shutdown")
+
+    monkeypatch.setattr(
+        HostCore,
+        "_manifest_store",
+        lambda self: _FailOnceManifestStore(),
+    )
+
+    async def run() -> HostCoreLifecycle:
+        session = await _open(core, tmp_path, host_session_id="host:manifest-shutdown")
+        core.durable = True
+        with pytest.raises(RuntimeError, match="manifest unavailable before shutdown"):
+            await core.close_session(session.host_session_id, close_conversation=True)
+        await core.shutdown()
+        assert await core.registry.list_manifest_close_tombstones() == ()
+        return core.lifecycle
+
+    assert asyncio.run(run()) is HostCoreLifecycle.CLOSED
+    assert calls == 2
+
+
+def test_cancelled_manifest_retry_owner_releases_retry_ownership(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    calls = 0
+    retry_finish_entered = asyncio.Event()
+    release_retry_finish = asyncio.Event()
+    original_finish_retry = HostSessionRegistry.finish_manifest_close_retry
+
+    class _FailOnceManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("manifest unavailable")
+
+    async def delayed_finish_retry(self, attempt, *, error=None):
+        retry_finish_entered.set()
+        await release_retry_finish.wait()
+        return await original_finish_retry(self, attempt, error=error)
+
+    monkeypatch.setattr(
+        HostCore,
+        "_manifest_store",
+        lambda self: _FailOnceManifestStore(),
+    )
+    monkeypatch.setattr(
+        HostSessionRegistry,
+        "finish_manifest_close_retry",
+        delayed_finish_retry,
+    )
+
+    async def run() -> None:
+        session = await _open(core, tmp_path, host_session_id="host:cancelled-retry")
+        core.durable = True
+        with pytest.raises(RuntimeError, match="manifest unavailable"):
+            await core.close_session(session.host_session_id, close_conversation=True)
+
+        retry = asyncio.create_task(
+            core.close_session(session.host_session_id, close_conversation=True)
+        )
+        await retry_finish_entered.wait()
+        tombstone = core.registry._manifest_close_tombstones[  # noqa: SLF001
+            session.host_session_id
+        ]
+        owned_attempt = tombstone.retry_attempt
+        assert owned_attempt is not None
+
+        retry.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await retry
+        assert owned_attempt.completion.done()
+        assert tombstone.retry_attempt is None
+
+        release_retry_finish.set()
+        await core.close_session(session.host_session_id, close_conversation=True)
+        assert await core.registry.list_manifest_close_tombstones() == ()
+        await core.shutdown()
+
+    asyncio.run(run())
+    assert calls == 3
+
+
+def test_runtime_reservation_atomically_rejects_pending_manifest_tombstone(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    calls = 0
+
+    class _FailOnceManifestStore:
+        def mark_closed(self, runtime_session_id: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("manifest unavailable")
+
+    monkeypatch.setattr(
+        HostCore,
+        "_manifest_store",
+        lambda self: _FailOnceManifestStore(),
+    )
+
+    async def run() -> None:
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:old-runtime",
+            conversation_id="conversation:same-runtime",
+        )
+        core.durable = True
+        with pytest.raises(RuntimeError, match="manifest unavailable"):
+            await core.close_session(session.host_session_id, close_conversation=True)
+
+        with pytest.raises(DuplicateHostSessionError, match="conversation_id pending close"):
+            await core.registry.reserve(
+                "host:new-conversation",
+                "conversation:same-runtime",
+            )
+        with pytest.raises(DuplicateHostSessionError, match="runtime_session_id.*pending close"):
+            await core.registry.reserve(
+                "host:new-runtime",
+                "conversation:new-runtime",
+                runtime_session_id=session.runtime_session_id,
+            )
+
+        await core.close_session(session.host_session_id, close_conversation=True)
+        reservation = await core.registry.reserve(
+            "host:new-runtime",
+            "conversation:same-runtime",
+            runtime_session_id=session.runtime_session_id,
+        )
+        await core.registry.release_reservation(reservation)
+        await core.shutdown()
+
+    asyncio.run(run())
+    assert calls == 2
+
+
+def test_tombstoned_resume_rejects_before_dangling_repair(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    repair_calls: list[str] = []
+    fail_manifest_close = True
+    manifest: SessionManifest | None = None
+
+    class _ManifestStore:
+        def get(self, runtime_session_id: str) -> SessionManifest | None:
+            assert manifest is not None
+            assert runtime_session_id == manifest.runtime_session_id
+            return manifest
+
+        def mark_closed(self, runtime_session_id: str) -> None:
+            if fail_manifest_close:
+                raise RuntimeError("manifest unavailable")
+
+    def record_repair(*, dsn: str, runtime_session_id: str, workspace_root: str):
+        repair_calls.append(runtime_session_id)
+        raise AssertionError("repair must not run before runtime reservation")
+
+    monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
+    monkeypatch.setattr(
+        "pulsara_agent.host.core.repair_dangling_runs_for_resume",
+        record_repair,
+    )
+
+    async def run() -> None:
+        nonlocal fail_manifest_close, manifest
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:tombstoned-resume",
+            conversation_id="conversation:tombstoned-resume",
+        )
+        manifest = SessionManifest(
+            runtime_session_id=session.runtime_session_id,
+            conversation_id=session.conversation_id,
+            workspace_kind="project",
+            workspace_root=str(tmp_path),
+            display_label="tombstoned resume",
+            memory_domain_id="u_test",
+            model_role=ModelRole.FLASH.value,
+            permission_mode=PermissionMode.BYPASS_PERMISSIONS.value,
+            permission_policy=preset_to_policy(
+                PermissionMode.BYPASS_PERMISSIONS
+            ).to_dict(),
+            created_by="test",
+            created_at=None,
+            last_active_at=None,
+            closed_at=None,
+            archived=False,
+            metadata={},
+        )
+        core.durable = True
+        with pytest.raises(RuntimeError, match="manifest unavailable"):
+            await core.close_session(session.host_session_id, close_conversation=True)
+
+        with pytest.raises(DuplicateHostSessionError, match="runtime_session_id.*pending close"):
+            await core.resume_session(
+                session.runtime_session_id,
+                host_session_id="host:resume-new",
+                conversation_id="conversation:resume-new",
+            )
+        assert repair_calls == []
+
+        fail_manifest_close = False
+        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.shutdown()
+
+    asyncio.run(run())
+
+
+def test_host_shutdown_stops_before_shared_teardown_when_session_drain_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    original_close = HostSession.aclose
+    attempts = 0
+
+    async def fail_once(self, *, reason=AbortKind.HOST_TEARDOWN, drain_timeout_seconds=5.0):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("synthetic shutdown drain timeout")
+        return await original_close(
+            self,
+            reason=reason,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
+
+    monkeypatch.setattr(HostSession, "aclose", fail_once)
+
+    async def run() -> None:
+        session = await _open(core, tmp_path, host_session_id="host:shutdown-retry")
+        lease = core._session_leases[session.host_session_id]  # noqa: SLF001
+
+        with pytest.raises(TimeoutError, match="shutdown drain timeout"):
+            await core.shutdown()
+
+        assert core.lifecycle is HostCoreLifecycle.OPEN
+        assert await core.registry.get(session.host_session_id) is session
+        assert core._session_leases[session.host_session_id] is lease  # noqa: SLF001
+        assert lease.workspace_key in core._supervisors  # noqa: SLF001
+
+        await core.shutdown()
+        assert core.lifecycle is HostCoreLifecycle.CLOSED
+
+    asyncio.run(run())
+
+
+def test_host_close_pending_terminal_completion_preserves_retryable_session_and_lease(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([]))
+    available = False
+
+    def recorder(event):
+        if not available:
+            raise RuntimeError("synthetic terminal event store outage")
+        return event
+
+    async def run() -> None:
+        nonlocal available
+        session = await _open(core, tmp_path, host_session_id="host:terminal-pending")
+        lease = core._session_leases[session.host_session_id]  # noqa: SLF001
+        terminal = lease.manager.get_or_create(
+            owner_host_session_id=session.host_session_id,
+            owner_conversation_id=session.conversation_id,
+        )
+        started = terminal.execute(
+            TerminalRequest(
+                command="sleep 5",
+                yield_time_ms=0,
+                metadata={
+                    "origin_event_context": EventContext(
+                        run_id="run:terminal-pending",
+                        turn_id="turn:terminal-pending",
+                        reply_id="reply:terminal-pending",
+                    ),
+                    "tool_call_id": "call:terminal-pending",
+                    "record_event": recorder,
+                },
+            )
+        )
+        assert started.process_id is not None
+        lease.manager.kill_process(
+            started.process_id,
+            owner_host_session_id=session.host_session_id,
+        )
+
+        with pytest.raises(PendingTerminalCompletionError):
+            await core.close_session(session.host_session_id)
+
+        assert await core.registry.get(session.host_session_id) is session
+        assert core._session_leases[session.host_session_id] is lease  # noqa: SLF001
+        assert lease.workspace_key in core._supervisors  # noqa: SLF001
+        assert lease.manager.pending_completion_count(
+            owner_host_session_id=session.host_session_id
+        ) == 1
+
+        available = True
+        await core.close_session(session.host_session_id)
+
+        assert await core.registry.list_sessions() == []
+        assert session.host_session_id not in core._session_leases  # noqa: SLF001
+        await core.shutdown()
+
+    asyncio.run(run())
 
 
 def test_repeated_owner_release_does_not_exhaust_shared_session_capacity(tmp_path, monkeypatch) -> None:
@@ -733,7 +1420,8 @@ def test_concurrent_shutdown_waits_for_owner_even_when_cleanup_fails(monkeypatch
         release_close.set()
         with pytest.raises(RuntimeError, match="retrieval close boom"):
             await owner
-        await asyncio.wait_for(waiter, timeout=0.2)
+        with pytest.raises(RuntimeError, match="retrieval close boom"):
+            await asyncio.wait_for(waiter, timeout=0.2)
         return core.lifecycle
 
     assert asyncio.run(run()) is HostCoreLifecycle.CLOSED

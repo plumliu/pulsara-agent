@@ -13,6 +13,12 @@ from psycopg.types.json import Jsonb
 
 from pulsara_agent.event.events import AgentEvent, ReplyStartEvent, RunEndEvent, RunStartEvent
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
+from pulsara_agent.event_log.protocol import (
+    EventBatchConfirmation,
+    EventIdConflict,
+    EventLogWriteConflict,
+    same_event_payload,
+)
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import MessageReducer
 
@@ -23,19 +29,63 @@ class PostgresEventLog:
     runtime_session_id: str
     workspace_root: str | Path | None = None
 
-    def append(self, event: AgentEvent) -> AgentEvent:
-        return self.extend([event])[0]
+    def append(
+        self,
+        event: AgentEvent,
+        *,
+        expected_last_sequence: int | None = None,
+    ) -> AgentEvent:
+        _validate_live_batch([event])
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                self._lock_session(cursor)
+                existing = self._get_by_id(cursor, event.id)
+                if existing is not None:
+                    if same_event_payload(event, existing):
+                        return existing
+                    raise EventIdConflict(event.id)
+                next_sequence = self._next_sequence(cursor)
+                actual_last_sequence = next_sequence - 1
+                if (
+                    expected_last_sequence is not None
+                    and expected_last_sequence != actual_last_sequence
+                ):
+                    raise EventLogWriteConflict(
+                        expected_last_sequence=expected_last_sequence,
+                        actual_last_sequence=actual_last_sequence,
+                    )
+                self._ensure_parent_rows(cursor, event)
+                stored, _ = self._with_canonical_sequence(event, next_sequence)
+                self._insert_event(cursor, stored)
+                self._sync_run_projection(cursor, stored)
+                return stored
 
-    def extend(self, events: Iterable[AgentEvent]) -> list[AgentEvent]:
+    def extend(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_last_sequence: int | None = None,
+    ) -> list[AgentEvent]:
         event_list = list(events)
         if not event_list:
             return []
+        _validate_live_batch(event_list)
 
         with psycopg.connect(self.dsn) as connection:
             with connection.cursor() as cursor:
                 self._lock_session(cursor)
                 stored_events: list[AgentEvent] = []
                 next_sequence = self._next_sequence(cursor)
+                actual_last_sequence = next_sequence - 1
+                if (
+                    expected_last_sequence is not None
+                    and expected_last_sequence != actual_last_sequence
+                ):
+                    raise EventLogWriteConflict(
+                        expected_last_sequence=expected_last_sequence,
+                        actual_last_sequence=actual_last_sequence,
+                    )
+                self._ensure_event_ids_available(cursor, event_list)
                 for event in event_list:
                     self._ensure_parent_rows(cursor, event)
                     stored, next_sequence = self._with_canonical_sequence(event, next_sequence)
@@ -145,6 +195,35 @@ class PostgresEventLog:
                 cursor.execute(query, params)
                 return [load_agent_event(row["payload"]) for row in cursor.fetchall()]
 
+    def get_by_id(self, event_id: str) -> AgentEvent | None:
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                return self._get_by_id(cursor, event_id)
+
+    def confirm_batch(self, candidates) -> EventBatchConfirmation:
+        candidate_list = list(candidates)
+        ids = [event.id for event in candidate_list]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Confirmed event ids must be unique within one batch")
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                self._lock_session(cursor)
+                committed: list[AgentEvent] = []
+                missing: list[str] = []
+                for candidate in candidate_list:
+                    existing = self._get_by_id(cursor, candidate.id)
+                    if existing is None:
+                        missing.append(candidate.id)
+                        continue
+                    if not same_event_payload(candidate, existing):
+                        raise EventIdConflict(candidate.id)
+                    committed.append(existing)
+                return EventBatchConfirmation(
+                    committed_events=tuple(committed),
+                    missing_event_ids=tuple(missing),
+                    actual_last_sequence=self._next_sequence(cursor) - 1,
+                )
+
     def replay(self, reply_id: str) -> Msg:
         events = self.iter(reply_id=reply_id)
         start = next((event for event in events if isinstance(event, ReplyStartEvent)), None)
@@ -253,6 +332,27 @@ class PostgresEventLog:
             ),
         )
 
+    def _ensure_event_ids_available(self, cursor, events: list[AgentEvent]) -> None:
+        ids = [event.id for event in events]
+        cursor.execute(
+            "select id from agent_events where session_id = %s and id = any(%s)",
+            (self.runtime_session_id, ids),
+        )
+        row = cursor.fetchone()
+        if row is not None:
+            raise ValueError(f"Event id already exists in this session: {row[0]}")
+
+    def _get_by_id(self, cursor, event_id: str) -> AgentEvent | None:
+        cursor.execute(
+            "select payload from agent_events where session_id = %s and id = %s",
+            (self.runtime_session_id, event_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        payload = row[0]
+        return load_agent_event(payload)
+
     def _sync_run_projection(self, cursor, stored: AgentEvent) -> None:
         if isinstance(stored, RunStartEvent):
             cursor.execute(
@@ -292,7 +392,12 @@ class PostgresEventLog:
         return cursor.fetchone()[0]
 
     def _with_canonical_sequence(self, event: AgentEvent, next_sequence: int) -> tuple[AgentEvent, int]:
-        if event.sequence is not None:
-            return event, max(next_sequence, event.sequence + 1)
-
         return event.model_copy(update={"sequence": next_sequence}), next_sequence + 1
+
+
+def _validate_live_batch(events: list[AgentEvent]) -> None:
+    if any(event.sequence is not None for event in events):
+        raise ValueError("Live EventLog append requires sequence=None")
+    ids = [event.id for event in events]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Event ids must be unique within one batch")

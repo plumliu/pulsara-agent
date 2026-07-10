@@ -40,42 +40,42 @@ Runtime event publishing 是 in-process post-commit bus。
 
 它的职责是：
 
-1. 在 `RuntimeSession.emit*()` 已经把 event 写入 canonical event log 后；
-2. 按 canonical `event.sequence` 顺序；
-3. 把 `RuntimePublishedEvent(runtime_session_id, event, state)` 投递给 subscriber；
-4. 让 `RuntimeHookManager` 等观察者做 derived projection / diagnostics。
+1. `RuntimeSession.write_event(s)` 通过同一个 `SessionWriteCoordinator` conditional commit canonical batch；
+2. 每个 registered committed reducer 先补齐自己的 sequence gap，再 apply current committed batch；
+3. publisher 独立补齐自己的 gap，并按 canonical `event.sequence` enqueue；
+4. 临界区外等待 live subscriber delivery；
+5. 把 observer failure 与 durable commit / reducer truth 分开报告。
 
 ---
 
-## 2. RuntimeSession emit boundary
+## 2. RuntimeSession committed writer boundary
 
-`RuntimeSession.emit(event, state=...)` 契约：
+`RuntimeSession.write_event(s)(..., expected_last_sequence=..., state=...)` 是 canonical 写入口：
 
-- 输入 event 的 `sequence` 必须是 `None`。
-- `EventLog.append()` 分配 canonical sequence。
-- append 成功后调用 `RuntimeEventPublisher.publish(...)`。
-- `emit()` 等待 publish delivery 完成或 subscriber error 抛出。
-- 返回带 canonical sequence 的 stored event。
+- 所有 input event 的 `sequence` 必须是 `None`；
+- async 与 thread writer 共享一个 session-owned、thread-safe serialization boundary；
+- `EventLog.extend(..., expected_last_sequence=...)` 负责 conditional atomic commit；
+- committed reducer 的 high-water 与 publisher high-water 相互独立；
+- reducer 必须先 apply 完整 missing interval，再 apply current batch；
+- publisher 必须先 enqueue missing committed events，再 enqueue current batch；
+- observer error 不回滚 durable event，不允许 caller 重复生成同一 semantic fact；
+- 返回 `EventWriteResult`，分别表达 commit、reducer high-water/reconciliation、publication status/errors。
 
-`RuntimeSession.emit_many(events, state=...)` 契约：
+`write_events_from_thread()` 使用同一 coordinator 与 reducer path，但不得等待 observer；只能报告 `enqueued` 或 `unavailable`。
 
-- 逐个调用 `emit()`。
-- 保持输入顺序。
-- 若中途失败，已写入的 event 仍是 canonical truth；调用方必须按 runtime finalization/recovery 契约处理。
+`emit/emit_many/emit_from_thread` 是 compatibility wrapper：
 
-`RuntimeSession.emit_from_thread(event, state=...)` 契约：
+- `emit_many()` 必须一次调用 `write_events()`，不能循环逐条 emit；
+- compatibility wrapper 可在 publication error 后抛 `EventPublicationAfterCommitError`，异常必须携带已经 committed 的 `EventWriteResult`；
+- Subagent 等新 command path 必须消费 `write_*` result，不把 observer error误判成 commit failure。
 
-- 输入 event 的 `sequence` 必须是 `None`。
-- 先 append 到 event log 获取 canonical sequence。
-- 尝试通过 `publisher.publish_from_thread()` 非阻塞投递。
-- 若 publisher 尚未绑定 event loop 或 loop 已关闭，必须 `discard_unpublished(stored)`，推进 publisher sequence，避免后续 publish 因缺口永久卡住。
-- 不等待慢 subscriber。
+registered committed reducer failure 不是 observer failure：event仍已 commit，但 session进入 `reconciliation_required`，后续 mutation fail closed；safe point必须从完整 EventLog rebuild，成功后才能恢复写入。
 
 `publish_stored_event(event, state=...)` 契约：
 
 - 只接受已经有 canonical sequence 的 stored event。
-- 用于 durable hooks / outbox replay / repair 后发布已落盘事件。
-- 若无法投递，也必须 discard sequence。
+- 用于其它事务已提交的 event bridge；它必须先 catch up registered reducers，再 catch up publisher，不能制造 sequence gap；
+- durable-only/offline repair 不允许写入 active session 后不更新 reducer/publisher high-water。
 
 ---
 
@@ -101,6 +101,7 @@ loop binding：
 - thread events 即使先到，也必须等待缺失的更小 sequence。
 - `_pending_by_sequence` 保存已到但还不能发布的事件。
 - `_next_sequence_to_publish` 是唯一发布游标。
+- `enqueue_committed_batch()` 接收 canonical contiguous/catch-up batch；writer 在 session coordinator 内调用，observer await 在锁外发生。
 
 subscriber：
 
@@ -134,9 +135,11 @@ mailbox：
 
 用途：
 
-- background thread emit 时 publisher 未绑定 loop；
+- teardown/legacy direct publisher path中明确放弃 live notification；
 - manual compact failure 后补发 started/failed events 时的 sequence gap 防线；
 - host teardown / close 路径中不能再等待 live subscriber 的场景。
+
+普通 `RuntimeSession.write_events_from_thread()` 不使用 discard 假装发布成功；loop不可用时返回 `publication_status="unavailable"`，durable graph/reducer truth仍必须正确。
 
 禁止：
 
@@ -241,7 +244,7 @@ mailbox：
 
 ## 9. 禁止事项
 
-- 不允许 subscriber 直接写 canonical event log 表达新的 runtime truth，除非该 subscriber 本身通过受控 `RuntimeSession.emit*()` 路径。
+- 不允许 subscriber 直接写 canonical event log 表达新的 runtime truth，除非该 subscriber本身通过受控 `RuntimeSession.write_event(s)` 路径。
 - 不允许 publisher 按 arrival order 发布跨线程 events。
 - 不允许 hook 修改 canonical event object。
 - 不允许 observer hook failure 中断后续 observer。
@@ -249,6 +252,9 @@ mailbox：
 - 不允许未完成 block 在 `RUN_ERROR` / `EXCEED_MAX_ITERS` 后变成 completed block。
 - 不允许 `emit_from_thread()` 因慢 subscriber 阻塞 worker thread。
 - 不允许 event 已落盘但 publisher sequence gap 未处理。
+- 不允许 current committed batch 在 reducer missing interval 之前 apply。
+- 不允许使用 publisher high-water 代替 reducer high-water。
+- 不允许 observer failure 触发 semantic command retry。
 
 ---
 
@@ -257,6 +263,11 @@ mailbox：
 最低测试门槛：
 
 - thread events 按 canonical sequence 发布。
+- conditional writer conflict 在 insert 前失败，并把 reducer/publisher catch up到 actual high-water。
+- reducer gap 先于 current batch apply。
+- reducer与publisher从各自 high-water独立 catch up。
+- batch observer failure不阻止后续 event/subscriber delivery。
+- reducer failure保留commit truth并阻断后续 mutation，rebuild后才能恢复。
 - `emit_from_thread()` 保留 `LoopState` 给 subscriber。
 - `emit_from_thread()` 不等待慢 subscriber。
 - 慢 subscriber 最终仍收到 thread event。

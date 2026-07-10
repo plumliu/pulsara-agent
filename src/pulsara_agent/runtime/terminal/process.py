@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from threading import RLock, Thread
+from threading import RLock, Thread, Timer
 from typing import Callable, Mapping
 from uuid import uuid4
 
@@ -31,6 +31,7 @@ from pulsara_agent.runtime.terminal.shell import TerminalShellConfig, detect_ter
 
 
 _TIMEOUT_EXIT_CODE = 124
+_COMPLETION_RECORD_RETRY_DELAYS_SECONDS = (0.05, 0.2, 1.0)
 
 
 class TerminalKillReason(StrEnum):
@@ -39,12 +40,30 @@ class TerminalKillReason(StrEnum):
     LIFETIME_WATCHDOG = "lifetime_watchdog"
 
 
+class TerminalCompletionRecordState(StrEnum):
+    PENDING = "pending"
+    RECORDING = "recording"
+    RECORDED = "recorded"
+
+
 class ProcessLimitError(RuntimeError):
     """Raised when a newly yielded terminal process would exceed the live limit."""
 
 
 class ProcessInputError(RuntimeError):
     """Raised when stdin cannot be written for a managed process."""
+
+
+class PendingTerminalCompletionError(RuntimeError):
+    """Owner release could not durably drain its completion facts."""
+
+    def __init__(self, *, owner_host_session_id: str, pending_count: int) -> None:
+        self.owner_host_session_id = owner_host_session_id
+        self.pending_count = pending_count
+        super().__init__(
+            f"terminal owner {owner_host_session_id!r} still has "
+            f"{pending_count} pending completion record(s)"
+        )
 
 
 @dataclass(slots=True)
@@ -77,7 +96,16 @@ class TerminalProcessState:
     origin_turn_id: str | None = None
     origin_reply_id: str | None = None
     origin_tool_call_id: str | None = None
-    completion_event_recorded: bool = False
+    completion_record_state: TerminalCompletionRecordState = (
+        TerminalCompletionRecordState.PENDING
+    )
+    completion_event_id: str = field(default_factory=lambda: uuid4().hex)
+    completion_event_candidate: TerminalProcessCompletedEvent | None = field(
+        default=None,
+        repr=False,
+    )
+    completion_record_attempts: int = 0
+    completion_retry_timer: Timer | None = field(default=None, repr=False)
     completion_suppressed: bool = False
     completion_reason: TerminalKillReason | None = None
     record_event: Callable[[AgentEvent], AgentEvent] | None = field(default=None, repr=False)
@@ -95,11 +123,17 @@ class TerminalProcessState:
         with self.lock:
             return self.status is not TerminalStatus.RUNNING
 
+    @property
+    def completion_event_recorded(self) -> bool:
+        with self.lock:
+            return self.completion_record_state is TerminalCompletionRecordState.RECORDED
+
 
 @dataclass(slots=True)
 class ProcessRegistry:
     max_live_processes: int = 8
     max_finished_processes: int = 32
+    max_pending_completion_records: int = 8
     finished_ttl_seconds: float = 3600.0
     _processes: dict[str, TerminalProcessState] = field(default_factory=dict, init=False, repr=False)
     _released_owners: set[str] = field(default_factory=set, init=False, repr=False)
@@ -165,22 +199,34 @@ class ProcessRegistry:
         if finished:
             return state, False
         over_limit = False
+        pending_completion_over_limit = False
         released = False
         with self._lock:
             if not self._is_accepting_locked(owner_host_session_id):
                 released = True
             elif self._live_count_locked() >= self.max_live_processes:
                 over_limit = True
+            elif (
+                _completion_record_contract_present(state)
+                and self._pending_completion_count_locked()
+                >= self.max_pending_completion_records
+            ):
+                pending_completion_over_limit = True
             else:
                 with state.lock:
                     state.yielded = True
                     state.output_callback = None
                 self._processes[state.process_id] = state
-        if released or over_limit:
+        if released or over_limit or pending_completion_over_limit:
             kill_process(state, reason=TerminalKillReason.TEARDOWN)
             _cleanup_cwd_file(state)
             if released:
                 raise ProcessLimitError("terminal owner was released while command was running")
+            if pending_completion_over_limit:
+                raise ProcessLimitError(
+                    "max pending terminal completion records reached: "
+                    f"{self.max_pending_completion_records}"
+                )
             raise ProcessLimitError(f"max live terminal processes reached: {self.max_live_processes}")
         _maybe_record_completion_event(state)
         return state, True
@@ -193,6 +239,7 @@ class ProcessRegistry:
         owner_host_session_id: str | None = None,
     ) -> TerminalResult:
         state = self._get(process_id, owner_host_session_id=owner_host_session_id)
+        _maybe_record_completion_event(state)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
     def wait(
@@ -205,6 +252,7 @@ class ProcessRegistry:
     ) -> TerminalResult:
         state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         wait_for_process(state, timeout_seconds=timeout_seconds, kill_on_timeout=False)
+        _maybe_record_completion_event(state)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
     def kill(
@@ -216,6 +264,11 @@ class ProcessRegistry:
     ) -> TerminalResult:
         state = self._get(process_id, owner_host_session_id=owner_host_session_id)
         kill_process(state, reason=TerminalKillReason.USER)
+        # User-visible kill completion is ordered before any immediately
+        # following owner/host teardown can suppress callbacks. The reader
+        # thread may race here, but _maybe_record_completion_event() grants one
+        # recording owner under state.lock and only marks success after commit.
+        _maybe_record_completion_event(state)
         return snapshot_process(state, max_output_chars=max_output_chars)
 
     def write(
@@ -261,16 +314,62 @@ class ProcessRegistry:
             ]
         return self._kill_states(states)
 
-    def release_owner(self, owner_host_session_id: str) -> list[TerminalResult]:
-        """Revoke an owner before killing its current process snapshot."""
+    def release_owner(
+        self,
+        owner_host_session_id: str,
+        *,
+        completion_drain_timeout_seconds: float = 1.0,
+    ) -> list[TerminalResult]:
+        """Drain canonical completions before irrevocably revoking an owner."""
         with self._lock:
-            self._released_owners.add(owner_host_session_id)
             states = [
                 state
                 for state in self._processes.values()
                 if state.owner_host_session_id == owner_host_session_id
             ]
-        return self._kill_states(states)
+        results = self._kill_states(states)
+        self.drain_pending_completions(
+            owner_host_session_id,
+            timeout_seconds=completion_drain_timeout_seconds,
+        )
+        with self._lock:
+            self._released_owners.add(owner_host_session_id)
+        return results
+
+    def drain_pending_completions(
+        self,
+        owner_host_session_id: str,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            with self._lock:
+                pending = [
+                    state
+                    for state in self._processes.values()
+                    if state.owner_host_session_id == owner_host_session_id
+                    and _completion_record_is_pending(state)
+                ]
+            if not pending:
+                return
+            for state in pending:
+                _start_completion_event_recording(state)
+            with self._lock:
+                remaining = [
+                    state
+                    for state in self._processes.values()
+                    if state.owner_host_session_id == owner_host_session_id
+                    and _completion_record_is_pending(state)
+                ]
+            if not remaining:
+                return
+            if time.monotonic() >= deadline:
+                raise PendingTerminalCompletionError(
+                    owner_host_session_id=owner_host_session_id,
+                    pending_count=len(remaining),
+                )
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
     def _kill_states(self, states: list[TerminalProcessState]) -> list[TerminalResult]:
         results: list[TerminalResult] = []
@@ -303,6 +402,9 @@ class ProcessRegistry:
         with self._lock:
             self._cleanup_finished_locked()
             states = list(self._processes.values())
+        for state in states:
+            if state.is_finished:
+                _maybe_record_completion_event(state)
         processes = [
             process_info(state)
             for state in states
@@ -326,6 +428,7 @@ class ProcessRegistry:
         owner_host_session_id: str | None = None,
     ) -> TerminalProcessLog:
         state = self._get(process_id, owner_host_session_id=owner_host_session_id)
+        _maybe_record_completion_event(state)
         return process_log(state, max_output_chars=max_output_chars or state.max_output_chars)
 
     def live_count(self, *, owner_host_session_id: str | None = None) -> int:
@@ -350,6 +453,23 @@ class ProcessRegistry:
             and (owner_host_session_id is None or state.owner_host_session_id == owner_host_session_id)
         )
 
+    def pending_completion_count(
+        self,
+        *,
+        owner_host_session_id: str | None = None,
+    ) -> int:
+        with self._lock:
+            states = list(self._processes.values())
+        return sum(
+            1
+            for state in states
+            if _completion_record_is_pending(state)
+            and (
+                owner_host_session_id is None
+                or state.owner_host_session_id == owner_host_session_id
+            )
+        )
+
     def _get(
         self,
         process_id: str,
@@ -368,6 +488,13 @@ class ProcessRegistry:
 
     def _live_count_locked(self) -> int:
         return sum(1 for state in self._processes.values() if state.yielded and state.is_running)
+
+    def _pending_completion_count_locked(self) -> int:
+        return sum(
+            1
+            for state in self._processes.values()
+            if _completion_record_is_pending(state)
+        )
 
     def _is_accepting_locked(self, owner_host_session_id: str | None) -> bool:
         return not self._closed and (
@@ -393,6 +520,7 @@ class ProcessRegistry:
             and state.is_finished
             and state.ended_at is not None
             and now - state.ended_at > self.finished_ttl_seconds
+            and not _completion_record_is_pending(state)
         ]
         for process_id in expired:
             self._processes.pop(process_id, None)
@@ -400,7 +528,9 @@ class ProcessRegistry:
         finished = [
             (process_id, state.ended_at or state.started_at)
             for process_id, state in self._processes.items()
-            if state.yielded and state.is_finished
+            if state.yielded
+            and state.is_finished
+            and not _completion_record_is_pending(state)
         ]
         finished.sort(key=lambda item: item[1])
         while len(finished) > self.max_finished_processes:
@@ -513,13 +643,12 @@ def kill_process(
     state: TerminalProcessState,
     *,
     reason: TerminalKillReason = TerminalKillReason.USER,
-) -> None:
-    if state.is_finished:
-        return
-    _mark_kill_reason(state, reason)
-    _mark_status(state, TerminalStatus.KILLED, exit_code=-signal.SIGTERM)
+) -> bool:
+    if not _claim_kill_transition(state, reason):
+        return False
     _terminate_process_group(state.process)
     _join_reader(state)
+    return True
 
 
 def write_process_input(
@@ -768,12 +897,23 @@ def _mark_status(
         state.ended_at = time.monotonic()
 
 
-def _mark_kill_reason(state: TerminalProcessState, reason: TerminalKillReason) -> None:
+def _claim_kill_transition(
+    state: TerminalProcessState,
+    reason: TerminalKillReason,
+) -> bool:
+    """Atomically win kill ownership or preserve the existing terminal fact."""
+
     with state.lock:
+        if state.status is not TerminalStatus.RUNNING:
+            return False
         state.completion_reason = reason
         if reason in {TerminalKillReason.TEARDOWN, TerminalKillReason.LIFETIME_WATCHDOG}:
             state.completion_suppressed = True
             state.record_event = None
+        state.status = TerminalStatus.KILLED
+        state.exit_code = -signal.SIGTERM
+        state.ended_at = time.monotonic()
+        return True
 
 
 def _duration_seconds_locked(state: TerminalProcessState) -> float:
@@ -782,20 +922,90 @@ def _duration_seconds_locked(state: TerminalProcessState) -> float:
 
 
 def _maybe_record_completion_event(state: TerminalProcessState) -> AgentEvent | None:
-    event_data = _completion_event_data(state)
+    event_data = _claim_completion_event_recording(state)
     if event_data is None:
         return None
-    record_event, fields = event_data
-    event = TerminalProcessCompletedEvent(**fields)
+    return _record_claimed_completion_event(state, event_data)
+
+
+def _start_completion_event_recording(state: TerminalProcessState) -> bool:
+    """Claim one attempt synchronously, but run its recorder off the caller."""
+
+    event_data = _claim_completion_event_recording(state)
+    if event_data is None:
+        return False
     try:
-        return record_event(event)
-    except Exception:
-        return None
+        worker = Thread(
+            target=_completion_recording_worker,
+            args=(state, event_data),
+            name=f"terminal-completion-{state.process_id}",
+            daemon=True,
+        )
+        worker.start()
+    except BaseException as exc:
+        _finish_completion_event_recording(state, success=False)
+        if isinstance(exc, Exception):
+            return False
+        raise
+    return True
 
 
-def _completion_event_data(
+def _completion_recording_worker(
     state: TerminalProcessState,
-) -> tuple[Callable[[AgentEvent], AgentEvent], dict[str, object]] | None:
+    event_data: tuple[
+        Callable[[AgentEvent], AgentEvent],
+        dict[str, object],
+        TerminalProcessCompletedEvent | None,
+    ],
+) -> None:
+    try:
+        _record_claimed_completion_event(state, event_data)
+    except BaseException:
+        # _record_claimed_completion_event() restores ownership before
+        # propagating non-Exception BaseException values. A daemon worker must
+        # not leak those through threading.excepthook during interpreter close.
+        return
+
+
+def _record_claimed_completion_event(
+    state: TerminalProcessState,
+    event_data: tuple[
+        Callable[[AgentEvent], AgentEvent],
+        dict[str, object],
+        TerminalProcessCompletedEvent | None,
+    ],
+) -> AgentEvent | None:
+    record_event, fields, candidate = event_data
+    try:
+        event = candidate
+        if event is None:
+            processed = state.output.snapshot(max_chars=2000)
+            fields["output_preview"] = processed.text
+            fields["output_truncated"] = processed.truncated
+            event = TerminalProcessCompletedEvent(**fields)
+            with state.lock:
+                if state.completion_event_candidate is None:
+                    state.completion_event_candidate = event
+                else:
+                    event = state.completion_event_candidate
+        stored = record_event(event)
+    except BaseException as exc:
+        _finish_completion_event_recording(state, success=False)
+        _schedule_completion_event_retry(state)
+        if isinstance(exc, Exception):
+            return None
+        raise
+    _finish_completion_event_recording(state, success=True)
+    return stored
+
+
+def _claim_completion_event_recording(
+    state: TerminalProcessState,
+) -> tuple[
+    Callable[[AgentEvent], AgentEvent],
+    dict[str, object],
+    TerminalProcessCompletedEvent | None,
+] | None:
     with state.lock:
         if not state.yielded:
             return None
@@ -803,7 +1013,7 @@ def _completion_event_data(
             return None
         if state.completion_suppressed:
             return None
-        if state.completion_event_recorded:
+        if state.completion_record_state is not TerminalCompletionRecordState.PENDING:
             return None
         if (
             state.record_event is None
@@ -812,9 +1022,11 @@ def _completion_event_data(
             or state.origin_reply_id is None
         ):
             return None
-        state.completion_event_recorded = True
+        state.completion_record_state = TerminalCompletionRecordState.RECORDING
+        state.completion_record_attempts += 1
         record_event = state.record_event
         fields: dict[str, object] = {
+            "id": state.completion_event_id,
             "run_id": state.origin_run_id,
             "turn_id": state.origin_turn_id,
             "reply_id": state.origin_reply_id,
@@ -831,10 +1043,84 @@ def _completion_event_data(
             "tool_call_id": state.origin_tool_call_id,
             "completion_reason": state.completion_reason.value if state.completion_reason is not None else None,
         }
-    processed = state.output.snapshot(max_chars=2000)
-    fields["output_preview"] = processed.text
-    fields["output_truncated"] = processed.truncated
-    return record_event, fields
+        candidate = state.completion_event_candidate
+    return record_event, fields, candidate
+
+
+def _finish_completion_event_recording(
+    state: TerminalProcessState,
+    *,
+    success: bool,
+) -> None:
+    retry_timer: Timer | None = None
+    with state.lock:
+        if state.completion_record_state is not TerminalCompletionRecordState.RECORDING:
+            return
+        state.completion_record_state = (
+            TerminalCompletionRecordState.RECORDED
+            if success
+            else TerminalCompletionRecordState.PENDING
+        )
+        if success:
+            retry_timer = state.completion_retry_timer
+            state.completion_retry_timer = None
+    if retry_timer is not None:
+        retry_timer.cancel()
+
+
+def _schedule_completion_event_retry(state: TerminalProcessState) -> None:
+    with state.lock:
+        if state.completion_record_state is not TerminalCompletionRecordState.PENDING:
+            return
+        if state.completion_retry_timer is not None:
+            return
+        retry_index = state.completion_record_attempts - 1
+        if retry_index >= len(_COMPLETION_RECORD_RETRY_DELAYS_SECONDS):
+            return
+        timer = Timer(
+            _COMPLETION_RECORD_RETRY_DELAYS_SECONDS[retry_index],
+            _retry_completion_event,
+            args=(state,),
+        )
+        timer.daemon = True
+        state.completion_retry_timer = timer
+    try:
+        timer.start()
+    except BaseException as exc:
+        with state.lock:
+            if state.completion_retry_timer is timer:
+                state.completion_retry_timer = None
+        if not isinstance(exc, Exception):
+            raise
+
+
+def _retry_completion_event(state: TerminalProcessState) -> None:
+    with state.lock:
+        state.completion_retry_timer = None
+    _maybe_record_completion_event(state)
+
+
+def _completion_record_is_pending(state: TerminalProcessState) -> bool:
+    with state.lock:
+        required = state.yielded and _completion_record_contract_present_locked(state)
+        return required and (
+            state.completion_record_state is not TerminalCompletionRecordState.RECORDED
+        )
+
+
+def _completion_record_contract_present(state: TerminalProcessState) -> bool:
+    with state.lock:
+        return _completion_record_contract_present_locked(state)
+
+
+def _completion_record_contract_present_locked(state: TerminalProcessState) -> bool:
+    return (
+        not state.completion_suppressed
+        and state.record_event is not None
+        and state.origin_run_id is not None
+        and state.origin_turn_id is not None
+        and state.origin_reply_id is not None
+    )
 
 
 def _join_reader(state: TerminalProcessState) -> None:

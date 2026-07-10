@@ -300,6 +300,20 @@ completion suppression 只在 terminal lifecycle 层决定：
 - `teardown` suppress。cleanup 不应生成模型可见 completion event / note。
 - `lifetime_watchdog` suppress。watchdog cleanup 不应伪装成普通用户可恢复 completion note。
 
+Kill ownership是单次锁内状态转换：只有在同一critical section中观察到`status=running`的caller，才能同时写`completion_reason`、terminal status、exit code与ended_at。自然SUCCESS/ERROR/TIMEOUT若先成为terminal fact，后到的user/teardown/watchdog kill必须返回“未取得ownership”，不得只改reason而保留原status。由此禁止`status="success" + completion_reason="user_tool_kill"`等自相矛盾事件。
+
+Completion event recorder使用`pending -> recording -> recorded`三态。锁内只有一个caller可取得recording ownership；只有recorder确认成功后才进入recorded。明确的pre-commit exception必须回到pending，使后续reader/poll/log/wait/kill可以重试，不能提前永久设置“已记录”。每个managed process在创建时预分配稳定completion event id，首次构造后保留同一个bounded event candidate；所有重试复用相同id与payload。并发触发者在recording期间不得发出第二份event。
+
+稳定id必须形成真正的幂等确认语义，而不只是重复insert：若一次写入可能已commit但确认丢失，recorder/runtime writer必须按event id回查。已有event与候选的immutable payload（忽略canonical sequence）完全一致时，视为同一事实已经commit，并补齐committed reducer与ordered publisher至该sequence；同id不同payload必须报`EventIdConflict`，不能吞成成功。EventLog单事件append遵循相同精确幂等规则，atomic batch仍不得接受部分已存在、部分缺失的模糊状态。
+
+completion持久化失败后必须安排bounded retry/reconciliation，而不能只等待模型未来显式调用`poll/log/wait/kill`。重试耗尽的pending completion仍保留为可诊断、可再次观察的session-owned事实；TTL与finished-process capacity cleanup不得删除`recording`或仍需持久化的`pending` process。只有recorded、明确suppressed，或根本没有completion recorder contract的finished process可以被正常prune。
+
+上述保留不能变成无界内存旁路。ProcessRegistry必须另设`max_pending_completion_records`（默认8）并把所有已yield、带completion recorder contract且尚未recorded的running/finished process计入同一个slot池。slot已满时，新的命令不得进入yielded managed-process状态：runtime必须teardown刚启动的process并返回结构化blocked/fail-closed结果。pending slot不受`max_finished_processes`绕过，但recorded/suppressed后会立即释放；inspect/metrics必须能读取当前pending count。
+
+owner/session close不得把pending completion遗留在shared workspace registry后直接释放lease。release路径必须先bounded drain该owner的pending candidates；成功后才revoke owner、删除terminal sessions并释放supervisor lease。drain只能在caller线程取得recording ownership并启动daemon recording attempt，随后等待state变化至deadline；不得在close caller中同步执行可能无限阻塞的recorder。deadline到达时，即使写线程仍在收口，也必须抛`PendingTerminalCompletionError`，HostCore abort当前close attempt并保留session、workspace与同一lease generation供重试。后台写线程之后成功可释放pending slot，但不能自行假装close已完成。不得通过suppress/drop canonical completion来腾slot，也不得让失败close伪装成功后永久阻塞后续owner。
+
+recording ownership必须覆盖worker lifecycle的所有异常边界：`Thread(...)`构造或`start()`失败时原子执行`recording -> pending`，drain继续等待并最终统一收敛为`PendingTerminalCompletionError`；worker recorder抛出`BaseException`时也必须先归还ownership，再由daemon wrapper吞掉线程级传播。bounded retry的`Timer.start()`失败必须清除`completion_retry_timer`，不能留下一个实际不存在的scheduled attempt。任何启动/线程资源故障都不得把state永久卡在`recording`或绕过HostCore的close-blocker分类。
+
 `TerminalProcessCompletedEvent.completion_reason` 是唯一模型可见的结构化 reason 字段。新代码不应把 reason 塞进 event `metadata`，也不应让 transcript / host 从 `metadata` 或进程退出码里反推 kill 类型。
 
 ---

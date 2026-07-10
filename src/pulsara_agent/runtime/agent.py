@@ -116,7 +116,12 @@ from pulsara_agent.runtime.recovery import (
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
-from pulsara_agent.runtime.subagent import InMemoryEventLogLocator, SubagentRun, SubagentRuntime
+from pulsara_agent.runtime.subagent import (
+    HydratedSubagentRunView,
+    InMemoryEventLogLocator,
+    PostgresEventLogLocator,
+    SubagentRuntime,
+)
 from pulsara_agent.runtime.tool_taxonomy import PLAN_WORKFLOW_TOOL_NAMES
 from pulsara_agent.runtime.tool_loop import (
     _ToolBatchTap,
@@ -164,22 +169,6 @@ StopReason = Literal[
 ]
 
 
-class _CachingEventLogLocator:
-    def __init__(self, factory):
-        self._factory = factory
-        self._cache: dict[str, EventLog] = {}
-
-    def register(self, runtime_session_id: str, event_log: EventLog) -> None:
-        self._cache[runtime_session_id] = event_log
-
-    def event_log_for_runtime_session(self, runtime_session_id: str) -> EventLog:
-        event_log = self._cache.get(runtime_session_id)
-        if event_log is None:
-            event_log = self._factory(runtime_session_id)
-            self._cache[runtime_session_id] = event_log
-        return event_log
-
-
 @dataclass(frozen=True, slots=True)
 class _ProfileFilteredCapabilityProvider:
     provider: Any
@@ -214,12 +203,9 @@ def _subagent_event_log_backend(runtime_session: RuntimeSession):
 
         return factory, locator
     if isinstance(parent_log, PostgresEventLog):
-        locator = _CachingEventLogLocator(
-            lambda runtime_session_id: PostgresEventLog(
-                dsn=parent_log.dsn,
-                runtime_session_id=runtime_session_id,
-                workspace_root=runtime_session.workspace_root,
-            )
+        locator = PostgresEventLogLocator(
+            dsn=parent_log.dsn,
+            workspace_root=runtime_session.workspace_root,
         )
         return locator.event_log_for_runtime_session, locator
     raise TypeError(
@@ -513,13 +499,18 @@ class AgentRuntime:
         self._subagent_parent_features_enabled = enable_subagents and not self._is_subagent_child
         self.subagent_runtime = subagent_runtime
         if self._subagent_parent_features_enabled and self.subagent_runtime is None:
-            child_event_log_factory, event_log_locator = _subagent_event_log_backend(runtime_session)
-            self.subagent_runtime = SubagentRuntime(
-                parent_runtime_session=runtime_session,
-                child_event_log_factory=child_event_log_factory,
-                event_log_locator=event_log_locator,
-                child_runner=self._run_child_agent,
-            )
+            existing_subagent_runtime = runtime_session.subagent_runtime
+            if isinstance(existing_subagent_runtime, SubagentRuntime):
+                self.subagent_runtime = existing_subagent_runtime
+                self.subagent_runtime.bind_child_runner(self._run_child_agent)
+            else:
+                child_event_log_factory, event_log_locator = _subagent_event_log_backend(runtime_session)
+                self.subagent_runtime = SubagentRuntime(
+                    parent_runtime_session=runtime_session,
+                    child_event_log_factory=child_event_log_factory,
+                    event_log_locator=event_log_locator,
+                    child_runner=self._run_child_agent,
+                )
         self.runtime_session.subagent_runtime = self.subagent_runtime
         self._subagent_dangling_repair_done = False
         self.tool_executor = runtime_session.create_tool_executor(
@@ -713,11 +704,17 @@ class AgentRuntime:
     def close(self) -> None:
         self.runtime_session.close()
 
-    async def _run_child_agent(self, subagent_runtime: SubagentRuntime, run: SubagentRun) -> None:
+    async def _run_child_agent(
+        self,
+        subagent_runtime: SubagentRuntime,
+        run_view: HydratedSubagentRunView,
+    ) -> None:
+        run = run_view.fact
+        capability_profile = run.capability_profile_value
         child_session = subagent_runtime.child_runtime_session(run.subagent_run_id)
-        if run.capability_profile.permission_mode is None:
+        if capability_profile.permission_mode is None:
             raise ValueError("child subagent run requires a preset child_profile permission mode")
-        child_permission_mode = parse_permission_mode(run.capability_profile.permission_mode)
+        child_permission_mode = parse_permission_mode(capability_profile.permission_mode)
         child_agent = AgentRuntime(
             runtime_session=child_session,
             llm_runtime=self.llm_runtime,
@@ -727,7 +724,10 @@ class AgentRuntime:
             options=self.options,
             budget=self.budget,
             system_prompt=self.system_prompt,
-            capability_runtime=_profile_filtered_capability_runtime(self.capability_runtime, run.capability_profile),
+            capability_runtime=_profile_filtered_capability_runtime(
+                self.capability_runtime,
+                capability_profile,
+            ),
             memory_domain=None,
             workspace_kind=self.workspace_kind,
             permission_policy=preset_to_policy(child_permission_mode),
@@ -735,8 +735,9 @@ class AgentRuntime:
             subagent_runtime=subagent_runtime,
             enable_subagents=False,
         )
-        result = await child_agent.run_task(run.task, prior_messages=[])
-        subagent_runtime.set_child_run_id(run.subagent_run_id, result.state.run_id)
+        if not run_view.task_text_complete or run_view.task_text is None:
+            raise ValueError("child subagent run requires a fully hydrated task artifact")
+        result = await child_agent.run_task(run_view.task_text, prior_messages=[])
         if result.status is LoopStatus.FINISHED:
             submitted = subagent_runtime.submitted_result(run.subagent_run_id)
             if submitted is not None:
@@ -744,6 +745,7 @@ class AgentRuntime:
                     run.subagent_run_id,
                     token_usage=result.state.token_usage.model_dump(),
                     tool_call_count=result.state.tool_call_count,
+                    child_run_id=result.state.run_id,
                 )
                 return
             summary = result.final_text.strip() or "(child agent finished without final text)"
@@ -751,6 +753,7 @@ class AgentRuntime:
                 run.subagent_run_id,
                 summary=summary,
                 output_preview=result.final_text,
+                child_run_id=result.state.run_id,
             )
             return
         if result.status is LoopStatus.WAITING_USER:
@@ -770,12 +773,14 @@ class AgentRuntime:
         await subagent_runtime.fail(
             run.subagent_run_id,
             reason_code=f"subagent_{result.status.value}",
-            reason_message=result.error_message or result.stop_reason or result.status.value,
+            reason_message=(
+                f"Child agent ended with status {result.status.value} without a usable result."
+            ),
             diagnostics=[
                 {
                     "status": result.status.value,
                     "stop_reason": result.stop_reason,
-                    "error_message": result.error_message,
+                    "child_error_present": result.error_message is not None,
                 }
             ],
         )

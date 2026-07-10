@@ -7,6 +7,12 @@ from typing import Any, Mapping, cast, get_args
 from pulsara_agent.event.events import AgentEvent
 
 
+# Hard-cut schema generation.  Existing rows from earlier development schemas
+# must be reset/migrated; runtime deserialization does not synthesize missing
+# required event facts.
+AGENT_EVENT_SCHEMA_VERSION = 2
+
+
 _EVENT_CLASS_BY_TYPE = {
     str(event_cls.model_fields["type"].default): event_cls
     for event_cls in get_args(AgentEvent)

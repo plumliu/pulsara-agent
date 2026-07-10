@@ -171,9 +171,9 @@ async def _run_subagent_spawn_wait_dogfood(
         child_runtime_session_id = started[0].child_runtime_session_id if started else None
         child_event_log_backend = None
         if started:
-            child_session = subagent_runtime.child_runtime_session(started[0].subagent_run_id)
-            child_event_log_backend = type(child_session.event_log).__name__
-            child_raw_events = child_session.event_log.iter()
+            child_log = subagent_runtime.child_event_log(started[0].subagent_run_id)
+            child_event_log_backend = type(child_log).__name__
+            child_raw_events = child_log.iter()
         child_metadata_missing = [
             event
             for event in child_raw_events
@@ -270,8 +270,7 @@ async def _run_subagent_background_delivery_dogfood(
             for event in parent_events
             if isinstance(event, ToolCallStartEvent)
         ]
-        child_session = subagent_runtime.child_runtime_session(seeded.subagent_run_id)
-        child_raw_events = child_session.event_log.iter()
+        child_raw_events = subagent_runtime.child_event_log(seeded.subagent_run_id).iter()
         child_metadata_missing = [
             event
             for event in child_raw_events

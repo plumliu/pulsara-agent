@@ -29,6 +29,13 @@ class _PublishItem:
     error: Exception | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PublisherEnqueueResult:
+    status: str
+    enqueued_through_sequence: int | None
+    delivery_futures: tuple[asyncio.Future[None], ...] = ()
+
+
 class RuntimeEventPublisher:
     def __init__(self, *, runtime_session_id: str, next_sequence_to_publish: int = 1) -> None:
         if next_sequence_to_publish < 1:
@@ -41,7 +48,71 @@ class RuntimeEventPublisher:
         self._drain_task: asyncio.Task[None] | None = None
         self._next_sequence_to_publish = next_sequence_to_publish
         self._pending_by_sequence: dict[int, _PublishItem] = {}
+        self._enqueue_lock = threading.RLock()
+        self._enqueued_through_sequence = next_sequence_to_publish - 1
         self.errors: list[Exception] = []
+
+    @property
+    def enqueued_through_sequence(self) -> int:
+        with self._enqueue_lock:
+            return self._enqueued_through_sequence
+
+    def bind_running_loop(self) -> None:
+        self._bind_loop(asyncio.get_running_loop())
+
+    def enqueue_committed_batch(
+        self,
+        events: tuple[RuntimePublishedEvent, ...],
+        *,
+        await_delivery: bool,
+    ) -> PublisherEnqueueResult:
+        """Non-awaiting ordered enqueue used inside SessionWriteCoordinator."""
+
+        if not events:
+            return PublisherEnqueueResult(
+                status="completed" if await_delivery else "enqueued",
+                enqueued_through_sequence=self.enqueued_through_sequence,
+            )
+        sequences = [_sequence(item) for item in events]
+        if sequences != list(range(sequences[0], sequences[-1] + 1)):
+            raise ValueError("Publisher batch must have contiguous sequences")
+        with self._enqueue_lock:
+            expected = self._enqueued_through_sequence + 1
+            if sequences[0] != expected:
+                raise ValueError(
+                    f"Publisher enqueue gap: expected {expected}, received {sequences[0]}"
+                )
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                self._enqueued_through_sequence = sequences[-1]
+                self._next_sequence_to_publish = max(
+                    self._next_sequence_to_publish,
+                    sequences[-1] + 1,
+                )
+                return PublisherEnqueueResult(
+                    status="unavailable",
+                    enqueued_through_sequence=sequences[-1],
+                )
+            current_thread = threading.get_ident() == self._loop_thread_id
+            futures: list[asyncio.Future[None]] = []
+            items: list[_PublishItem] = []
+            for published in events:
+                delivered = loop.create_future() if await_delivery and current_thread else None
+                if delivered is not None:
+                    futures.append(delivered)
+                items.append(_PublishItem(published=published, delivered=delivered))
+            if current_thread:
+                for item in items:
+                    self._enqueue(item)
+            else:
+                for item in items:
+                    loop.call_soon_threadsafe(self._enqueue, item)
+            self._enqueued_through_sequence = sequences[-1]
+            return PublisherEnqueueResult(
+                status="enqueued",
+                enqueued_through_sequence=sequences[-1],
+                delivery_futures=tuple(futures),
+            )
 
     def subscribe(self, subscriber: RuntimeEventSubscriber) -> None:
         if subscriber not in self._subscribers:
@@ -54,18 +125,14 @@ class RuntimeEventPublisher:
     async def publish(self, published: RuntimePublishedEvent) -> None:
         loop = asyncio.get_running_loop()
         self._bind_loop(loop)
-        delivered = loop.create_future()
-        self._enqueue(_PublishItem(published=published, delivered=delivered))
-        await delivered
+        result = self.enqueue_committed_batch((published,), await_delivery=True)
+        if not result.delivery_futures:
+            raise RuntimeError("RuntimeEventPublisher loop is unavailable")
+        await result.delivery_futures[0]
 
     def publish_from_thread(self, published: RuntimePublishedEvent) -> bool:
-        if self._loop is None or self._loop.is_closed():
-            return False
-        if self._loop_thread_id == threading.get_ident():
-            self._enqueue(_PublishItem(published=published))
-            return True
-        self._loop.call_soon_threadsafe(self._enqueue, _PublishItem(published=published))
-        return True
+        result = self.enqueue_committed_batch((published,), await_delivery=False)
+        return result.status != "unavailable"
 
     def discard_unpublished(self, published: RuntimePublishedEvent) -> None:
         sequence = published.event.sequence
@@ -153,3 +220,10 @@ class RuntimeEventPublisher:
             if item.delivered is not None and not item.delivered.done():
                 item.delivered.set_result(None)
             self._next_sequence_to_publish += 1
+
+
+def _sequence(published: RuntimePublishedEvent) -> int:
+    sequence = published.event.sequence
+    if sequence is None:
+        raise ValueError("Published events must have a canonical sequence")
+    return sequence

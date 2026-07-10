@@ -31,7 +31,14 @@ from pulsara_agent.event import (
     TextBlockStartEvent,
 )
 from pulsara_agent.event import TerminalProcessCompletedEvent
-from pulsara_agent.event_log import EventLog, PostgresEventLog, dump_agent_event, load_agent_event
+from pulsara_agent.event_log import (
+    EventIdConflict,
+    EventLog,
+    EventLogWriteConflict,
+    PostgresEventLog,
+    dump_agent_event,
+    load_agent_event,
+)
 from pulsara_agent.settings import StorageConfig
 
 
@@ -107,6 +114,28 @@ def test_event_log_assigns_sequences_and_filters_events(event_log: EventLog) -> 
     assert [event.reply_id for event in event_log.iter(run_id=first.run_id)] == [first.reply_id] * 6
     assert [event.run_id for event in event_log.iter(reply_id=second.reply_id)] == [second.run_id]
     assert [event.sequence for event in event_log.iter(after_sequence=5)] == [6, 7]
+
+
+def test_event_log_single_append_is_idempotent_by_exact_event_payload(
+    event_log: EventLog,
+) -> None:
+    ctx = _ctx("contract:idempotent-event-id")
+    candidate = TextBlockDeltaEvent(
+        **ctx.event_fields(),
+        block_id="text:idempotent",
+        delta="stable",
+    )
+
+    first = event_log.append(candidate)
+    confirmed = event_log.append(candidate)
+
+    assert confirmed == first
+    assert event_log.get_by_id(candidate.id) == first
+    assert len(event_log.iter()) == 1
+
+    conflicting = candidate.model_copy(update={"delta": "different"})
+    with pytest.raises(EventIdConflict):
+        event_log.append(conflicting)
 
 
 def test_event_log_replay_rebuilds_assistant_message(event_log: EventLog) -> None:
@@ -493,13 +522,18 @@ def test_plan_workflow_events_round_trip_through_agent_event_serialization(event
     assert load_agent_event(dump_agent_event(event)) == event
 
 
-def test_event_log_preassigned_sequence_advances_next_sequence(event_log: EventLog) -> None:
+def test_event_log_live_append_rejects_presequenced_event(event_log: EventLog) -> None:
     ctx = _ctx("contract:preset")
-    preset = event_log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:10", delta="preset", sequence=10))
-    next_event = event_log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:11", delta="next"))
-
-    assert preset.sequence == 10
-    assert next_event.sequence == 11
+    with pytest.raises(ValueError, match="sequence=None"):
+        event_log.append(
+            TextBlockDeltaEvent(
+                **ctx.event_fields(),
+                block_id="text:10",
+                delta="preset",
+                sequence=10,
+            )
+        )
+    assert event_log.next_sequence() == 1
 
 
 def test_postgres_event_log_reloads_persisted_events(tmp_path: Path) -> None:
@@ -539,6 +573,143 @@ def test_postgres_event_log_concurrent_append_keeps_unique_sequences(tmp_path: P
         assert [event.sequence for event in event_log.iter(reply_id=ctx.reply_id)] == list(range(1, 13))
     finally:
         _cleanup_session(dsn, runtime_session_id)
+
+
+def test_postgres_event_log_extend_allocates_contiguous_atomic_batch(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx("postgres:atomic-batch")
+        stored = log.extend(
+            [
+                TextBlockDeltaEvent(
+                    **ctx.event_fields(),
+                    block_id=f"text:{index}",
+                    delta=str(index),
+                )
+                for index in range(4)
+            ]
+        )
+        assert [event.sequence for event in stored] == [1, 2, 3, 4]
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_postgres_event_log_concurrent_batches_never_interleave(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    barrier = Barrier(2)
+    _connect_or_skip(dsn).close()
+    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+
+    def write(prefix: str):
+        ctx = _ctx(f"postgres:batch:{prefix}")
+        barrier.wait(timeout=2)
+        return log.extend(
+            [
+                TextBlockDeltaEvent(
+                    **ctx.event_fields(),
+                    block_id=f"{prefix}:{index}",
+                    delta=prefix,
+                )
+                for index in range(3)
+            ]
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = (executor.submit(write, "a"), executor.submit(write, "b"))
+            batches = tuple(future.result() for future in futures)
+        for batch in batches:
+            sequences = [event.sequence for event in batch]
+            assert sequences == list(range(sequences[0], sequences[0] + 3))
+        assert [event.sequence for event in log.iter()] == list(range(1, 7))
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_postgres_event_log_conditional_extend_conflict_writes_nothing(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+        ctx = _ctx("postgres:cas")
+        log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id="seed", delta="seed"))
+        with pytest.raises(EventLogWriteConflict) as captured:
+            log.extend(
+                [TextBlockDeltaEvent(**ctx.event_fields(), block_id="stale", delta="stale")],
+                expected_last_sequence=0,
+            )
+        assert captured.value.actual_last_sequence == 1
+        assert [event.sequence for event in log.iter()] == [1]
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_postgres_event_log_batch_failure_rolls_back_prior_event_and_projection(
+    tmp_path: Path,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    owner_session_id = _runtime_session_id()
+    batch_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    owner = PostgresEventLog(
+        dsn=dsn,
+        runtime_session_id=owner_session_id,
+        workspace_root=tmp_path,
+    )
+    batch = PostgresEventLog(
+        dsn=dsn,
+        runtime_session_id=batch_session_id,
+        workspace_root=tmp_path,
+    )
+    shared_run_id = f"run:owned:{uuid4().hex}"
+    owner_context = EventContext(
+        run_id=shared_run_id,
+        turn_id=f"turn:owned:{uuid4().hex}",
+        reply_id=f"reply:owned:{uuid4().hex}",
+    )
+    first_context = _ctx(f"postgres:rollback:first:{uuid4().hex}")
+    conflicting_context = EventContext(
+        run_id=shared_run_id,
+        turn_id=f"turn:conflict:{uuid4().hex}",
+        reply_id=f"reply:conflict:{uuid4().hex}",
+    )
+    try:
+        owner.append(
+            TextBlockDeltaEvent(
+                **owner_context.event_fields(),
+                block_id="owner",
+                delta="owner",
+            )
+        )
+
+        with pytest.raises(ValueError, match="already belongs to runtime session"):
+            batch.extend(
+                (
+                    RunStartEvent(
+                        **first_context.event_fields(),
+                        **run_start_permission_fields(first_context.run_id),
+                        user_input_chars=1,
+                    ),
+                    TextBlockDeltaEvent(
+                        **conflicting_context.event_fields(),
+                        block_id="conflict",
+                        delta="conflict",
+                    ),
+                )
+            )
+
+        assert batch.iter() == []
+        assert batch.next_sequence() == 1
+        assert _fetch_run_row(dsn, first_context.run_id) is None
+        assert [event.sequence for event in owner.iter()] == [1]
+    finally:
+        _cleanup_session(dsn, batch_session_id)
+        _cleanup_session(dsn, owner_session_id)
 
 
 def test_postgres_event_log_rejects_cross_session_run_id_reuse(tmp_path: Path) -> None:
@@ -659,7 +830,7 @@ def test_postgres_event_log_rejects_concurrent_cross_session_turn_id_reuse(tmp_p
         _cleanup_session(dsn, second_session_id)
 
 
-def test_postgres_event_log_extend_rolls_back_entire_batch_on_parent_conflict(tmp_path: Path) -> None:
+def test_postgres_event_log_transaction_failure_leaves_no_partial_events(tmp_path: Path) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     runtime_session_id = _runtime_session_id()
     conflicting_session_id = _runtime_session_id()

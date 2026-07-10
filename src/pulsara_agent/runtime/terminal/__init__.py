@@ -23,7 +23,11 @@ from pulsara_agent.runtime.terminal.policy import (
     ExecPolicyDecisionKind,
     TerminalExecPolicy,
 )
-from pulsara_agent.runtime.terminal.process import ProcessRegistry, TerminalProcessState
+from pulsara_agent.runtime.terminal.process import (
+    PendingTerminalCompletionError,
+    ProcessRegistry,
+    TerminalProcessState,
+)
 from pulsara_agent.runtime.terminal.session import TerminalSession
 
 __all__ = [
@@ -31,6 +35,7 @@ __all__ = [
     "ExecPolicyDecision",
     "ExecPolicyDecisionKind",
     "OwnedTerminalRuntime",
+    "PendingTerminalCompletionError",
     "TerminalBackendType",
     "TerminalIOMode",
     "TerminalOwnerContext",
