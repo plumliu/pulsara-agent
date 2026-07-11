@@ -36,6 +36,7 @@ from pulsara_agent.message import (
     ToolResultBlock,
     ToolResultState,
 )
+from tests.support import model_call_end_fields
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
@@ -60,40 +61,61 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
             TextBlockStartEvent(**CTX.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="hello "),
+            TextBlockDeltaEvent(
+                **CTX.event_fields(), block_id="text:1", delta="hello "
+            ),
             TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="world"),
             TextBlockEndEvent(**CTX.event_fields(), block_id="text:1"),
             ThinkingBlockStartEvent(**CTX.event_fields(), block_id="thinking:1"),
-            ThinkingBlockDeltaEvent(**CTX.event_fields(), block_id="thinking:1", delta="plan"),
+            ThinkingBlockDeltaEvent(
+                **CTX.event_fields(), block_id="thinking:1", delta="plan"
+            ),
             ThinkingBlockEndEvent(**CTX.event_fields(), block_id="thinking:1"),
-            DataBlockStartEvent(**CTX.event_fields(), block_id="data:1", media_type="image/png"),
-            DataBlockDeltaEvent(**CTX.event_fields(), block_id="data:1", data="abc", media_type="image/png"),
+            DataBlockStartEvent(
+                **CTX.event_fields(), block_id="data:1", media_type="image/png"
+            ),
+            DataBlockDeltaEvent(
+                **CTX.event_fields(),
+                block_id="data:1",
+                data="abc",
+                media_type="image/png",
+            ),
             DataBlockEndEvent(**CTX.event_fields(), block_id="data:1"),
             ToolCallStartEvent(
                 **CTX.event_fields(),
                 tool_call_id="call:1",
                 tool_call_name="lookup",
             ),
-            ToolCallDeltaEvent(**CTX.event_fields(), tool_call_id="call:1", delta='{"q"'),
-            ToolCallDeltaEvent(**CTX.event_fields(), tool_call_id="call:1", delta=':"x"}'),
+            ToolCallDeltaEvent(
+                **CTX.event_fields(), tool_call_id="call:1", delta='{"q"'
+            ),
+            ToolCallDeltaEvent(
+                **CTX.event_fields(), tool_call_id="call:1", delta=':"x"}'
+            ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:1"),
             ToolResultStartEvent(
                 **CTX.event_fields(),
                 tool_call_id="call:1",
                 tool_call_name="lookup",
             ),
-            ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:1", delta="found"),
+            ToolResultTextDeltaEvent(
+                **CTX.event_fields(), tool_call_id="call:1", delta="found"
+            ),
             ToolResultEndEvent(
                 **CTX.event_fields(),
                 tool_call_id="call:1",
                 state=ToolResultState.SUCCESS,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             ),
             ExternalExecutionResultEvent(
                 **CTX.event_fields(),
                 metadata={
                     "tool_observation_timing_by_call_id": {
-                        "call:external": _external_timing("call:external", "external_lookup")
+                        "call:external": _external_timing(
+                            "call:external", "external_lookup"
+                        )
                     }
                 },
                 execution_results=[
@@ -105,8 +127,14 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
                     )
                 ],
             ),
-            ModelCallEndEvent(**CTX.event_fields(), input_tokens=3, output_tokens=4, total_tokens=7),
-            ModelCallEndEvent(**CTX.event_fields(), input_tokens=1, output_tokens=2, total_tokens=3),
+            ModelCallEndEvent(
+                **CTX.event_fields(),
+                **model_call_end_fields(input_tokens=3, output_tokens=4),
+            ),
+            ModelCallEndEvent(
+                **CTX.event_fields(),
+                **model_call_end_fields(input_tokens=1, output_tokens=2),
+            ),
             ReplyEndEvent(**CTX.event_fields()),
         ]
     )
@@ -129,7 +157,9 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
     assert msg.content[5].type == "tool_result"
     assert msg.content[5].output[0].text == "external result"
     assert (
-        msg.metadata["tool_observation_timing_by_call_id"]["call:external"]["observed_at"]
+        msg.metadata["tool_observation_timing_by_call_id"]["call:external"][
+            "observed_at"
+        ]
         == "2026-07-09T00:00:00Z"
     )
     assert msg.usage is not None
@@ -160,8 +190,12 @@ def test_tool_result_end_event_artifacts_round_trip_into_block() -> None:
     event_log = InMemoryEventLog()
     event_log.extend(
         [
-            ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:1", tool_call_name="lookup"),
-            ToolResultTextDeltaEvent(**CTX.event_fields(), tool_call_id="call:1", delta="preview"),
+            ToolResultStartEvent(
+                **CTX.event_fields(), tool_call_id="call:1", tool_call_name="lookup"
+            ),
+            ToolResultTextDeltaEvent(
+                **CTX.event_fields(), tool_call_id="call:1", delta="preview"
+            ),
             loaded,
         ]
     )
@@ -204,7 +238,9 @@ def test_external_execution_result_requires_tool_observation_timing_map() -> Non
             **CTX.event_fields(),
             metadata={
                 "tool_observation_timing_by_call_id": {
-                    "call:external": _external_timing("call:external", "external_lookup"),
+                    "call:external": _external_timing(
+                        "call:external", "external_lookup"
+                    ),
                     "junk": {},
                 }
             },
@@ -251,7 +287,9 @@ def test_tool_observation_timing_requires_utc_iso_and_non_negative_duration() ->
         )
 
     for value in (float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="duration must be finite and non-negative"):
+        with pytest.raises(
+            ValueError, match="duration must be finite and non-negative"
+        ):
             ToolObservationTiming(
                 observed_at="2026-07-09T00:00:00Z",
                 observation_duration_seconds=value,
@@ -277,7 +315,13 @@ def test_external_execution_result_rejects_duplicate_result_ids() -> None:
     with pytest.raises(ValueError, match="duplicate ids"):
         ExternalExecutionResultEvent(
             **CTX.event_fields(),
-            metadata={"tool_observation_timing_by_call_id": {"call:external": _external_timing("call:external", "external_lookup")}},
+            metadata={
+                "tool_observation_timing_by_call_id": {
+                    "call:external": _external_timing(
+                        "call:external", "external_lookup"
+                    )
+                }
+            },
             execution_results=[
                 ToolResultBlock(
                     id="call:external",
@@ -301,9 +345,15 @@ def test_message_reducer_preserves_block_start_order_for_interleaved_events() ->
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
             TextBlockStartEvent(**CTX.event_fields(), block_id="text:first"),
-            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:first", delta="before tool"),
-            ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:later", tool_call_name="lookup"),
-            ToolCallDeltaEvent(**CTX.event_fields(), tool_call_id="call:later", delta="{}"),
+            TextBlockDeltaEvent(
+                **CTX.event_fields(), block_id="text:first", delta="before tool"
+            ),
+            ToolCallStartEvent(
+                **CTX.event_fields(), tool_call_id="call:later", tool_call_name="lookup"
+            ),
+            ToolCallDeltaEvent(
+                **CTX.event_fields(), tool_call_id="call:later", delta="{}"
+            ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:later"),
             TextBlockEndEvent(**CTX.event_fields(), block_id="text:first"),
             ReplyEndEvent(**CTX.event_fields()),
@@ -317,7 +367,9 @@ def test_message_reducer_preserves_block_start_order_for_interleaved_events() ->
     assert msg.content[1].input == "{}"
 
 
-def test_message_reducer_marks_external_tool_call_finished_when_result_arrives() -> None:
+def test_message_reducer_marks_external_tool_call_finished_when_result_arrives() -> (
+    None
+):
     event_log = InMemoryEventLog()
     tool_call = ToolCallBlock(id="call:external", name="external_lookup", input="{}")
     event_log.extend(
@@ -328,7 +380,9 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
                 tool_call_id=tool_call.id,
                 tool_call_name=tool_call.name,
             ),
-            ToolCallDeltaEvent(**CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input),
+            ToolCallDeltaEvent(
+                **CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input
+            ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id),
             RequireExternalExecutionEvent(**CTX.event_fields(), tool_calls=[tool_call]),
             ExternalExecutionResultEvent(

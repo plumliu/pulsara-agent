@@ -24,13 +24,28 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.host.transcript import rebuild_prior_messages
-from pulsara_agent.llm import build_llm_runtime
+from pulsara_agent.llm import ModelRole, build_llm_runtime
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
-from pulsara_agent.message import AssistantMsg, Msg, TextBlock, ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState, UserMsg
+from pulsara_agent.message import (
+    AssistantMsg,
+    Msg,
+    TextBlock,
+    ToolCallBlock,
+    ToolCallState,
+    ToolResultBlock,
+    ToolResultState,
+    UserMsg,
+)
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
-from pulsara_agent.runtime.compaction.service import ContextCompactionPolicy, ContextCompactionService
+from pulsara_agent.runtime.compaction.service import (
+    ContextCompactionPolicy,
+    ContextCompactionService,
+)
+from pulsara_agent.runtime.context_engine.tool_results import (
+    render_segmented_llm_messages,
+)
 from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.state import LoopState, LoopTransition
+from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopTransition
 from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
 from pulsara_agent.settings import PulsaraSettings
 
@@ -54,12 +69,22 @@ class _CapturingLLMRuntime:
                 self.model_ends.append(event)
             yield event
 
+    def resolve_target(self, **kwargs):
+        return self.inner.resolve_target(**kwargs)
+
+    def resolve_call(self, **kwargs):
+        return self.inner.resolve_call(**kwargs)
+
 
 def test_real_llm_context_compaction_summary_and_resume(tmp_path: Path) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_COMPACTION") != "1":
-        pytest.skip("Set PULSARA_RUN_DOGFOOD_COMPACTION=1 to run context compaction dogfood.")
+        pytest.skip(
+            "Set PULSARA_RUN_DOGFOOD_COMPACTION=1 to run context compaction dogfood."
+        )
     settings = _load_settings()
     _connect_or_skip(settings.storage.postgres_dsn).close()
 
@@ -104,16 +129,24 @@ def test_real_llm_context_compaction_summary_and_resume(tmp_path: Path) -> None:
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 keep_recent_runs=1,
-                auto_threshold_tokens=100,
-                chars_per_token=1.0,
-                summary_max_output_tokens=2048,
+                max_summary_chars=8_000,
             ),
         )
 
-        completed = asyncio.run(service.compact(trigger="manual", reason="dogfood_manual_compact", force=True))
+        target = service.llm_runtime.resolve_target(role=ModelRole.PRO)
+        completed = asyncio.run(
+            service.compact(
+                target_model_target=target,
+                trigger="manual",
+                reason="dogfood_manual_compact",
+                force=True,
+            )
+        )
 
         assert completed is not None
-        summary = archive.get_text(completed.summary_artifact_id, session_id=runtime_session_id)
+        summary = archive.get_text(
+            completed.summary_artifact_id, session_id=runtime_session_id
+        )
         summary_lower = summary.casefold()
         assert "200k" in summary_lower or "200,000" in summary_lower
         assert "256k" in summary_lower or "256,000" in summary_lower
@@ -139,16 +172,23 @@ def test_real_llm_context_compaction_summary_and_resume(tmp_path: Path) -> None:
         assert "<context-compaction-summary" in rendered
         assert "do_not_write_back" in rendered
         assert "implementation detail" in rendered.casefold()
-        assert any(isinstance(event, ContextCompactionCompletedEvent) for event in resumed_log.iter())
+        assert any(
+            isinstance(event, ContextCompactionCompletedEvent)
+            for event in resumed_log.iter()
+        )
     finally:
         _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
 def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_COMPACTION_LONG") != "1":
-        pytest.skip("Set PULSARA_RUN_DOGFOOD_COMPACTION_LONG=1 to run the long compaction dogfood.")
+        pytest.skip(
+            "Set PULSARA_RUN_DOGFOOD_COMPACTION_LONG=1 to run the long compaction dogfood."
+        )
     settings = _load_settings()
     _connect_or_skip(settings.storage.postgres_dsn).close()
 
@@ -170,20 +210,32 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 keep_recent_runs=2,
-                auto_threshold_tokens=100,
-                summary_max_output_tokens=4096,
+                max_summary_chars=12_000,
             ),
         )
 
-        completed = asyncio.run(service.compact(trigger="manual", reason="long_pr4_dogfood_manual_compact", force=True))
+        target = service.llm_runtime.resolve_target(role=ModelRole.PRO)
+        completed = asyncio.run(
+            service.compact(
+                target_model_target=target,
+                trigger="manual",
+                reason="long_pr4_dogfood_manual_compact",
+                force=True,
+            )
+        )
 
         assert completed is not None
-        summary = archive.get_text(completed.summary_artifact_id, session_id=runtime_session_id)
+        summary = archive.get_text(
+            completed.summary_artifact_id, session_id=runtime_session_id
+        )
         summary_lower = summary.casefold()
         assert "pr4" in summary_lower
         assert "skill" in summary_lower
         assert "controlled" in summary_lower or "provider failure" in summary_lower
-        assert completed.estimated_tokens_after < completed.estimated_tokens_before
+        assert (
+            completed.target_estimate.estimated_tokens_after
+            < completed.target_estimate.estimated_tokens_before
+        )
 
         compact_context = capture.contexts[0]
         compact_user_input = compact_context.messages[1].content[0]
@@ -216,8 +268,8 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
         usage = capture.model_ends[-1] if capture.model_ends else None
         print(
             "[long-compaction-dogfood] "
-            f"before={completed.estimated_tokens_before} "
-            f"after={completed.estimated_tokens_after} "
+            f"before={completed.target_estimate.estimated_tokens_before} "
+            f"after={completed.target_estimate.estimated_tokens_after} "
             f"summary_chars={completed.summary_chars} "
             f"input_chars={len(compact_user_input)} "
             f"raw_output_chars={len(raw_output)} "
@@ -228,11 +280,17 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
         _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
-def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Path) -> None:
+def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
+    tmp_path: Path,
+) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_COMPACTION_MID_TURN") != "1":
-        pytest.skip("Set PULSARA_RUN_DOGFOOD_COMPACTION_MID_TURN=1 to run mid-turn compaction dogfood.")
+        pytest.skip(
+            "Set PULSARA_RUN_DOGFOOD_COMPACTION_MID_TURN=1 to run mid-turn compaction dogfood."
+        )
     settings = _load_settings()
     _connect_or_skip(settings.storage.postgres_dsn).close()
 
@@ -248,7 +306,8 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Pa
             log,
             "midturn-old-a",
             "Historical requirement A: mid-turn compaction may summarize old prefix facts.",
-            "Acknowledged historical requirement A.",
+            "Acknowledged historical requirement A. "
+            + ("Historical detail remains part of requirement A. " * 400),
         )
         _append_turn(
             log,
@@ -261,7 +320,9 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Pa
             runtime_session_id=runtime_session_id,
             event_log=log,
             archive=archive,
-            tool_result_artifacts=PostgresToolResultArtifactIndex(settings.storage.postgres_dsn),
+            tool_result_artifacts=PostgresToolResultArtifactIndex(
+                settings.storage.postgres_dsn
+            ),
         )
         state = _mid_turn_state(runtime_session_id)
         current_start = asyncio.run(
@@ -271,8 +332,12 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Pa
                     turn_id=state.turn_id,
                     reply_id=state.reply_id,
                     **run_start_permission_fields(state.run_id),
-                    user_input_chars=len("Current request: inspect the just-finished tool output."),
-                    metadata={"user_input": "Current request: inspect the just-finished tool output."},
+                    user_input_chars=len(
+                        "Current request: inspect the just-finished tool output."
+                    ),
+                    metadata={
+                        "user_input": "Current request: inspect the just-finished tool output."
+                    },
                 ),
                 state=state,
             )
@@ -285,10 +350,36 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Pa
             runtime_session_id=runtime_session_id,
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
-                auto_threshold_tokens=1,
-                summary_max_output_tokens=2048,
+                auto_trigger_ratio=0.006,
+                post_compaction_target_ratio=0.005,
+                # This dogfood validates inline boundary preservation, not
+                # the summary-length rejection path.  Real summarizers can
+                # legitimately need more than 1k characters to preserve
+                # the seeded historical/tool facts.
+                max_summary_chars=4_000,
             ),
         )
+        state.run_model_target = capture.resolve_target(role=ModelRole.PRO)
+        segmented = render_segmented_llm_messages(
+            state.messages,
+            LoopBudget(),
+            f"user-message:{state.run_id}",
+            token_estimator=state.run_model_target.token_estimator,
+        )
+        protected = (
+            *(segmented.current_user_messages or ()),
+            *(segmented.current_run_tail_messages or ()),
+        )
+        model_visible_messages = [
+            message
+            for message in rebuild_prior_messages(
+                log,
+                archive=archive,
+                session_id=runtime_session_id,
+            )
+            if message.id != f"user-message:{state.run_id}"
+        ]
+        model_visible_messages.extend(state.messages)
         compactor = RuntimeContextCompactor(
             event_log=log,
             archive=archive,
@@ -299,14 +390,21 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Pa
         result = asyncio.run(
             compactor.maybe_compact_before_followup(
                 state=state,
-                model_visible_messages=state.messages,
+                model_visible_messages=model_visible_messages,
+                protected_model_visible_messages_after=protected,
             )
         )
 
         assert result.compacted is True
         assert current_start.sequence is not None
-        completed = next(event for event in result.events if isinstance(event, ContextCompactionCompletedEvent))
-        summary = archive.get_text(completed.summary_artifact_id, session_id=runtime_session_id)
+        completed = next(
+            event
+            for event in result.events
+            if isinstance(event, ContextCompactionCompletedEvent)
+        )
+        summary = archive.get_text(
+            completed.summary_artifact_id, session_id=runtime_session_id
+        )
         compact_input = capture.contexts[0].messages[1].content[0]
         assert "Historical requirement A" in compact_input
         assert "Recent requirement B" not in compact_input
@@ -322,12 +420,16 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(tmp_path: Pa
         assert "Recent requirement B" in rendered
         assert "Current request" in rendered
         assert completed.metadata["phase"] == "mid_turn"
-        assert completed.metadata["current_run_start_sequence"] == current_start.sequence
+        assert (
+            completed.metadata["current_run_start_sequence"] == current_start.sequence
+        )
     finally:
         _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
-def _append_turn(log: PostgresEventLog, label: str, user_input: str, assistant_text: str) -> None:
+def _append_turn(
+    log: PostgresEventLog, label: str, user_input: str, assistant_text: str
+) -> None:
     ctx = EventContext(
         run_id=f"run:real-compaction:{label}:{uuid4().hex}",
         turn_id=f"turn:real-compaction:{label}:{uuid4().hex}",
@@ -335,10 +437,17 @@ def _append_turn(log: PostgresEventLog, label: str, user_input: str, assistant_t
     )
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=len(user_input), metadata={"user_input": user_input}),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=len(user_input),
+                metadata={"user_input": user_input},
+            ),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
             TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
-            TextBlockDeltaEvent(**ctx.event_fields(), block_id=f"text:{label}", delta=assistant_text),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(), block_id=f"text:{label}", delta=assistant_text
+            ),
             TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{label}"),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
@@ -347,7 +456,9 @@ def _append_turn(log: PostgresEventLog, label: str, user_input: str, assistant_t
 
 
 def _mid_turn_state(runtime_session_id: str) -> LoopState:
-    state = LoopState(session_id=runtime_session_id, run_id=f"run:midturn-current:{uuid4().hex}")
+    state = LoopState(
+        session_id=runtime_session_id, run_id=f"run:midturn-current:{uuid4().hex}"
+    )
     state.messages = [
         UserMsg(
             name="user",
@@ -486,18 +597,26 @@ def _append_pr4_style_long_dogfood_transcript(log: PostgresEventLog) -> None:
         ),
     ]
     for idx, (label, user_input, assistant_text) in enumerate(rounds, start=1):
-        expanded_assistant = assistant_text + (
-            f" PR4 long dogfood evidence block {idx}: registry included write_file and terminal_process; "
-            f"turn label {label}; workspace artifact checks and event replay diagnostics were preserved. "
-            "This repeated diagnostic prose intentionally makes the transcript long enough to exercise real "
-            "context compaction without changing the original PR4 long dogfood test. "
-        ) * 4
+        expanded_assistant = (
+            assistant_text
+            + (
+                f" PR4 long dogfood evidence block {idx}: registry included write_file and terminal_process; "
+                f"turn label {label}; workspace artifact checks and event replay diagnostics were preserved. "
+                "This repeated diagnostic prose intentionally makes the transcript long enough to exercise real "
+                "context compaction without changing the original PR4 long dogfood test. "
+            )
+            * 4
+        )
         _append_turn(log, label, user_input, expanded_assistant)
 
 
 def _load_settings() -> PulsaraSettings:
     env_file = Path(".env")
-    return PulsaraSettings.from_env_file(env_file) if env_file.exists() else PulsaraSettings.from_env()
+    return (
+        PulsaraSettings.from_env_file(env_file)
+        if env_file.exists()
+        else PulsaraSettings.from_env()
+    )
 
 
 def _connect_or_skip(dsn: str):

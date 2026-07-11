@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import Any
 
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.estimator import TokenEstimator
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import Msg
 from pulsara_agent.runtime.context_engine.types import (
@@ -27,7 +28,10 @@ from pulsara_agent.runtime.context_engine.types import (
 )
 
 from pulsara_agent.runtime.context_engine.lifecycle import ContextLifecycleCoordinator
-from pulsara_agent.runtime.recovery import project_recovery_from_state, render_recovery_text
+from pulsara_agent.runtime.recovery import (
+    project_recovery_from_state,
+    render_recovery_text,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,45 +72,151 @@ def compile_context(
         lifecycle_coordinator=lifecycle_coordinator,
     )
     sections = _apply_timing_overlay(request, sections)
+    estimator = request.resolved_call.target.token_estimator
     tool_units = _compile_tool_units(request)
-    context_window_tokens = _context_window_tokens(request)
-    reserved_output_tokens = _reserved_output_tokens(request)
-    safety_margin_tokens = int(context_window_tokens * 0.25)
-    input_budget_tokens = max(0, context_window_tokens - reserved_output_tokens - safety_margin_tokens)
+    target = request.resolved_call.target
+    input_budget_tokens = target.context_budget.input_budget_tokens
+    if request.tools and not target.fact.supports_tools:
+        sections_estimated_tokens = sum(
+            section.estimated_tokens
+            for section in sections
+            if section.included and section.metadata.get("counted_in") is None
+        )
+        tools_estimated_tokens = sum(
+            tool.estimated_tokens for tool in tool_units if tool.included
+        )
+        raise ContextBudgetExceeded(
+            "Resolved model target does not support tool schemas.",
+            context_id=request.context_id,
+            model_call_index=request.model_call_index,
+            diagnostics=(
+                *diagnostics,
+                ContextDiagnostic(
+                    severity="error",
+                    code="model_target_does_not_support_tools",
+                    message="The resolved model target cannot receive tool schemas.",
+                ),
+            ),
+            tool_result_render_decisions=inputs.tool_result_render_decisions,
+            tool_result_budget_report=dict(inputs.tool_result_budget_report or {}),
+            budget_report=ContextBudgetReport(
+                target_fingerprint=target.fact.target_fingerprint,
+                resolved_model_call_id=request.resolved_call.fact.resolved_model_call_id,
+                measurement_stage="section_allocation",
+                total_context_tokens=target.limits.total_context_tokens,
+                max_input_tokens=target.limits.max_input_tokens,
+                max_output_tokens=target.limits.max_output_tokens,
+                effective_output_tokens=target.context_budget.effective_output_tokens,
+                safety_margin_tokens=target.context_budget.safety_margin_tokens,
+                input_budget_tokens=input_budget_tokens,
+                sections_estimated_tokens=sections_estimated_tokens,
+                tools_estimated_tokens=tools_estimated_tokens,
+                envelope_estimated_tokens=None,
+                allocation_estimated_tokens=(
+                    sections_estimated_tokens + tools_estimated_tokens
+                ),
+                final_payload_estimated_tokens=None,
+                non_transcript_baseline_tokens=None,
+                transcript_estimated_tokens=None,
+                estimator=target.token_estimator.fact,
+            ),
+        )
     sections, diagnostics = _apply_section_budget(
         sections,
         diagnostics,
         input_budget_tokens=input_budget_tokens,
-        tools_estimated_tokens=sum(tool.estimated_tokens for tool in tool_units if tool.included),
+        tools_estimated_tokens=sum(
+            tool.estimated_tokens for tool in tool_units if tool.included
+        ),
+        estimator=estimator,
     )
     system_prompt = _lower_system_prompt(sections)
     messages = _lower_messages(inputs, sections=sections)
+    message_budget_scopes = _lower_message_budget_scopes(inputs, sections=sections)
+    if len(messages) != len(message_budget_scopes):
+        raise RuntimeError(
+            "lowered message budget scopes do not match lowered messages"
+        )
     compiled_sections = tuple(_compiled_section(section) for section in sections)
     sections_estimated_tokens = sum(
         section.estimated_tokens
         for section in compiled_sections
         if section.included and section.metadata.get("counted_in") is None
     )
-    tools_estimated_tokens = sum(tool.estimated_tokens for tool in tool_units if tool.included)
-    envelope_estimated_tokens = max(1, len(messages) // 2)
-    total_estimated_tokens = sections_estimated_tokens + tools_estimated_tokens + envelope_estimated_tokens
-    budget = ContextBudgetReport(
-        context_window_tokens=context_window_tokens,
-        reserved_output_tokens=reserved_output_tokens,
-        safety_margin_tokens=safety_margin_tokens,
-        input_budget_tokens=input_budget_tokens,
-        sections_estimated_tokens=sections_estimated_tokens,
-        tools_estimated_tokens=tools_estimated_tokens,
-        envelope_estimated_tokens=envelope_estimated_tokens,
-        total_estimated_tokens=total_estimated_tokens,
+    tools_estimated_tokens = sum(
+        tool.estimated_tokens for tool in tool_units if tool.included
     )
-    _raise_if_current_user_exceeds_budget(compiled_sections, budget)
     llm_context = LLMContext(
         messages=tuple(messages),
         tools=request.tools,
         system_prompt=system_prompt,
         context_id=request.context_id,
+        resolved_model_call_id=request.resolved_call.fact.resolved_model_call_id,
+        target_fingerprint=target.fact.target_fingerprint,
         model_call_index=request.model_call_index,
+    )
+    final_estimate = estimator.estimate_context(llm_context)
+    transcript_estimated_tokens = sum(
+        final_estimate.message_tokens_by_index[index]
+        for index, scope in enumerate(message_budget_scopes)
+        if scope == "transcript"
+    )
+    non_transcript_baseline_tokens = (
+        final_estimate.system_tokens
+        + final_estimate.tool_tokens
+        + final_estimate.envelope_tokens
+        + sum(
+            final_estimate.message_tokens_by_index[index]
+            for index, scope in enumerate(message_budget_scopes)
+            if scope == "non_transcript"
+        )
+    )
+    allocation_estimated_tokens = sections_estimated_tokens + tools_estimated_tokens
+    budget = ContextBudgetReport(
+        target_fingerprint=target.fact.target_fingerprint,
+        resolved_model_call_id=request.resolved_call.fact.resolved_model_call_id,
+        measurement_stage="final_payload",
+        total_context_tokens=target.limits.total_context_tokens,
+        max_input_tokens=target.limits.max_input_tokens,
+        max_output_tokens=target.limits.max_output_tokens,
+        effective_output_tokens=target.context_budget.effective_output_tokens,
+        safety_margin_tokens=target.context_budget.safety_margin_tokens,
+        input_budget_tokens=input_budget_tokens,
+        sections_estimated_tokens=sections_estimated_tokens,
+        tools_estimated_tokens=tools_estimated_tokens,
+        envelope_estimated_tokens=final_estimate.envelope_tokens,
+        allocation_estimated_tokens=allocation_estimated_tokens,
+        final_payload_estimated_tokens=final_estimate.total_input_tokens,
+        non_transcript_baseline_tokens=non_transcript_baseline_tokens,
+        transcript_estimated_tokens=transcript_estimated_tokens,
+        estimator=estimator.fact,
+    )
+    _raise_if_current_user_exceeds_budget(
+        request,
+        compiled_sections,
+        budget,
+        inputs=inputs,
+    )
+    if final_estimate.total_input_tokens > input_budget_tokens:
+        raise ContextBudgetExceeded(
+            "Final model payload exceeds the resolved model input budget.",
+            context_id=request.context_id,
+            model_call_index=request.model_call_index,
+            diagnostics=(
+                *diagnostics,
+                ContextDiagnostic(
+                    severity="error",
+                    code="context_budget_still_exceeded",
+                    message="Final lowered model payload exceeds the resolved input budget.",
+                ),
+            ),
+            tool_result_render_decisions=inputs.tool_result_render_decisions,
+            tool_result_budget_report=dict(inputs.tool_result_budget_report or {}),
+            budget_report=budget,
+        )
+    llm_context = replace(
+        llm_context,
+        compiler_estimated_input_tokens=final_estimate.total_input_tokens,
     )
     return CompiledContext(
         context_id=request.context_id,
@@ -115,15 +225,20 @@ def compile_context(
         tool_specs=tool_units,
         diagnostics=diagnostics,
         lifecycle_decisions=lifecycle_decisions,
-        estimated_tokens=total_estimated_tokens,
+        estimated_tokens=final_estimate.total_input_tokens,
         budget=budget,
+        resolved_model_call=request.resolved_call.fact,
+        final_token_estimate=final_estimate,
+        message_budget_scopes=message_budget_scopes,
         tool_result_render_decisions=inputs.tool_result_render_decisions,
         tool_result_budget_report=inputs.tool_result_budget_report or {},
     )
 
 
 def _lower_system_prompt(sections: tuple[ContextSection, ...]) -> str:
-    system_section = next((section for section in sections if section.id == "system:prompt"), None)
+    system_section = next(
+        (section for section in sections if section.id == "system:prompt"), None
+    )
     parts = [system_section.text if system_section is not None else ""]
     parts.extend(
         _render_section_text_with_timing(section)
@@ -151,10 +266,16 @@ def _lower_messages(
 ) -> list[LLMMessage]:
     leading_context = _leading_user_context_text(sections)
     if inputs.current_user_messages is None:
-        messages = list(inputs.prior_messages) if _section_included(sections, "transcript:legacy_history") else []
+        messages = (
+            list(inputs.prior_messages)
+            if _section_included(sections, "transcript:legacy_history")
+            else []
+        )
         if leading_context:
             messages.insert(0, LLMMessage.user(leading_context))
-        if inputs.recovery_message is not None and _section_included(sections, "recovery:prompt"):
+        if inputs.recovery_message is not None and _section_included(
+            sections, "recovery:prompt"
+        ):
             messages.append(inputs.recovery_message)
         return messages
 
@@ -163,7 +284,9 @@ def _lower_messages(
         messages.append(LLMMessage.user(leading_context))
     if _section_included(sections, "transcript:prior_history"):
         messages.extend(inputs.prior_history_messages or ())
-    if inputs.recovery_message is not None and _section_included(sections, "recovery:prompt"):
+    if inputs.recovery_message is not None and _section_included(
+        sections, "recovery:prompt"
+    ):
         messages.append(inputs.recovery_message)
     if _section_included(sections, "transcript:current_user"):
         messages.extend(inputs.current_user_messages)
@@ -172,17 +295,56 @@ def _lower_messages(
     return messages
 
 
+def _lower_message_budget_scopes(
+    inputs: ContextCompileInputs,
+    *,
+    sections: tuple[ContextSection, ...],
+) -> tuple[str, ...]:
+    scopes: list[str] = []
+    leading_context = _leading_user_context_text(sections)
+    if inputs.current_user_messages is None:
+        if _section_included(sections, "transcript:legacy_history"):
+            scopes.extend("transcript" for _ in inputs.prior_messages)
+        if leading_context:
+            scopes.insert(0, "non_transcript")
+        if inputs.recovery_message is not None and _section_included(
+            sections, "recovery:prompt"
+        ):
+            scopes.append("non_transcript")
+        return tuple(scopes)
+
+    if leading_context:
+        scopes.append("non_transcript")
+    if _section_included(sections, "transcript:prior_history"):
+        scopes.extend("transcript" for _ in (inputs.prior_history_messages or ()))
+    if inputs.recovery_message is not None and _section_included(
+        sections, "recovery:prompt"
+    ):
+        scopes.append("non_transcript")
+    if _section_included(sections, "transcript:current_user"):
+        scopes.extend("transcript" for _ in inputs.current_user_messages)
+    if _section_included(sections, "transcript:current_run_tail"):
+        scopes.extend("transcript" for _ in (inputs.current_run_tail_messages or ()))
+    return tuple(scopes)
+
+
 def _section_included(sections: tuple[ContextSection, ...], section_id: str) -> bool:
     if not sections:
         return True
-    section = next((candidate for candidate in sections if candidate.id == section_id), None)
+    section = next(
+        (candidate for candidate in sections if candidate.id == section_id), None
+    )
     return section is None or section.included
 
 
 def _leading_user_context_text(sections: tuple[ContextSection, ...]) -> str:
     parts: list[str] = []
     for section in sorted(sections, key=lambda candidate: candidate.priority):
-        if section.channel != "leading_user" or not section.included or not section.text:
+        if (
+            section.channel != "leading_user"
+            or not section.included
+            or not section.text
+        ):
             continue
         label = _component_label(section.id)
         parts.append(f"## {label}\n{_render_section_text_with_timing(section)}")
@@ -218,8 +380,11 @@ def _component_label(component_id: str) -> str:
 
 
 def _raise_if_current_user_exceeds_budget(
+    request: ContextCompileRequest,
     sections: tuple[CompiledContextSection, ...],
     budget: ContextBudgetReport,
+    *,
+    inputs: ContextCompileInputs,
 ) -> None:
     for section in sections:
         if section.channel != "current_user" or not section.included:
@@ -227,7 +392,20 @@ def _raise_if_current_user_exceeds_budget(
         if section.estimated_tokens > budget.input_budget_tokens:
             raise ContextBudgetExceeded(
                 "Current user input exceeds the available model input budget; "
-                "please split the request into smaller turns."
+                "please split the request into smaller turns.",
+                context_id=request.context_id,
+                model_call_index=request.model_call_index,
+                diagnostics=(
+                    ContextDiagnostic(
+                        severity="error",
+                        code="current_user_exceeds_model_input_budget",
+                        message="Current user input exceeds the resolved model input budget.",
+                        section_id=section.id,
+                    ),
+                ),
+                tool_result_render_decisions=inputs.tool_result_render_decisions,
+                tool_result_budget_report=dict(inputs.tool_result_budget_report or {}),
+                budget_report=budget,
             )
 
 
@@ -249,6 +427,7 @@ def _collect_sections(
     tuple[ContextDiagnostic, ...],
     tuple[ContextLifecycleDecisionDiagnostic, ...],
 ]:
+    estimator = request.resolved_call.target.token_estimator
     sections: list[ContextSection] = [
         ContextSection(
             id="system:prompt",
@@ -258,7 +437,9 @@ def _collect_sections(
             stability="turn",
             budget_class="must_keep",
             text=inputs.system_prompt,
-            estimated_tokens=estimate_text_tokens(inputs.system_prompt),
+            estimated_tokens=estimate_text_tokens(
+                inputs.system_prompt, estimator=estimator
+            ),
             provenance={"source": "compose_system_prompt"},
             metadata={
                 "chars": len(inputs.system_prompt),
@@ -273,10 +454,14 @@ def _collect_sections(
     for component_id, text in inputs.component_prompts:
         if not text:
             continue
-        source_id, channel, budget_class = _component_section_classification(component_id)
+        source_id, channel, budget_class = _component_section_classification(
+            component_id
+        )
         metadata = {
             "chars": len(text),
-            "lowered_to": "system_prompt" if channel in {"system", "handoff_hint"} else "messages",
+            "lowered_to": "system_prompt"
+            if channel in {"system", "handoff_hint"}
+            else "messages",
             "source_timing": _component_source_timing(
                 request,
                 component_id=component_id,
@@ -292,10 +477,12 @@ def _collect_sections(
                 stability="turn",
                 budget_class=budget_class,
                 text=text,
-                estimated_tokens=estimate_text_tokens(text),
+                estimated_tokens=estimate_text_tokens(text, estimator=estimator),
                 provenance={"source": component_id},
                 metadata=metadata,
-                dependency_fingerprint=_component_dependency_fingerprint(request, component_id, text),
+                dependency_fingerprint=_component_dependency_fingerprint(
+                    request, component_id, text
+                ),
             )
         )
     diagnostics: list[ContextDiagnostic] = []
@@ -322,7 +509,9 @@ def _collect_sections(
                 stability="step",
                 budget_class="important",
                 text=_llm_messages_text(messages),
-                estimated_tokens=estimate_messages_tokens(messages),
+                estimated_tokens=estimate_messages_tokens(
+                    messages, estimator=estimator
+                ),
                 provenance={"source": "msg_to_llm_messages"},
                 metadata=_transcript_metadata(
                     messages=request.state.messages,
@@ -334,7 +523,9 @@ def _collect_sections(
                         fallback_observed_at=None,
                     ),
                 ),
-                dependency_fingerprint=_messages_dependency_fingerprint(request.state.messages),
+                dependency_fingerprint=_messages_dependency_fingerprint(
+                    request.state.messages
+                ),
             )
         )
     else:
@@ -350,7 +541,9 @@ def _collect_sections(
                     stability="step",
                     budget_class="important",
                     text=prior_text,
-                    estimated_tokens=estimate_text_tokens(prior_text),
+                    estimated_tokens=estimate_text_tokens(
+                        prior_text, estimator=estimator
+                    ),
                     provenance={"source": "msg_to_llm_messages"},
                     metadata={
                         "message_count": len(prior),
@@ -374,7 +567,10 @@ def _collect_sections(
                 stability="turn",
                 budget_class="must_keep",
                 text=request.current_user_input or _messages_text([current_user]),
-                estimated_tokens=estimate_text_tokens(request.current_user_input or _messages_text([current_user])),
+                estimated_tokens=estimate_text_tokens(
+                    request.current_user_input or _messages_text([current_user]),
+                    estimator=estimator,
+                ),
                 provenance={"message_id": current_user.id},
                 metadata={
                     "anchor": request.current_user_anchor,
@@ -394,11 +590,15 @@ def _collect_sections(
                     stability="step",
                     budget_class="important",
                     text=tail_text,
-                    estimated_tokens=estimate_text_tokens(tail_text),
+                    estimated_tokens=estimate_text_tokens(
+                        tail_text, estimator=estimator
+                    ),
                     provenance={"source": "state.messages"},
                     metadata={
                         "message_count": len(tail),
-                        "llm_message_count": len(inputs.current_run_tail_messages or ()),
+                        "llm_message_count": len(
+                            inputs.current_run_tail_messages or ()
+                        ),
                         "structure_must_keep": True,
                         "body_may_degrade": True,
                         "source_timing": _messages_source_timing(
@@ -421,7 +621,7 @@ def _collect_sections(
                 stability="ephemeral",
                 budget_class="important",
                 text=text,
-                estimated_tokens=estimate_text_tokens(text),
+                estimated_tokens=estimate_text_tokens(text, estimator=estimator),
                 provenance={"source": "project_recovery_from_state"},
                 metadata={
                     "source_timing": _source_timing(
@@ -434,7 +634,9 @@ def _collect_sections(
         )
     lifecycle_decisions: tuple[ContextLifecycleDecisionDiagnostic, ...] = ()
     if lifecycle_coordinator is not None:
-        sections, lifecycle_decisions = lifecycle_coordinator.apply(request, tuple(sections))
+        sections, lifecycle_decisions = lifecycle_coordinator.apply(
+            request, tuple(sections)
+        )
     return tuple(sections), tuple(diagnostics), lifecycle_decisions
 
 
@@ -455,7 +657,11 @@ def _apply_timing_overlay(
             ),
             source=source,
         )
-        timing_header_text = _timing_header_text(timing) if _section_renders_timing_header(section) else None
+        timing_header_text = (
+            _timing_header_text(timing)
+            if _section_renders_timing_header(section)
+            else None
+        )
         metadata: dict[str, Any] = {
             **section.metadata,
             "source_timing": source.to_event_value(),
@@ -463,7 +669,10 @@ def _apply_timing_overlay(
         }
         if timing_header_text:
             metadata["timing_header_text"] = timing_header_text
-            metadata["rendered_timing_header_tokens"] = estimate_text_tokens(timing_header_text)
+            metadata["rendered_timing_header_tokens"] = estimate_text_tokens(
+                timing_header_text,
+                estimator=request.resolved_call.target.token_estimator,
+            )
             metadata["rendered_timing_header_chars"] = len(timing_header_text)
         else:
             metadata.pop("timing_header_text", None)
@@ -473,7 +682,12 @@ def _apply_timing_overlay(
             replace(
                 section,
                 metadata=metadata,
-                estimated_tokens=_estimate_section_tokens(section, text=section.text, metadata=metadata),
+                estimated_tokens=_estimate_section_tokens(
+                    section,
+                    text=section.text,
+                    estimator=request.resolved_call.target.token_estimator,
+                    metadata=metadata,
+                ),
             )
         )
     return tuple(overlaid)
@@ -516,7 +730,9 @@ def _coerce_source_timing(value: object) -> ContextSectionSourceTiming:
     return ContextSectionSourceTiming()
 
 
-def _current_user_source_timing(request: ContextCompileRequest, message: Msg) -> dict[str, Any]:
+def _current_user_source_timing(
+    request: ContextCompileRequest, message: Msg
+) -> dict[str, Any]:
     started_at = message.created_at or request.user_observed_at_utc
     ended_at = message.finished_at or started_at
     clock_source = "message_created_at" if message.created_at else "compiler_wall_clock"
@@ -535,7 +751,9 @@ def _messages_source_timing(
     freshness: str,
     fallback_observed_at: str | None,
 ) -> dict[str, Any]:
-    started_at = next((message.created_at for message in messages if message.created_at), None)
+    started_at = next(
+        (message.created_at for message in messages if message.created_at), None
+    )
     ended_at = next(
         (
             message.finished_at or message.created_at
@@ -604,14 +822,15 @@ def _compaction_summary_messages_metadata(messages: list[Msg]) -> dict[str, Any]
     summaries: list[dict[str, Any]] = []
     for message in messages:
         metadata = message.metadata or {}
-        if metadata.get("kind") != "context_compaction_summary" and not str(message.id).startswith(
-            "context-compaction-summary:"
-        ):
+        if metadata.get("kind") != "context_compaction_summary" and not str(
+            message.id
+        ).startswith("context-compaction-summary:"):
             continue
         summaries.append(
             {
                 "compaction_id": metadata.get("compaction_id"),
-                "summary_artifact_id": metadata.get("artifact_id") or metadata.get("summary_artifact_id"),
+                "summary_artifact_id": metadata.get("artifact_id")
+                or metadata.get("summary_artifact_id"),
                 "compacted_at": message.created_at,
                 "keep_after_sequence": metadata.get("keep_after_sequence"),
                 "through_sequence": metadata.get("through_sequence"),
@@ -624,8 +843,12 @@ def _compaction_summary_messages_metadata(messages: list[Msg]) -> dict[str, Any]
     return {"compaction_summary_messages": summaries}
 
 
-def _age_seconds(*, compiled_at_utc: str, source: ContextSectionSourceTiming) -> float | None:
-    source_time = source.source_ended_at or source.observed_at or source.source_started_at
+def _age_seconds(
+    *, compiled_at_utc: str, source: ContextSectionSourceTiming
+) -> float | None:
+    source_time = (
+        source.source_ended_at or source.observed_at or source.source_started_at
+    )
     if not source_time:
         return None
     compiled = _parse_iso_datetime(compiled_at_utc)
@@ -694,13 +917,17 @@ def _estimate_section_tokens(
     section: ContextSection,
     *,
     text: str,
+    estimator: TokenEstimator,
     metadata: dict[str, Any] | None = None,
 ) -> int:
     metadata = metadata if metadata is not None else section.metadata
     header = metadata.get("timing_header_text")
     if isinstance(header, str) and header:
-        return estimate_text_tokens(f"{header}\n{text}" if text else header)
-    return estimate_text_tokens(text)
+        return estimate_text_tokens(
+            f"{header}\n{text}" if text else header,
+            estimator=estimator,
+        )
+    return estimate_text_tokens(text, estimator=estimator)
 
 
 def _str_or_none(value: object) -> str | None:
@@ -717,6 +944,7 @@ def _apply_section_budget(
     *,
     input_budget_tokens: int,
     tools_estimated_tokens: int,
+    estimator: TokenEstimator,
 ) -> tuple[tuple[ContextSection, ...], tuple[ContextDiagnostic, ...]]:
     mutable = list(sections)
     emitted = list(diagnostics)
@@ -726,7 +954,7 @@ def _apply_section_budget(
     for index, section in list(enumerate(mutable)):
         if _section_total(mutable) + tools_estimated_tokens <= input_budget_tokens:
             break
-        degraded = _compact_section(section)
+        degraded = _compact_section(section, estimator=estimator)
         if degraded is section:
             continue
         mutable[index] = degraded
@@ -735,7 +963,11 @@ def _apply_section_budget(
     for index, section in list(enumerate(mutable)):
         if _section_total(mutable) + tools_estimated_tokens <= input_budget_tokens:
             break
-        if section.budget_class == "must_keep" or section.channel in {"system", "current_user", "current_run_tail"}:
+        if section.budget_class == "must_keep" or section.channel in {
+            "system",
+            "current_user",
+            "current_run_tail",
+        }:
             continue
         omitted = replace(
             section,
@@ -762,7 +994,8 @@ def _apply_section_budget(
                     "non-must-keep sections."
                 ),
                 metadata={
-                    "estimated_tokens": _section_total(mutable) + tools_estimated_tokens,
+                    "estimated_tokens": _section_total(mutable)
+                    + tools_estimated_tokens,
                     "input_budget_tokens": input_budget_tokens,
                 },
             )
@@ -774,7 +1007,11 @@ def _section_total(sections: list[ContextSection]) -> int:
     return sum(section.estimated_tokens for section in sections if section.included)
 
 
-def _compact_section(section: ContextSection) -> ContextSection:
+def _compact_section(
+    section: ContextSection,
+    *,
+    estimator: TokenEstimator,
+) -> ContextSection:
     if not section.included or section.render_mode != "full":
         return section
     if section.id.startswith("capability:catalog"):
@@ -787,6 +1024,7 @@ def _compact_section(section: ContextSection) -> ContextSection:
             ),
             render_mode="compact",
             reason="capability_catalog_compacted_for_budget",
+            estimator=estimator,
         )
     if section.id.startswith("memory:projection"):
         return _replace_with_compact_text(
@@ -798,6 +1036,7 @@ def _compact_section(section: ContextSection) -> ContextSection:
             ),
             render_mode="compact",
             reason="memory_projection_compacted_for_budget",
+            estimator=estimator,
         )
     return section
 
@@ -808,11 +1047,14 @@ def _replace_with_compact_text(
     text: str,
     render_mode: ContextRenderMode,
     reason: str,
+    estimator: TokenEstimator,
 ) -> ContextSection:
     return replace(
         section,
         text=text,
-        estimated_tokens=_estimate_section_tokens(section, text=text),
+        estimated_tokens=_estimate_section_tokens(
+            section, text=text, estimator=estimator
+        ),
         render_mode=render_mode,
         metadata={
             **section.metadata,
@@ -829,7 +1071,9 @@ def _clip_section_text(text: str, *, max_chars: int, marker: str) -> str:
     return text[:kept].rstrip() + marker
 
 
-def _degrade_diagnostic(original: ContextSection, degraded: ContextSection) -> ContextDiagnostic:
+def _degrade_diagnostic(
+    original: ContextSection, degraded: ContextSection
+) -> ContextDiagnostic:
     return ContextDiagnostic(
         severity="warning",
         code="context_section_degraded",
@@ -861,28 +1105,24 @@ def _omit_diagnostic(section: ContextSection) -> ContextDiagnostic:
     )
 
 
-def _compile_tool_units(request: ContextCompileRequest) -> tuple[CompiledToolSpecUnit, ...]:
+def _compile_tool_units(
+    request: ContextCompileRequest,
+) -> tuple[CompiledToolSpecUnit, ...]:
+    estimator = request.resolved_call.target.token_estimator
     descriptor_ids: dict[str, str | None] = {}
     if request.exposure is not None:
         descriptor_ids = {
-            name: descriptor.id for name, descriptor in request.exposure.descriptors_by_name.items()
+            name: descriptor.id
+            for name, descriptor in request.exposure.descriptors_by_name.items()
         }
     return tuple(
         CompiledToolSpecUnit(
             name=tool.name,
             descriptor_id=descriptor_ids.get(tool.name),
-            schema_chars=len(json.dumps(tool.parameters, ensure_ascii=False, sort_keys=True)),
-            estimated_tokens=estimate_json_tokens(
-                json.dumps(
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
+            schema_chars=len(
+                json.dumps(tool.parameters, ensure_ascii=False, sort_keys=True)
             ),
+            estimated_tokens=estimator.estimate_tool_spec(tool),
             included=True,
             metadata={},
         )
@@ -918,11 +1158,19 @@ def _component_dependency_fingerprint(
     if component_id.startswith("runtime_context"):
         return f"{component_id}:workspace:{request.runtime_session_id}:{_text_fingerprint(text)}"
     if component_id.startswith("capability:"):
-        generation = request.exposure.registry_generation if request.exposure is not None else "none"
+        generation = (
+            request.exposure.registry_generation
+            if request.exposure is not None
+            else "none"
+        )
         return f"{component_id}:registry:{generation}"
     if component_id.startswith("memory:projection") and request.state.memory_projection:
         projection = request.state.memory_projection
-        included = projection.get("included_memory_ids") or projection.get("included_ids") or ()
+        included = (
+            projection.get("included_memory_ids")
+            or projection.get("included_ids")
+            or ()
+        )
         conflict_groups = projection.get("conflict_groups") or ()
         warnings = projection.get("warnings") or ()
         return (
@@ -945,8 +1193,7 @@ def _text_fingerprint(text: str) -> str:
 
 def _messages_dependency_fingerprint(messages: list[Msg]) -> str:
     return "|".join(
-        f"{message.id}:{message.role}:{len(message.content)}"
-        for message in messages
+        f"{message.id}:{message.role}:{len(message.content)}" for message in messages
     )
 
 
@@ -957,7 +1204,7 @@ def _compiled_section(section: ContextSection) -> CompiledContextSection:
         channel=section.channel,
         render_mode=section.render_mode,
         included=section.included,
-        estimated_tokens=section.estimated_tokens or estimate_text_tokens(section.text),
+        estimated_tokens=section.estimated_tokens,
         lifecycle_status=section.lifecycle_status,
         lifecycle_reason=section.lifecycle_reason,
         dependency_fingerprint=section.dependency_fingerprint,
@@ -973,7 +1220,11 @@ def _split_messages_by_current_user(
     anchor = request.current_user_anchor
     if not anchor:
         return None
-    matches = [index for index, message in enumerate(request.state.messages) if message.id == anchor]
+    matches = [
+        index
+        for index, message in enumerate(request.state.messages)
+        if message.id == anchor
+    ]
     if len(matches) != 1:
         return None
     index = matches[0]
@@ -994,7 +1245,9 @@ def _messages_text(messages: list[Msg]) -> str:
             elif getattr(block, "type", None) == "tool_call":
                 block_text.append(f"[tool_call:{getattr(block, 'name', '')}]")
             elif getattr(block, "type", None) == "tool_result":
-                block_text.append(f"[tool_result:{getattr(block, 'name', '')}:{getattr(getattr(block, 'state', None), 'value', '')}]")
+                block_text.append(
+                    f"[tool_result:{getattr(block, 'name', '')}:{getattr(getattr(block, 'state', None), 'value', '')}]"
+                )
         if block_text:
             parts.append(f"{message.role}: " + "\n".join(block_text))
     return "\n".join(parts)
@@ -1007,27 +1260,23 @@ def _llm_messages_text(messages: tuple[LLMMessage, ...]) -> str:
         if text:
             parts.append(f"{message.role.value}: {text}")
         if message.tool_calls:
-            parts.append(f"{message.role.value}: [tool_calls:{len(message.tool_calls)}]")
+            parts.append(
+                f"{message.role.value}: [tool_calls:{len(message.tool_calls)}]"
+            )
     return "\n".join(parts)
 
 
-def estimate_messages_tokens(messages: tuple[LLMMessage, ...]) -> int:
-    return estimate_text_tokens(_llm_messages_text(messages))
+def estimate_messages_tokens(
+    messages: tuple[LLMMessage, ...],
+    *,
+    estimator: TokenEstimator,
+) -> int:
+    return sum(estimator.estimate_message(message) for message in messages)
 
 
-def estimate_text_tokens(text: str) -> int:
-    return max(1, (len(text) + 3) // 4) if text else 0
+def estimate_text_tokens(text: str, *, estimator: TokenEstimator) -> int:
+    return estimator.estimate_text(text)
 
 
-def estimate_json_tokens(text: str) -> int:
-    return max(1, (len(text) + 1) // 2) if text else 0
-
-
-def _context_window_tokens(request: ContextCompileRequest) -> int:
-    # The current runtime does not carry ModelProfile into build_llm_context.
-    return 256_000
-
-
-def _reserved_output_tokens(request: ContextCompileRequest) -> int:
-    del request
-    return 8_000
+def estimate_json_tokens(value: object, *, estimator: TokenEstimator) -> int:
+    return estimator.estimate_json(value)

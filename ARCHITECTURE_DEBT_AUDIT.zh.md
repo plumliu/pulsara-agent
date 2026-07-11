@@ -1,6 +1,6 @@
 # Pulsara 当前架构债务审计
 
-> 审计日期：2026-07-10
+> 审计日期：2026-07-10；实施状态更新：2026-07-11
 > 审计基线：`main@995b5746`
 > 审计方法：以当前代码、生产 wiring、事件投影和一组窄动态探针为准；
 > `archived_docs/ARCHITECTURE_DEBT_AUDIT.zh.md` 只用于学习文档结构，不继承其中的历史结论。
@@ -29,11 +29,19 @@
 
 这些主线是对的。当前最危险的债务不在这些架构选择本身，而在迁移尚未彻底收口的接缝处。
 
-本轮最值得优先处理的五项是：
+`ResolvedModelTarget / ResolvedModelCall / model context limits` 这一项已于
+2026-07-11 完成 hard cut，实施与验收记录见
+`PULSARA_RESOLVED_MODEL_CALL_HARD_CUT_IMPLEMENTATION.zh.md`。剩余最值得优先处理的
+四项是：
+
+该 hard cut 的 model identity 口径已同时收口：requested model id 是
+Pulsara 的路由合约，provider-reported model id 是独立观察事实。默认
+`accept_reported` 接受 provider alias / snapshot，`exact` 仅作显式严格策略；
+V1 不实现 allowlist/regex/prefix 推断。这不放宽 transport 内部自行改写
+resolved target 或请求 payload model 的合约。
 
 | 优先级 | 债务 | 风险 |
 |---|---|---|
-| P1 | compiler/transport 没有共享的 `ResolvedModelCall`，compiler 仍使用 `256_000 / 8_000` 常量 | options/limits 可能漂移；小窗口模型可能 provider overflow |
 | P1 | subagent live cache、bootstrap reducer、inspect projector 三套状态归约不一致 | durable resume 后 task 状态可与 event projection 不同 |
 | P1 | event append/publish 边界分裂，governance events 又与 memory mutation 跨事务 | sequence gap、live 可见性和 canonical fact 部分提交 |
 | P1 | runtime / tools / event / message 的依赖环由 lazy import 隐藏 | 新功能继续跨层引用，重构成本呈非线性增长 |
@@ -92,6 +100,15 @@ candidate 不是 canonical memory；governance 决定 accept / merge / correct /
 
 ## 2. ContextCompiler 的模型预算真源与半迁移债务
 
+> 状态更新（2026-07-11）：本节的第一阶段，即 `ResolvedModelTarget / ResolvedModelCall`
+> 与模型上下文预算单一真源，已经完成 PR0–PR5 hard cut。pro/flash limits 现为 required；
+> compiler、pre-send validator、LLMRuntime、transport 和 compaction 共享 resolved target/call
+> 合约；旧静态模型预算与旧 stream API 已删除；typed events、replay、PostgreSQL 与 Inspector
+> 已接入同一事实。权威实施记录为
+> `PULSARA_RESOLVED_MODEL_CALL_HARD_CUT_IMPLEMENTATION.zh.md`。本节后续关于
+> `ContextFactSnapshot`、normalized transcript/tool-result units 和 `ContextSource` 的内容仍是
+> 下一阶段债务，不因本次完成而自动关闭。
+
 ### 2.1 旧设计来源
 
 ContextCompiler 最初在 AgentRuntime 已经渲染好 transcript、memory、capability、recovery prose 后，负责把这些兼容输入组织成 sections、做 lifecycle cache、预算降级并 lower 成 `LLMContext`。
@@ -107,7 +124,7 @@ ContextCompiler 最初在 AgentRuntime 已经渲染好 transcript、memory、cap
 
 见 `src/pulsara_agent/runtime/context_engine/compiler.py` 的 `ContextCompileInputs`。
 
-### 2.2 当前兼容层
+### 2.2 审计时的兼容层（Resolved model 部分已完成迁移）
 
 #### 单次模型调用没有可复用的 resolved contract
 

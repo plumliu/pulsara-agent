@@ -14,8 +14,9 @@ from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     CustomEvent,
     EventContext,
-    ModelCallEndEvent,
     ModelCallStartEvent,
+    RunErrorEvent,
+    RunStartEvent,
     SubagentEdgeRecordedEvent,
     SubagentMessageSentEvent,
     SubagentPhaseReportedEvent,
@@ -45,9 +46,10 @@ from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.types import CapabilityResolveContext
 from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.session import HostSession
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
+from pulsara_agent.llm import LLMRuntime
+from tests.support import model_call_start_fields, run_agent_task, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.runtime.subagent import (
@@ -56,9 +58,17 @@ from pulsara_agent.runtime.subagent import (
     SubagentLimitExceeded,
     SubagentRuntime,
 )
-from pulsara_agent.runtime import AgentRuntime, EventWriteConflict, LoopStatus, RuntimeSession
+from pulsara_agent.runtime import (
+    AgentRuntime,
+    EventWriteConflict,
+    LoopStatus,
+    RuntimeSession,
+)
 from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
-from pulsara_agent.runtime.wiring import AgentRuntimeWiring, build_in_memory_runtime_wiring
+from pulsara_agent.runtime.wiring import (
+    AgentRuntimeWiring,
+    build_in_memory_runtime_wiring,
+)
 from pulsara_agent.runtime.transcript import rebuild_prior_messages
 from pulsara_agent.tools.base import ToolCall, ToolRuntimeContext
 from pulsara_agent.tools.builtins.subagent import (
@@ -117,7 +127,9 @@ def _resumed_runtime(parent, locator, child_logs):
     return resumed_parent, resumed
 
 
-def test_subagent_graph_events_are_parent_stream_and_task_is_artifact_backed(tmp_path) -> None:
+def test_subagent_graph_events_are_parent_stream_and_task_is_artifact_backed(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
 
     async def run() -> None:
@@ -132,7 +144,10 @@ def test_subagent_graph_events_are_parent_stream_and_task_is_artifact_backed(tmp
             spawn_initiator_id="tool:spawn",
         )
         events = parent.event_log.iter()
-        assert [type(event) for event in events] == [SubagentRunStartedEvent, SubagentMessageSentEvent]
+        assert [type(event) for event in events] == [
+            SubagentRunStartedEvent,
+            SubagentMessageSentEvent,
+        ]
 
         started = events[0]
         assert isinstance(started, SubagentRunStartedEvent)
@@ -145,9 +160,9 @@ def test_subagent_graph_events_are_parent_stream_and_task_is_artifact_backed(tmp
         assert len(started.task_preview) <= 500
 
         task_artifact_id = f"{subagent.subagent_run_id}:task"
-        assert parent.archive.get_text(task_artifact_id, session_id=parent.runtime_session_id).startswith(
-            "Implement the isolated worker task."
-        )
+        assert parent.archive.get_text(
+            task_artifact_id, session_id=parent.runtime_session_id
+        ).startswith("Implement the isolated worker task.")
 
         graph = runtime.graph()
         assert len(graph.nodes) == 1
@@ -236,21 +251,40 @@ def test_materialized_batch_facts_are_applied_once(tmp_path) -> None:
     assert len(runtime.runs) == 2
 
 
-def test_child_raw_events_get_subagent_metadata_at_runtime_session_boundary(tmp_path) -> None:
+def test_child_raw_events_get_subagent_metadata_at_runtime_session_boundary(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
         child = runtime.child_runtime_session(subagent.subagent_run_id)
-        child_ctx = EventContext(run_id="run:child", turn_id="turn:child", reply_id="reply:child")
+        child_ctx = EventContext(
+            run_id="run:child", turn_id="turn:child", reply_id="reply:child"
+        )
 
-        stored = await child.emit(TextBlockDeltaEvent(**child_ctx.event_fields(), block_id="text:1", delta="hello"))
+        stored = await child.emit(
+            TextBlockDeltaEvent(
+                **child_ctx.event_fields(), block_id="text:1", delta="hello"
+            )
+        )
 
-        assert stored.metadata["subagent"]["subagent_run_id"] == subagent.subagent_run_id
-        assert stored.metadata["subagent"]["parent_runtime_session_id"] == parent.runtime_session_id
+        assert (
+            stored.metadata["subagent"]["subagent_run_id"] == subagent.subagent_run_id
+        )
+        assert (
+            stored.metadata["subagent"]["parent_runtime_session_id"]
+            == parent.runtime_session_id
+        )
         assert stored.metadata["subagent"]["parent_run_id"] == CTX.run_id
-        assert stored.metadata["subagent"]["capability_profile_id"] == subagent.capability_profile.profile_id
-        assert all(not isinstance(event, TextBlockDeltaEvent) for event in parent.event_log.iter())
+        assert (
+            stored.metadata["subagent"]["capability_profile_id"]
+            == subagent.capability_profile.profile_id
+        )
+        assert all(
+            not isinstance(event, TextBlockDeltaEvent)
+            for event in parent.event_log.iter()
+        )
 
     asyncio.run(run())
 
@@ -261,9 +295,13 @@ def test_child_publish_stored_event_requires_boundary_metadata(tmp_path) -> None
     async def run() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
         child = runtime.child_runtime_session(subagent.subagent_run_id)
-        child_ctx = EventContext(run_id="run:child", turn_id="turn:child", reply_id="reply:child")
+        child_ctx = EventContext(
+            run_id="run:child", turn_id="turn:child", reply_id="reply:child"
+        )
         directly_appended = child.event_log.append(
-            TextBlockDeltaEvent(**child_ctx.event_fields(), block_id="text:1", delta="missing metadata")
+            TextBlockDeltaEvent(
+                **child_ctx.event_fields(), block_id="text:1", delta="missing metadata"
+            )
         )
 
         with pytest.raises(ValueError, match="default metadata"):
@@ -272,13 +310,17 @@ def test_child_publish_stored_event_requires_boundary_metadata(tmp_path) -> None
     asyncio.run(run())
 
 
-def test_child_publish_stored_event_requires_nested_subagent_metadata_values(tmp_path) -> None:
+def test_child_publish_stored_event_requires_nested_subagent_metadata_values(
+    tmp_path,
+) -> None:
     _parent, _locator, _child_logs, runtime = _runtime(tmp_path)
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
         child = runtime.child_runtime_session(subagent.subagent_run_id)
-        child_ctx = EventContext(run_id="run:child", turn_id="turn:child", reply_id="reply:child")
+        child_ctx = EventContext(
+            run_id="run:child", turn_id="turn:child", reply_id="reply:child"
+        )
         directly_appended = child.event_log.append(
             TextBlockDeltaEvent(
                 **child_ctx.event_fields(),
@@ -299,10 +341,14 @@ def test_wait_result_records_consumption_edge_without_delivered_event(tmp_path) 
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
-        result = await runtime.complete_fake(subagent.subagent_run_id, summary="child finished", event_context=CTX)
+        result = await runtime.complete_fake(
+            subagent.subagent_run_id, summary="child finished", event_context=CTX
+        )
         waited = await runtime.wait_result(
             subagent.subagent_run_id,
-            event_context=EventContext(run_id="run:wait", turn_id="turn:wait", reply_id="reply:wait"),
+            event_context=EventContext(
+                run_id="run:wait", turn_id="turn:wait", reply_id="reply:wait"
+            ),
             returned_to_tool_call_id="tool:wait",
             source_context_id="context:wait",
             source_model_call_index=3,
@@ -312,9 +358,13 @@ def test_wait_result_records_consumption_edge_without_delivered_event(tmp_path) 
         events = parent.event_log.iter()
         assert any(isinstance(event, SubagentRunCompletedEvent) for event in events)
         assert any(isinstance(event, SubagentEdgeRecordedEvent) for event in events)
-        assert not any(isinstance(event, SubagentResultDeliveredEvent) for event in events)
+        assert not any(
+            isinstance(event, SubagentResultDeliveredEvent) for event in events
+        )
 
-        wait_edge = next(event for event in events if isinstance(event, SubagentEdgeRecordedEvent))
+        wait_edge = next(
+            event for event in events if isinstance(event, SubagentEdgeRecordedEvent)
+        )
         assert wait_edge.edge_kind == "wait"
         assert wait_edge.result_id == result.result_id
         assert wait_edge.result_artifact_id == result.final_message_artifact_id
@@ -364,7 +414,9 @@ def test_wait_agent_failed_run_returns_terminal_outcome_without_fake_consumption
     )
 
 
-def test_spawn_agent_tool_rejects_invalid_role_and_context_before_persisting(tmp_path) -> None:
+def test_spawn_agent_tool_rejects_invalid_role_and_context_before_persisting(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = SpawnAgentTool(runtime)
 
@@ -373,9 +425,15 @@ def test_spawn_agent_tool_rejects_invalid_role_and_context_before_persisting(tmp
             ToolCall(
                 id="tool:spawn",
                 name="spawn_agent",
-                arguments={"task": "child task", "role": "wizard", "context": "telepathic"},
+                arguments={
+                    "task": "child task",
+                    "role": "wizard",
+                    "context": "telepathic",
+                },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         assert result.status.value == "error"
         payload = json.loads(result.output)
@@ -384,7 +442,9 @@ def test_spawn_agent_tool_rejects_invalid_role_and_context_before_persisting(tmp
 
     asyncio.run(run())
 
-    assert not any(isinstance(event, SubagentRunStartedEvent) for event in parent.event_log.iter())
+    assert not any(
+        isinstance(event, SubagentRunStartedEvent) for event in parent.event_log.iter()
+    )
 
 
 def test_list_agents_tool_returns_bounded_run_only_projection(tmp_path) -> None:
@@ -392,12 +452,20 @@ def test_list_agents_tool_returns_bounded_run_only_projection(tmp_path) -> None:
     tool = ListAgentsTool(runtime)
 
     async def run() -> None:
-        subagent = await runtime.spawn_fake(task="child task", event_context=CTX, label="worker-a")
-        await runtime.complete_fake(subagent.subagent_run_id, summary="child finished", event_context=CTX)
+        subagent = await runtime.spawn_fake(
+            task="child task", event_context=CTX, label="worker-a"
+        )
+        await runtime.complete_fake(
+            subagent.subagent_run_id, summary="child finished", event_context=CTX
+        )
 
         result = await tool.execute_async(
-            ToolCall(id="tool:list", name="list_agents", arguments={"include_edges": True}),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            ToolCall(
+                id="tool:list", name="list_agents", arguments={"include_edges": True}
+            ),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.SUCCESS
@@ -417,12 +485,16 @@ def test_list_agents_tool_returns_bounded_run_only_projection(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_list_projection_does_not_hydrate_full_child_transcript(tmp_path, monkeypatch) -> None:
+def test_list_projection_does_not_hydrate_full_child_transcript(
+    tmp_path, monkeypatch
+) -> None:
     parent, locator, _child_logs, runtime = _runtime(tmp_path)
     tool = ListAgentsTool(runtime)
 
     async def run() -> None:
-        subagent = await runtime.spawn_fake(task="child task", event_context=CTX, label="worker-a")
+        subagent = await runtime.spawn_fake(
+            task="child task", event_context=CTX, label="worker-a"
+        )
         child_session = runtime.child_runtime_session(subagent.subagent_run_id)
         child_context = EventContext(
             run_id="run:child-list-boundary",
@@ -455,7 +527,9 @@ def test_list_projection_does_not_hydrate_full_child_transcript(tmp_path, monkey
     asyncio.run(run())
 
 
-def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(tmp_path) -> None:
+def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = ListAgentsTool(runtime)
 
@@ -471,7 +545,9 @@ def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(t
 
         assert task.status == "created"
         assert task.has_child_run is False
-        assert [type(event) for event in parent.event_log.iter()] == [SubagentTaskCreatedEvent]
+        assert [type(event) for event in parent.event_log.iter()] == [
+            SubagentTaskCreatedEvent
+        ]
         graph = runtime.graph()
         assert len(graph.tasks) == 1
         assert graph.tasks[0].task_id == task.task_id
@@ -481,7 +557,9 @@ def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(t
 
         result = await tool.execute_async(
             ToolCall(id="tool:list", name="list_agents", arguments={}),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         payload = json.loads(result.output)
         assert payload["total_items"] == 1
@@ -496,7 +574,9 @@ def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(t
     asyncio.run(run())
 
 
-def test_subagent_task_start_links_child_run_without_duplicate_list_item(tmp_path) -> None:
+def test_subagent_task_start_links_child_run_without_duplicate_list_item(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = ListAgentsTool(runtime)
 
@@ -544,7 +624,9 @@ def test_subagent_task_start_links_child_run_without_duplicate_list_item(tmp_pat
 
         result = await tool.execute_async(
             ToolCall(id="tool:list", name="list_agents", arguments={}),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         payload = json.loads(result.output)
         assert payload["total_items"] == 1
@@ -669,7 +751,9 @@ def test_subagent_task_completion_updates_task_projection(tmp_path) -> None:
             event_context=CTX,
             profile_id="research_worker",
         )
-        subagent = await runtime.start_task(task.task_id, event_context=CTX, spawn_initiator_id="tool:create")
+        subagent = await runtime.start_task(
+            task.task_id, event_context=CTX, spawn_initiator_id="tool:create"
+        )
         result = await runtime.complete_fake(
             subagent.subagent_run_id,
             summary="worker result",
@@ -678,12 +762,21 @@ def test_subagent_task_completion_updates_task_projection(tmp_path) -> None:
 
         assert runtime.tasks[0].status == "completed"
         assert runtime.tasks[0].result_id == result.result_id
-        assert runtime.result_for_run(runtime.runs[0].subagent_run_id).result_source == "inferred"  # type: ignore[union-attr]
-        assert any(isinstance(event, SubagentTaskCompletedEvent) for event in parent.event_log.iter())
+        assert (
+            runtime.result_for_run(runtime.runs[0].subagent_run_id).result_source
+            == "inferred"
+        )  # type: ignore[union-attr]
+        assert any(
+            isinstance(event, SubagentTaskCompletedEvent)
+            for event in parent.event_log.iter()
+        )
         graph = runtime.graph()
         assert graph.tasks[0].status == "completed"
         assert graph.tasks[0].result_id == result.result_id
-        assert graph.tasks[0].primary_result_artifact_id == result.final_message_artifact_id
+        assert (
+            graph.tasks[0].primary_result_artifact_id
+            == result.final_message_artifact_id
+        )
 
     asyncio.run(run())
 
@@ -699,7 +792,9 @@ def test_child_report_phase_updates_run_and_task_projection(tmp_path) -> None:
             profile_id="research_worker",
             label="Research",
         )
-        subagent = await runtime.start_task(task.task_id, event_context=CTX, spawn_initiator_id="tool:create")
+        subagent = await runtime.start_task(
+            task.task_id, event_context=CTX, spawn_initiator_id="tool:create"
+        )
 
         await runtime.report_phase(
             subagent.subagent_run_id,
@@ -709,7 +804,11 @@ def test_child_report_phase_updates_run_and_task_projection(tmp_path) -> None:
             source_tool_call_id="tool:phase",
         )
 
-        phase_event = next(event for event in parent.event_log.iter() if isinstance(event, SubagentPhaseReportedEvent))
+        phase_event = next(
+            event
+            for event in parent.event_log.iter()
+            if isinstance(event, SubagentPhaseReportedEvent)
+        )
         assert phase_event.task_id == task.task_id
         assert phase_event.source_tool_call_id == "tool:phase"
         graph = runtime.graph()
@@ -717,7 +816,9 @@ def test_child_report_phase_updates_run_and_task_projection(tmp_path) -> None:
         assert graph.tasks[0].phase == "investigating"
         result = await tool.execute_async(
             ToolCall(id="tool:list", name="list_agents", arguments={}),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         payload = json.loads(result.output)
         assert payload["items"][0]["phase"] == "investigating"
@@ -725,7 +826,9 @@ def test_child_report_phase_updates_run_and_task_projection(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_report_agent_result_submits_explicit_result_before_completion(tmp_path) -> None:
+def test_report_agent_result_submits_explicit_result_before_completion(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
 
     async def run() -> None:
@@ -742,26 +845,50 @@ def test_report_agent_result_submits_explicit_result_before_completion(tmp_path)
                 },
             ),
             runtime_context=ToolRuntimeContext(
-                runtime_session_id=runtime.child_runtime_session(subagent.subagent_run_id).runtime_session_id,
+                runtime_session_id=runtime.child_runtime_session(
+                    subagent.subagent_run_id
+                ).runtime_session_id,
                 event_context=CTX,
             ),
         )
         assert submitted.status is ToolResultState.SUCCESS
-        submitted_event = next(event for event in parent.event_log.iter() if isinstance(event, SubagentResultSubmittedEvent))
+        submitted_event = next(
+            event
+            for event in parent.event_log.iter()
+            if isinstance(event, SubagentResultSubmittedEvent)
+        )
         assert submitted_event.result_source == "explicit"
         assert submitted_event.source_tool_call_id == "tool:report-result"
-        assert not any(isinstance(event, SubagentRunCompletedEvent) for event in parent.event_log.iter())
+        assert not any(
+            isinstance(event, SubagentRunCompletedEvent)
+            for event in parent.event_log.iter()
+        )
 
-        result = await runtime.complete_submitted_result(subagent.subagent_run_id, event_context=CTX)
+        result = await runtime.complete_submitted_result(
+            subagent.subagent_run_id, event_context=CTX
+        )
 
         events = parent.event_log.iter()
-        submitted_index = next(index for index, event in enumerate(events) if isinstance(event, SubagentResultSubmittedEvent))
-        completed_index = next(index for index, event in enumerate(events) if isinstance(event, SubagentRunCompletedEvent))
+        submitted_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, SubagentResultSubmittedEvent)
+        )
+        completed_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, SubagentRunCompletedEvent)
+        )
         assert submitted_index < completed_index
         completed_event = events[completed_index]
         assert isinstance(completed_event, SubagentRunCompletedEvent)
-        assert completed_event.result_id == submitted_event.result_id == result.result_id
-        assert runtime.result_for_run(runtime.runs[0].subagent_run_id).result_source == "explicit"  # type: ignore[union-attr]
+        assert (
+            completed_event.result_id == submitted_event.result_id == result.result_id
+        )
+        assert (
+            runtime.result_for_run(runtime.runs[0].subagent_run_id).result_source
+            == "explicit"
+        )  # type: ignore[union-attr]
         waited = await runtime.wait_result(
             subagent.subagent_run_id,
             event_context=CTX,
@@ -773,7 +900,9 @@ def test_report_agent_result_submits_explicit_result_before_completion(tmp_path)
     asyncio.run(run())
 
 
-def test_child_report_events_use_parent_spawn_context_not_child_native_context(tmp_path) -> None:
+def test_child_report_events_use_parent_spawn_context_not_child_native_context(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     child_context = EventContext(
         run_id="run:child-report-native",
@@ -799,7 +928,9 @@ def test_child_report_events_use_parent_spawn_context_not_child_native_context(t
         graph_events = [
             event
             for event in parent.event_log.iter()
-            if isinstance(event, (SubagentPhaseReportedEvent, SubagentResultSubmittedEvent))
+            if isinstance(
+                event, (SubagentPhaseReportedEvent, SubagentResultSubmittedEvent)
+            )
         ]
         assert len(graph_events) == 2
         assert all(event.run_id == CTX.run_id for event in graph_events)
@@ -838,21 +969,41 @@ def test_builtin_profiles_compute_child_tool_boundaries(tmp_path) -> None:
                 event_context=CTX,
                 profile_id=profile_name,
             )
-            subagent = await runtime.start_task(task.task_id, event_context=CTX, spawn_initiator_id="tool:create")
+            subagent = await runtime.start_task(
+                task.task_id, event_context=CTX, spawn_initiator_id="tool:create"
+            )
             profiles[profile_name] = set(subagent.capability_profile.allowed_tool_names)
 
         for profile_name in ("research_worker", "review_worker"):
-            assert {"read_file", "search_files", "artifact_read"} <= profiles[profile_name]
-            assert {"report_agent_phase", "report_agent_result"} <= profiles[profile_name]
-            assert not ({"terminal", "terminal_process", "write_file", "edit_file"} & profiles[profile_name])
+            assert {"read_file", "search_files", "artifact_read"} <= profiles[
+                profile_name
+            ]
+            assert {"report_agent_phase", "report_agent_result"} <= profiles[
+                profile_name
+            ]
+            assert not (
+                {"terminal", "terminal_process", "write_file", "edit_file"}
+                & profiles[profile_name]
+            )
             assert "spawn_agent" not in profiles[profile_name]
-            assert not any(name.startswith("memory_") or name.startswith("remember_") for name in profiles[profile_name])
+            assert not any(
+                name.startswith("memory_") or name.startswith("remember_")
+                for name in profiles[profile_name]
+            )
 
-        assert {"read_file", "search_files", "artifact_read", "terminal", "terminal_process"} <= profiles[
+        assert {
+            "read_file",
+            "search_files",
+            "artifact_read",
+            "terminal",
+            "terminal_process",
+        } <= profiles["verification_worker"]
+        assert {"write_file", "edit_file", "spawn_agent"} & profiles[
+            "verification_worker"
+        ] == set()
+        assert {"report_agent_phase", "report_agent_result"} <= profiles[
             "verification_worker"
         ]
-        assert {"write_file", "edit_file", "spawn_agent"} & profiles["verification_worker"] == set()
-        assert {"report_agent_phase", "report_agent_result"} <= profiles["verification_worker"]
 
     asyncio.run(run())
 
@@ -926,7 +1077,9 @@ def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_create_agent_tasks_materializes_batch_with_event_log_extend(tmp_path, monkeypatch) -> None:
+def test_create_agent_tasks_materializes_batch_with_event_log_extend(
+    tmp_path, monkeypatch
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
     extend_calls = 0
@@ -934,7 +1087,9 @@ def test_create_agent_tasks_materializes_batch_with_event_log_extend(tmp_path, m
 
     class BatchOnlyEventLog:
         def append(self, event, *, expected_last_sequence=None):
-            raise AssertionError("create_agent_tasks must not append batch facts one by one")
+            raise AssertionError(
+                "create_agent_tasks must not append batch facts one by one"
+            )
 
         def extend(self, events, *, expected_last_sequence=None):
             nonlocal extend_calls
@@ -959,12 +1114,22 @@ def test_create_agent_tasks_materializes_batch_with_event_log_extend(tmp_path, m
                 name="create_agent_tasks",
                 arguments={
                     "tasks": [
-                        {"task_key": "review", "profile": "review_worker", "task": "Review"},
-                        {"task_key": "verify", "profile": "verification_worker", "task": "Verify"},
+                        {
+                            "task_key": "review",
+                            "profile": "review_worker",
+                            "task": "Review",
+                        },
+                        {
+                            "task_key": "verify",
+                            "profile": "verification_worker",
+                            "task": "Verify",
+                        },
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.SUCCESS
@@ -976,7 +1141,9 @@ def test_create_agent_tasks_materializes_batch_with_event_log_extend(tmp_path, m
     asyncio.run(run())
 
 
-def test_create_agent_tasks_rejects_dependencies_without_persisting_tasks(tmp_path) -> None:
+def test_create_agent_tasks_rejects_dependencies_without_persisting_tasks(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
 
@@ -996,7 +1163,9 @@ def test_create_agent_tasks_rejects_dependencies_without_persisting_tasks(tmp_pa
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.ERROR
@@ -1004,14 +1173,19 @@ def test_create_agent_tasks_rejects_dependencies_without_persisting_tasks(tmp_pa
         assert payload["failed_stage"] == "preflight"
         assert payload["error_code"] == "subagent_task_batch_preflight_failed"
         assert payload["failed_task_keys"] == ["review"]
-        assert not any(isinstance(event, SubagentTaskCreatedEvent) for event in parent.event_log.iter())
+        assert not any(
+            isinstance(event, SubagentTaskCreatedEvent)
+            for event in parent.event_log.iter()
+        )
         assert runtime.tasks == ()
         assert runtime.runs == ()
 
     asyncio.run(run())
 
 
-def test_create_agent_tasks_dependency_waits_then_starts_after_upstream_completion(tmp_path) -> None:
+def test_create_agent_tasks_dependency_waits_then_starts_after_upstream_completion(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
 
@@ -1036,18 +1210,26 @@ def test_create_agent_tasks_dependency_waits_then_starts_after_upstream_completi
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         payload = json.loads(created.output)
-        review_task = next(item for item in payload["tasks"] if item["task_key"] == "review")
-        verify_task = next(item for item in payload["tasks"] if item["task_key"] == "verify")
+        review_task = next(
+            item for item in payload["tasks"] if item["task_key"] == "review"
+        )
+        verify_task = next(
+            item for item in payload["tasks"] if item["task_key"] == "verify"
+        )
         assert review_task["status"] == "running"
         assert verify_task["status"] == "waiting_dependency"
         assert verify_task["subagent_run_id"] is None
         assert len(runtime.runs) == 1
         review_run_id = review_task["subagent_run_id"]
 
-        await runtime.complete_fake(review_run_id, summary="review done", event_context=CTX)
+        await runtime.complete_fake(
+            review_run_id, summary="review done", event_context=CTX
+        )
 
         graph = runtime.graph()
         by_key = {task.task_key: task for task in graph.tasks}
@@ -1059,7 +1241,9 @@ def test_create_agent_tasks_dependency_waits_then_starts_after_upstream_completi
     asyncio.run(run())
 
 
-def test_dependency_start_unavailable_fails_task_and_blocks_downstream(tmp_path) -> None:
+def test_dependency_start_unavailable_fails_task_and_blocks_downstream(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(
         tmp_path,
         budget=SubagentBudget(
@@ -1077,8 +1261,18 @@ def test_dependency_start_unavailable_fails_task_and_blocks_downstream(tmp_path)
                 arguments={
                     "tasks": [
                         {"task_key": "a", "profile": "review_worker", "task": "A"},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
-                        {"task_key": "c", "profile": "review_worker", "task": "C", "depends_on": ["b"]},
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
+                        {
+                            "task_key": "c",
+                            "profile": "review_worker",
+                            "task": "C",
+                            "depends_on": ["b"],
+                        },
                     ]
                 },
             ),
@@ -1162,8 +1356,12 @@ def test_dependency_post_commit_child_start_failure_keeps_upstream_completed(
         def fail_child_session(**_kwargs):
             raise OSError("synthetic child adapter failure")
 
-        monkeypatch.setattr(runtime, "_create_child_runtime_session", fail_child_session)
-        result = await runtime.complete_fake(a_run_id, summary="A completed", event_context=CTX)
+        monkeypatch.setattr(
+            runtime, "_create_child_runtime_session", fail_child_session
+        )
+        result = await runtime.complete_fake(
+            a_run_id, summary="A completed", event_context=CTX
+        )
 
         assert result.summary == "A completed"
         by_key = {task.task_key: task for task in runtime.graph().tasks}
@@ -1174,7 +1372,9 @@ def test_dependency_post_commit_child_start_failure_keeps_upstream_completed(
     asyncio.run(run())
 
 
-def test_create_agent_tasks_post_commit_failure_terminalizes_materialized_batch(tmp_path, monkeypatch) -> None:
+def test_create_agent_tasks_post_commit_failure_terminalizes_materialized_batch(
+    tmp_path, monkeypatch
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
     original_materialize_task_batch = runtime.materialize_task_batch
@@ -1198,7 +1398,9 @@ def test_create_agent_tasks_post_commit_failure_terminalizes_materialized_batch(
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.ERROR
@@ -1209,10 +1411,15 @@ def test_create_agent_tasks_post_commit_failure_terminalizes_materialized_batch(
 
         graph = runtime.graph()
         assert {task.status for task in graph.tasks} == {"cancelled"}
-        assert all(not task.current_run_id or task.status == "cancelled" for task in graph.tasks)
+        assert all(
+            not task.current_run_id or task.status == "cancelled"
+            for task in graph.tasks
+        )
         assert {run.status for run in runtime.runs} == {"cancelled"}
         task_cancelled_events = [
-            event for event in parent.event_log.iter() if isinstance(event, SubagentTaskCancelledEvent)
+            event
+            for event in parent.event_log.iter()
+            if isinstance(event, SubagentTaskCancelledEvent)
         ]
         assert len(task_cancelled_events) == 3
         assert len({event.repair_id for event in task_cancelled_events}) == 1
@@ -1377,7 +1584,9 @@ def test_create_agent_tasks_post_commit_failure_repairs_waiting_and_blocked_batc
         assert result.status is ToolResultState.ERROR
         payload = json.loads(result.output)
         assert payload["failed_stage"] == "post_commit_start"
-        repaired_tasks = [task for task in runtime.tasks if task.batch_id == payload["batch_id"]]
+        repaired_tasks = [
+            task for task in runtime.tasks if task.batch_id == payload["batch_id"]
+        ]
         assert len(repaired_tasks) == 3
         assert {task.status for task in repaired_tasks} == {"cancelled"}
         repair_events = [
@@ -1405,16 +1614,30 @@ def test_dependency_failure_blocks_downstream_task_without_retry(tmp_path) -> No
                 arguments={
                     "tasks": [
                         {"task_key": "a", "profile": "review_worker", "task": "A"},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         payload = json.loads(created.output)
-        a_run_id = next(item for item in payload["tasks"] if item["task_key"] == "a")["subagent_run_id"]
+        a_run_id = next(item for item in payload["tasks"] if item["task_key"] == "a")[
+            "subagent_run_id"
+        ]
 
-        await runtime.fail(a_run_id, reason_code="test_failure", reason_message="A failed", event_context=CTX)
+        await runtime.fail(
+            a_run_id,
+            reason_code="test_failure",
+            reason_message="A failed",
+            event_context=CTX,
+        )
 
         graph = runtime.graph()
         by_key = {task.task_key: task for task in graph.tasks}
@@ -1429,7 +1652,10 @@ def test_dependency_failure_blocks_downstream_task_without_retry(tmp_path) -> No
             if isinstance(event, SubagentTaskFailedEvent)
             and event.task_id == by_key["a"].task_id
         )
-        assert by_key["b"].dependency_terminal_event_ids[by_key["a"].task_id] == failed_event.id
+        assert (
+            by_key["b"].dependency_terminal_event_ids[by_key["a"].task_id]
+            == failed_event.id
+        )
         assert len(runtime.runs) == 1
 
     asyncio.run(run())
@@ -1447,17 +1673,36 @@ def test_dependency_failure_propagates_transitively(tmp_path) -> None:
                 arguments={
                     "tasks": [
                         {"task_key": "a", "profile": "review_worker", "task": "A"},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
-                        {"task_key": "c", "profile": "review_worker", "task": "C", "depends_on": ["b"]},
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
+                        {
+                            "task_key": "c",
+                            "profile": "review_worker",
+                            "task": "C",
+                            "depends_on": ["b"],
+                        },
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         payload = json.loads(created.output)
-        a_run_id = next(item for item in payload["tasks"] if item["task_key"] == "a")["subagent_run_id"]
+        a_run_id = next(item for item in payload["tasks"] if item["task_key"] == "a")[
+            "subagent_run_id"
+        ]
 
-        await runtime.fail(a_run_id, reason_code="test_failure", reason_message="A failed", event_context=CTX)
+        await runtime.fail(
+            a_run_id,
+            reason_code="test_failure",
+            reason_message="A failed",
+            event_context=CTX,
+        )
 
         graph = runtime.graph()
         by_key = {task.task_key: task for task in graph.tasks}
@@ -1465,7 +1710,9 @@ def test_dependency_failure_propagates_transitively(tmp_path) -> None:
         assert by_key["b"].status == "blocked_dependency_failed"
         assert by_key["c"].status == "blocked_dependency_failed"
         assert by_key["c"].blocked_by_task_ids == (by_key["b"].task_id,)
-        assert by_key["c"].dependency_status_snapshot == {by_key["b"].task_id: "blocked_dependency_failed"}
+        assert by_key["c"].dependency_status_snapshot == {
+            by_key["b"].task_id: "blocked_dependency_failed"
+        }
         blocked_b_event = next(
             event
             for event in parent.event_log.iter()
@@ -1473,7 +1720,10 @@ def test_dependency_failure_propagates_transitively(tmp_path) -> None:
             and event.task_id == by_key["b"].task_id
             and event.status == "blocked_dependency_failed"
         )
-        assert by_key["c"].dependency_terminal_event_ids[by_key["b"].task_id] == blocked_b_event.id
+        assert (
+            by_key["c"].dependency_terminal_event_ids[by_key["b"].task_id]
+            == blocked_b_event.id
+        )
 
         waited = await runtime.wait_tasks(
             (by_key["a"].task_id, by_key["b"].task_id, by_key["c"].task_id),
@@ -1482,13 +1732,18 @@ def test_dependency_failure_propagates_transitively(tmp_path) -> None:
             settle="all",
             timeout_seconds=0,
         )
-        assert {item["status"] for item in waited} == {"failed", "blocked_dependency_failed"}
+        assert {item["status"] for item in waited} == {
+            "failed",
+            "blocked_dependency_failed",
+        }
         assert len(waited) == 3
 
     asyncio.run(run())
 
 
-def test_create_agent_tasks_blocks_transitive_dependency_on_existing_failed_task(tmp_path) -> None:
+def test_create_agent_tasks_blocks_transitive_dependency_on_existing_failed_task(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
 
@@ -1517,11 +1772,18 @@ def test_create_agent_tasks_blocks_transitive_dependency_on_existing_failed_task
                             "task": "B",
                             "depends_on": [f"task:{upstream.task_id}"],
                         },
-                        {"task_key": "c", "profile": "review_worker", "task": "C", "depends_on": ["b"]},
+                        {
+                            "task_key": "c",
+                            "profile": "review_worker",
+                            "task": "C",
+                            "depends_on": ["b"],
+                        },
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.SUCCESS
@@ -1539,9 +1801,14 @@ def test_create_agent_tasks_blocks_transitive_dependency_on_existing_failed_task
             if isinstance(event, SubagentTaskCancelledEvent)
             and event.task_id == upstream.task_id
         )
-        assert by_key["b"].dependency_terminal_event_ids[upstream.task_id] == upstream_cancelled_event.id
+        assert (
+            by_key["b"].dependency_terminal_event_ids[upstream.task_id]
+            == upstream_cancelled_event.id
+        )
         assert by_key["c"].blocked_by_task_ids == (by_key["b"].task_id,)
-        assert by_key["c"].dependency_status_snapshot == {by_key["b"].task_id: "blocked_dependency_failed"}
+        assert by_key["c"].dependency_status_snapshot == {
+            by_key["b"].task_id: "blocked_dependency_failed"
+        }
         blocked_b_event = next(
             event
             for event in parent.event_log.iter()
@@ -1549,13 +1816,18 @@ def test_create_agent_tasks_blocks_transitive_dependency_on_existing_failed_task
             and event.task_id == by_key["b"].task_id
             and event.status == "blocked_dependency_failed"
         )
-        assert by_key["c"].dependency_terminal_event_ids[by_key["b"].task_id] == blocked_b_event.id
+        assert (
+            by_key["c"].dependency_terminal_event_ids[by_key["b"].task_id]
+            == blocked_b_event.id
+        )
         assert by_key["c"].dependency_generation is not None
 
     asyncio.run(run())
 
 
-def test_create_agent_tasks_rejects_dependency_cycle_without_persisting_tasks(tmp_path) -> None:
+def test_create_agent_tasks_rejects_dependency_cycle_without_persisting_tasks(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
 
@@ -1566,12 +1838,24 @@ def test_create_agent_tasks_rejects_dependency_cycle_without_persisting_tasks(tm
                 name="create_agent_tasks",
                 arguments={
                     "tasks": [
-                        {"task_key": "a", "profile": "review_worker", "task": "A", "depends_on": ["b"]},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
+                        {
+                            "task_key": "a",
+                            "profile": "review_worker",
+                            "task": "A",
+                            "depends_on": ["b"],
+                        },
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.ERROR
@@ -1579,7 +1863,10 @@ def test_create_agent_tasks_rejects_dependency_cycle_without_persisting_tasks(tm
         assert payload["failed_stage"] == "preflight"
         assert "dependency cycle" in payload["diagnostics"][0]["message"]
         assert runtime.tasks == ()
-        assert not any(isinstance(event, SubagentTaskCreatedEvent) for event in parent.event_log.iter())
+        assert not any(
+            isinstance(event, SubagentTaskCreatedEvent)
+            for event in parent.event_log.iter()
+        )
 
     asyncio.run(run())
 
@@ -1597,24 +1884,40 @@ def test_wait_agent_tasks_consumes_completed_task_results(tmp_path) -> None:
                 profile_id="review_worker",
                 task_key=key,
             )
-            subagent = await runtime.start_task(task.task_id, event_context=CTX, spawn_initiator_id="tool:create")
-            await runtime.complete_fake(subagent.subagent_run_id, summary=f"result {key}", event_context=CTX)
+            subagent = await runtime.start_task(
+                task.task_id, event_context=CTX, spawn_initiator_id="tool:create"
+            )
+            await runtime.complete_fake(
+                subagent.subagent_run_id, summary=f"result {key}", event_context=CTX
+            )
             tasks.append(task)
 
         result = await wait_tool.execute_async(
             ToolCall(
                 id="tool:wait-tasks",
                 name="wait_agent_tasks",
-                arguments={"task_ids": [task.task_id for task in tasks], "settle": "all"},
+                arguments={
+                    "task_ids": [task.task_id for task in tasks],
+                    "settle": "all",
+                },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.SUCCESS
         payload = json.loads(result.output)
         assert payload["returned_count"] == 2
-        assert {item["summary"] for item in payload["results"]} == {"result a", "result b"}
-        consumed = [event for event in parent.event_log.iter() if isinstance(event, SubagentResultConsumedEvent)]
+        assert {item["summary"] for item in payload["results"]} == {
+            "result a",
+            "result b",
+        }
+        consumed = [
+            event
+            for event in parent.event_log.iter()
+            if isinstance(event, SubagentResultConsumedEvent)
+        ]
         assert len(consumed) == 2
         assert {event.kind for event in consumed} == {"wait_task"}
         graph = runtime.graph()
@@ -1726,42 +2029,59 @@ def test_wait_agent_tasks_first_does_not_cancel_unsettled_tasks(tmp_path) -> Non
             profile_id="review_worker",
             task_key="done",
         )
-        done_run = await runtime.start_task(done_task.task_id, event_context=CTX, spawn_initiator_id="tool:create")
-        await runtime.complete_fake(done_run.subagent_run_id, summary="done result", event_context=CTX)
+        done_run = await runtime.start_task(
+            done_task.task_id, event_context=CTX, spawn_initiator_id="tool:create"
+        )
+        await runtime.complete_fake(
+            done_run.subagent_run_id, summary="done result", event_context=CTX
+        )
         running_task = await runtime.create_task(
             objective="Running task",
             event_context=CTX,
             profile_id="review_worker",
             task_key="running",
         )
-        running_run = await runtime.start_task(running_task.task_id, event_context=CTX, spawn_initiator_id="tool:create")
+        running_run = await runtime.start_task(
+            running_task.task_id, event_context=CTX, spawn_initiator_id="tool:create"
+        )
 
         result = await wait_tool.execute_async(
             ToolCall(
                 id="tool:wait-first",
                 name="wait_agent_tasks",
-                arguments={"task_ids": [done_task.task_id, running_task.task_id], "settle": "first"},
+                arguments={
+                    "task_ids": [done_task.task_id, running_task.task_id],
+                    "settle": "first",
+                },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         payload = json.loads(result.output)
         assert payload["returned_count"] == 1
         assert payload["results"][0]["task_id"] == done_task.task_id
-        assert next(
-            run
-            for run in runtime.runs
-            if run.subagent_run_id == running_run.subagent_run_id
-        ).status == "running"
+        assert (
+            next(
+                run
+                for run in runtime.runs
+                if run.subagent_run_id == running_run.subagent_run_id
+            ).status
+            == "running"
+        )
         assert not any(
-            isinstance(event, SubagentRunCancelledEvent) and event.subagent_run_id == running_run.subagent_run_id
+            isinstance(event, SubagentRunCancelledEvent)
+            and event.subagent_run_id == running_run.subagent_run_id
             for event in parent.event_log.iter()
         )
 
     asyncio.run(run())
 
 
-def test_wait_agent_tasks_timeout_returns_partial_without_cancelling_unsettled(tmp_path) -> None:
+def test_wait_agent_tasks_timeout_returns_partial_without_cancelling_unsettled(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     wait_tool = WaitAgentTasksTool(runtime)
 
@@ -1777,7 +2097,9 @@ def test_wait_agent_tasks_timeout_returns_partial_without_cancelling_unsettled(t
             event_context=CTX,
             spawn_initiator_id="tool:create",
         )
-        await runtime.complete_fake(done_run.subagent_run_id, summary="partial result", event_context=CTX)
+        await runtime.complete_fake(
+            done_run.subagent_run_id, summary="partial result", event_context=CTX
+        )
         running_task = await runtime.create_task(
             objective="Still running at timeout",
             event_context=CTX,
@@ -1809,11 +2131,14 @@ def test_wait_agent_tasks_timeout_returns_partial_without_cancelling_unsettled(t
         payload = json.loads(result.output)
         assert payload["returned_count"] == 1
         assert payload["results"][0]["task_id"] == done_task.task_id
-        assert next(
-            run
-            for run in runtime.runs
-            if run.subagent_run_id == running_run.subagent_run_id
-        ).status == "running"
+        assert (
+            next(
+                run
+                for run in runtime.runs
+                if run.subagent_run_id == running_run.subagent_run_id
+            ).status
+            == "running"
+        )
         assert not any(
             isinstance(event, SubagentRunCancelledEvent)
             and event.subagent_run_id == running_run.subagent_run_id
@@ -1838,7 +2163,9 @@ def test_wait_agent_tasks_repeated_wait_requires_include_consumed(tmp_path) -> N
             event_context=CTX,
             spawn_initiator_id="tool:create",
         )
-        await runtime.complete_fake(child.subagent_run_id, summary="consumable", event_context=CTX)
+        await runtime.complete_fake(
+            child.subagent_run_id, summary="consumable", event_context=CTX
+        )
 
         first = await runtime.wait_tasks(
             (task.task_id,),
@@ -1866,7 +2193,8 @@ def test_wait_agent_tasks_repeated_wait_requires_include_consumed(tmp_path) -> N
         consumed_events = [
             event
             for event in parent.event_log.iter()
-            if isinstance(event, SubagentResultConsumedEvent) and event.task_id == task.task_id
+            if isinstance(event, SubagentResultConsumedEvent)
+            and event.task_id == task.task_id
         ]
         assert [event.consumer_tool_call_id for event in consumed_events] == [
             "tool:wait:first",
@@ -1887,7 +2215,9 @@ def test_stop_agent_task_cancels_active_attempt_and_task_projection(tmp_path) ->
             profile_id="verification_worker",
             task_key="long",
         )
-        subagent = await runtime.start_task(task.task_id, event_context=CTX, spawn_initiator_id="tool:create")
+        subagent = await runtime.start_task(
+            task.task_id, event_context=CTX, spawn_initiator_id="tool:create"
+        )
 
         result = await stop_tool.execute_async(
             ToolCall(
@@ -1895,7 +2225,9 @@ def test_stop_agent_task_cancels_active_attempt_and_task_projection(tmp_path) ->
                 name="stop_agent_task",
                 arguments={"task_id": task.task_id, "reason": "No longer needed."},
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
 
         assert result.status is ToolResultState.SUCCESS
@@ -1904,7 +2236,8 @@ def test_stop_agent_task_cancels_active_attempt_and_task_projection(tmp_path) ->
         assert runtime.runs[0].status == "cancelled"
         assert runtime.tasks[0].status == "cancelled"
         assert any(
-            isinstance(event, SubagentTaskCancelledEvent) and event.task_id == task.task_id
+            isinstance(event, SubagentTaskCancelledEvent)
+            and event.task_id == task.task_id
             for event in parent.event_log.iter()
         )
         graph = runtime.graph()
@@ -1919,7 +2252,9 @@ def test_runtime_bootstraps_completed_result_from_parent_event_log(tmp_path) -> 
 
     async def seed() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
-        await runtime.complete_fake(subagent.subagent_run_id, summary="bootstrapped result", event_context=CTX)
+        await runtime.complete_fake(
+            subagent.subagent_run_id, summary="bootstrapped result", event_context=CTX
+        )
 
     asyncio.run(seed())
     _resumed_parent, resumed = _resumed_runtime(parent, locator, child_logs)
@@ -1928,7 +2263,9 @@ def test_runtime_bootstraps_completed_result_from_parent_event_log(tmp_path) -> 
         [bootstrapped] = resumed.runs
         result = await resumed.wait_result(
             bootstrapped.subagent_run_id,
-            event_context=EventContext(run_id="run:wait", turn_id="turn:wait", reply_id="reply:wait"),
+            event_context=EventContext(
+                run_id="run:wait", turn_id="turn:wait", reply_id="reply:wait"
+            ),
             returned_to_tool_call_id="tool:wait",
         )
 
@@ -1950,7 +2287,12 @@ def test_restart_preserves_waiting_dependency_fact(tmp_path) -> None:
                 arguments={
                     "tasks": [
                         {"task_key": "a", "profile": "review_worker", "task": "A"},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
                     ]
                 },
             ),
@@ -1969,7 +2311,9 @@ def test_restart_preserves_waiting_dependency_fact(tmp_path) -> None:
     assert after["b"].status == "waiting_dependency"
 
 
-def test_restart_preserves_blocked_dependency_terminal_refs_and_generation(tmp_path) -> None:
+def test_restart_preserves_blocked_dependency_terminal_refs_and_generation(
+    tmp_path,
+) -> None:
     parent, locator, child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
 
@@ -1981,7 +2325,12 @@ def test_restart_preserves_blocked_dependency_terminal_refs_and_generation(tmp_p
                 arguments={
                     "tasks": [
                         {"task_key": "a", "profile": "review_worker", "task": "A"},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
                     ]
                 },
             ),
@@ -1991,14 +2340,23 @@ def test_restart_preserves_blocked_dependency_terminal_refs_and_generation(tmp_p
             ),
         )
         payload = json.loads(result.output)
-        run_id = next(item["subagent_run_id"] for item in payload["tasks"] if item["task_key"] == "a")
+        run_id = next(
+            item["subagent_run_id"]
+            for item in payload["tasks"]
+            if item["task_key"] == "a"
+        )
         await runtime.fail(run_id, reason_code="restart_failure", event_context=CTX)
 
     asyncio.run(seed())
-    blocked_before = next(task for task in runtime.graph().tasks if task.task_key == "b")
+    blocked_before = next(
+        task for task in runtime.graph().tasks if task.task_key == "b"
+    )
     _resumed_parent, resumed = _resumed_runtime(parent, locator, child_logs)
     blocked_after = next(task for task in resumed.graph().tasks if task.task_key == "b")
-    assert blocked_after.dependency_terminal_event_ids == blocked_before.dependency_terminal_event_ids
+    assert (
+        blocked_after.dependency_terminal_event_ids
+        == blocked_before.dependency_terminal_event_ids
+    )
     assert blocked_after.dependency_generation == blocked_before.dependency_generation
     assert blocked_after.dependency_generation is not None
 
@@ -2047,11 +2405,10 @@ def test_restart_preserves_consumed_and_delivered_sets_from_facts(tmp_path) -> N
         await parent.write_event(
             ModelCallStartEvent(
                 **CTX.event_fields(),
-                model_name="test",
-                model_role="pro",
-                provider="test",
-                context_id="context:restart-delivery",
-                model_call_index=3,
+                **model_call_start_fields(
+                    context_id="context:restart-delivery",
+                    model_call_index=3,
+                ),
             )
         )
         await runtime.mark_results_delivered(
@@ -2078,7 +2435,9 @@ def test_restart_does_not_require_archive_for_graph_equality(tmp_path) -> None:
 
     async def seed() -> None:
         child = await runtime.spawn_fake(task="artifact-backed task", event_context=CTX)
-        await runtime.complete_fake(child.subagent_run_id, summary="done", event_context=CTX)
+        await runtime.complete_fake(
+            child.subagent_run_id, summary="done", event_context=CTX
+        )
 
     asyncio.run(seed())
     expected = runtime.graph()
@@ -2103,12 +2462,17 @@ def test_restart_does_not_require_archive_for_graph_equality(tmp_path) -> None:
 def test_subagent_spawn_caps_are_enforced(tmp_path) -> None:
     _parent, _locator, _child_logs, runtime = _runtime(
         tmp_path,
-        budget=SubagentBudget(max_concurrent_children_per_parent_run=1, max_concurrent_children_per_host_session=1),
+        budget=SubagentBudget(
+            max_concurrent_children_per_parent_run=1,
+            max_concurrent_children_per_host_session=1,
+        ),
     )
 
     async def run() -> None:
         await runtime.spawn_fake(task="first", event_context=CTX)
-        with pytest.raises(SubagentLimitExceeded, match="max_concurrent_children_per_parent_run"):
+        with pytest.raises(
+            SubagentLimitExceeded, match="max_concurrent_children_per_parent_run"
+        ):
             await runtime.spawn_fake(task="second", event_context=CTX)
 
     asyncio.run(run())
@@ -2181,7 +2545,11 @@ def test_restart_active_run_without_handle_repairs_fail_closed(tmp_path) -> None
 
         assert len(repaired) == 1
         assert repaired[0].status == "failed"
-        failed = [event for event in parent.event_log.iter() if isinstance(event, SubagentRunFailedEvent)]
+        failed = [
+            event
+            for event in parent.event_log.iter()
+            if isinstance(event, SubagentRunFailedEvent)
+        ]
         assert failed[-1].reason_code == "subagent_dangling_repaired"
 
     asyncio.run(run())
@@ -2194,7 +2562,9 @@ def test_cancel_stops_running_child_task(tmp_path) -> None:
         started.set()
         await asyncio.Event().wait()
 
-    _parent, _locator, _child_logs, runtime = _runtime(tmp_path, child_runner=child_runner)
+    _parent, _locator, _child_logs, runtime = _runtime(
+        tmp_path, child_runner=child_runner
+    )
 
     async def run() -> None:
         subagent = await runtime.spawn_agent(task="long child task", event_context=CTX)
@@ -2203,7 +2573,9 @@ def test_cancel_stops_running_child_task(tmp_path) -> None:
         assert handle is not None and handle.coroutine is not None
         task = handle.coroutine
 
-        await runtime.cancel(subagent.subagent_run_id, event_context=CTX, reason_code="test_cancel")
+        await runtime.cancel(
+            subagent.subagent_run_id, event_context=CTX, reason_code="test_cancel"
+        )
         await asyncio.sleep(0)
 
         assert task.cancelled()
@@ -2224,7 +2596,11 @@ def test_child_timeout_marks_subagent_failed(tmp_path) -> None:
     async def run() -> None:
         await runtime.spawn_agent(task="timed child task", event_context=CTX)
         for _ in range(20):
-            failed = [event for event in parent.event_log.iter() if isinstance(event, SubagentRunFailedEvent)]
+            failed = [
+                event
+                for event in parent.event_log.iter()
+                if isinstance(event, SubagentRunFailedEvent)
+            ]
             if failed:
                 assert failed[-1].reason_code == "subagent_timeout"
                 assert runtime.runs[0].status == "failed"
@@ -2235,18 +2611,26 @@ def test_child_timeout_marks_subagent_failed(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_child_runner_failure_durable_diagnostic_redacts_exception_text(tmp_path) -> None:
+def test_child_runner_failure_durable_diagnostic_redacts_exception_text(
+    tmp_path,
+) -> None:
     secret = "/private/secret/path API_KEY=do-not-persist"
 
     async def child_runner(_runtime: SubagentRuntime, _run) -> None:
         raise RuntimeError(secret)
 
-    parent, _locator, _child_logs, runtime = _runtime(tmp_path, child_runner=child_runner)
+    parent, _locator, _child_logs, runtime = _runtime(
+        tmp_path, child_runner=child_runner
+    )
 
     async def run() -> None:
         await runtime.spawn_agent(task="failing child task", event_context=CTX)
         for _ in range(20):
-            failed = [event for event in parent.event_log.iter() if isinstance(event, SubagentRunFailedEvent)]
+            failed = [
+                event
+                for event in parent.event_log.iter()
+                if isinstance(event, SubagentRunFailedEvent)
+            ]
             if failed:
                 event = failed[-1]
                 assert event.reason_code == "subagent_child_runner_error"
@@ -2265,12 +2649,19 @@ def test_cancel_is_idempotent_for_completed_child(tmp_path) -> None:
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
-        await runtime.complete_fake(subagent.subagent_run_id, summary="done", event_context=CTX)
+        await runtime.complete_fake(
+            subagent.subagent_run_id, summary="done", event_context=CTX
+        )
 
-        cancelled = await runtime.cancel(subagent.subagent_run_id, event_context=CTX, reason_code="test_cancel")
+        cancelled = await runtime.cancel(
+            subagent.subagent_run_id, event_context=CTX, reason_code="test_cancel"
+        )
 
         assert cancelled.status == "completed"
-        assert not any(isinstance(event, SubagentRunCancelledEvent) for event in parent.event_log.iter())
+        assert not any(
+            isinstance(event, SubagentRunCancelledEvent)
+            for event in parent.event_log.iter()
+        )
 
     asyncio.run(run())
 
@@ -2291,13 +2682,17 @@ def test_safety_narrowing_cancels_active_children_sync(tmp_path) -> None:
     assert len(cancelled) == 1
     assert cancelled[0].status == "cancelled"
     cancellation_event = [
-        event for event in parent.event_log.iter() if isinstance(event, SubagentRunCancelledEvent)
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentRunCancelledEvent)
     ][-1]
     assert cancellation_event.reason_code == "subagent_bypass_revoked"
     assert cancellation_event.cancelled_by == "runtime"
 
 
-def test_safety_narrowing_sync_terminalizes_task_and_blocks_dependents(tmp_path) -> None:
+def test_safety_narrowing_sync_terminalizes_task_and_blocks_dependents(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     tool = CreateAgentTasksTool(runtime)
 
@@ -2309,11 +2704,18 @@ def test_safety_narrowing_sync_terminalizes_task_and_blocks_dependents(tmp_path)
                 arguments={
                     "tasks": [
                         {"task_key": "a", "profile": "review_worker", "task": "A"},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
                     ]
                 },
             ),
-            runtime_context=ToolRuntimeContext(runtime_session_id=parent.runtime_session_id, event_context=CTX),
+            runtime_context=ToolRuntimeContext(
+                runtime_session_id=parent.runtime_session_id, event_context=CTX
+            ),
         )
         assert result.status is ToolResultState.SUCCESS
 
@@ -2337,12 +2739,23 @@ def test_safety_narrowing_sync_terminalizes_task_and_blocks_dependents(tmp_path)
         if isinstance(event, SubagentTaskCancelledEvent)
         and event.task_id == by_key["a"].task_id
     )
-    assert by_key["b"].dependency_terminal_event_ids[by_key["a"].task_id] == cancelled_event.id
-    assert any(isinstance(event, SubagentTaskCancelledEvent) for event in parent.event_log.iter())
+    assert (
+        by_key["b"].dependency_terminal_event_ids[by_key["a"].task_id]
+        == cancelled_event.id
+    )
+    assert any(
+        isinstance(event, SubagentTaskCancelledEvent)
+        for event in parent.event_log.iter()
+    )
     blocked_events = [
-        event for event in parent.event_log.iter() if isinstance(event, SubagentTaskBlockedEvent)
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentTaskBlockedEvent)
     ]
-    assert blocked_events[-1].dependency_terminal_event_ids == by_key["b"].dependency_terminal_event_ids
+    assert (
+        blocked_events[-1].dependency_terminal_event_ids
+        == by_key["b"].dependency_terminal_event_ids
+    )
 
 
 def test_cancel_sync_async_fact_equality(tmp_path) -> None:
@@ -2427,8 +2840,18 @@ def test_transitive_cancel_block_events_use_real_event_ids(tmp_path) -> None:
                 arguments={
                     "tasks": [
                         {"task_key": "a", "profile": "review_worker", "task": "A"},
-                        {"task_key": "b", "profile": "review_worker", "task": "B", "depends_on": ["a"]},
-                        {"task_key": "c", "profile": "review_worker", "task": "C", "depends_on": ["b"]},
+                        {
+                            "task_key": "b",
+                            "profile": "review_worker",
+                            "task": "B",
+                            "depends_on": ["a"],
+                        },
+                        {
+                            "task_key": "c",
+                            "profile": "review_worker",
+                            "task": "C",
+                            "depends_on": ["b"],
+                        },
                     ]
                 },
             ),
@@ -2438,7 +2861,11 @@ def test_transitive_cancel_block_events_use_real_event_ids(tmp_path) -> None:
             ),
         )
         payload = json.loads(result.output)
-        run_id = next(item["subagent_run_id"] for item in payload["tasks"] if item["task_key"] == "a")
+        run_id = next(
+            item["subagent_run_id"]
+            for item in payload["tasks"]
+            if item["task_key"] == "a"
+        )
         await runtime.cancel(run_id, event_context=CTX, reason_code="test_cancel")
 
     asyncio.run(run())
@@ -2451,6 +2878,7 @@ def test_transitive_cancel_block_events_use_real_event_ids(tmp_path) -> None:
         terminal_event_id = downstream.dependency_terminal_event_ids[upstream.task_id]
         assert terminal_event_id in events_by_id
         assert events_by_id[terminal_event_id].id == terminal_event_id
+
 
 def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
     started = asyncio.Event()
@@ -2483,7 +2911,7 @@ def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -2498,12 +2926,16 @@ def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
+        ),
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
 
     async def run() -> None:
-        subagent = await subagent_runtime.spawn_agent(task="long child task", event_context=CTX)
+        subagent = await subagent_runtime.spawn_agent(
+            task="long child task", event_context=CTX
+        )
         await asyncio.wait_for(started.wait(), timeout=1)
         handle = subagent_runtime._execution_registry.get(subagent.subagent_run_id)  # noqa: SLF001
         assert handle is not None and handle.coroutine is not None
@@ -2525,7 +2957,9 @@ def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(tmp_path) -> None:
+def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(
+    tmp_path,
+) -> None:
     started = asyncio.Event()
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     locator = InMemoryEventLogLocator()
@@ -2551,7 +2985,7 @@ def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(tmp_pat
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -2566,12 +3000,16 @@ def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(tmp_pat
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
+        ),
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
 
     async def run() -> None:
-        subagent = await subagent_runtime.spawn_agent(task="long child task", event_context=CTX)
+        subagent = await subagent_runtime.spawn_agent(
+            task="long child task", event_context=CTX
+        )
         await asyncio.wait_for(started.wait(), timeout=1)
         handle = subagent_runtime._execution_registry.get(subagent.subagent_run_id)  # noqa: SLF001
         assert handle is not None and handle.coroutine is not None
@@ -2602,7 +3040,9 @@ def test_subagent_events_round_trip_through_agent_event_serialization(tmp_path) 
 
     async def run() -> None:
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
-        await runtime.complete_fake(subagent.subagent_run_id, summary="done", event_context=CTX)
+        await runtime.complete_fake(
+            subagent.subagent_run_id, summary="done", event_context=CTX
+        )
 
     asyncio.run(run())
 
@@ -2610,25 +3050,40 @@ def test_subagent_events_round_trip_through_agent_event_serialization(tmp_path) 
         assert load_agent_event(dump_agent_event(event)) == event
 
 
-def test_parent_transcript_rebuild_ignores_subagent_graph_events_after_run_end(tmp_path) -> None:
+def test_parent_transcript_rebuild_ignores_subagent_graph_events_after_run_end(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
 
     async def run() -> None:
         from pulsara_agent.event import RunEndEvent, RunStartEvent
 
-        await parent.emit(RunStartEvent(**CTX.event_fields(), **run_start_permission_fields(CTX.run_id), user_input_chars=5, metadata={"user_input": "hello"}))
-        await parent.emit(RunEndEvent(**CTX.event_fields(), status="finished", stop_reason="final"))
+        await parent.emit(
+            RunStartEvent(
+                **CTX.event_fields(),
+                **run_start_permission_fields(CTX.run_id),
+                user_input_chars=5,
+                metadata={"user_input": "hello"},
+            )
+        )
+        await parent.emit(
+            RunEndEvent(**CTX.event_fields(), status="finished", stop_reason="final")
+        )
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
         await runtime.complete_fake(subagent.subagent_run_id, summary="child done")
 
     asyncio.run(run())
 
-    messages = rebuild_prior_messages(parent.event_log, archive=parent.archive, session_id=parent.runtime_session_id)
+    messages = rebuild_prior_messages(
+        parent.event_log, archive=parent.archive, session_id=parent.runtime_session_id
+    )
     assert [message.id for message in messages] == [f"user-message:{CTX.run_id}"]
 
 
 class _SubagentScriptedTransport:
     api = "subagent-scripted"
+    binding_id = "test.subagent-scripted"
+    contract_version = "v1"
 
     def __init__(self) -> None:
         self.contexts: list[LLMContext] = []
@@ -2636,27 +3091,22 @@ class _SubagentScriptedTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del options
+        del call
         self.contexts.append(context)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
-        )
         text = _context_text(context)
         if "CHILD TASK: summarize the moon" in text:
-            async for event in _text_reply(event_context, "child says: the moon is bright"):
+            async for event in _text_reply(
+                event_context, "child says: the moon is bright"
+            ):
                 yield event
         elif '"result_id"' in text and "child says: the moon is bright" in text:
-            async for event in _text_reply(event_context, "parent received child result"):
+            async for event in _text_reply(
+                event_context, "parent received child result"
+            ):
                 yield event
         elif '"status": "started"' in text:
             subagent_run_id = _extract_subagent_run_id(text)
@@ -2680,55 +3130,39 @@ class _SubagentScriptedTransport:
                 },
             ):
                 yield event
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
 class _FinalOnlyTransport:
     api = "final-only"
+    binding_id = "test.final-only"
+    contract_version = "v1"
 
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del model, options
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name="test",
-            model_role="pro",
-            provider="test",
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
-        )
+        del call, context
         async for event in _text_reply(event_context, "parent final"):
             yield event
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
 class _PendingChildTransport:
     api = "pending-child"
+    binding_id = "test.pending-child"
+    contract_version = "v1"
 
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del model, options
+        del call
         text = _context_text(context)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name="test",
-            model_role="pro",
-            provider="test",
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
-        )
         if "CHILD NEEDS PLAN QUESTION" in text and '"status": "entered"' not in text:
             async for event in _tool_reply(
                 event_context,
@@ -2742,11 +3176,16 @@ class _PendingChildTransport:
                 event_context,
                 tool_call_id="tool:child-plan-question",
                 name="ask_plan_question",
-                arguments={"question": "Should the child continue?", "allow_free_text": True},
+                arguments={
+                    "question": "Should the child continue?",
+                    "allow_free_text": True,
+                },
             ):
                 yield event
         elif '"status": "started"' in text:
-            async for event in _text_reply(event_context, "parent finished after spawn"):
+            async for event in _text_reply(
+                event_context, "parent finished after spawn"
+            ):
                 yield event
         else:
             async for event in _tool_reply(
@@ -2756,11 +3195,12 @@ class _PendingChildTransport:
                 arguments={"task": "CHILD NEEDS PLAN QUESTION"},
             ):
                 yield event
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
 class _ListAgentsNonBypassTransport:
     api = "list-agents-non-bypass"
+    binding_id = "test.list-agents-non-bypass"
+    contract_version = "v1"
 
     def __init__(self) -> None:
         self.contexts: list[LLMContext] = []
@@ -2768,23 +3208,16 @@ class _ListAgentsNonBypassTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del model, options
+        del call
         self.contexts.append(context)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name="test",
-            model_role="pro",
-            provider="test",
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
-        )
         if "subagent_requires_bypass_mode" in _context_text(context):
-            async for event in _text_reply(event_context, "list_agents denied outside bypass"):
+            async for event in _text_reply(
+                event_context, "list_agents denied outside bypass"
+            ):
                 yield event
         else:
             async for event in _tool_reply(
@@ -2794,18 +3227,19 @@ class _ListAgentsNonBypassTransport:
                 arguments={},
             ):
                 yield event
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
 def test_list_agents_is_visible_but_gate_denied_outside_bypass(tmp_path) -> None:
     transport = _ListAgentsNonBypassTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    parent_session = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
+    parent_session = in_memory_runtime_session(
+        tmp_path, runtime_session_id="runtime:parent"
+    )
     agent = AgentRuntime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -2818,21 +3252,25 @@ def test_list_agents_is_visible_but_gate_denied_outside_bypass(tmp_path) -> None
         permission_policy=preset_to_policy(PermissionMode.READ_ONLY),
     )
 
-    result = asyncio.run(agent.run_task("list children"))
+    result = asyncio.run(run_agent_task(agent, "list children"))
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "list_agents denied outside bypass"
     gate_decision = next(
         event
         for event in parent_session.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "tool:list-agents"
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and event.tool_call_id == "tool:list-agents"
     )
     assert gate_decision.tool_name == "list_agents"
     assert gate_decision.decision == "deny"
     assert gate_decision.result_state is ToolResultState.DENIED
     assert gate_decision.reason_code == "subagent_requires_bypass_mode"
     assert gate_decision.permission_category == "subagent_runtime"
-    assert any("list_agents" in getattr(tool, "name", "") for tool in agent.tool_executor.registry.all())
+    assert any(
+        "list_agents" in getattr(tool, "name", "")
+        for tool in agent.tool_executor.registry.all()
+    )
 
 
 def test_agent_runtime_repairs_dangling_subagent_before_turn(tmp_path) -> None:
@@ -2849,7 +3287,7 @@ def test_agent_runtime_repairs_dangling_subagent_before_turn(tmp_path) -> None:
     agent = AgentRuntime(
         runtime_session=resumed_parent,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -2862,10 +3300,14 @@ def test_agent_runtime_repairs_dangling_subagent_before_turn(tmp_path) -> None:
         subagent_runtime=resumed,
     )
 
-    result = asyncio.run(agent.run_task("resume after lost child"))
+    result = asyncio.run(run_agent_task(agent, "resume after lost child"))
 
     assert result.status is LoopStatus.FINISHED
-    failed = [event for event in parent.event_log.iter() if isinstance(event, SubagentRunFailedEvent)]
+    failed = [
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentRunFailedEvent)
+    ]
     assert failed[-1].reason_code == "subagent_dangling_repaired"
 
 
@@ -2873,11 +3315,13 @@ def test_child_enter_plan_finalizes_without_parent_pending_slot(tmp_path) -> Non
     transport = _PendingChildTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    parent_session = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
+    parent_session = in_memory_runtime_session(
+        tmp_path, runtime_session_id="runtime:parent"
+    )
     agent = AgentRuntime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -2890,7 +3334,7 @@ def test_child_enter_plan_finalizes_without_parent_pending_slot(tmp_path) -> Non
     )
 
     async def run_parent() -> None:
-        result = await agent.run_task("spawn a child that needs approval")
+        result = await run_agent_task(agent, "spawn a child that needs approval")
         assert result.status is LoopStatus.FINISHED
         assert result.state.pending_interaction_kind is None
         for _ in range(200):
@@ -2911,7 +3355,7 @@ def test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path) ->
     registry = LLMTransportRegistry()
     registry.register(transport)
     llm_runtime = LLMRuntime(
-        config=LLMConfig(
+        config=test_llm_config(
             api_key="sk-test",
             base_url="https://example.test/v1",
             pro_model="pro",
@@ -2920,14 +3364,16 @@ def test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path) ->
         ),
         registry=registry,
     )
-    parent_session = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
+    parent_session = in_memory_runtime_session(
+        tmp_path, runtime_session_id="runtime:parent"
+    )
     agent = AgentRuntime(
         runtime_session=parent_session,
         llm_runtime=llm_runtime,
         capability_runtime=CapabilityRuntime(),
     )
 
-    result = asyncio.run(agent.run_task("Parent: delegate the moon summary."))
+    result = asyncio.run(run_agent_task(agent, "Parent: delegate the moon summary."))
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "parent received child result"
@@ -2944,37 +3390,64 @@ def test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path) ->
     ).iter()
     assert child_events
     assert all(event.metadata.get("subagent") for event in child_events)
+    child_run_start = next(
+        event for event in child_events if isinstance(event, RunStartEvent)
+    )
+    child_model_start = next(
+        event for event in child_events if isinstance(event, ModelCallStartEvent)
+    )
+    assert child_run_start.model_target == child_model_start.resolved_call.target
     parent_events = parent_session.event_log.iter()
     assert any(isinstance(event, SubagentRunStartedEvent) for event in parent_events)
     assert any(isinstance(event, SubagentRunCompletedEvent) for event in parent_events)
     assert any(isinstance(event, SubagentEdgeRecordedEvent) for event in parent_events)
-    assert not any(isinstance(event, SubagentResultDeliveredEvent) for event in parent_events)
-    started_event = next(event for event in parent_events if isinstance(event, SubagentRunStartedEvent))
+    assert not any(
+        isinstance(event, SubagentResultDeliveredEvent) for event in parent_events
+    )
+    started_event = next(
+        event for event in parent_events if isinstance(event, SubagentRunStartedEvent)
+    )
     wait_edge = next(
         event
         for event in parent_events
         if isinstance(event, SubagentEdgeRecordedEvent) and event.edge_kind == "wait"
     )
     assert started_event.parent_context_id == transport.contexts[0].context_id
-    assert started_event.parent_model_call_index == transport.contexts[0].model_call_index
-    wait_context = next(context for context in transport.contexts if '"status": "started"' in _context_text(context))
+    assert (
+        started_event.parent_model_call_index == transport.contexts[0].model_call_index
+    )
+    wait_context = next(
+        context
+        for context in transport.contexts
+        if '"status": "started"' in _context_text(context)
+    )
     assert wait_edge.source_context_id == wait_context.context_id
     assert wait_edge.source_model_call_index == wait_context.model_call_index
     allowed_tool_names = set(started_event.capability_profile.allowed_tool_names)
     assert "spawn_agent" not in allowed_tool_names
-    assert not any(name.startswith("memory_") or name.startswith("remember_") for name in allowed_tool_names)
+    assert not any(
+        name.startswith("memory_") or name.startswith("remember_")
+        for name in allowed_tool_names
+    )
     child_exposures = [
         event.value
         for event in child_events
-        if isinstance(event, CustomEvent) and event.name == "capability_exposure_resolved"
+        if isinstance(event, CustomEvent)
+        and event.name == "capability_exposure_resolved"
     ]
     assert child_exposures
     assert "spawn_agent" not in child_exposures[0]["callable_names"]
     assert "report_agent_result" in child_exposures[0]["callable_names"]
 
 
+def test_subagent_child_run_records_model_target(tmp_path) -> None:
+    test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path)
+
+
 class _ExplicitReportChildTransport:
     api = "explicit-report-child"
+    binding_id = "test.explicit-report-child"
+    contract_version = "v1"
 
     def __init__(self) -> None:
         self.contexts: list[LLMContext] = []
@@ -2983,22 +3456,13 @@ class _ExplicitReportChildTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del options
+        del call
         self.contexts.append(context)
         text = _context_text(context)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
-        )
         tool_names = {tool.name for tool in context.tools}
         if "CHILD EXPLICIT REPORT TASK" in text and "report_agent_result" in tool_names:
             self.child_context_count += 1
@@ -3046,18 +3510,21 @@ class _ExplicitReportChildTransport:
                 },
             ):
                 yield event
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
-def test_child_report_agent_result_finishes_child_without_followup_model_call(tmp_path) -> None:
+def test_child_report_agent_result_finishes_child_without_followup_model_call(
+    tmp_path,
+) -> None:
     transport = _ExplicitReportChildTransport()
     registry = LLMTransportRegistry()
     registry.register(transport)
-    parent_session = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
+    parent_session = in_memory_runtime_session(
+        tmp_path, runtime_session_id="runtime:parent"
+    )
     agent = AgentRuntime(
         runtime_session=parent_session,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -3069,7 +3536,7 @@ def test_child_report_agent_result_finishes_child_without_followup_model_call(tm
         capability_runtime=CapabilityRuntime(),
     )
 
-    result = asyncio.run(agent.run_task("Parent: delegate explicit report."))
+    result = asyncio.run(run_agent_task(agent, "Parent: delegate explicit report."))
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "parent got explicit report"
@@ -3079,12 +3546,22 @@ def test_child_report_agent_result_finishes_child_without_followup_model_call(tm
     assert graph.nodes[0].status == "completed"
     assert graph.nodes[0].phase == "verifying"
     assert graph.nodes[0].consumed_by_wait is True
-    waited_result = agent.subagent_runtime.result_for_run(graph.nodes[0].subagent_run_id)
+    waited_result = agent.subagent_runtime.result_for_run(
+        graph.nodes[0].subagent_run_id
+    )
     assert waited_result is not None
     assert waited_result.result_source == "explicit"
     parent_events = parent_session.event_log.iter()
-    submitted_index = next(index for index, event in enumerate(parent_events) if isinstance(event, SubagentResultSubmittedEvent))
-    completed_index = next(index for index, event in enumerate(parent_events) if isinstance(event, SubagentRunCompletedEvent))
+    submitted_index = next(
+        index
+        for index, event in enumerate(parent_events)
+        if isinstance(event, SubagentResultSubmittedEvent)
+    )
+    completed_index = next(
+        index
+        for index, event in enumerate(parent_events)
+        if isinstance(event, SubagentRunCompletedEvent)
+    )
     assert submitted_index < completed_index
     wait_edge = next(
         event
@@ -3096,6 +3573,8 @@ def test_child_report_agent_result_finishes_child_without_followup_model_call(tm
 
 class _BackgroundSubagentResultTransport:
     api = "background-subagent-scripted"
+    binding_id = "test.background-subagent-scripted"
+    contract_version = "v1"
 
     def __init__(self) -> None:
         self.contexts: list[LLMContext] = []
@@ -3103,41 +3582,39 @@ class _BackgroundSubagentResultTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del options
+        del call
         self.contexts.append(context)
         text = _context_text(context)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
-        )
         assert "## Subagent Results" in text
         assert "background child summary" in text
-        async for event in _text_reply(event_context, "parent used background child result"):
+        async for event in _text_reply(
+            event_context, "parent used background child result"
+        ):
             yield event
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
-def test_background_subagent_result_enters_parent_context_and_marks_delivered(tmp_path) -> None:
+def test_background_subagent_result_enters_parent_context_and_marks_delivered(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, subagent_runtime = _runtime(tmp_path)
 
     async def seed_child_result() -> None:
         subagent = await subagent_runtime.spawn_fake(
             task="background child task",
-            event_context=EventContext(run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"),
+            event_context=EventContext(
+                run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"
+            ),
         )
         await subagent_runtime.complete_fake(
             subagent.subagent_run_id,
             summary="background child summary",
-            event_context=EventContext(run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"),
+            event_context=EventContext(
+                run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"
+            ),
         )
 
     asyncio.run(seed_child_result())
@@ -3148,7 +3625,7 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(tm
     agent = AgentRuntime(
         runtime_session=parent,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -3161,11 +3638,15 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(tm
         subagent_runtime=subagent_runtime,
     )
 
-    result = asyncio.run(agent.run_task("Use any completed subagent result."))
+    result = asyncio.run(run_agent_task(agent, "Use any completed subagent result."))
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "parent used background child result"
-    delivered = [event for event in parent.event_log.iter() if isinstance(event, SubagentResultDeliveredEvent)]
+    delivered = [
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentResultDeliveredEvent)
+    ]
     assert len(delivered) == 1
     assert delivered[0].context_id == transport.contexts[0].context_id
     assert delivered[0].model_call_index == transport.contexts[0].model_call_index
@@ -3177,45 +3658,49 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(tm
 
 class _MismatchedModelStartBackgroundTransport(_BackgroundSubagentResultTransport):
     api = "background-subagent-mismatched-start"
+    binding_id = "test.background-subagent-mismatched-start"
 
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del options
         self.contexts.append(context)
         text = _context_text(context)
         yield ModelCallStartEvent(
             **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
+            resolved_call=call.fact,
             context_id="context:not-this-call",
             model_call_index=(context.model_call_index or 0) + 100,
         )
         assert "## Subagent Results" in text
         assert "background child summary" in text
-        async for event in _text_reply(event_context, "parent saw but delivery metadata mismatched"):
+        async for event in _text_reply(
+            event_context, "parent saw but delivery metadata mismatched"
+        ):
             yield event
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
-def test_background_subagent_result_requires_matching_model_start_metadata_for_delivery(tmp_path) -> None:
+def test_transport_cannot_forge_second_model_start_or_duplicate_background_delivery(
+    tmp_path,
+) -> None:
     parent, _locator, _child_logs, subagent_runtime = _runtime(tmp_path)
 
     async def seed_child_result() -> None:
         subagent = await subagent_runtime.spawn_fake(
             task="background child task",
-            event_context=EventContext(run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"),
+            event_context=EventContext(
+                run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"
+            ),
         )
         await subagent_runtime.complete_fake(
             subagent.subagent_run_id,
             summary="background child summary",
-            event_context=EventContext(run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"),
+            event_context=EventContext(
+                run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"
+            ),
         )
 
     asyncio.run(seed_child_result())
@@ -3226,7 +3711,7 @@ def test_background_subagent_result_requires_matching_model_start_metadata_for_d
     agent = AgentRuntime(
         runtime_session=parent,
         llm_runtime=LLMRuntime(
-            config=LLMConfig(
+            config=test_llm_config(
                 api_key="sk-test",
                 base_url="https://example.test/v1",
                 pro_model="pro",
@@ -3239,19 +3724,35 @@ def test_background_subagent_result_requires_matching_model_start_metadata_for_d
         subagent_runtime=subagent_runtime,
     )
 
-    result = asyncio.run(agent.run_task("Use any completed subagent result."))
+    result = asyncio.run(run_agent_task(agent, "Use any completed subagent result."))
 
-    assert result.status is LoopStatus.FINISHED
-    assert not any(isinstance(event, SubagentResultDeliveredEvent) for event in parent.event_log.iter())
+    assert result.status is LoopStatus.FAILED
+    delivered = [
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentResultDeliveredEvent)
+    ]
+    assert len(delivered) == 1
+    assert delivered[0].context_id != "context:not-this-call"
+    assert delivered[0].model_call_index != 100
+    assert any(
+        isinstance(event, RunErrorEvent)
+        and "forbidden lifecycle event" in event.message
+        for event in parent.event_log.iter()
+    )
     graph = subagent_runtime.graph()
-    assert graph.nodes[0].delivered is False
+    assert graph.nodes[0].delivered is True
     assert graph.nodes[0].consumed_by_wait is False
 
 
-async def _text_reply(event_context: EventContext, text: str) -> AsyncIterator[AgentEvent]:
+async def _text_reply(
+    event_context: EventContext, text: str
+) -> AsyncIterator[AgentEvent]:
     block_id = f"text:{event_context.run_id}"
     yield TextBlockStartEvent(**event_context.event_fields(), block_id=block_id)
-    yield TextBlockDeltaEvent(**event_context.event_fields(), block_id=block_id, delta=text)
+    yield TextBlockDeltaEvent(
+        **event_context.event_fields(), block_id=block_id, delta=text
+    )
     yield TextBlockEndEvent(**event_context.event_fields(), block_id=block_id)
 
 

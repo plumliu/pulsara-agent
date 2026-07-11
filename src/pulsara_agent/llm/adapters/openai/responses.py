@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -17,11 +17,12 @@ from pulsara_agent.llm.adapters.openai.client import (
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     AgentEventBuilder,
+    ReportedModelIdentityObserver,
     arguments_to_json_string,
-    event_includes_model_end,
     event_includes_run_error,
     sdk_event_to_dict,
-    usage_from_mapping,
+    responses_reported_model,
+    transport_usage_report_from_mapping,
 )
 from pulsara_agent.llm.adapters.openai.retrying import (
     log_retry_attempt,
@@ -31,8 +32,11 @@ from pulsara_agent.llm.adapters.openai.retrying import (
     sdk_max_retries_for_transport,
 )
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
-from pulsara_agent.llm.models import ModelProfile
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.errors import LLMTransportContractError
+from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.llm.provider import mutable_provider_value
+from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -41,7 +45,6 @@ from pulsara_agent.llm.retry import (
     compute_retry_delay,
 )
 from pulsara_agent.llm.transport import LLMTransport
-from pulsara_agent.llm.usage import Usage
 
 
 @dataclass(slots=True)
@@ -50,46 +53,66 @@ class OpenAIResponsesTransport(LLMTransport):
 
     api_key: str
     api: str = OPENAI_RESPONSES_API
+    binding_id: str = "pulsara.openai.responses"
+    contract_version: str = "v1"
     timeout_seconds: float = 60.0
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
     openai_sdk_max_retries: int | None = None
-    retry_sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
+    retry_sleep: Callable[[float], Awaitable[None]] = field(
+        default=asyncio.sleep, repr=False
+    )
     _mock_events: list[dict[str, Any]] = field(default_factory=list)
     _client: Any | None = None
 
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[AgentEvent | TransportUsageReport]:
+        model = call.target.model_profile
         builder = AgentEventBuilder(
-            model=model,
             event_context=event_context,
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
         )
-        yield builder.model_start()
-
         if self._mock_events:
-            model_end_emitted = False
+            model_identity = ReportedModelIdentityObserver(
+                requested_model_id=model.id,
+                policy=model.provider_profile.model_identity_policy,
+            )
+            usage_report: TransportUsageReport | None = None
             for raw_event in self._mock_events:
-                events = translate_responses_event(raw_event, builder=builder)
-                model_end_emitted = model_end_emitted or event_includes_model_end(events)
+                model_identity.observe(responses_reported_model(raw_event))
+                items = translate_responses_event(raw_event, builder=builder)
+                events = [item for item in items if isinstance(item, AgentEvent)]
                 run_error_emitted = event_includes_run_error(events)
-                for event in events:
-                    yield event
+                for item in items:
+                    if isinstance(item, TransportUsageReport):
+                        if usage_report is not None:
+                            raise LLMTransportContractError(
+                                "transport emitted more than one usage report",
+                                reason_code="transport_usage_report_duplicate",
+                            )
+                        usage_report = item
+                    else:
+                        yield item
                 if run_error_emitted:
+                    report = _report_with_model_identity(
+                        usage_report, model_identity.reported_model_id
+                    )
+                    if report is not None:
+                        yield report
                     return
-            if not model_end_emitted:
-                for event in builder.close_active_blocks():
-                    yield event
-                yield builder.model_end()
+            for event in builder.close_active_blocks():
+                yield event
+            report = _report_with_model_identity(
+                usage_report, model_identity.reported_model_id
+            )
+            if report is not None:
+                yield report
             return
 
-        payload = build_responses_payload(model=model, context=context, options=options)
+        payload = build_responses_payload(call=call, context=context)
         should_close_client = self._client is None
         client = self._client or build_async_openai_client(
             api_key=self.api_key,
@@ -100,22 +123,50 @@ class OpenAIResponsesTransport(LLMTransport):
                 explicit_max_retries=self.openai_sdk_max_retries,
             ),
         )
-        model_end_emitted = False
         retry_traces: list[RetryAttemptTrace] = []
+        completed_report: TransportUsageReport | None = None
         try:
             attempt = 1
-            max_attempts = self.retry_config.attempts if self.retry_config.enabled else 1
+            max_attempts = (
+                self.retry_config.attempts if self.retry_config.enabled else 1
+            )
             while True:
+                model_identity = ReportedModelIdentityObserver(
+                    requested_model_id=model.id,
+                    policy=model.provider_profile.model_identity_policy,
+                )
+                attempt_usage_report: TransportUsageReport | None = None
                 try:
                     stream = await client.responses.create(**payload, stream=True)
                     async for raw_event in stream:
-                        events = translate_responses_event(raw_event, builder=builder)
-                        model_end_emitted = model_end_emitted or event_includes_model_end(events)
+                        model_identity.observe(responses_reported_model(raw_event))
+                        items = translate_responses_event(raw_event, builder=builder)
+                        events = [
+                            item for item in items if isinstance(item, AgentEvent)
+                        ]
                         run_error_emitted = event_includes_run_error(events)
-                        for event in events:
-                            yield event
+                        for item in items:
+                            if isinstance(item, TransportUsageReport):
+                                if attempt_usage_report is not None:
+                                    raise LLMTransportContractError(
+                                        "transport emitted more than one usage report",
+                                        reason_code="transport_usage_report_duplicate",
+                                    )
+                                attempt_usage_report = item
+                            else:
+                                yield item
                         if run_error_emitted:
+                            report = _report_with_model_identity(
+                                attempt_usage_report,
+                                model_identity.reported_model_id,
+                            )
+                            if report is not None:
+                                yield report
                             return
+                    completed_report = _report_with_model_identity(
+                        attempt_usage_report,
+                        model_identity.reported_model_id,
+                    )
                     break
                 except Exception as exc:
                     decision = apply_retry_after_cap(
@@ -168,6 +219,12 @@ class OpenAIResponsesTransport(LLMTransport):
                     )
                     for event in builder.close_active_blocks():
                         yield event
+                    report = _report_with_model_identity(
+                        attempt_usage_report,
+                        model_identity.reported_model_id,
+                    )
+                    if report is not None:
+                        yield report
                     yield builder.run_error(
                         message=str(exc),
                         code="openai_responses_error",
@@ -192,10 +249,22 @@ class OpenAIResponsesTransport(LLMTransport):
             if should_close_client:
                 await client.close()
 
-        if not model_end_emitted:
-            for event in builder.close_active_blocks():
-                yield event
-            yield builder.model_end()
+        for event in builder.close_active_blocks():
+            yield event
+        if completed_report is not None:
+            yield completed_report
+
+
+def _report_with_model_identity(
+    report: TransportUsageReport | None,
+    reported_model_id: str | None,
+) -> TransportUsageReport | None:
+    if report is None and reported_model_id is None:
+        return None
+    return replace(
+        report or TransportUsageReport(usage_status="missing", usage=None),
+        reported_model_id=reported_model_id,
+    )
 
 
 def _retry_skipped_reason(
@@ -219,41 +288,29 @@ def _retry_skipped_reason(
 
 def build_responses_payload(
     *,
-    model: ModelProfile,
+    call: ResolvedModelCall,
     context: LLMContext,
-    options: LLMOptions | None = None,
 ) -> dict[str, Any]:
+    model = call.target.model_profile
+    options = call.target.effective_options
     payload: dict[str, Any] = {
         "model": model.id,
         "input": _messages_to_responses_inputs(context.messages),
     }
     provider_profile = model.provider_profile
     for key, value in provider_profile.request_defaults.items():
-        payload.setdefault(key, value)
+        payload.setdefault(key, mutable_provider_value(value))
     if context.system_prompt:
         payload["instructions"] = context.system_prompt
     if context.tools and provider_profile.supports_tools:
         payload["tools"] = [_tool_to_responses_tool(tool) for tool in context.tools]
-    if options is not None:
-        omitted = set(provider_profile.omit_params_when_thinking)
-        thinking_enabled = provider_profile.thinking.enabled
-        if options.temperature is not None and not (thinking_enabled and "temperature" in omitted):
-            payload["temperature"] = options.temperature
-        if options.max_output_tokens is not None and not (
-            thinking_enabled and "max_output_tokens" in omitted
-        ):
-            payload["max_output_tokens"] = options.max_output_tokens
-        if (
-            options.reasoning_effort is not None
-            and provider_profile.supports_reasoning
-            and not (thinking_enabled and "reasoning" in omitted)
-            and not (thinking_enabled and "reasoning_effort" in omitted)
-        ):
-            payload["reasoning"] = {"effort": options.reasoning_effort}
-        if options.reasoning_summary is not None:
-            payload.setdefault("reasoning", {})["summary"] = options.reasoning_summary
+    payload["max_output_tokens"] = call.target.context_budget.effective_output_tokens
+    if options.reasoning_effort is not None:
+        payload["reasoning"] = {"effort": options.reasoning_effort}
     if provider_profile.request_extra_body:
-        payload["extra_body"] = dict(provider_profile.request_extra_body)
+        payload["extra_body"] = mutable_provider_value(
+            provider_profile.request_extra_body
+        )
     return payload
 
 
@@ -261,8 +318,8 @@ def response_to_agent_events(
     *,
     response: dict[str, Any],
     builder: AgentEventBuilder,
-) -> list[AgentEvent]:
-    events: list[AgentEvent] = []
+) -> list[AgentEvent | TransportUsageReport]:
+    events: list[AgentEvent | TransportUsageReport] = []
     thinking = _extract_reasoning_summary(response)
     if thinking:
         events.extend(builder.thinking_delta(thinking))
@@ -278,7 +335,7 @@ def response_to_agent_events(
             )
         )
     events.extend(builder.close_active_blocks())
-    events.append(builder.model_end(usage=_usage(response)))
+    events.append(_usage(response))
     return events
 
 
@@ -286,12 +343,15 @@ def translate_responses_event(
     raw_event: Any,
     *,
     builder: AgentEventBuilder,
-) -> list[AgentEvent]:
+) -> list[AgentEvent | TransportUsageReport]:
     event = sdk_event_to_dict(raw_event)
     event_type = event.get("type")
     if event_type == "response.output_text.delta":
         return builder.text_delta(str(event.get("delta", "")))
-    if event_type in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
+    if event_type in {
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+    }:
         return builder.thinking_delta(str(event.get("delta", "")))
     if event_type == "response.output_item.added":
         item = event.get("item")
@@ -332,9 +392,14 @@ def translate_responses_event(
     if event_type == "response.completed":
         response = event.get("response")
         events = builder.close_active_blocks()
-        events.append(builder.model_end(usage=_usage(response if isinstance(response, dict) else {})))
+        events.append(_usage(response if isinstance(response, dict) else {}))
         return events
-    if event_type in {"response.failed", "response.error", "response.incomplete", "error"}:
+    if event_type in {
+        "response.failed",
+        "response.error",
+        "response.incomplete",
+        "error",
+    }:
         response = event.get("response")
         provider_data = response if isinstance(response, dict) else event
         message = _response_error_message(provider_data)
@@ -350,7 +415,9 @@ def translate_responses_event(
     return []
 
 
-def _messages_to_responses_inputs(messages: tuple[LLMMessage, ...]) -> list[dict[str, Any]]:
+def _messages_to_responses_inputs(
+    messages: tuple[LLMMessage, ...],
+) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
     for message in messages:
         inputs.extend(_message_to_responses_inputs(message))
@@ -374,7 +441,9 @@ def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
         ]
     if message.role is MessageRole.TOOL_RESULT:
         if not message.tool_call_id:
-            raise ValueError("Responses function_call_output input requires tool_call_id/call_id")
+            raise ValueError(
+                "Responses function_call_output input requires tool_call_id/call_id"
+            )
         return [
             {
                 "type": "function_call_output",
@@ -386,7 +455,9 @@ def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
         inputs: list[dict[str, Any]] = []
         if message.content:
             inputs.append(_textual_responses_input(message))
-        inputs.extend(_tool_call_to_responses_input(tool_call) for tool_call in message.tool_calls)
+        inputs.extend(
+            _tool_call_to_responses_input(tool_call) for tool_call in message.tool_calls
+        )
         return inputs
     return [_textual_responses_input(message)]
 
@@ -465,7 +536,9 @@ def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, str]]:
                 {
                     "id": str(item.get("call_id") or item.get("id") or ""),
                     "name": str(item.get("name") or ""),
-                    "arguments": arguments_to_json_string(item.get("arguments") or "{}"),
+                    "arguments": arguments_to_json_string(
+                        item.get("arguments") or "{}"
+                    ),
                 }
             )
     return calls
@@ -478,8 +551,8 @@ def _iter_output_items(response: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in output if isinstance(item, dict)]
 
 
-def _usage(response: dict[str, Any]) -> Usage:
-    return usage_from_mapping(response.get("usage"))
+def _usage(response: dict[str, Any]) -> TransportUsageReport:
+    return transport_usage_report_from_mapping(response.get("usage"))
 
 
 def _response_error_message(provider_data: dict[str, Any]) -> str:

@@ -10,6 +10,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from tests.support import run_agent_task
+
 from pulsara_agent.capability.types import CapabilityResolveContext
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
@@ -57,14 +59,16 @@ FALLBACK_FILE_SENTINEL = "PULSARA_FALLBACK_FILE_OK"
 FALLBACK_TERMINAL_SENTINEL = "PULSARA_FALLBACK_TERMINAL_OK"
 FALLBACK_PARENT_SENTINEL = "PULSARA_FALLBACK_PARENT_OK"
 VERIFY_COMMAND = (
-    "uv run python -c \"from subsystem_spec import subsystem_marker; "
+    'uv run python -c "from subsystem_spec import subsystem_marker; '
     f"assert subsystem_marker() == '{SPEC_SENTINEL}'; print('{VERIFY_SENTINEL}')\""
 )
 
 
 def test_real_llm_subagent_task_system_dogfood(tmp_path: Path) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_SUBAGENT_SYSTEM") != "1":
         pytest.skip(
             "Set PULSARA_RUN_DOGFOOD_SUBAGENT_SYSTEM=1 to run subsystem-agent real LLM dogfood."
@@ -73,7 +77,10 @@ def test_real_llm_subagent_task_system_dogfood(tmp_path: Path) -> None:
     settings = _settings()
     _connect_or_skip(settings.storage.postgres_dsn)
     result = asyncio.run(_run_subagent_task_system_dogfood(settings, tmp_path))
-    print("\nREAL_LLM_SUBAGENT_SYSTEM_DOGFOOD=" + json.dumps(result, ensure_ascii=False, sort_keys=True))
+    print(
+        "\nREAL_LLM_SUBAGENT_SYSTEM_DOGFOOD="
+        + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    )
 
     assert result["status"] == "finished", result
     assert result["error_message"] is None, result
@@ -96,8 +103,12 @@ def test_real_llm_subagent_task_system_dogfood(tmp_path: Path) -> None:
     assert result["result_consumed_count"] >= 2, result
     assert result["result_submitted_count"] == 2, result
     assert set(result["reported_phases"]) == {"reviewing", "verifying"}, result
-    assert any(REVIEW_SENTINEL in item for item in result["submitted_summaries"]), result
-    assert any(VERIFY_SENTINEL in item for item in result["submitted_summaries"]), result
+    assert any(REVIEW_SENTINEL in item for item in result["submitted_summaries"]), (
+        result
+    )
+    assert any(VERIFY_SENTINEL in item for item in result["submitted_summaries"]), (
+        result
+    )
     assert result["child_raw_event_count"] > 0, result
     assert result["child_raw_events_missing_subagent_metadata"] == 0, result
 
@@ -107,11 +118,15 @@ def test_real_llm_subagent_task_system_dogfood(tmp_path: Path) -> None:
     assert result["verify_started_after_review_completed"] is True, result
 
 
-def test_real_llm_subagent_independent_parallel_explicit_result_dogfood(tmp_path: Path) -> None:
+def test_real_llm_subagent_independent_parallel_explicit_result_dogfood(
+    tmp_path: Path,
+) -> None:
     _require_system_dogfood()
     settings = _settings()
     _connect_or_skip(settings.storage.postgres_dsn)
-    result = asyncio.run(_run_independent_parallel_explicit_result_dogfood(settings, tmp_path))
+    result = asyncio.run(
+        _run_independent_parallel_explicit_result_dogfood(settings, tmp_path)
+    )
     print(
         "\nREAL_LLM_SUBAGENT_INDEPENDENT_EXPLICIT_DOGFOOD="
         + json.dumps(result, ensure_ascii=False, sort_keys=True)
@@ -126,7 +141,9 @@ def test_real_llm_subagent_independent_parallel_explicit_result_dogfood(tmp_path
     assert result["result_sources"] == ["explicit", "explicit"], result
     assert result["child_report_result_calls"] == 2, result
     assert result["child_report_result_states"] == ["success", "success"], result
-    assert all(item["decision"] == "allow" for item in result["child_gate_decisions"]), result
+    assert all(
+        item["decision"] == "allow" for item in result["child_gate_decisions"]
+    ), result
     assert result["child_followup_model_calls_after_report"] == 0, result
     assert result["graph_backend"] == "DurableGraphFacade", result
     assert result["oxigraph_backend"] == "OxigraphGraphStore", result
@@ -155,11 +172,15 @@ def test_real_llm_subagent_durable_restart_wait_dogfood(tmp_path: Path) -> None:
     assert RESTART_PARENT_SENTINEL in result["final_text"], result
 
 
-def test_real_llm_subagent_failed_dependency_parent_self_verifies_dogfood(tmp_path: Path) -> None:
+def test_real_llm_subagent_failed_dependency_parent_self_verifies_dogfood(
+    tmp_path: Path,
+) -> None:
     _require_system_dogfood()
     settings = _settings()
     _connect_or_skip(settings.storage.postgres_dsn)
-    result = asyncio.run(_run_failed_dependency_parent_self_verifies_dogfood(settings, tmp_path))
+    result = asyncio.run(
+        _run_failed_dependency_parent_self_verifies_dogfood(settings, tmp_path)
+    )
     print(
         "\nREAL_LLM_SUBAGENT_FAILED_DEPENDENCY_FALLBACK_DOGFOOD="
         + json.dumps(result, ensure_ascii=False, sort_keys=True)
@@ -190,7 +211,7 @@ async def _run_independent_parallel_explicit_result_dogfood(
         workspace_root,
         durable=True,
         model_role=ModelRole.PRO,
-        options=LLMOptions(temperature=0, max_output_tokens=768),
+        options=LLMOptions(),
         system_prompt=_independent_explicit_system_prompt(),
         memory_reflection=False,
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
@@ -269,11 +290,31 @@ async def _run_independent_parallel_explicit_result_dogfood(
         )
 
         parent_events = wiring.runtime_wiring.event_log.iter()
-        task_created = [event for event in parent_events if isinstance(event, SubagentTaskCreatedEvent)]
-        task_started = [event for event in parent_events if isinstance(event, SubagentTaskStartedEvent)]
-        task_completed = [event for event in parent_events if isinstance(event, SubagentTaskCompletedEvent)]
-        run_completed = [event for event in parent_events if isinstance(event, SubagentRunCompletedEvent)]
-        submitted = [event for event in parent_events if isinstance(event, SubagentResultSubmittedEvent)]
+        task_created = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentTaskCreatedEvent)
+        ]
+        task_started = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentTaskStartedEvent)
+        ]
+        task_completed = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentTaskCompletedEvent)
+        ]
+        run_completed = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentRunCompletedEvent)
+        ]
+        submitted = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentResultSubmittedEvent)
+        ]
         child_report_calls = 0
         child_followups = 0
         child_gate_decisions: list[dict[str, object]] = []
@@ -338,7 +379,9 @@ async def _run_independent_parallel_explicit_result_dogfood(
             "child_gate_decisions": child_gate_decisions,
             "child_report_result_states": child_report_result_states,
             "graph_backend": type(wiring.runtime_wiring.graph).__name__,
-            "oxigraph_backend": type(getattr(wiring.runtime_wiring.graph, "oxigraph", None)).__name__,
+            "oxigraph_backend": type(
+                getattr(wiring.runtime_wiring.graph, "oxigraph", None)
+            ).__name__,
             "summaries": [event.summary for event in submitted],
         }
     finally:
@@ -351,7 +394,9 @@ async def _run_independent_parallel_explicit_result_dogfood(
             )
         )
         wiring.agent_runtime.close()
-        _delete_sessions(settings.storage.postgres_dsn, [*child_session_ids, parent_session_id])
+        _delete_sessions(
+            settings.storage.postgres_dsn, [*child_session_ids, parent_session_id]
+        )
 
 
 async def _run_durable_restart_wait_dogfood(
@@ -367,7 +412,7 @@ async def _run_durable_restart_wait_dogfood(
         durable=True,
         runtime_session_id=runtime_session_id,
         model_role=ModelRole.PRO,
-        options=LLMOptions(temperature=0, max_output_tokens=512),
+        options=LLMOptions(),
         system_prompt=_restart_child_system_prompt(),
         memory_reflection=False,
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
@@ -389,7 +434,9 @@ async def _run_durable_restart_wait_dogfood(
     child_session_id: str | None = None
     subagent_run_id: str | None = None
     try:
-        await _write_seed_run_start(first, seed_context, "Seed a completed child before restart.")
+        await _write_seed_run_start(
+            first, seed_context, "Seed a completed child before restart."
+        )
         child = await first_subagents.spawn_agent(
             task=(
                 "RESTART_CHILD_TASK: do not call tools; reply exactly "
@@ -399,7 +446,9 @@ async def _run_durable_restart_wait_dogfood(
         )
         subagent_run_id = child.subagent_run_id
         child_session_id = child.child_runtime_session_id
-        await _wait_for_terminal_run(first_subagents, subagent_run_id, timeout_seconds=240)
+        await _wait_for_terminal_run(
+            first_subagents, subagent_run_id, timeout_seconds=240
+        )
         completed_before_restart = first_subagents.result_for_run(subagent_run_id)
         assert completed_before_restart is not None
         assert RESTART_CHILD_SENTINEL in completed_before_restart.summary
@@ -426,7 +475,7 @@ async def _run_durable_restart_wait_dogfood(
         durable=True,
         runtime_session_id=runtime_session_id,
         model_role=ModelRole.PRO,
-        options=LLMOptions(temperature=0, max_output_tokens=768),
+        options=LLMOptions(),
         system_prompt=_restart_parent_system_prompt(subagent_run_id or ""),
         memory_reflection=False,
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
@@ -442,12 +491,17 @@ async def _run_durable_restart_wait_dogfood(
         second_subagents = second.agent_runtime.subagent_runtime
         assert second_subagents is not None
         recovered = next(
-            run for run in second_subagents.runs if run.subagent_run_id == subagent_run_id
+            run
+            for run in second_subagents.runs
+            if run.subagent_run_id == subagent_run_id
         )
-        run_result = await second.agent_runtime.run_task(
-            "After the process-style runtime rebuild, retrieve the completed child with wait_agent now."
+        run_result = await run_agent_task(
+            second.agent_runtime,
+            "After the process-style runtime rebuild, retrieve the completed child with wait_agent now.",
         )
-        current_events = second.runtime_wiring.event_log.iter(run_id=run_result.state.run_id)
+        current_events = second.runtime_wiring.event_log.iter(
+            run_id=run_result.state.run_id
+        )
         tool_names = [
             event.tool_call_name
             for event in current_events
@@ -469,7 +523,8 @@ async def _run_durable_restart_wait_dogfood(
             "status": run_result.status.value,
             "final_text": run_result.final_text,
             "runtime_session_id_reused": (
-                second.runtime_wiring.runtime_session.runtime_session_id == runtime_session_id
+                second.runtime_wiring.runtime_session.runtime_session_id
+                == runtime_session_id
             ),
             "fresh_runtime_recovered_completed_run": recovered.status == "completed",
             "spawn_calls_after_restart": tool_names.count("spawn_agent"),
@@ -496,7 +551,7 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
         encoding="utf-8",
     )
     terminal_command = (
-        "uv run python -c \"from pathlib import Path; "
+        'uv run python -c "from pathlib import Path; '
         f"assert Path('fallback_fact.txt').read_text().strip() == '{FALLBACK_FILE_SENTINEL}'; "
         f"print('{FALLBACK_TERMINAL_SENTINEL}')\""
     )
@@ -505,7 +560,7 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
         workspace_root,
         durable=True,
         model_role=ModelRole.PRO,
-        options=LLMOptions(temperature=0, max_output_tokens=1024),
+        options=LLMOptions(),
         system_prompt=_failed_dependency_parent_system_prompt(terminal_command),
         memory_reflection=False,
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
@@ -526,7 +581,9 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
         reply_id=f"reply:failed-dependency-seed:{uuid4().hex}",
     )
     try:
-        await _write_seed_run_start(wiring, seed_context, "Seed failed and blocked task facts.")
+        await _write_seed_run_start(
+            wiring, seed_context, "Seed failed and blocked task facts."
+        )
         upstream = await subagent_runtime.create_task(
             objective="This upstream task failed before producing evidence.",
             event_context=seed_context,
@@ -561,14 +618,17 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
             )
         )
 
-        run_result = await wiring.agent_runtime.run_task(
+        run_result = await run_agent_task(
+            wiring.agent_runtime,
             _failed_dependency_parent_user_prompt(
                 upstream_task_id=upstream.task_id,
                 downstream_task_id=downstream.task_id,
                 terminal_command=terminal_command,
-            )
+            ),
         )
-        current_events = wiring.runtime_wiring.event_log.iter(run_id=run_result.state.run_id)
+        current_events = wiring.runtime_wiring.event_log.iter(
+            run_id=run_result.state.run_id
+        )
         tool_names = [
             event.tool_call_name
             for event in current_events
@@ -590,7 +650,8 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
             "wait_agent_tasks_calls": tool_names.count("wait_agent_tasks"),
             "read_file_calls": tool_names.count("read_file"),
             "terminal_calls": tool_names.count("terminal"),
-            "new_subagent_calls": tool_names.count("spawn_agent") + tool_names.count("create_agent_tasks"),
+            "new_subagent_calls": tool_names.count("spawn_agent")
+            + tool_names.count("create_agent_tasks"),
             "consumed_task_count": len(current_consumptions),
         }
     finally:
@@ -598,7 +659,9 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
         _delete_sessions(settings.storage.postgres_dsn, [parent_session_id])
 
 
-async def _run_subagent_task_system_dogfood(settings: PulsaraSettings, tmp_path: Path) -> dict[str, object]:
+async def _run_subagent_task_system_dogfood(
+    settings: PulsaraSettings, tmp_path: Path
+) -> dict[str, object]:
     workspace_root = tmp_path / "workspace"
     _prepare_workspace(workspace_root)
     wiring = build_agent_runtime_wiring(
@@ -606,7 +669,7 @@ async def _run_subagent_task_system_dogfood(settings: PulsaraSettings, tmp_path:
         workspace_root,
         durable=True,
         model_role=ModelRole.FLASH,
-        options=LLMOptions(temperature=0, max_output_tokens=1536),
+        options=LLMOptions(),
         system_prompt=_system_prompt(),
         memory_reflection=False,
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
@@ -619,8 +682,10 @@ async def _run_subagent_task_system_dogfood(settings: PulsaraSettings, tmp_path:
         max_subagent_results_per_parent_compile=0,
     )
     try:
-        run_result = await wiring.agent_runtime.run_task(_parent_user_prompt())
-        parent_events = wiring.runtime_wiring.event_log.iter(run_id=run_result.state.run_id)
+        run_result = await run_agent_task(wiring.agent_runtime, _parent_user_prompt())
+        parent_events = wiring.runtime_wiring.event_log.iter(
+            run_id=run_result.state.run_id
+        )
         all_parent_events = wiring.runtime_wiring.event_log.iter()
         subagent_runtime = wiring.agent_runtime.subagent_runtime
         assert subagent_runtime is not None
@@ -630,16 +695,56 @@ async def _run_subagent_task_system_dogfood(settings: PulsaraSettings, tmp_path:
             for event in parent_events
             if isinstance(event, ToolCallStartEvent)
         ]
-        task_created = [event for event in all_parent_events if isinstance(event, SubagentTaskCreatedEvent)]
-        task_started = [event for event in all_parent_events if isinstance(event, SubagentTaskStartedEvent)]
-        task_completed = [event for event in all_parent_events if isinstance(event, SubagentTaskCompletedEvent)]
-        task_scheduled = [event for event in all_parent_events if isinstance(event, SubagentTaskScheduledEvent)]
-        task_blocked = [event for event in all_parent_events if isinstance(event, SubagentTaskBlockedEvent)]
-        run_started = [event for event in all_parent_events if isinstance(event, SubagentRunStartedEvent)]
-        run_completed = [event for event in all_parent_events if isinstance(event, SubagentRunCompletedEvent)]
-        phases = [event for event in all_parent_events if isinstance(event, SubagentPhaseReportedEvent)]
-        submitted = [event for event in all_parent_events if isinstance(event, SubagentResultSubmittedEvent)]
-        consumed = [event for event in all_parent_events if isinstance(event, SubagentResultConsumedEvent)]
+        task_created = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentTaskCreatedEvent)
+        ]
+        task_started = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentTaskStartedEvent)
+        ]
+        task_completed = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentTaskCompletedEvent)
+        ]
+        task_scheduled = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentTaskScheduledEvent)
+        ]
+        task_blocked = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentTaskBlockedEvent)
+        ]
+        run_started = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentRunStartedEvent)
+        ]
+        run_completed = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentRunCompletedEvent)
+        ]
+        phases = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentPhaseReportedEvent)
+        ]
+        submitted = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentResultSubmittedEvent)
+        ]
+        consumed = [
+            event
+            for event in all_parent_events
+            if isinstance(event, SubagentResultConsumedEvent)
+        ]
 
         task_id_by_key = {
             event.task_key: event.task_id
@@ -649,24 +754,24 @@ async def _run_subagent_task_system_dogfood(settings: PulsaraSettings, tmp_path:
         review_task_id = task_id_by_key.get("review")
         verify_task_id = task_id_by_key.get("verify")
         started_sequence_by_task = {
-            event.task_id: event.sequence or 0
-            for event in task_started
+            event.task_id: event.sequence or 0 for event in task_started
         }
         completed_sequence_by_task = {
-            event.task_id: event.sequence or 0
-            for event in task_completed
+            event.task_id: event.sequence or 0 for event in task_completed
         }
         verify_waited_for_review = any(
-            event.task_id == verify_task_id
-            and event.status == "waiting_dependency"
+            event.task_id == verify_task_id and event.status == "waiting_dependency"
             for event in task_blocked
-        ) and any(event.schedule_reason == "dependency_satisfied" for event in task_scheduled)
+        ) and any(
+            event.schedule_reason == "dependency_satisfied" for event in task_scheduled
+        )
         verify_started_after_review_completed = bool(
             review_task_id
             and verify_task_id
             and completed_sequence_by_task.get(review_task_id, 0)
             and started_sequence_by_task.get(verify_task_id, 0)
-            and completed_sequence_by_task[review_task_id] < started_sequence_by_task[verify_task_id]
+            and completed_sequence_by_task[review_task_id]
+            < started_sequence_by_task[verify_task_id]
         )
 
         child_raw_events = []
@@ -692,11 +797,14 @@ async def _run_subagent_task_system_dogfood(settings: PulsaraSettings, tmp_path:
             "list_agents_calls": tool_names.count("list_agents"),
             "wait_agent_tasks_calls": tool_names.count("wait_agent_tasks"),
             "parent_read_file_calls": tool_names.count("read_file"),
-            "primitive_spawn_or_wait_calls": tool_names.count("spawn_agent") + tool_names.count("wait_agent"),
+            "primitive_spawn_or_wait_calls": tool_names.count("spawn_agent")
+            + tool_names.count("wait_agent"),
             "task_created_count": len(task_created),
             "task_started_count": len(task_started),
             "task_completed_count": len(task_completed),
-            "task_scheduled_reasons": [event.schedule_reason for event in task_scheduled],
+            "task_scheduled_reasons": [
+                event.schedule_reason for event in task_scheduled
+            ],
             "task_blocked_events": [
                 {
                     "task_id": event.task_id,
@@ -729,7 +837,10 @@ async def _run_subagent_task_system_dogfood(settings: PulsaraSettings, tmp_path:
         wiring.agent_runtime.close()
         _delete_sessions(
             settings.storage.postgres_dsn,
-            [*child_session_ids, wiring.runtime_wiring.runtime_session.runtime_session_id],
+            [
+                *child_session_ids,
+                wiring.runtime_wiring.runtime_session.runtime_session_id,
+            ],
         )
 
 
@@ -896,7 +1007,9 @@ async def _write_seed_run_start(wiring, context: EventContext, user_input: str) 
             user_input_chars=len(user_input),
             permission_snapshot_id=f"permission_snapshot:{context.run_id}",
             permission_mode=PermissionMode.BYPASS_PERMISSIONS.value,
-            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS).to_dict(),
+            permission_policy=preset_to_policy(
+                PermissionMode.BYPASS_PERMISSIONS
+            ).to_dict(),
             permission_snapshot_source="session_default",
             metadata={"user_input": user_input},
         )
@@ -952,7 +1065,9 @@ async def _wait_for_terminal_run(
 
 def _require_system_dogfood() -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_SUBAGENT_SYSTEM") != "1":
         pytest.skip(
             "Set PULSARA_RUN_DOGFOOD_SUBAGENT_SYSTEM=1 to run subsystem-agent real LLM dogfood."
@@ -979,10 +1094,14 @@ def _connect_or_skip(dsn: str) -> None:
 
 
 def _delete_sessions(dsn: str, runtime_session_ids: Iterable[str | None]) -> None:
-    session_ids = [session_id for session_id in dict.fromkeys(runtime_session_ids) if session_id]
+    session_ids = [
+        session_id for session_id in dict.fromkeys(runtime_session_ids) if session_id
+    ]
     if not session_ids:
         return
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             for runtime_session_id in session_ids:
-                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+                cursor.execute(
+                    "delete from sessions where id = %s", (runtime_session_id,)
+                )

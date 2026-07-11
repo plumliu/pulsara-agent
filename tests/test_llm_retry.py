@@ -2,7 +2,10 @@ import random
 
 import pytest
 
-from pulsara_agent.llm.adapters.openai.errors import classify_llm_error, parse_retry_after_seconds
+from pulsara_agent.llm.adapters.openai.errors import (
+    classify_llm_error,
+    parse_retry_after_seconds,
+)
 from pulsara_agent.llm.adapters.openai import client as openai_client
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.retry import (
@@ -38,7 +41,9 @@ class FakeProviderError(Exception):
     ):
         super().__init__(message)
         self.status_code = status_code
-        self.response = FakeResponse(status_code=status_code, headers=headers, body=body)
+        self.response = FakeResponse(
+            status_code=status_code, headers=headers, body=body
+        )
         self.body = body
         self.code = code
 
@@ -65,6 +70,12 @@ def test_llm_config_reads_retry_and_sdk_retry_env(monkeypatch) -> None:
     monkeypatch.setenv("PULSARA_API_KEY", "sk-test")
     monkeypatch.setenv("PULSARA_PRO_MODEL", "pro")
     monkeypatch.setenv("PULSARA_FLASH_MODEL", "flash")
+    for role in ("PRO", "FLASH"):
+        monkeypatch.setenv(f"PULSARA_{role}_TOTAL_CONTEXT_TOKENS", "4096")
+        monkeypatch.setenv(f"PULSARA_{role}_MAX_INPUT_TOKENS", "3584")
+        monkeypatch.setenv(f"PULSARA_{role}_MAX_OUTPUT_TOKENS", "1024")
+        monkeypatch.setenv(f"PULSARA_{role}_DEFAULT_OUTPUT_TOKENS", "512")
+        monkeypatch.setenv(f"PULSARA_{role}_INPUT_SAFETY_MARGIN_TOKENS", "128")
     monkeypatch.setenv("PULSARA_LLM_RETRY_ATTEMPTS", "4")
     monkeypatch.setenv("PULSARA_OPENAI_SDK_MAX_RETRIES", "0")
 
@@ -133,13 +144,20 @@ def test_retry_classifier_status_codes_and_bad_request_signals() -> None:
         FakeProviderError(
             "gateway error",
             status_code=502,
-            body={"error": {"code": "unsupported_parameter", "message": "unknown parameter foo"}},
+            body={
+                "error": {
+                    "code": "unsupported_parameter",
+                    "message": "unknown parameter foo",
+                }
+            },
         )
     )
     assert deterministic_5xx.kind is RetryDecisionKind.DO_NOT_RETRY
     assert deterministic_5xx.reason == "deterministic_bad_request"
 
-    payload_too_large = classify_llm_error(FakeProviderError("too large", status_code=413))
+    payload_too_large = classify_llm_error(
+        FakeProviderError("too large", status_code=413)
+    )
     assert payload_too_large.kind is RetryDecisionKind.DO_NOT_RETRY
 
     overloaded = classify_llm_error(FakeProviderError("overloaded", status_code=529))
@@ -162,7 +180,9 @@ def test_retry_after_cap_and_backoff_jitter() -> None:
         max_retry_after_seconds=5,
     )
     retry_after_decision = classify_llm_error(
-        FakeProviderError("rate limited", status_code=429, headers={"retry-after": "10"})
+        FakeProviderError(
+            "rate limited", status_code=429, headers={"retry-after": "10"}
+        )
     )
     capped = apply_retry_after_cap(retry_after_decision, config=config)
     assert capped.kind is RetryDecisionKind.DO_NOT_RETRY

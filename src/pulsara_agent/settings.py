@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.retrieval.config import RetrievalConfig
@@ -28,8 +29,12 @@ class StorageConfig:
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "StorageConfig":
         return cls(
-            oxigraph_url=os.getenv(f"{prefix}_OXIGRAPH_URL", DEFAULT_OXIGRAPH_URL).strip(),
-            postgres_dsn=os.getenv(f"{prefix}_POSTGRES_DSN", DEFAULT_POSTGRES_DSN).strip(),
+            oxigraph_url=os.getenv(
+                f"{prefix}_OXIGRAPH_URL", DEFAULT_OXIGRAPH_URL
+            ).strip(),
+            postgres_dsn=os.getenv(
+                f"{prefix}_POSTGRES_DSN", DEFAULT_POSTGRES_DSN
+            ).strip(),
         )
 
     def redacted_dict(self) -> dict:
@@ -71,9 +76,11 @@ class PulsaraSettings:
             "llm": {
                 "api": self.llm.api,
                 "provider": self.llm.provider,
-                "base_url": self.llm.base_url,
+                "endpoint_origin": _redacted_endpoint_origin(self.llm.base_url),
                 "pro_model": self.llm.pro_model,
                 "flash_model": self.llm.flash_model,
+                "pro_limits": self.llm.pro.limits.model_dump(mode="json"),
+                "flash_limits": self.llm.flash.limits.model_dump(mode="json"),
                 "api_key_set": bool(self.llm.api_key),
             },
             "storage": self.storage.redacted_dict(),
@@ -111,7 +118,27 @@ class PulsaraSettings:
         }
 
 
-def load_env_file(path: str | Path = ".env", *, override: bool = False) -> dict[str, str]:
+def _redacted_endpoint_origin(value: str) -> str:
+    """Return a display-safe endpoint identity without path/query/userinfo."""
+
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return "<invalid>"
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+        port = parsed.port
+        if port == (80 if parsed.scheme.lower() == "http" else 443):
+            port = None
+        rendered_host = f"[{host}]" if ":" in host else host
+        authority = rendered_host if port is None else f"{rendered_host}:{port}"
+        return f"{parsed.scheme.lower()}://{authority}"
+    except (UnicodeError, ValueError):
+        return "<invalid>"
+
+
+def load_env_file(
+    path: str | Path = ".env", *, override: bool = False
+) -> dict[str, str]:
     env_path = Path(path)
     if not env_path.exists():
         raise ValueError(f"Environment file not found: {env_path}")
@@ -119,13 +146,17 @@ def load_env_file(path: str | Path = ".env", *, override: bool = False) -> dict[
         raise ValueError(f"Environment path is not a file: {env_path}")
 
     loaded: dict[str, str] = {}
-    for line_number, raw_line in enumerate(env_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw_line in enumerate(
+        env_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         parsed = _parse_env_line(raw_line)
         if parsed is None:
             continue
         key, value = parsed
         if not key:
-            raise ValueError(f"Invalid empty environment key in {env_path}:{line_number}")
+            raise ValueError(
+                f"Invalid empty environment key in {env_path}:{line_number}"
+            )
         if override or key not in os.environ:
             os.environ[key] = value
         loaded[key] = value

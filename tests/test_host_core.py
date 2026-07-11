@@ -9,7 +9,6 @@ from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
     EventContext,
-    ModelCallEndEvent,
     ModelCallStartEvent,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
@@ -41,11 +40,21 @@ from pulsara_agent.host import (
     HostSessionPendingInteractionError,
     HostWorkspaceInput,
 )
-from pulsara_agent.host.transcript import FAILURE_NOTE_TEXT, INTERRUPTED_NOTE_TEXT, rebuild_prior_messages
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
+from pulsara_agent.host.transcript import (
+    FAILURE_NOTE_TEXT,
+    INTERRUPTED_NOTE_TEXT,
+    rebuild_prior_messages,
+)
+from pulsara_agent.llm import LLMRuntime, ModelRole
+from tests.support import model_call_start_fields, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultBlock, ToolResultState
+from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.message import (
+    ToolCallBlock,
+    ToolCallState,
+    ToolResultBlock,
+    ToolResultState,
+)
 from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
@@ -72,6 +81,8 @@ from tests.support.settings import compatibility_storage_config
 
 class ScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[dict], *, delay: float = 0) -> None:
         self.replies = replies
@@ -81,29 +92,27 @@ class ScriptedTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        del call
         self.contexts.append(context)
         if self.delay:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
+            )
             yield TextBlockDeltaEvent(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+            yield TextBlockEndEvent(
+                **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
+            )
         for call in reply.get("tool_calls", []):
             yield ToolCallStartEvent(
                 **event_context.event_fields(),
@@ -115,12 +124,15 @@ class ScriptedTransport:
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
-        yield ModelCallEndEvent(**event_context.event_fields())
+            yield ToolCallEndEvent(
+                **event_context.event_fields(), tool_call_id=call["id"]
+            )
 
 
 class FailingScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[dict]) -> None:
         self.replies = replies
@@ -129,28 +141,27 @@ class FailingScriptedTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        del call
         self.contexts.append(context)
         reply = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
+            )
             yield TextBlockDeltaEvent(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
             if reply.get("close_text_block", True):
-                yield TextBlockEndEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+                yield TextBlockEndEvent(
+                    **event_context.event_fields(),
+                    block_id=f"text:{len(self.contexts)}",
+                )
         if "run_error" in reply:
             error = reply["run_error"]
             yield RunErrorEvent(
@@ -162,12 +173,11 @@ class FailingScriptedTransport:
             return
         if "raise" in reply:
             raise reply["raise"]
-        yield ModelCallEndEvent(**event_context.event_fields())
 
 
 def _settings() -> PulsaraSettings:
     return PulsaraSettings(
-        llm=LLMConfig(
+        llm=test_llm_config(
             api_key="sk-test",
             base_url="https://example.test/v1",
             pro_model="pro",
@@ -213,7 +223,9 @@ async def _open_project_session(
     permission_policy: EffectivePermissionPolicy | None = None,
 ):
     return await core.open_session(
-        HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path, memory_domain_id="u_test"),
+        HostWorkspaceInput(
+            workspace_kind="project", workspace_root=tmp_path, memory_domain_id="u_test"
+        ),
         host_session_id=host_session_id,
         conversation_id=f"conversation:{host_session_id}",
         model_role=ModelRole.FLASH,
@@ -237,7 +249,9 @@ def test_host_session_rejects_custom_policy_for_run_turn(tmp_path, monkeypatch) 
 
     async def run():
         with pytest.raises(ValueError, match="preset permission mode"):
-            await _open_project_session(core, tmp_path, permission_policy=custom_like_bypass)
+            await _open_project_session(
+                core, tmp_path, permission_policy=custom_like_bypass
+            )
         await core.shutdown()
 
     asyncio.run(run())
@@ -255,26 +269,43 @@ def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> N
 
     session = asyncio.run(run())
 
-    assert session.runtime_session_id == session.wiring.agent_runtime.runtime_session.runtime_session_id
+    assert (
+        session.runtime_session_id
+        == session.wiring.agent_runtime.runtime_session.runtime_session_id
+    )
     assert "first user" in _context_text(transport.contexts[1])
     assert "sentinel-one" in _context_text(transport.contexts[1])
     assert FAILURE_NOTE_TEXT not in _context_text(transport.contexts[1])
 
 
-def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_reply_end() -> None:
+def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_reply_end() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    ctx = EventContext(
+        run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "first user"}),
-            ModelCallStartEvent(**ctx.event_fields(), model_name="flash", model_role="flash", provider="scripted"),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "first user"},
+            ),
+            ModelCallStartEvent(**ctx.event_fields(), **model_call_start_fields()),
             RunErrorEvent(
                 **ctx.event_fields(),
                 message="APIConnectionError: sk-secret https://api.deepseek.com retry trace",
                 code="openai_responses_error",
-                metadata={"provider_data": {"base_url": "https://api.deepseek.com", "api_key": "sk-secret"}},
+                metadata={
+                    "provider_data": {
+                        "base_url": "https://api.deepseek.com",
+                        "api_key": "sk-secret",
+                    }
+                },
             ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
@@ -295,7 +326,9 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
     assert messages[2].role == "system"
     assert messages[2].content[0].text == FAILURE_NOTE_TEXT
     rendered = "\n".join(
-        getattr(block, "text", "") for message in messages for block in getattr(message, "content", [])
+        getattr(block, "text", "")
+        for message in messages
+        for block in getattr(message, "content", [])
     )
     assert "sk-secret" not in rendered
     assert "api.deepseek.com" not in rendered
@@ -305,16 +338,31 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
 def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:partial", turn_id="turn:partial", reply_id="reply:partial")
+    ctx = EventContext(
+        run_id="run:partial", turn_id="turn:partial", reply_id="reply:partial"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "first user"}),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "first user"},
+            ),
             TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="partial answer"),
-            RunErrorEvent(**ctx.event_fields(), message="provider failed", code="openai_responses_error"),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(), block_id="text:1", delta="partial answer"
+            ),
+            RunErrorEvent(
+                **ctx.event_fields(),
+                message="provider failed",
+                code="openai_responses_error",
+            ),
             ReplyEndEvent(**ctx.event_fields()),
-            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="model_error"),
+            RunEndEvent(
+                **ctx.event_fields(), status="failed", stop_reason="model_error"
+            ),
         ]
     )
 
@@ -329,29 +377,62 @@ def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> Non
 def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
-    failed_ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
-    done_ctx = EventContext(run_id="run:done", turn_id="turn:done", reply_id="reply:done")
+    failed_ctx = EventContext(
+        run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed"
+    )
+    done_ctx = EventContext(
+        run_id="run:done", turn_id="turn:done", reply_id="reply:done"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**failed_ctx.event_fields(), **run_start_permission_fields(failed_ctx.run_id), user_input_chars=10, metadata={"user_input": "failed user"}),
-            RunErrorEvent(**failed_ctx.event_fields(), message="provider failed", code="openai_responses_error"),
+            RunStartEvent(
+                **failed_ctx.event_fields(),
+                **run_start_permission_fields(failed_ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "failed user"},
+            ),
+            RunErrorEvent(
+                **failed_ctx.event_fields(),
+                message="provider failed",
+                code="openai_responses_error",
+            ),
             ReplyEndEvent(**failed_ctx.event_fields()),
-            RunEndEvent(**failed_ctx.event_fields(), status="failed", stop_reason="model_error"),
-            RunStartEvent(**done_ctx.event_fields(), **run_start_permission_fields(done_ctx.run_id), user_input_chars=8, metadata={"user_input": "done user"}),
+            RunEndEvent(
+                **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
+            ),
+            RunStartEvent(
+                **done_ctx.event_fields(),
+                **run_start_permission_fields(done_ctx.run_id),
+                user_input_chars=8,
+                metadata={"user_input": "done user"},
+            ),
             TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
-            TextBlockDeltaEvent(**done_ctx.event_fields(), block_id="text:done", delta="done"),
+            TextBlockDeltaEvent(
+                **done_ctx.event_fields(), block_id="text:done", delta="done"
+            ),
             TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
             ReplyEndEvent(**done_ctx.event_fields()),
-            RunEndEvent(**done_ctx.event_fields(), status="finished", stop_reason="final"),
+            RunEndEvent(
+                **done_ctx.event_fields(), status="finished", stop_reason="final"
+            ),
         ]
     )
 
     messages = rebuild_prior_messages(log)
 
-    assert [message.role for message in messages] == ["user", "assistant", "user", "assistant"]
+    assert [message.role for message in messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
     assert all(
-        not (message.role == "system" and message.content and message.content[0].text == FAILURE_NOTE_TEXT)
+        not (
+            message.role == "system"
+            and message.content
+            and message.content[0].text == FAILURE_NOTE_TEXT
+        )
         for message in messages
     )
 
@@ -359,13 +440,22 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
 def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    ctx = EventContext(
+        run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "long user task"}),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "long user task"},
+            ),
             TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="partial answer"),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(), block_id="text:1", delta="partial answer"
+            ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
         ]
@@ -376,13 +466,22 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
     assert [message.role for message in messages] == ["user", "assistant", "system"]
     assert messages[1].content[0].text == "partial answer"
     assert messages[2].content[0].text == INTERRUPTED_NOTE_TEXT
-    assert messages[2].metadata == {"run_id": "run:aborted", "kind": "previous_turn_aborted"}
+    assert messages[2].metadata == {
+        "run_id": "run:aborted",
+        "kind": "previous_turn_aborted",
+    }
 
 
-def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active() -> None:
+def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:plan-aborted", turn_id="turn:plan-aborted", reply_id="reply:plan-aborted")
+    ctx = EventContext(
+        run_id="run:plan-aborted",
+        turn_id="turn:plan-aborted",
+        reply_id="reply:plan-aborted",
+    )
     log = InMemoryEventLog()
     log.extend(
         [
@@ -390,10 +489,17 @@ def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active(
                 **ctx.event_fields(),
                 source="user",
                 previous_permission_mode="bypass-permissions",
-                previous_permission_policy=run_start_permission_fields(ctx.run_id)["permission_policy"],
+                previous_permission_policy=run_start_permission_fields(ctx.run_id)[
+                    "permission_policy"
+                ],
                 reason="plan first",
             ),
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "ask plan question"}),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "ask plan question"},
+            ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
                 **ctx.event_fields(),
@@ -414,17 +520,38 @@ def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active(
 def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    ctx = EventContext(
+        run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "dangerous task"}),
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
-            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:danger", delta='{"command": "rm -rf ./x"}'),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "dangerous task"},
+            ),
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:danger",
+                tool_call_name="terminal",
+            ),
+            ToolCallDeltaEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:danger",
+                delta='{"command": "rm -rf ./x"}',
+            ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:danger"),
             RequireUserConfirmEvent(
                 **ctx.event_fields(),
-                tool_calls=[ToolCallBlock(id="call:danger", name="terminal", input='{"command": "rm -rf ./x"}')],
+                tool_calls=[
+                    ToolCallBlock(
+                        id="call:danger",
+                        name="terminal",
+                        input='{"command": "rm -rf ./x"}',
+                    )
+                ],
             ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
@@ -441,19 +568,42 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
     assert "rm -rf" not in note
 
 
-def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed_result() -> None:
+def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed_result() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    ctx = EventContext(
+        run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "run command"}),
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
-            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta='{"command": "sleep 30"}'),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "run command"},
+            ),
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:terminal",
+                tool_call_name="terminal",
+            ),
+            ToolCallDeltaEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:terminal",
+                delta='{"command": "sleep 30"}',
+            ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
-            ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
-            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="tool_error"),
+            ToolResultStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:terminal",
+                tool_call_name="terminal",
+            ),
+            RunEndEvent(
+                **ctx.event_fields(), status="failed", stop_reason="tool_error"
+            ),
         ]
     )
 
@@ -470,23 +620,46 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
 def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
+    ctx = EventContext(
+        run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "run command"}),
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
-            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta='{"command": "printf done"}'),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "run command"},
+            ),
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:terminal",
+                tool_call_name="terminal",
+            ),
+            ToolCallDeltaEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:terminal",
+                delta='{"command": "printf done"}',
+            ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
             ReplyEndEvent(**ctx.event_fields()),
-            ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
+            ToolResultStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:terminal",
+                tool_call_name="terminal",
+            ),
             RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
-            ToolResultTextDeltaEvent(**ctx.event_fields(), tool_call_id="call:terminal", delta="done"),
+            ToolResultTextDeltaEvent(
+                **ctx.event_fields(), tool_call_id="call:terminal", delta="done"
+            ),
             ToolResultEndEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 state=ToolResultState.SUCCESS,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             ),
         ]
     )
@@ -495,26 +668,57 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
 
     assert [message.role for message in messages] == ["user", "assistant", "system"]
     assistant_blocks = messages[1].content
-    assert any(isinstance(block, ToolCallBlock) and block.id == "call:terminal" for block in assistant_blocks)
-    assert any(isinstance(block, ToolResultBlock) and block.id == "call:terminal" for block in assistant_blocks)
+    assert any(
+        isinstance(block, ToolCallBlock) and block.id == "call:terminal"
+        for block in assistant_blocks
+    )
+    assert any(
+        isinstance(block, ToolResultBlock) and block.id == "call:terminal"
+        for block in assistant_blocks
+    )
     assert messages[2].content[0].text == INTERRUPTED_NOTE_TEXT
 
 
 def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    ctx = EventContext(
+        run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "change files"}),
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
-            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:write", delta='{"path": "secret.txt"}'),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "change files"},
+            ),
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:write",
+                tool_call_name="write_file",
+            ),
+            ToolCallDeltaEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:write",
+                delta='{"path": "secret.txt"}',
+            ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:write"),
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:term", tool_call_name="terminal"),
-            ToolCallDeltaEvent(**ctx.event_fields(), tool_call_id="call:term", delta='{"command": "echo hidden"}'),
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:term",
+                tool_call_name="terminal",
+            ),
+            ToolCallDeltaEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:term",
+                delta='{"command": "echo hidden"}',
+            ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:term"),
-            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="model_error"),
+            RunEndEvent(
+                **ctx.event_fields(), status="failed", stop_reason="model_error"
+            ),
         ]
     )
 
@@ -530,11 +734,17 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
     assert "echo hidden" not in note
 
 
-def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_run() -> None:
+def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_run() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    aborted_ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
-    failed_ctx = EventContext(run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed")
+    aborted_ctx = EventContext(
+        run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted"
+    )
+    failed_ctx = EventContext(
+        run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
@@ -544,7 +754,11 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
                 user_input_chars=10,
                 metadata={"user_input": "dangerous task"},
             ),
-            ToolCallStartEvent(**aborted_ctx.event_fields(), tool_call_id="call:danger", tool_call_name="terminal"),
+            ToolCallStartEvent(
+                **aborted_ctx.event_fields(),
+                tool_call_id="call:danger",
+                tool_call_name="terminal",
+            ),
             ToolCallDeltaEvent(
                 **aborted_ctx.event_fields(),
                 tool_call_id="call:danger",
@@ -553,18 +767,32 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
             ToolCallEndEvent(**aborted_ctx.event_fields(), tool_call_id="call:danger"),
             RequireUserConfirmEvent(
                 **aborted_ctx.event_fields(),
-                tool_calls=[ToolCallBlock(id="call:danger", name="terminal", input='{"command": "rm -rf ./x"}')],
+                tool_calls=[
+                    ToolCallBlock(
+                        id="call:danger",
+                        name="terminal",
+                        input='{"command": "rm -rf ./x"}',
+                    )
+                ],
             ),
             ReplyEndEvent(**aborted_ctx.event_fields()),
-            RunEndEvent(**aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            RunEndEvent(
+                **aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"
+            ),
             RunStartEvent(
                 **failed_ctx.event_fields(),
                 **run_start_permission_fields(failed_ctx.run_id),
                 user_input_chars=10,
                 metadata={"user_input": "failed follow-up"},
             ),
-            RunErrorEvent(**failed_ctx.event_fields(), message="provider failed", code="openai_responses_error"),
-            RunEndEvent(**failed_ctx.event_fields(), status="failed", stop_reason="model_error"),
+            RunErrorEvent(
+                **failed_ctx.event_fields(),
+                message="provider failed",
+                code="openai_responses_error",
+            ),
+            RunEndEvent(
+                **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
+            ),
         ]
     )
 
@@ -579,45 +807,91 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
     )
 
 
-def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succeeds() -> None:
+def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succeeds() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    aborted_ctx = EventContext(run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted")
-    done_ctx = EventContext(run_id="run:done", turn_id="turn:done", reply_id="reply:done")
+    aborted_ctx = EventContext(
+        run_id="run:aborted", turn_id="turn:aborted", reply_id="reply:aborted"
+    )
+    done_ctx = EventContext(
+        run_id="run:done", turn_id="turn:done", reply_id="reply:done"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**aborted_ctx.event_fields(), **run_start_permission_fields(aborted_ctx.run_id), user_input_chars=10, metadata={"user_input": "aborted user"}),
+            RunStartEvent(
+                **aborted_ctx.event_fields(),
+                **run_start_permission_fields(aborted_ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "aborted user"},
+            ),
             ReplyEndEvent(**aborted_ctx.event_fields()),
-            RunEndEvent(**aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"),
-            RunStartEvent(**done_ctx.event_fields(), **run_start_permission_fields(done_ctx.run_id), user_input_chars=8, metadata={"user_input": "done user"}),
+            RunEndEvent(
+                **aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"
+            ),
+            RunStartEvent(
+                **done_ctx.event_fields(),
+                **run_start_permission_fields(done_ctx.run_id),
+                user_input_chars=8,
+                metadata={"user_input": "done user"},
+            ),
             TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
-            TextBlockDeltaEvent(**done_ctx.event_fields(), block_id="text:done", delta="done"),
+            TextBlockDeltaEvent(
+                **done_ctx.event_fields(), block_id="text:done", delta="done"
+            ),
             TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
             ReplyEndEvent(**done_ctx.event_fields()),
-            RunEndEvent(**done_ctx.event_fields(), status="finished", stop_reason="final"),
+            RunEndEvent(
+                **done_ctx.event_fields(), status="finished", stop_reason="final"
+            ),
         ]
     )
 
     messages = rebuild_prior_messages(log)
 
-    assert [message.role for message in messages] == ["user", "assistant", "user", "assistant"]
+    assert [message.role for message in messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
     assert all(
-        not (message.role == "system" and message.content and message.content[0].text == INTERRUPTED_NOTE_TEXT)
+        not (
+            message.role == "system"
+            and message.content
+            and message.content[0].text == INTERRUPTED_NOTE_TEXT
+        )
         for message in messages
     )
 
 
-def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_end() -> None:
+def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_end() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    ctx = EventContext(run_id="run:raised", turn_id="turn:raised", reply_id="reply:raised")
+    ctx = EventContext(
+        run_id="run:raised", turn_id="turn:raised", reply_id="reply:raised"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "first user"}),
-            RunErrorEvent(**ctx.event_fields(), message="APIConnectionError: boom", code="model_stream_error"),
-            RunEndEvent(**ctx.event_fields(), status="failed", stop_reason="model_error"),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "first user"},
+            ),
+            RunErrorEvent(
+                **ctx.event_fields(),
+                message="APIConnectionError: boom",
+                code="model_stream_error",
+            ),
+            RunEndEvent(
+                **ctx.event_fields(), status="failed", stop_reason="model_error"
+            ),
         ]
     )
 
@@ -627,17 +901,30 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
     assert messages[1].content[0].text == FAILURE_NOTE_TEXT
 
 
-def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_previous_run() -> None:
+def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_previous_run() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    first_ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
-    second_ctx = EventContext(run_id="run:second", turn_id="turn:second", reply_id="reply:second")
+    first_ctx = EventContext(
+        run_id="run:first", turn_id="turn:first", reply_id="reply:first"
+    )
+    second_ctx = EventContext(
+        run_id="run:second", turn_id="turn:second", reply_id="reply:second"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**first_ctx.event_fields(), **run_start_permission_fields(first_ctx.run_id), user_input_chars=10, metadata={"user_input": "run tests"}),
+            RunStartEvent(
+                **first_ctx.event_fields(),
+                **run_start_permission_fields(first_ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "run tests"},
+            ),
             ReplyEndEvent(**first_ctx.event_fields()),
-            RunEndEvent(**first_ctx.event_fields(), status="finished", stop_reason="final"),
+            RunEndEvent(
+                **first_ctx.event_fields(), status="finished", stop_reason="final"
+            ),
             TerminalProcessCompletedEvent(
                 **first_ctx.event_fields(),
                 process_id="proc_done",
@@ -660,31 +947,59 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
 
     log.extend(
         [
-            RunStartEvent(**second_ctx.event_fields(), **run_start_permission_fields(second_ctx.run_id), user_input_chars=8, metadata={"user_input": "continue"}),
+            RunStartEvent(
+                **second_ctx.event_fields(),
+                **run_start_permission_fields(second_ctx.run_id),
+                user_input_chars=8,
+                metadata={"user_input": "continue"},
+            ),
             ReplyEndEvent(**second_ctx.event_fields()),
-            RunEndEvent(**second_ctx.event_fields(), status="finished", stop_reason="final"),
+            RunEndEvent(
+                **second_ctx.event_fields(), status="finished", stop_reason="final"
+            ),
         ]
     )
     later_messages = rebuild_prior_messages(log)
 
     assert all(
-        not (message.role == "system" and "terminal background task update" in message.content[0].text)
+        not (
+            message.role == "system"
+            and "terminal background task update" in message.content[0].text
+        )
         for message in later_messages
     )
 
 
-def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion_happened_during_later_turn() -> None:
+def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion_happened_during_later_turn() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
-    first_ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
-    second_ctx = EventContext(run_id="run:second", turn_id="turn:second", reply_id="reply:second")
+    first_ctx = EventContext(
+        run_id="run:first", turn_id="turn:first", reply_id="reply:first"
+    )
+    second_ctx = EventContext(
+        run_id="run:second", turn_id="turn:second", reply_id="reply:second"
+    )
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**first_ctx.event_fields(), **run_start_permission_fields(first_ctx.run_id), user_input_chars=10, metadata={"user_input": "start server"}),
+            RunStartEvent(
+                **first_ctx.event_fields(),
+                **run_start_permission_fields(first_ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "start server"},
+            ),
             ReplyEndEvent(**first_ctx.event_fields()),
-            RunEndEvent(**first_ctx.event_fields(), status="finished", stop_reason="final"),
-            RunStartEvent(**second_ctx.event_fields(), **run_start_permission_fields(second_ctx.run_id), user_input_chars=8, metadata={"user_input": "do other work"}),
+            RunEndEvent(
+                **first_ctx.event_fields(), status="finished", stop_reason="final"
+            ),
+            RunStartEvent(
+                **second_ctx.event_fields(),
+                **run_start_permission_fields(second_ctx.run_id),
+                user_input_chars=8,
+                metadata={"user_input": "do other work"},
+            ),
             TerminalProcessCompletedEvent(
                 **first_ctx.event_fields(),
                 process_id="proc_late",
@@ -696,7 +1011,9 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
                 duration_seconds=2.0,
             ),
             ReplyEndEvent(**second_ctx.event_fields()),
-            RunEndEvent(**second_ctx.event_fields(), status="finished", stop_reason="final"),
+            RunEndEvent(
+                **second_ctx.event_fields(), status="finished", stop_reason="final"
+            ),
         ]
     )
 
@@ -707,14 +1024,21 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
     assert "exit code 1" in messages[-1].content[0].text
 
 
-def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_projection() -> None:
+def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_projection() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
     ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
     log = InMemoryEventLog()
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "start background"}),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=10,
+                metadata={"user_input": "start background"},
+            ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
             TerminalProcessCompletedEvent(
@@ -749,13 +1073,20 @@ def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_proje
     assert "full output" in note
 
 
-def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processes() -> None:
+def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processes() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
     ctx = EventContext(run_id="run:first", turn_id="turn:first", reply_id="reply:first")
     log = InMemoryEventLog()
     events = [
-        RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=10, metadata={"user_input": "start background"}),
+        RunStartEvent(
+            **ctx.event_fields(),
+            **run_start_permission_fields(ctx.run_id),
+            user_input_chars=10,
+            metadata={"user_input": "start background"},
+        ),
         ReplyEndEvent(**ctx.event_fields()),
         RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
     ]
@@ -787,12 +1118,29 @@ def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processe
     assert "output_3" not in note
 
 
-def test_host_session_injects_failed_turn_note_into_next_context(tmp_path, monkeypatch) -> None:
+def test_host_session_injects_failed_turn_note_into_next_context(
+    tmp_path, monkeypatch
+) -> None:
     transport = FailingScriptedTransport(
         [
-            {"run_error": {"message": "APIConnectionError: sk-secret", "code": "openai_responses_error"}},
-            {"run_error": {"message": "APIConnectionError: sk-secret", "code": "openai_responses_error"}},
-            {"run_error": {"message": "APIConnectionError: sk-secret", "code": "openai_responses_error"}},
+            {
+                "run_error": {
+                    "message": "APIConnectionError: sk-secret",
+                    "code": "openai_responses_error",
+                }
+            },
+            {
+                "run_error": {
+                    "message": "APIConnectionError: sk-secret",
+                    "code": "openai_responses_error",
+                }
+            },
+            {
+                "run_error": {
+                    "message": "APIConnectionError: sk-secret",
+                    "code": "openai_responses_error",
+                }
+            },
             {"text": "recovered"},
         ]
     )
@@ -806,10 +1154,17 @@ def test_host_session_injects_failed_turn_note_into_next_context(tmp_path, monke
 
     session = asyncio.run(run())
 
-    assert session.runtime_session_id == session.wiring.agent_runtime.runtime_session.runtime_session_id
+    assert (
+        session.runtime_session_id
+        == session.wiring.agent_runtime.runtime_session.runtime_session_id
+    )
     assert len(transport.contexts) == 4
     second_context = transport.contexts[-1]
-    assert any(message.role.value == "system" and FAILURE_NOTE_TEXT in "\n".join(message.content) for message in second_context.messages)
+    assert any(
+        message.role.value == "system"
+        and FAILURE_NOTE_TEXT in "\n".join(message.content)
+        for message in second_context.messages
+    )
     assert "first user" in _context_text(second_context)
     assert "please continue" in _context_text(second_context)
     assert "sk-secret" not in _context_text(second_context)
@@ -828,10 +1183,14 @@ def test_host_session_replay_events_after_sequence(tmp_path, monkeypatch) -> Non
     all_events = session.replay_events()
     missed = session.replay_events(after_sequence=2)
 
-    assert [event.sequence for event in missed] == [seq for seq in [event.sequence for event in all_events] if seq > 2]
+    assert [event.sequence for event in missed] == [
+        seq for seq in [event.sequence for event in all_events] if seq > 2
+    ]
 
 
-def test_host_session_terminal_completion_event_replays_and_injects_one_shot_note(tmp_path, monkeypatch) -> None:
+def test_host_session_terminal_completion_event_replays_and_injects_one_shot_note(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -840,7 +1199,10 @@ def test_host_session_terminal_completion_event_replays_and_injects_one_shot_not
                         "id": "call:bg",
                         "name": "terminal",
                         "arguments": json.dumps(
-                            {"command": "sleep 0.05 && printf BG_DONE", "yield_time_ms": 0}
+                            {
+                                "command": "sleep 0.05 && printf BG_DONE",
+                                "yield_time_ms": 0,
+                            }
                         ),
                     }
                 ]
@@ -853,23 +1215,33 @@ def test_host_session_terminal_completion_event_replays_and_injects_one_shot_not
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
         seen_live: list[TerminalProcessCompletedEvent] = []
 
         class Subscriber:
-            async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            async def on_published_event(
+                self, published: RuntimePublishedEvent
+            ) -> None:
                 if isinstance(published.event, TerminalProcessCompletedEvent):
                     seen_live.append(published.event)
 
         session.wiring.runtime_wiring.runtime_session.publisher.subscribe(Subscriber())
         await session.run_turn("start background task")
         manager = session.wiring.runtime_wiring.runtime_session.terminal_sessions
-        process = manager.list_processes(owner_host_session_id=session.host_session_id)[0]
+        process = manager.list_processes(owner_host_session_id=session.host_session_id)[
+            0
+        ]
         manager.wait_process(process.process_id, timeout_seconds=2)
         deadline = asyncio.get_running_loop().time() + 2
         while not seen_live and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.02)
-        replayed = [event for event in session.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
+        replayed = [
+            event
+            for event in session.replay_events()
+            if isinstance(event, TerminalProcessCompletedEvent)
+        ]
         await session.run_turn("continue after background completion")
         second_context = transport.contexts[-1]
         await session.run_turn("check note is gone")
@@ -890,7 +1262,9 @@ def test_host_session_terminal_completion_event_replays_and_injects_one_shot_not
     assert terminal_summary["processes"][0]["process_id"] == replayed[0].process_id
 
 
-def test_host_session_terminal_completion_during_later_turn_appears_in_following_context(tmp_path, monkeypatch) -> None:
+def test_host_session_terminal_completion_during_later_turn_appears_in_following_context(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -899,7 +1273,10 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
                         "id": "call:bg",
                         "name": "terminal",
                         "arguments": json.dumps(
-                            {"command": "sleep 0.25 && printf LATE_DONE", "yield_time_ms": 0}
+                            {
+                                "command": "sleep 0.25 && printf LATE_DONE",
+                                "yield_time_ms": 0,
+                            }
                         ),
                     }
                 ]
@@ -913,11 +1290,17 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_policy()
+        )
         await session.run_turn("start background task")
         await session.run_turn("do slow unrelated work")
         second_context = transport.contexts[-1]
-        events = [event for event in session.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
+        events = [
+            event
+            for event in session.replay_events()
+            if isinstance(event, TerminalProcessCompletedEvent)
+        ]
         await session.run_turn("continue after late task")
         third_context = transport.contexts[-1]
         return events, second_context, third_context
@@ -930,7 +1313,9 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
     assert events[0].process_id in _context_text(third_context)
 
 
-def test_host_session_terminal_completion_note_is_owner_isolated_across_shared_workspace(tmp_path, monkeypatch) -> None:
+def test_host_session_terminal_completion_note_is_owner_isolated_across_shared_workspace(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -939,7 +1324,10 @@ def test_host_session_terminal_completion_note_is_owner_isolated_across_shared_w
                         "id": "call:a-bg",
                         "name": "terminal",
                         "arguments": json.dumps(
-                            {"command": "sleep 0.05 && printf A_DONE", "yield_time_ms": 0}
+                            {
+                                "command": "sleep 0.05 && printf A_DONE",
+                                "yield_time_ms": 0,
+                            }
                         ),
                     }
                 ]
@@ -951,14 +1339,32 @@ def test_host_session_terminal_completion_note_is_owner_isolated_across_shared_w
     core = _core(monkeypatch, transport)
 
     async def run():
-        a = await _open_project_session(core, tmp_path, host_session_id="host:a", permission_policy=_trusted_terminal_policy())
-        b = await _open_project_session(core, tmp_path, host_session_id="host:b", permission_policy=_trusted_terminal_policy())
+        a = await _open_project_session(
+            core,
+            tmp_path,
+            host_session_id="host:a",
+            permission_policy=_trusted_terminal_policy(),
+        )
+        b = await _open_project_session(
+            core,
+            tmp_path,
+            host_session_id="host:b",
+            permission_policy=_trusted_terminal_policy(),
+        )
         await a.run_turn("start a process")
         manager = a.wiring.runtime_wiring.runtime_session.terminal_sessions
         process = manager.list_processes(owner_host_session_id="host:a")[0]
         manager.wait_process(process.process_id, timeout_seconds=2)
-        a_events = [event for event in a.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
-        b_events = [event for event in b.replay_events() if isinstance(event, TerminalProcessCompletedEvent)]
+        a_events = [
+            event
+            for event in a.replay_events()
+            if isinstance(event, TerminalProcessCompletedEvent)
+        ]
+        b_events = [
+            event
+            for event in b.replay_events()
+            if isinstance(event, TerminalProcessCompletedEvent)
+        ]
         await b.run_turn("continue b")
         return a_events, b_events, transport.contexts[-1]
 
@@ -986,7 +1392,9 @@ def test_host_session_rejects_concurrent_runs(tmp_path, monkeypatch) -> None:
     assert result.final_text == "slow"
 
 
-def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved(tmp_path, monkeypatch) -> None:
+def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1004,7 +1412,9 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         first = await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -1017,7 +1427,10 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
         resolved = await session.resolve_approval(
             ApprovalResolution(
                 approval_id=pending.approval_id,
-                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                    for call in pending.tool_calls
+                ),
             )
         )
         return session, first, resolved
@@ -1032,7 +1445,9 @@ def test_host_session_stores_pending_approval_and_blocks_new_turn_until_resolved
     assert any(event.run_id == first.state.run_id for event in session.replay_events())
 
 
-def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(tmp_path, monkeypatch) -> None:
+def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1050,7 +1465,9 @@ def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(tm
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         first = await session.run_turn("run harmless terminal under ask")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -1059,17 +1476,23 @@ def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(tm
         resolved = await session.resolve_approval(
             ApprovalResolution(
                 approval_id=pending.approval_id,
-                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                    for call in pending.tool_calls
+                ),
             )
         )
         return session, first, resolved
 
     session, first, resolved = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    run_events = [
+        event for event in session.replay_events() if event.run_id == first.state.run_id
+    ]
     tool_output = "".join(
         event.delta
         for event in run_events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:ask-terminal"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:ask-terminal"
     )
 
     assert first.status.value == "waiting_user"
@@ -1079,7 +1502,9 @@ def test_host_session_terminal_access_ask_approval_executes_terminal_snapshot(tm
     assert "PULSARA_ASK_OK" in tool_output
 
 
-def test_host_session_on_request_write_approval_executes_file_snapshot(tmp_path, monkeypatch) -> None:
+def test_host_session_on_request_write_approval_executes_file_snapshot(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1087,7 +1512,12 @@ def test_host_session_on_request_write_approval_executes_file_snapshot(tmp_path,
                     {
                         "id": "call:write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "approved.txt", "content": "PULSARA_ON_REQUEST_OK\n"}),
+                        "arguments": json.dumps(
+                            {
+                                "path": "approved.txt",
+                                "content": "PULSARA_ON_REQUEST_OK\n",
+                            }
+                        ),
                     }
                 ]
             },
@@ -1097,7 +1527,9 @@ def test_host_session_on_request_write_approval_executes_file_snapshot(tmp_path,
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_workspace_on_request_policy()
+        )
         first = await session.run_turn("write a file under on_request")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -1105,7 +1537,10 @@ def test_host_session_on_request_write_approval_executes_file_snapshot(tmp_path,
         resolved = await session.resolve_approval(
             ApprovalResolution(
                 approval_id=pending.approval_id,
-                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                    for call in pending.tool_calls
+                ),
             )
         )
         return session, first, resolved
@@ -1114,11 +1549,15 @@ def test_host_session_on_request_write_approval_executes_file_snapshot(tmp_path,
 
     assert first.status.value == "waiting_user"
     assert resolved.status.value == "finished"
-    assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "PULSARA_ON_REQUEST_OK\n"
+    assert (tmp_path / "approved.txt").read_text(
+        encoding="utf-8"
+    ) == "PULSARA_ON_REQUEST_OK\n"
     assert session.get_pending_approval() is None
 
 
-def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(tmp_path, monkeypatch) -> None:
+def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1126,7 +1565,9 @@ def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(tmp
                     {
                         "id": "call:write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "denied.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {"path": "denied.txt", "content": "SHOULD_NOT_EXIST\n"}
+                        ),
                     }
                 ]
             },
@@ -1136,7 +1577,9 @@ def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(tmp
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_workspace_on_request_policy()
+        )
         first = await session.run_turn("write a file under on_request")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -1144,18 +1587,22 @@ def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(tmp
             ApprovalResolution(
                 approval_id=pending.approval_id,
                 decisions=tuple(
-                    ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=False)
+                    for call in pending.tool_calls
                 ),
             )
         )
         return session, first, resolved
 
     session, first, resolved = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    run_events = [
+        event for event in session.replay_events() if event.run_id == first.state.run_id
+    ]
     denied_output = "".join(
         event.delta
         for event in run_events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:write"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:write"
     )
 
     assert resolved.status.value == "finished"
@@ -1165,7 +1612,9 @@ def test_host_session_on_request_write_deny_leaves_file_absent_and_continues(tmp
     assert session.get_pending_approval() is None
 
 
-def test_host_session_stop_terminal_access_ask_pending_approval_aborts(tmp_path, monkeypatch) -> None:
+def test_host_session_stop_terminal_access_ask_pending_approval_aborts(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1183,7 +1632,9 @@ def test_host_session_stop_terminal_access_ask_pending_approval_aborts(tmp_path,
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         first = await session.run_turn("run harmless terminal under ask")
         assert session.get_pending_approval() is not None
         stopped = await session.stop_current_turn()
@@ -1192,17 +1643,23 @@ def test_host_session_stop_terminal_access_ask_pending_approval_aborts(tmp_path,
         return session, first, stopped, second
 
     session, first, stopped, second = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    run_events = [
+        event for event in session.replay_events() if event.run_id == first.state.run_id
+    ]
 
     assert stopped.status.value == "aborted"
     assert stopped.stop_reason == "aborted"
     assert second.final_text == "continued after ask stop"
     assert session.get_pending_approval() is None
     assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
-    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == ["aborted"]
+    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == [
+        "aborted"
+    ]
 
 
-def test_host_session_stop_on_request_write_pending_approval_aborts_without_file(tmp_path, monkeypatch) -> None:
+def test_host_session_stop_on_request_write_pending_approval_aborts_without_file(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1210,7 +1667,9 @@ def test_host_session_stop_on_request_write_pending_approval_aborts_without_file
                     {
                         "id": "call:write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "stopped.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {"path": "stopped.txt", "content": "SHOULD_NOT_EXIST\n"}
+                        ),
                     }
                 ]
             },
@@ -1220,7 +1679,9 @@ def test_host_session_stop_on_request_write_pending_approval_aborts_without_file
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_workspace_on_request_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_workspace_on_request_policy()
+        )
         first = await session.run_turn("write a file under on_request")
         assert session.get_pending_approval() is not None
         stopped = await session.stop_current_turn()
@@ -1229,7 +1690,9 @@ def test_host_session_stop_on_request_write_pending_approval_aborts_without_file
         return session, first, stopped, second
 
     session, first, stopped, second = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    run_events = [
+        event for event in session.replay_events() if event.run_id == first.state.run_id
+    ]
 
     assert stopped.status.value == "aborted"
     assert stopped.stop_reason == "aborted"
@@ -1237,10 +1700,14 @@ def test_host_session_stop_on_request_write_pending_approval_aborts_without_file
     assert session.get_pending_approval() is None
     assert not (tmp_path / "stopped.txt").exists()
     assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
-    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == ["aborted"]
+    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == [
+        "aborted"
+    ]
 
 
-def test_host_session_hardline_under_terminal_ask_denies_without_approval(tmp_path, monkeypatch) -> None:
+def test_host_session_hardline_under_terminal_ask_denies_without_approval(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1258,16 +1725,23 @@ def test_host_session_hardline_under_terminal_ask_denies_without_approval(tmp_pa
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         result = await session.run_turn("attempt hardline command")
         return session, result
 
     session, result = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    run_events = [
+        event
+        for event in session.replay_events()
+        if event.run_id == result.state.run_id
+    ]
     denied_output = "".join(
         event.delta
         for event in run_events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:hardline"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:hardline"
     )
 
     assert result.status.value == "finished"
@@ -1284,7 +1758,9 @@ def test_host_session_hardline_under_terminal_ask_denies_without_approval(tmp_pa
 # contracts/PERMISSION_POLICY_CONTRACT.zh.md §2/§4/§5.
 
 
-def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(tmp_path, monkeypatch) -> None:
+def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1292,7 +1768,9 @@ def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(tmp_p
                     {
                         "id": "call:ask-terminal",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "printf PULSARA_PRESET_ASK_OK"}),
+                        "arguments": json.dumps(
+                            {"command": "printf PULSARA_PRESET_ASK_OK"}
+                        ),
                     }
                 ]
             },
@@ -1303,7 +1781,9 @@ def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(tmp_p
 
     async def run():
         session = await _open_project_session(
-            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
         )
         first = await session.run_turn("run terminal under ask-permissions")
         pending = session.get_pending_approval()
@@ -1312,17 +1792,23 @@ def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(tmp_p
         resolved = await session.resolve_approval(
             ApprovalResolution(
                 approval_id=pending.approval_id,
-                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                    for call in pending.tool_calls
+                ),
             )
         )
         return session, first, resolved
 
     session, first, resolved = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == first.state.run_id]
+    run_events = [
+        event for event in session.replay_events() if event.run_id == first.state.run_id
+    ]
     tool_output = "".join(
         event.delta
         for event in run_events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:ask-terminal"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:ask-terminal"
     )
 
     assert first.status.value == "waiting_user"
@@ -1332,7 +1818,9 @@ def test_ask_permissions_preset_terminal_suspends_then_executes_on_approve(tmp_p
     assert "PULSARA_PRESET_ASK_OK" in tool_output
 
 
-def test_ask_permissions_preset_write_suspends_then_executes_on_approve(tmp_path, monkeypatch) -> None:
+def test_ask_permissions_preset_write_suspends_then_executes_on_approve(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1340,7 +1828,12 @@ def test_ask_permissions_preset_write_suspends_then_executes_on_approve(tmp_path
                     {
                         "id": "call:ask-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "ask_permissions.txt", "content": "PULSARA_ASK_WRITE_OK\n"}),
+                        "arguments": json.dumps(
+                            {
+                                "path": "ask_permissions.txt",
+                                "content": "PULSARA_ASK_WRITE_OK\n",
+                            }
+                        ),
                     }
                 ]
             },
@@ -1351,7 +1844,9 @@ def test_ask_permissions_preset_write_suspends_then_executes_on_approve(tmp_path
 
     async def run():
         session = await _open_project_session(
-            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
         )
         first = await session.run_turn("write a file under ask-permissions")
         pending = session.get_pending_approval()
@@ -1360,7 +1855,10 @@ def test_ask_permissions_preset_write_suspends_then_executes_on_approve(tmp_path
         resolved = await session.resolve_approval(
             ApprovalResolution(
                 approval_id=pending.approval_id,
-                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                    for call in pending.tool_calls
+                ),
             )
         )
         return first, resolved
@@ -1372,7 +1870,9 @@ def test_ask_permissions_preset_write_suspends_then_executes_on_approve(tmp_path
     assert (tmp_path / "ask_permissions.txt").read_text() == "PULSARA_ASK_WRITE_OK\n"
 
 
-def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkeypatch) -> None:
+def test_accept_edits_preset_autoallows_write_but_asks_terminal(
+    tmp_path, monkeypatch
+) -> None:
     # accept-edits = trusted_host / never / ask. The only difference from
     # ask-permissions is that file writes auto-pass while terminal still asks.
     # Writes and the terminal are scripted in separate model rounds because the
@@ -1385,7 +1885,12 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkey
                     {
                         "id": "call:auto-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "accept_edits.txt", "content": "PULSARA_ACCEPT_EDITS_OK\n"}),
+                        "arguments": json.dumps(
+                            {
+                                "path": "accept_edits.txt",
+                                "content": "PULSARA_ACCEPT_EDITS_OK\n",
+                            }
+                        ),
                     }
                 ]
             },
@@ -1394,7 +1899,9 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkey
                     {
                         "id": "call:accept-terminal",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "printf PULSARA_ACCEPT_TERMINAL_OK"}),
+                        "arguments": json.dumps(
+                            {"command": "printf PULSARA_ACCEPT_TERMINAL_OK"}
+                        ),
                     }
                 ]
             },
@@ -1405,7 +1912,9 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkey
 
     async def run():
         session = await _open_project_session(
-            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ACCEPT_EDITS)
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.ACCEPT_EDITS),
         )
         first = await session.run_turn("write a file then run a terminal command")
         # Write auto-executed without suspending; the run only paused on terminal.
@@ -1416,7 +1925,10 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkey
         resolved = await session.resolve_approval(
             ApprovalResolution(
                 approval_id=pending.approval_id,
-                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                    for call in pending.tool_calls
+                ),
             )
         )
         return session, first, resolved, write_exists_at_pause
@@ -1425,7 +1937,8 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkey
     terminal_output = "".join(
         event.delta
         for event in session.replay_events()
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:accept-terminal"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:accept-terminal"
     )
 
     assert first.status.value == "waiting_user"
@@ -1436,7 +1949,9 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(tmp_path, monkey
     assert "PULSARA_ACCEPT_TERMINAL_OK" in terminal_output
 
 
-def test_bypass_permissions_preset_runs_without_pending_approval(tmp_path, monkeypatch) -> None:
+def test_bypass_permissions_preset_runs_without_pending_approval(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1444,12 +1959,16 @@ def test_bypass_permissions_preset_runs_without_pending_approval(tmp_path, monke
                     {
                         "id": "call:bypass-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "bypass.txt", "content": "PULSARA_BYPASS_OK\n"}),
+                        "arguments": json.dumps(
+                            {"path": "bypass.txt", "content": "PULSARA_BYPASS_OK\n"}
+                        ),
                     },
                     {
                         "id": "call:bypass-terminal",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "printf PULSARA_BYPASS_TERMINAL_OK"}),
+                        "arguments": json.dumps(
+                            {"command": "printf PULSARA_BYPASS_TERMINAL_OK"}
+                        ),
                     },
                 ]
             },
@@ -1460,17 +1979,24 @@ def test_bypass_permissions_preset_runs_without_pending_approval(tmp_path, monke
 
     async def run():
         session = await _open_project_session(
-            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
         )
         result = await session.run_turn("write and run terminal under bypass")
         return session, result
 
     session, result = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    run_events = [
+        event
+        for event in session.replay_events()
+        if event.run_id == result.state.run_id
+    ]
     terminal_output = "".join(
         event.delta
         for event in run_events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bypass-terminal"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:bypass-terminal"
     )
 
     assert result.status.value == "finished"
@@ -1481,7 +2007,9 @@ def test_bypass_permissions_preset_runs_without_pending_approval(tmp_path, monke
     assert "PULSARA_BYPASS_TERMINAL_OK" in terminal_output
 
 
-def test_bypass_permissions_preset_still_denies_hardline_terminal(tmp_path, monkeypatch) -> None:
+def test_bypass_permissions_preset_still_denies_hardline_terminal(
+    tmp_path, monkeypatch
+) -> None:
     # Contract §5: bypass means "no approval", NOT "no protection". Hardline
     # terminal commands are denied under every preset, including bypass.
     transport = ScriptedTransport(
@@ -1502,17 +2030,24 @@ def test_bypass_permissions_preset_still_denies_hardline_terminal(tmp_path, monk
 
     async def run():
         session = await _open_project_session(
-            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
         )
         result = await session.run_turn("attempt hardline command under bypass")
         return session, result
 
     session, result = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    run_events = [
+        event
+        for event in session.replay_events()
+        if event.run_id == result.state.run_id
+    ]
     denied_output = "".join(
         event.delta
         for event in run_events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bypass-hardline"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:bypass-hardline"
     )
 
     assert result.status.value == "finished"
@@ -1522,7 +2057,9 @@ def test_bypass_permissions_preset_still_denies_hardline_terminal(tmp_path, monk
     assert "terminal command blocked by hardline permission policy" in denied_output
 
 
-def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkeypatch) -> None:
+def test_read_only_preset_denies_write_without_pending_approval(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1530,7 +2067,9 @@ def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkey
                     {
                         "id": "call:ro-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "read_only.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {"path": "read_only.txt", "content": "SHOULD_NOT_EXIST\n"}
+                        ),
                     }
                 ]
             },
@@ -1547,11 +2086,16 @@ def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkey
         return session, result
 
     session, result = asyncio.run(run())
-    run_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    run_events = [
+        event
+        for event in session.replay_events()
+        if event.run_id == result.state.run_id
+    ]
     denied_output = "".join(
         event.delta
         for event in run_events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:ro-write"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:ro-write"
     )
 
     assert result.status.value == "finished"
@@ -1562,7 +2106,9 @@ def test_read_only_preset_denies_write_without_pending_approval(tmp_path, monkey
     assert "not allowed by permission policy" in denied_output
 
 
-def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(tmp_path, monkeypatch) -> None:
+def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1570,7 +2116,9 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(
                     {
                         "id": "call:write-in-plan",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "plan_write.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {"path": "plan_write.txt", "content": "SHOULD_NOT_EXIST\n"}
+                        ),
                     }
                 ]
             },
@@ -1591,12 +2139,18 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(
         assert session.plan_state.active is True
         assert session.plan_state.pending_entry_audit is False
         immediate_events = session.replay_events()
-        immediate_entered = [event for event in immediate_events if isinstance(event, PlanModeEnteredEvent)]
+        immediate_entered = [
+            event
+            for event in immediate_events
+            if isinstance(event, PlanModeEnteredEvent)
+        ]
         assert len(immediate_entered) == 1
         assert immediate_entered[0].source == "user"
         reduced = reduce_plan_workflow_state(immediate_events)
         assert reduced.active is True
-        assert reduced.pre_plan_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+        assert (
+            reduced.pre_plan_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+        )
         result = await session.run_turn("please plan the change")
         return session, result
 
@@ -1606,7 +2160,8 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(
     write_output = "".join(
         event.delta
         for event in events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:write-in-plan"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:write-in-plan"
     )
     first_context = _context_text(transport.contexts[0])
 
@@ -1615,14 +2170,18 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(
     assert session.plan_state.pending_entry_audit is False
     assert len(entered) == 1
     assert entered[0].source == "user"
-    assert entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    assert (
+        entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    )
     assert "Plan workflow" in first_context
     assert "please plan the change" in first_context
     assert not (tmp_path / "plan_write.txt").exists()
     assert "not allowed by permission policy" in write_output
 
 
-def test_plan_mode_blocks_permission_switch_until_explicit_exit(tmp_path, monkeypatch) -> None:
+def test_plan_mode_blocks_permission_switch_until_explicit_exit(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1630,7 +2189,12 @@ def test_plan_mode_blocks_permission_switch_until_explicit_exit(tmp_path, monkey
                     {
                         "id": "call:bypass-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "bypass_write.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {
+                                "path": "bypass_write.txt",
+                                "content": "SHOULD_NOT_EXIST\n",
+                            }
+                        ),
                     }
                 ]
             },
@@ -1657,7 +2221,8 @@ def test_plan_mode_blocks_permission_switch_until_explicit_exit(tmp_path, monkey
     write_output = "".join(
         event.delta
         for event in events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bypass-write"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:bypass-write"
     )
 
     assert result.final_text == "still planning"
@@ -1667,7 +2232,9 @@ def test_plan_mode_blocks_permission_switch_until_explicit_exit(tmp_path, monkey
     assert "not allowed by permission policy" in write_output
 
 
-def test_agent_enter_plan_tool_finalizes_current_run_before_next_tool_turn(tmp_path, monkeypatch) -> None:
+def test_agent_enter_plan_tool_finalizes_current_run_before_next_tool_turn(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1684,7 +2251,9 @@ def test_agent_enter_plan_tool_finalizes_current_run_before_next_tool_turn(tmp_p
                     {
                         "id": "call:write-after-enter",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "after_enter.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {"path": "after_enter.txt", "content": "SHOULD_NOT_EXIST\n"}
+                        ),
                     }
                 ]
             },
@@ -1708,7 +2277,8 @@ def test_agent_enter_plan_tool_finalizes_current_run_before_next_tool_turn(tmp_p
     write_output = "".join(
         event.delta
         for event in events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:write-after-enter"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:write-after-enter"
     )
 
     assert result.status.value == "finished"
@@ -1716,13 +2286,17 @@ def test_agent_enter_plan_tool_finalizes_current_run_before_next_tool_turn(tmp_p
     assert session.plan_state.active is True
     assert session.current_permission_mode is PermissionMode.READ_ONLY
     assert entered[0].source == "agent"
-    assert entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    assert (
+        entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
+    )
     assert not (tmp_path / "after_enter.txt").exists()
     assert write_output == ""
     assert len(transport.contexts) == 1
 
 
-def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monkeypatch) -> None:
+def test_plan_question_suspends_and_resolution_continues_same_run(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1777,9 +2351,11 @@ def test_plan_question_suspends_and_resolution_continues_same_run(tmp_path, monk
         isinstance(event, PlanQuestionAnsweredEvent) and event.answer_text == "runtime"
         for event in events
     )
-    assert {event.run_id for event in events if isinstance(event, PlanQuestionAskedEvent | PlanQuestionAnsweredEvent)} == {
-        first.state.run_id
-    }
+    assert {
+        event.run_id
+        for event in events
+        if isinstance(event, PlanQuestionAskedEvent | PlanQuestionAnsweredEvent)
+    } == {first.state.run_id}
 
 
 def test_plan_question_supports_structured_options(tmp_path, monkeypatch) -> None:
@@ -1823,10 +2399,22 @@ def test_plan_question_supports_structured_options(tmp_path, monkeypatch) -> Non
     pending = session.get_pending_interaction()
     assert isinstance(pending, PendingPlanInteraction)
     assert pending.to_dict()["options"] == [
-        {"label": "Small", "description": "Make the smallest safe change.", "recommended": True},
-        {"label": "Broad", "description": "Refactor the surrounding subsystem.", "recommended": False},
+        {
+            "label": "Small",
+            "description": "Make the smallest safe change.",
+            "recommended": True,
+        },
+        {
+            "label": "Broad",
+            "description": "Refactor the surrounding subsystem.",
+            "recommended": False,
+        },
     ]
-    asked = [event for event in session.replay_events() if isinstance(event, PlanQuestionAskedEvent)]
+    asked = [
+        event
+        for event in session.replay_events()
+        if isinstance(event, PlanQuestionAskedEvent)
+    ]
     assert asked
     assert asked[0].options[0].label == "Small"
     assert asked[0].options[0].recommended is True
@@ -1841,7 +2429,9 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
                     {
                         "id": "call:exit",
                         "name": "exit_plan",
-                        "arguments": json.dumps({"plan": expected_plan_text, "summary": "edit and test"}),
+                        "arguments": json.dumps(
+                            {"plan": expected_plan_text, "summary": "edit and test"}
+                        ),
                     }
                 ]
             },
@@ -1879,19 +2469,30 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
     assert session.plan_state.active is False
     assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
     assert any(isinstance(event, PlanExitRequestedEvent) for event in events)
-    assert any(isinstance(event, PlanExitResolvedEvent) and event.decision == "approve" for event in events)
+    assert any(
+        isinstance(event, PlanExitResolvedEvent) and event.decision == "approve"
+        for event in events
+    )
     exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
     assert exited[0].source == "approved_exit_plan"
     assert exited[0].restored_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value
     assert exited[0].accepted_plan_artifact_id
-    assert session.plan_state.latest_accepted_plan_artifact_id == exited[0].accepted_plan_artifact_id
-    assert session.wiring.runtime_wiring.runtime_session.archive.get_text(
-        exited[0].accepted_plan_artifact_id
-    ) == expected_plan_text
+    assert (
+        session.plan_state.latest_accepted_plan_artifact_id
+        == exited[0].accepted_plan_artifact_id
+    )
+    assert (
+        session.wiring.runtime_wiring.runtime_session.archive.get_text(
+            exited[0].accepted_plan_artifact_id
+        )
+        == expected_plan_text
+    )
     assert len(transport.contexts) == 1
 
 
-def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch) -> None:
+def test_exit_plan_revise_keeps_plan_active_and_read_only(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1944,7 +2545,9 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch)
     assert result.final_text == ""
     assert session.plan_state.active is True
     assert session.current_permission_mode is PermissionMode.READ_ONLY
-    assert not any(isinstance(event, PlanModeExitedEvent) for event in session.replay_events())
+    assert not any(
+        isinstance(event, PlanModeExitedEvent) for event in session.replay_events()
+    )
     revision_context = _context_text(transport.contexts[1])
     assert "call exit_plan again immediately" in revision_context
     assert "add tests" in revision_context
@@ -1952,7 +2555,9 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(tmp_path, monkeypatch)
     assert "Plan revision is still pending" in retry_context
 
 
-def test_cancel_plan_exits_plan_mode_and_aborts_suspended_exit_run(tmp_path, monkeypatch) -> None:
+def test_cancel_plan_exits_plan_mode_and_aborts_suspended_exit_run(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1989,7 +2594,10 @@ def test_cancel_plan_exits_plan_mode_and_aborts_suspended_exit_run(tmp_path, mon
     assert session.plan_state.active is False
     assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
     assert session.get_pending_interaction() is None
-    assert any(isinstance(event, PlanExitResolvedEvent) and event.decision == "cancel" for event in events)
+    assert any(
+        isinstance(event, PlanExitResolvedEvent) and event.decision == "cancel"
+        for event in events
+    )
     exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
     assert exited[-1].source == "user_cancel"
     run_ends = [event for event in events if isinstance(event, RunEndEvent)]
@@ -2018,7 +2626,9 @@ def test_force_exit_plan_exits_without_pending_exit(tmp_path, monkeypatch) -> No
     assert exited[-1].source == "user_force_exit"
 
 
-def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(tmp_path, monkeypatch) -> None:
+def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2031,7 +2641,9 @@ def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(tmp_path, mo
                     {
                         "id": "call:sibling-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "sibling.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {"path": "sibling.txt", "content": "SHOULD_NOT_EXIST\n"}
+                        ),
                     },
                 ]
             }
@@ -2050,7 +2662,8 @@ def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(tmp_path, mo
     sibling_output = "".join(
         event.delta
         for event in events
-        if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:sibling-write"
+        if isinstance(event, ToolResultTextDeltaEvent)
+        and event.tool_call_id == "call:sibling-write"
     )
 
     assert result.status.value == "waiting_user"
@@ -2059,7 +2672,9 @@ def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(tmp_path, mo
     assert "not executed because a plan workflow control tool" in sibling_output
 
 
-def test_stop_pending_plan_interaction_keeps_plan_active_read_only(tmp_path, monkeypatch) -> None:
+def test_stop_pending_plan_interaction_keeps_plan_active_read_only(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2094,10 +2709,14 @@ def test_stop_pending_plan_interaction_keeps_plan_active_read_only(tmp_path, mon
     assert session.plan_state.active is True
     assert session.current_permission_mode is PermissionMode.READ_ONLY
     assert session.get_pending_interaction() is None
-    assert not any(isinstance(event, PlanModeExitedEvent) for event in session.replay_events())
+    assert not any(
+        isinstance(event, PlanModeExitedEvent) for event in session.replay_events()
+    )
 
 
-def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(tmp_path, monkeypatch) -> None:
+def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(
+    tmp_path, monkeypatch
+) -> None:
     # §9.6: plan HITL has its own per-run budget. A second ask_plan_question
     # after the budget of 1 trips a plan-specific failure, not an ordinary
     # tool-error budget failure.
@@ -2127,7 +2746,9 @@ def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(tmp_
 
     async def run():
         session = await _open_project_session(core, tmp_path)
-        session.wiring.agent_runtime.budget = LoopBudget(max_plan_interactions_per_run=1)
+        session.wiring.agent_runtime.budget = LoopBudget(
+            max_plan_interactions_per_run=1
+        )
         session.enter_plan(reason="budget")
         first = await session.run_turn("plan with questions")
         pending = session.get_pending_interaction()
@@ -2135,7 +2756,9 @@ def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(tmp_
         # Resolving the first question continues the same run, where the model
         # immediately asks again and trips the interaction budget.
         resolved = await session.resolve_plan_interaction(
-            PlanQuestionResolution(interaction_id=pending.interaction_id, answer_text="ok")
+            PlanQuestionResolution(
+                interaction_id=pending.interaction_id, answer_text="ok"
+            )
         )
         return session, first, resolved
 
@@ -2148,7 +2771,8 @@ def test_plan_question_budget_exhaustion_fails_run_with_plan_specific_error(tmp_
     assert session.get_pending_interaction() is None
     # The failure is plan-specific, not an ordinary tool-error budget failure.
     assert any(
-        isinstance(event, RunErrorEvent) and event.code == "plan_interaction_budget_exceeded"
+        isinstance(event, RunErrorEvent)
+        and event.code == "plan_interaction_budget_exceeded"
         for event in events
     )
     # Plan stays active / read-only; budget exhaustion is not an approved exit.
@@ -2224,7 +2848,8 @@ def test_plan_exit_revision_budget_exhaustion_fails_run(tmp_path, monkeypatch) -
     assert third.status.value == "failed"
     assert third.stop_reason == "plan_interaction_budget"
     assert any(
-        isinstance(event, RunErrorEvent) and event.code == "plan_interaction_budget_exceeded"
+        isinstance(event, RunErrorEvent)
+        and event.code == "plan_interaction_budget_exceeded"
         for event in events
     )
     # Revise never restores permission; plan stays active / read-only.
@@ -2233,7 +2858,9 @@ def test_plan_exit_revision_budget_exhaustion_fails_run(tmp_path, monkeypatch) -
     assert not any(isinstance(event, PlanModeExitedEvent) for event in events)
 
 
-def test_host_session_suspension_releases_run_lock_before_approval_resolution(tmp_path, monkeypatch) -> None:
+def test_host_session_suspension_releases_run_lock_before_approval_resolution(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2251,7 +2878,9 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(tm
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -2261,7 +2890,8 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(tm
                 ApprovalResolution(
                     approval_id=pending.approval_id,
                     decisions=tuple(
-                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False)
+                        for call in pending.tool_calls
                     ),
                 )
             ),
@@ -2276,7 +2906,9 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(tm
     assert not session._run_lock.locked()
 
 
-def test_host_session_stop_pending_approval_aborts_without_tool_execution(tmp_path, monkeypatch) -> None:
+def test_host_session_stop_pending_approval_aborts_without_tool_execution(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2294,7 +2926,9 @@ def test_host_session_stop_pending_approval_aborts_without_tool_execution(tmp_pa
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         first = await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -2313,14 +2947,19 @@ def test_host_session_stop_pending_approval_aborts_without_tool_execution(tmp_pa
     assert session.get_pending_approval() is None
     assert session.suspended_run_id is None
     assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
-    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == ["aborted"]
+    assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == [
+        "aborted"
+    ]
     assert any(
-        message.role.value == "system" and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
+        message.role.value == "system"
+        and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
         for message in transport.contexts[-1].messages
     )
 
 
-def test_host_core_stop_current_turn_delegates_to_session(tmp_path, monkeypatch) -> None:
+def test_host_core_stop_current_turn_delegates_to_session(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2337,7 +2976,9 @@ def test_host_core_stop_current_turn_delegates_to_session(tmp_path, monkeypatch)
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         await session.run_turn("attempt dangerous command")
         return await core.stop_current_turn(session.host_session_id)
 
@@ -2347,7 +2988,9 @@ def test_host_core_stop_current_turn_delegates_to_session(tmp_path, monkeypatch)
     assert stopped.status.value == "aborted"
 
 
-def test_host_session_stop_active_run_turn_aborts_and_releases_lock(tmp_path, monkeypatch) -> None:
+def test_host_session_stop_active_run_turn_aborts_and_releases_lock(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "continued"}], delay=0.2)
     core = _core(monkeypatch, transport)
 
@@ -2363,7 +3006,9 @@ def test_host_session_stop_active_run_turn_aborts_and_releases_lock(tmp_path, mo
 
     session, stopped, result, second = asyncio.run(run())
     first_run_id = result.state.run_id
-    first_events = [event for event in session.replay_events() if event.run_id == first_run_id]
+    first_events = [
+        event for event in session.replay_events() if event.run_id == first_run_id
+    ]
 
     assert stopped is not None
     assert stopped.status.value == "aborted"
@@ -2374,14 +3019,19 @@ def test_host_session_stop_active_run_turn_aborts_and_releases_lock(tmp_path, mo
     assert second.final_text == "continued"
     assert session.active_run_id is None
     assert session.stopping_run_id is None
-    assert [event.status for event in first_events if isinstance(event, RunEndEvent)] == ["aborted"]
+    assert [
+        event.status for event in first_events if isinstance(event, RunEndEvent)
+    ] == ["aborted"]
     assert any(
-        message.role.value == "system" and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
+        message.role.value == "system"
+        and INTERRUPTED_NOTE_TEXT in "\n".join(message.content)
         for message in transport.contexts[-1].messages
     )
 
 
-def test_host_session_stop_active_run_publishes_aborted_event_to_live_subscriber(tmp_path, monkeypatch) -> None:
+def test_host_session_stop_active_run_publishes_aborted_event_to_live_subscriber(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([], delay=0.2)
     core = _core(monkeypatch, transport)
     delivered: list[AgentEvent] = []
@@ -2413,9 +3063,13 @@ def test_host_session_stop_active_run_publishes_aborted_event_to_live_subscriber
     )
 
 
-def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(tmp_path, monkeypatch) -> None:
+def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(
+    tmp_path, monkeypatch
+) -> None:
     class CancellationSwallowingTransport:
         api = "scripted"
+        binding_id = "test.scripted"
+        contract_version = "v1"
 
         def __init__(self) -> None:
             self.contexts: list[LLMContext] = []
@@ -2425,11 +3079,11 @@ def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(tmp
         async def stream(
             self,
             *,
-            model: ModelProfile,
+            call,
             context: LLMContext,
             event_context: EventContext,
-            options: LLMOptions | None = None,
         ) -> AsyncIterator[AgentEvent]:
+            del call
             self.contexts.append(context)
             assert self.started is not None
             assert self.release is not None
@@ -2438,16 +3092,15 @@ def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(tmp
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 await self.release.wait()
-            yield ModelCallStartEvent(
-                **event_context.event_fields(),
-                model_name=model.id,
-                model_role=model.role.value,
-                provider=model.provider,
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id="text:late"
             )
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:late")
-            yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:late", delta="late text")
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:late")
-            yield ModelCallEndEvent(**event_context.event_fields())
+            yield TextBlockDeltaEvent(
+                **event_context.event_fields(), block_id="text:late", delta="late text"
+            )
+            yield TextBlockEndEvent(
+                **event_context.event_fields(), block_id="text:late"
+            )
 
     transport = CancellationSwallowingTransport()
     core = _core(monkeypatch, transport)
@@ -2467,14 +3120,22 @@ def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(tmp
         return session, result
 
     session, result = asyncio.run(run())
-    first_events = [event for event in session.replay_events() if event.run_id == result.state.run_id]
+    first_events = [
+        event
+        for event in session.replay_events()
+        if event.run_id == result.state.run_id
+    ]
 
     assert result.status.value == "aborted"
     assert session.stopping_run_id is None
-    assert [event.status for event in first_events if isinstance(event, RunEndEvent)] == ["aborted"]
+    assert [
+        event.status for event in first_events if isinstance(event, RunEndEvent)
+    ] == ["aborted"]
 
 
-def test_host_session_resume_can_suspend_again_with_new_pending_approval(tmp_path, monkeypatch) -> None:
+def test_host_session_resume_can_suspend_again_with_new_pending_approval(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2500,7 +3161,9 @@ def test_host_session_resume_can_suspend_again_with_new_pending_approval(tmp_pat
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         first = await session.run_turn("attempt dangerous command")
         first_pending = session.get_pending_approval()
         assert first_pending is not None
@@ -2508,7 +3171,8 @@ def test_host_session_resume_can_suspend_again_with_new_pending_approval(tmp_pat
             ApprovalResolution(
                 approval_id=first_pending.approval_id,
                 decisions=tuple(
-                    ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in first_pending.tool_calls
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=False)
+                    for call in first_pending.tool_calls
                 ),
             )
         )
@@ -2543,7 +3207,9 @@ def test_host_session_close_invalidates_pending_approval(tmp_path, monkeypatch) 
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
         await session.run_turn("attempt dangerous command")
         pending = session.get_pending_approval()
         assert pending is not None
@@ -2555,7 +3221,8 @@ def test_host_session_close_invalidates_pending_approval(tmp_path, monkeypatch) 
                 ApprovalResolution(
                     approval_id=pending.approval_id,
                     decisions=tuple(
-                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False)
+                        for call in pending.tool_calls
                     ),
                 )
             )
@@ -2566,7 +3233,9 @@ def test_host_session_close_invalidates_pending_approval(tmp_path, monkeypatch) 
     assert session.closed
 
 
-def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(tmp_path, monkeypatch) -> None:
+def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2584,8 +3253,12 @@ def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(tmp_p
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
-        streamed = [event async for event in session.stream_turn("attempt dangerous command")]
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
+        streamed = [
+            event async for event in session.stream_turn("attempt dangerous command")
+        ]
         pending = session.get_pending_approval()
         assert pending is not None
         assert session.suspended_run_id is not None
@@ -2596,7 +3269,8 @@ def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(tmp_p
                 ApprovalResolution(
                     approval_id=pending.approval_id,
                     decisions=tuple(
-                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False) for call in pending.tool_calls
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=False)
+                        for call in pending.tool_calls
                     ),
                 )
             )
@@ -2611,7 +3285,9 @@ def test_host_session_stream_turn_captures_pending_state_and_resolves_deny(tmp_p
     assert session.get_pending_approval() is None
 
 
-def test_host_session_stream_turn_captures_suspended_run_id_before_clearing_active_run(tmp_path, monkeypatch) -> None:
+def test_host_session_stream_turn_captures_suspended_run_id_before_clearing_active_run(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2628,10 +3304,16 @@ def test_host_session_stream_turn_captures_suspended_run_id_before_clearing_acti
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, permission_policy=_trusted_terminal_ask_policy())
-        streamed = [event async for event in session.stream_turn("attempt dangerous command")]
+        session = await _open_project_session(
+            core, tmp_path, permission_policy=_trusted_terminal_ask_policy()
+        )
+        streamed = [
+            event async for event in session.stream_turn("attempt dangerous command")
+        ]
         pending = session.get_pending_approval()
-        confirm = next(event for event in streamed if isinstance(event, RequireUserConfirmEvent))
+        confirm = next(
+            event for event in streamed if isinstance(event, RequireUserConfirmEvent)
+        )
         return session, pending, confirm
 
     session, pending, confirm = asyncio.run(run())
@@ -2642,7 +3324,9 @@ def test_host_session_stream_turn_captures_suspended_run_id_before_clearing_acti
     assert pending.reply_id == confirm.reply_id
 
 
-def test_host_core_approval_facade_resolves_pending_request(tmp_path, monkeypatch) -> None:
+def test_host_core_approval_facade_resolves_pending_request(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2673,7 +3357,10 @@ def test_host_core_approval_facade_resolves_pending_request(tmp_path, monkeypatc
             session.host_session_id,
             ApprovalResolution(
                 approval_id=pending.approval_id,
-                decisions=tuple(ToolApprovalDecision(tool_call_id=call.id, confirmed=True) for call in pending.tool_calls),
+                decisions=tuple(
+                    ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                    for call in pending.tool_calls
+                ),
             ),
         )
         return result, await core.get_pending_approval(session.host_session_id)
@@ -2685,7 +3372,9 @@ def test_host_core_approval_facade_resolves_pending_request(tmp_path, monkeypatc
 
 
 def test_confirm_result_rules_are_inert_in_message_replay() -> None:
-    ctx = EventContext(run_id="run:confirm", turn_id="turn:confirm", reply_id="reply:confirm")
+    ctx = EventContext(
+        run_id="run:confirm", turn_id="turn:confirm", reply_id="reply:confirm"
+    )
     tool_call = ToolCallBlock(
         id="call:danger",
         name="terminal",
@@ -2729,12 +3418,16 @@ def test_confirm_result_rules_are_inert_in_message_replay() -> None:
     assert "rules" not in replayed_call.model_dump(mode="json")
 
 
-def test_host_core_reconnect_by_session_id_returns_same_session(tmp_path, monkeypatch) -> None:
+def test_host_core_reconnect_by_session_id_returns_same_session(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, host_session_id="host:reconnect")
+        session = await _open_project_session(
+            core, tmp_path, host_session_id="host:reconnect"
+        )
         same = await core.get_session("host:reconnect")
         by_conversation = await core.find_by_conversation("conversation:host:reconnect")
         return session, same, by_conversation
@@ -2745,12 +3438,16 @@ def test_host_core_reconnect_by_session_id_returns_same_session(tmp_path, monkey
     assert by_conversation is session
 
 
-def test_host_core_lists_workspace_supervisor_diagnostics(tmp_path, monkeypatch) -> None:
+def test_host_core_lists_workspace_supervisor_diagnostics(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, host_session_id="host:diagnostics")
+        session = await _open_project_session(
+            core, tmp_path, host_session_id="host:diagnostics"
+        )
         summaries = await core.list_workspace_supervisors()
         await core.close_session(session.host_session_id)
         return summaries
@@ -2762,7 +3459,9 @@ def test_host_core_lists_workspace_supervisor_diagnostics(tmp_path, monkeypatch)
     assert summaries[0]["live_process_count"] == 0
 
 
-def test_idle_sweep_marks_live_process_session_without_closing(tmp_path, monkeypatch) -> None:
+def test_idle_sweep_marks_live_process_session_without_closing(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2770,7 +3469,9 @@ def test_idle_sweep_marks_live_process_session_without_closing(tmp_path, monkeyp
                     {
                         "id": "call:bg",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "sleep 10", "yield_time_ms": 0}),
+                        "arguments": json.dumps(
+                            {"command": "sleep 10", "yield_time_ms": 0}
+                        ),
                     }
                 ]
             },
@@ -2780,7 +3481,9 @@ def test_idle_sweep_marks_live_process_session_without_closing(tmp_path, monkeyp
     core = _core(monkeypatch, transport)
 
     async def run():
-        session = await _open_project_session(core, tmp_path, host_session_id="host:idle")
+        session = await _open_project_session(
+            core, tmp_path, host_session_id="host:idle"
+        )
         await session.run_turn("start process")
         session.last_active_at -= 30_000
         # Sweep is pure discovery now: a live-process session is never a
@@ -2799,7 +3502,9 @@ def test_idle_sweep_marks_live_process_session_without_closing(tmp_path, monkeyp
     assert summaries[0].idle_with_live_processes is True
 
 
-def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, monkeypatch) -> None:
+def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2807,7 +3512,9 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, m
                     {
                         "id": "call:a",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "sleep 10", "yield_time_ms": 0}),
+                        "arguments": json.dumps(
+                            {"command": "sleep 10", "yield_time_ms": 0}
+                        ),
                     }
                 ]
             },
@@ -2817,7 +3524,9 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, m
                     {
                         "id": "call:b",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "sleep 10", "yield_time_ms": 0}),
+                        "arguments": json.dumps(
+                            {"command": "sleep 10", "yield_time_ms": 0}
+                        ),
                     }
                 ]
             },
@@ -2837,7 +3546,9 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, m
         b_proc = manager.list_owned("host:b")[0].process_id
         assert a_proc is not None and b_proc is not None
         supervisor_summary = (await core.list_workspace_supervisors())[0]
-        supervisor_process_ids = {process["process_id"] for process in supervisor_summary["processes"]}
+        supervisor_process_ids = {
+            process["process_id"] for process in supervisor_summary["processes"]
+        }
         with pytest.raises(KeyError):
             manager.poll_process(a_proc, owner_host_session_id="host:b")
         await core.close_session("host:a")
@@ -2846,7 +3557,14 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, m
         await core.close_workspace(a.workspace.workspace_key)
         b_status_after_workspace_close = manager.poll_process(b_proc).status
         remaining_sessions = await core.list_sessions()
-        return a_status, b_status, b_status_after_workspace_close, remaining_sessions, supervisor_process_ids, {a_proc, b_proc}
+        return (
+            a_status,
+            b_status,
+            b_status_after_workspace_close,
+            remaining_sessions,
+            supervisor_process_ids,
+            {a_proc, b_proc},
+        )
 
     (
         a_status,
@@ -2864,7 +3582,9 @@ def test_workspace_supervisor_owner_isolation_and_workspace_shutdown(tmp_path, m
     assert remaining_sessions == []
 
 
-def test_host_session_default_terminal_cwd_is_owner_scoped(tmp_path, monkeypatch) -> None:
+def test_host_session_default_terminal_cwd_is_owner_scoped(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2872,7 +3592,9 @@ def test_host_session_default_terminal_cwd_is_owner_scoped(tmp_path, monkeypatch
                     {
                         "id": "call:a",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "mkdir -p src && cd src && pwd"}),
+                        "arguments": json.dumps(
+                            {"command": "mkdir -p src && cd src && pwd"}
+                        ),
                     }
                 ]
             },
@@ -2896,11 +3618,15 @@ def test_host_session_default_terminal_cwd_is_owner_scoped(tmp_path, monkeypatch
         b = await _open_project_session(core, tmp_path, host_session_id="host:cwd-b")
         await a.run_turn("cd in a")
         await b.run_turn("pwd in b")
-        a_terminal = a.wiring.runtime_wiring.runtime_session.terminal_sessions.get_or_create(
-            owner_host_session_id="host:cwd-a"
+        a_terminal = (
+            a.wiring.runtime_wiring.runtime_session.terminal_sessions.get_or_create(
+                owner_host_session_id="host:cwd-a"
+            )
         )
-        b_terminal = b.wiring.runtime_wiring.runtime_session.terminal_sessions.get_or_create(
-            owner_host_session_id="host:cwd-b"
+        b_terminal = (
+            b.wiring.runtime_wiring.runtime_session.terminal_sessions.get_or_create(
+                owner_host_session_id="host:cwd-b"
+            )
         )
         await core.shutdown()
         return a_terminal.current_cwd, b_terminal.current_cwd
@@ -2911,20 +3637,26 @@ def test_host_session_default_terminal_cwd_is_owner_scoped(tmp_path, monkeypatch
     assert b_cwd == tmp_path
 
 
-def test_host_core_transient_uses_distinct_workspace_supervisor(tmp_path, monkeypatch) -> None:
+def test_host_core_transient_uses_distinct_workspace_supervisor(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "one"}, {"text": "two"}])
     core = _core(monkeypatch, transport)
 
     async def run():
         first = await core.open_session(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path / "s1"),
+            HostWorkspaceInput(
+                workspace_kind="transient", workspace_root=tmp_path / "s1"
+            ),
             host_session_id="host:t1",
             conversation_id="conversation:t1",
             model_role=ModelRole.FLASH,
             memory_reflection=False,
         )
         second = await core.open_session(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path / "s2"),
+            HostWorkspaceInput(
+                workspace_kind="transient", workspace_root=tmp_path / "s2"
+            ),
             host_session_id="host:t2",
             conversation_id="conversation:t2",
             model_role=ModelRole.FLASH,
@@ -2937,7 +3669,9 @@ def test_host_core_transient_uses_distinct_workspace_supervisor(tmp_path, monkey
     assert first_key != second_key
 
 
-def test_host_core_keeps_auto_transient_root_on_close_by_default(tmp_path, monkeypatch) -> None:
+def test_host_core_keeps_auto_transient_root_on_close_by_default(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     core = _core(monkeypatch, transport)
 
@@ -2962,7 +3696,9 @@ def test_host_core_keeps_auto_transient_root_on_close_by_default(tmp_path, monke
     assert (root / "marker.txt").read_text(encoding="utf-8") == "scratch"
 
 
-def test_host_core_removes_auto_transient_root_on_close_when_requested(tmp_path, monkeypatch) -> None:
+def test_host_core_removes_auto_transient_root_on_close_when_requested(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     core = _core(monkeypatch, transport)
 
@@ -2989,14 +3725,18 @@ def test_host_core_removes_auto_transient_root_on_close_when_requested(tmp_path,
     assert not root.exists()
 
 
-def test_host_core_keeps_host_supplied_transient_root_on_close(tmp_path, monkeypatch) -> None:
+def test_host_core_keeps_host_supplied_transient_root_on_close(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "done"}])
     core = _core(monkeypatch, transport)
     supplied_root = tmp_path / "supplied"
 
     async def run():
         session = await core.open_session(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=supplied_root),
+            HostWorkspaceInput(
+                workspace_kind="transient", workspace_root=supplied_root
+            ),
             host_session_id="host:supplied-transient",
             conversation_id="conversation:supplied-transient",
             model_role=ModelRole.FLASH,
@@ -3019,7 +3759,9 @@ def test_host_core_keeps_project_root_on_close(tmp_path, monkeypatch) -> None:
     marker.write_text("project", encoding="utf-8")
 
     async def run():
-        session = await _open_project_session(core, tmp_path, host_session_id="host:project-close")
+        session = await _open_project_session(
+            core, tmp_path, host_session_id="host:project-close"
+        )
         await core.close_session(session.host_session_id)
 
     asyncio.run(run())
@@ -3033,7 +3775,9 @@ def test_host_core_keeps_project_root_on_close(tmp_path, monkeypatch) -> None:
 # only. Tools stay fully visible across modes; the gate denies at call time.
 
 
-def test_host_session_switch_mode_changes_gate_behavior_next_turn(tmp_path, monkeypatch) -> None:
+def test_host_session_switch_mode_changes_gate_behavior_next_turn(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -3041,7 +3785,9 @@ def test_host_session_switch_mode_changes_gate_behavior_next_turn(tmp_path, monk
                     {
                         "id": "call:ro-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "switch.txt", "content": "SHOULD_NOT_EXIST\n"}),
+                        "arguments": json.dumps(
+                            {"path": "switch.txt", "content": "SHOULD_NOT_EXIST\n"}
+                        ),
                     }
                 ]
             },
@@ -3051,7 +3797,9 @@ def test_host_session_switch_mode_changes_gate_behavior_next_turn(tmp_path, monk
                     {
                         "id": "call:bypass-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "switch.txt", "content": "PULSARA_SWITCH_OK\n"}),
+                        "arguments": json.dumps(
+                            {"path": "switch.txt", "content": "PULSARA_SWITCH_OK\n"}
+                        ),
                     }
                 ]
             },
@@ -3081,7 +3829,9 @@ def test_host_session_switch_mode_changes_gate_behavior_next_turn(tmp_path, monk
     assert (tmp_path / "switch.txt").read_text() == "PULSARA_SWITCH_OK\n"
 
 
-def test_host_session_switch_mode_rejected_while_pending_approval(tmp_path, monkeypatch) -> None:
+def test_host_session_switch_mode_rejected_while_pending_approval(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -3089,7 +3839,9 @@ def test_host_session_switch_mode_rejected_while_pending_approval(tmp_path, monk
                     {
                         "id": "call:ask-write",
                         "name": "write_file",
-                        "arguments": json.dumps({"path": "pending.txt", "content": "x\n"}),
+                        "arguments": json.dumps(
+                            {"path": "pending.txt", "content": "x\n"}
+                        ),
                     }
                 ]
             },
@@ -3100,7 +3852,9 @@ def test_host_session_switch_mode_rejected_while_pending_approval(tmp_path, monk
 
     async def run():
         session = await _open_project_session(
-            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS)
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
         )
         await session.run_turn("write under ask-permissions")
         assert session.get_pending_approval() is not None
@@ -3118,7 +3872,9 @@ def test_host_session_switch_mode_rejected_while_pending_approval(tmp_path, monk
     assert session.current_permission_mode is PermissionMode.ASK_PERMISSIONS
 
 
-def test_host_session_switch_mode_preserves_live_terminal_process(tmp_path, monkeypatch) -> None:
+def test_host_session_switch_mode_preserves_live_terminal_process(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -3139,7 +3895,9 @@ def test_host_session_switch_mode_preserves_live_terminal_process(tmp_path, monk
 
     async def run():
         session = await _open_project_session(
-            core, tmp_path, permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
         )
         try:
             await session.run_turn("start a long process")

@@ -13,11 +13,12 @@ from pulsara_agent.event import (
     ContextCompiledEvent,
     EventContext,
     EventType,
-    ModelCallEndEvent,
     ModelCallStartEvent,
+    ModelCallRejectedEvent,
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -36,17 +37,27 @@ from pulsara_agent.capability import (
     LocalSkillProvider,
 )
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
-from pulsara_agent.capability.descriptor import CapabilityDescriptor, CapabilityProviderKind
+from pulsara_agent.capability.descriptor import (
+    CapabilityDescriptor,
+    CapabilityProviderKind,
+)
 from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
 from pulsara_agent.capability.provider import CapabilityProviderOutput
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.llm import LLMConfig, LLMRuntime, MessageRole, ModelProfile
+from pulsara_agent.llm import LLMRuntime, MessageRole
+from pulsara_agent.llm.errors import ModelContextIdentityMismatch
+from tests.support import run_agent_task, stream_agent_task, test_llm_config
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.memory.recall.service import RecallResult, RecallStatus
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.memory import ExecutionEvidenceLedger, ExecutionEvidencePersistenceHook, InMemoryArchiveStore
+from pulsara_agent.memory import (
+    ExecutionEvidenceLedger,
+    ExecutionEvidencePersistenceHook,
+    InMemoryArchiveStore,
+)
 from pulsara_agent.message import (
     AssistantMsg,
     Base64Source,
@@ -72,8 +83,8 @@ from pulsara_agent.runtime import (
     LoopTransition,
     ToolApprovalDecision,
     build_tool_result_error_events,
-    msg_to_llm_messages,
 )
+from pulsara_agent.runtime.context import msg_to_llm_messages as _msg_to_llm_messages
 from pulsara_agent.runtime.compaction.inline import MidTurnCompactionResult
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
@@ -100,37 +111,43 @@ def _without_context_timing_lines(text: str) -> str:
     )
 
 
+def msg_to_llm_messages(messages, budget, **kwargs):
+    kwargs.setdefault("token_estimator", PulsaraHeuristicTokenEstimatorV1())
+    return _msg_to_llm_messages(messages, budget, **kwargs)
+
+
 class ScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[dict]) -> None:
         self.replies = replies
         self.contexts: list[LLMContext] = []
+        self.calls = []
 
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        self.calls.append(call)
         self.contexts.append(context)
         reply = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
+            )
             yield TextBlockDeltaEvent(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
+            yield TextBlockEndEvent(
+                **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
+            )
         for call in reply.get("tool_calls", []):
             yield ToolCallStartEvent(
                 **event_context.event_fields(),
@@ -142,16 +159,30 @@ class ScriptedTransport:
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
-        yield ModelCallEndEvent(**event_context.event_fields())
+            yield ToolCallEndEvent(
+                **event_context.event_fields(), tool_call_id=call["id"]
+            )
 
 
 class RecordingContextCompactor:
     def __init__(self) -> None:
         self.calls: list[tuple[LoopTransition, int, int]] = []
 
-    async def maybe_compact_before_followup(self, *, state: LoopState, model_visible_messages: list[Msg]):
-        self.calls.append((state.last_transition, len(state.pending_tool_calls), len(model_visible_messages)))
+    async def maybe_compact_before_followup(
+        self,
+        *,
+        state: LoopState,
+        model_visible_messages: list[Msg],
+        protected_model_visible_messages_after,
+    ):
+        self.calls.append(
+            (
+                state.last_transition,
+                len(state.pending_tool_calls),
+                len(model_visible_messages),
+            )
+        )
+        assert protected_model_visible_messages_after
         return MidTurnCompactionResult(compacted=False, skipped_reason="test")
 
 
@@ -160,14 +191,25 @@ class RewritingContextCompactor:
         self.rewritten_messages = rewritten_messages
         self.calls = 0
 
-    async def maybe_compact_before_followup(self, *, state: LoopState, model_visible_messages: list[Msg]):
+    async def maybe_compact_before_followup(
+        self,
+        *,
+        state: LoopState,
+        model_visible_messages: list[Msg],
+        protected_model_visible_messages_after,
+    ):
+        assert protected_model_visible_messages_after
         self.calls += 1
-        state.scratchpad["mid_turn_compaction"] = {"compaction_id": f"fake:{self.calls}"}
-        return MidTurnCompactionResult(compacted=True, rewritten_messages=self.rewritten_messages)
+        state.scratchpad["mid_turn_compaction"] = {
+            "compaction_id": f"fake:{self.calls}"
+        }
+        return MidTurnCompactionResult(
+            compacted=True, rewritten_messages=self.rewritten_messages
+        )
 
 
 def make_llm_runtime(transport: ScriptedTransport) -> LLMRuntime:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -215,20 +257,89 @@ def test_agent_runtime_emits_context_compiled_event_before_model_call(tmp_path) 
     )
 
     async def collect() -> list[AgentEvent]:
-        return [event async for event in agent.stream_task("hello")]
+        return [event async for event in stream_agent_task(agent, "hello")]
 
     events = asyncio.run(collect())
 
-    compiled_events = [event for event in events if isinstance(event, ContextCompiledEvent)]
+    compiled_events = [
+        event for event in events if isinstance(event, ContextCompiledEvent)
+    ]
+    model_starts = [event for event in events if isinstance(event, ModelCallStartEvent)]
     assert len(compiled_events) == 1
+    assert len(model_starts) == 1
     compiled = compiled_events[0]
+    assert compiled.resolved_call == model_starts[0].resolved_call
+    assert compiled.budget.resolved_model_call_id == (
+        compiled.resolved_call.resolved_model_call_id
+    )
+    assert compiled.budget.target_fingerprint == (
+        compiled.resolved_call.target.target_fingerprint
+    )
     assert compiled.context_id == transport.contexts[0].context_id
     assert compiled.model_call_index == transport.contexts[0].model_call_index == 1
-    assert compiled.tools_estimated_tokens > 0
+    assert compiled.budget.tools_estimated_tokens is not None
+    assert compiled.budget.tools_estimated_tokens > 0
     assert any(section["channel"] == "current_user" for section in compiled.sections)
 
 
-def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(tmp_path) -> None:
+def test_compiled_event_budget_matches_call_fact(tmp_path) -> None:
+    test_agent_runtime_emits_context_compiled_event_before_model_call(tmp_path)
+
+
+def test_run_start_records_model_target(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
+    asyncio.run(run_agent_task(agent, "record target"))
+    started = next(
+        event
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, RunStartEvent)
+    )
+    assert transport.calls
+    assert started.model_target == transport.calls[0].target.fact
+
+
+def test_model_call_rejected_event_is_inspectable(tmp_path) -> None:
+    transport = ScriptedTransport([{"text": "must not run"}])
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    def reject_stream(**kwargs):
+        async def generate():
+            raise ModelContextIdentityMismatch("synthetic compiled identity rejection")
+            yield  # pragma: no cover
+
+        return generate()
+
+    agent.llm_runtime.stream = reject_stream
+    result = asyncio.run(run_agent_task(agent, "reject before provider"))
+    rejected = [
+        event
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, ModelCallRejectedEvent)
+    ]
+    assert result.status is LoopStatus.FAILED
+    assert len(rejected) == 1
+    assert rejected[0].reason_code == "model_context_identity_mismatch"
+    assert transport.contexts == []
+
+
+def test_pr1_compiled_validation_rejection_uses_existing_durable_failure_path(
+    tmp_path,
+) -> None:
+    test_model_call_rejected_event_is_inspectable(tmp_path)
+
+
+def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(
+    tmp_path,
+) -> None:
     transport = ScriptedTransport([{"text": "should not be called"}])
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
@@ -236,7 +347,7 @@ def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(tm
         llm_runtime=make_llm_runtime(transport),
     )
 
-    result = asyncio.run(agent.run_task("x" * 900_000))
+    result = asyncio.run(run_agent_task(agent, "x" * 900_000))
 
     assert result.status is LoopStatus.FAILED
     assert result.error_message is not None
@@ -248,12 +359,37 @@ def test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(tm
         if isinstance(event, ContextCompiledEvent)
     ]
     assert [event.status for event in compiled_events] == ["pressure", "failed"]
-    assert compiled_events[0].model_call_index == compiled_events[1].model_call_index == 1
-    assert compiled_events[0].compile_attempt_index == compiled_events[1].compile_attempt_index == 1
-    assert compiled_events[0].context_retry_index == compiled_events[1].context_retry_index == 0
+    assert (
+        compiled_events[0].model_call_index == compiled_events[1].model_call_index == 1
+    )
+    assert (
+        compiled_events[0].compile_attempt_index
+        == compiled_events[1].compile_attempt_index
+        == 1
+    )
+    assert (
+        compiled_events[0].context_retry_index
+        == compiled_events[1].context_retry_index
+        == 0
+    )
+    assert compiled_events[0].resolved_call == compiled_events[1].resolved_call
+    assert all(
+        event.budget.target_fingerprint == event.resolved_call.target.target_fingerprint
+        for event in compiled_events
+    )
 
 
-def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp_path) -> None:
+def test_context_pressure_event_records_resolved_call(tmp_path) -> None:
+    test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(tmp_path)
+
+
+def test_context_failed_event_records_real_budget(tmp_path) -> None:
+    test_agent_runtime_fails_cleanly_when_current_user_exceeds_context_budget(tmp_path)
+
+
+def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(
+    tmp_path,
+) -> None:
     transport = ScriptedTransport([{"text": "after retry"}])
     runtime_session = in_memory_runtime_session(tmp_path)
     agent = AgentRuntime(
@@ -267,6 +403,7 @@ def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp
         ),
     )
     state = LoopState(session_id=runtime_session.runtime_session_id)
+    state.run_model_target = agent.resolve_run_model_target()
     user = UserMsg(
         name="user",
         content="continue after pressure",
@@ -275,7 +412,9 @@ def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:terminal", name="terminal", input='{"cmd":"x"}')],
+        content=[
+            ToolCallBlock(id="call:terminal", name="terminal", input='{"cmd":"x"}')
+        ],
     )
     pressure_result = AssistantMsg(
         name="assistant",
@@ -322,15 +461,73 @@ def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp
 
     events = asyncio.run(_collect_async(agent._stream_model_loop(state, exposure)))
 
-    compiled_events = [event for event in events if isinstance(event, ContextCompiledEvent)]
+    compiled_events = [
+        event for event in events if isinstance(event, ContextCompiledEvent)
+    ]
     assert [event.status for event in compiled_events] == ["pressure", "compiled"]
-    assert compiled_events[0].model_call_index == compiled_events[1].model_call_index == 1
+    assert (
+        compiled_events[0].model_call_index == compiled_events[1].model_call_index == 1
+    )
     assert compiled_events[0].compile_attempt_index == 1
     assert compiled_events[1].compile_attempt_index == 2
     assert compiled_events[1].context_retry_index == 1
+    assert (
+        compiled_events[0].resolved_call.resolved_model_call_id
+        == compiled_events[1].resolved_call.resolved_model_call_id
+    )
+    assert compiled_events[0].context_id != compiled_events[1].context_id
     assert compactor.calls == 1
     assert len(transport.contexts) == 1
     assert transport.contexts[0].model_call_index == 1
+
+
+def test_compile_retry_reuses_call_id(tmp_path) -> None:
+    test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp_path)
+
+
+def test_compile_retry_may_change_context_id(tmp_path) -> None:
+    test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp_path)
+
+
+def test_run_followups_reuse_target(tmp_path) -> None:
+    transport = ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:unknown",
+                        "name": "unknown_contract_tool",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"text": "finished after tool result"},
+        ]
+    )
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    result = asyncio.run(run_agent_task(agent, "exercise a tool follow-up"))
+
+    assert result.status is LoopStatus.FINISHED
+    starts = [
+        event
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, ModelCallStartEvent)
+    ]
+    assert len(starts) == 2
+    assert starts[0].resolved_call.target == starts[1].resolved_call.target
+    assert (
+        starts[0].resolved_call.resolved_model_call_id
+        != starts[1].resolved_call.resolved_model_call_id
+    )
+
+
+def test_tool_followup_uses_new_call_id(tmp_path) -> None:
+    test_run_followups_reuse_target(tmp_path)
 
 
 def test_msg_to_llm_messages_compresses_context_blocks() -> None:
@@ -349,12 +546,18 @@ def test_msg_to_llm_messages_compresses_context_blocks() -> None:
                     output=[TextBlock(text=huge)],
                     state=ToolResultState.SUCCESS,
                 ),
-                DataBlock(id="data:plot", source=Base64Source(data="abc", media_type="image/png"), name="plot"),
+                DataBlock(
+                    id="data:plot",
+                    source=Base64Source(data="abc", media_type="image/png"),
+                    name="plot",
+                ),
             ],
         ),
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=20))
+    llm_messages = msg_to_llm_messages(
+        messages, LoopBudget(tool_result_context_chars=20)
+    )
     assistant_text = "\n".join(
         text
         for message in llm_messages
@@ -362,10 +565,14 @@ def test_msg_to_llm_messages_compresses_context_blocks() -> None:
         for text in message.content
     )
     assistant_turn = next(
-        message for message in llm_messages if message.role is MessageRole.ASSISTANT and message.tool_calls
+        message
+        for message in llm_messages
+        if message.role is MessageRole.ASSISTANT and message.tool_calls
     )
     tool_call = assistant_turn.tool_calls[0]
-    tool_result = next(message for message in llm_messages if message.role is MessageRole.TOOL_RESULT)
+    tool_result = next(
+        message for message in llm_messages if message.role is MessageRole.TOOL_RESULT
+    )
 
     assert "visible" in assistant_text
     assert "hidden" not in assistant_text
@@ -388,7 +595,11 @@ def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> Non
                 ToolResultBlock(
                     id="call:artifact",
                     name="terminal",
-                    output=[TextBlock(text='{"status":"success","output":"' + ("x" * 80) + '"}')],
+                    output=[
+                        TextBlock(
+                            text='{"status":"success","output":"' + ("x" * 80) + '"}'
+                        )
+                    ],
                     state=ToolResultState.SUCCESS,
                     artifacts=[
                         ToolResultArtifactRef(
@@ -417,8 +628,14 @@ def test_msg_to_llm_messages_wraps_artifact_tool_results_after_clipping() -> Non
 
     assert envelope["output_truncated"] is True
     assert "omitted" in envelope["output_preview"].lower()
-    assert envelope["artifacts"][0]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
-    assert envelope["artifacts"][0]["read_more"]["artifact_id"] == "artifact:tool-result:run:call:combined_output:0"
+    assert (
+        envelope["artifacts"][0]["artifact_id"]
+        == "artifact:tool-result:run:call:combined_output:0"
+    )
+    assert (
+        envelope["artifacts"][0]["read_more"]["artifact_id"]
+        == "artifact:tool-result:run:call:combined_output:0"
+    )
 
 
 def test_msg_to_llm_messages_uses_aggregate_tool_result_budget() -> None:
@@ -449,7 +666,9 @@ def test_msg_to_llm_messages_uses_aggregate_tool_result_budget() -> None:
         ),
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=90))
+    llm_messages = msg_to_llm_messages(
+        messages, LoopBudget(tool_result_context_chars=90)
+    )
     first = "\n".join(llm_messages[0].content)
     second = "\n".join(llm_messages[1].content)
 
@@ -457,7 +676,9 @@ def test_msg_to_llm_messages_uses_aggregate_tool_result_budget() -> None:
     assert "TOOL RESULT BODY OMITTED" in second
 
 
-def test_msg_to_llm_messages_bounds_artifact_envelopes_after_budget_exhaustion() -> None:
+def test_msg_to_llm_messages_bounds_artifact_envelopes_after_budget_exhaustion() -> (
+    None
+):
     noisy_preview = ToolResultPreviewMetadata(
         preview_policy="head_tail",
         preview_chars=8_000,
@@ -499,7 +720,9 @@ def test_msg_to_llm_messages_bounds_artifact_envelopes_after_budget_exhaustion()
         for idx in range(5)
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=500))
+    llm_messages = msg_to_llm_messages(
+        messages, LoopBudget(tool_result_context_chars=500)
+    )
     rendered = "\n".join("\n".join(message.content) for message in llm_messages)
 
     assert "TOOL RESULT BODY OMITTED" in rendered
@@ -507,7 +730,9 @@ def test_msg_to_llm_messages_bounds_artifact_envelopes_after_budget_exhaustion()
     assert '"noise"' not in rendered
 
 
-def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_body_is_omitted() -> None:
+def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_body_is_omitted() -> (
+    None
+):
     payload = {
         "status": "success",
         "output": "VISIBLE_ONLY_IF_BUDGET_AVAILABLE",
@@ -555,7 +780,9 @@ def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_body_is_
     assert "VISIBLE_ONLY_IF_BUDGET_AVAILABLE" not in rendered
 
 
-def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_json_is_clipped() -> None:
+def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_json_is_clipped() -> (
+    None
+):
     payload = {
         "status": "success",
         "output": "x" * 1_000,
@@ -596,7 +823,9 @@ def test_msg_to_llm_messages_preserves_terminal_essential_envelope_when_json_is_
     assert "x" * 80 not in rendered
 
 
-def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_read_file_json() -> None:
+def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_read_file_json() -> (
+    None
+):
     payload = {
         "status": "ok",
         "path": "large.txt",
@@ -624,7 +853,9 @@ def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_read_file_json()
         )
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=500))
+    llm_messages = msg_to_llm_messages(
+        messages, LoopBudget(tool_result_context_chars=500)
+    )
     rendered = "\n".join(llm_messages[0].content)
 
     assert "tool_result_body_omitted" not in rendered
@@ -632,7 +863,9 @@ def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_read_file_json()
     assert rendered.split("\n", 1)[1].startswith('{"status": "ok"')
 
 
-def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_custom_exec_json() -> None:
+def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_custom_exec_json() -> (
+    None
+):
     payload = {
         "status": "ok",
         "exit_code": 0,
@@ -654,7 +887,9 @@ def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_custom_exec_json
         )
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=500))
+    llm_messages = msg_to_llm_messages(
+        messages, LoopBudget(tool_result_context_chars=500)
+    )
     rendered = "\n".join(llm_messages[0].content)
 
     assert "tool_result_body_omitted" not in rendered
@@ -662,12 +897,19 @@ def test_msg_to_llm_messages_does_not_use_terminal_envelope_for_custom_exec_json
     assert rendered.split("\n", 1)[1].startswith('{"status": "ok"')
 
 
-def test_msg_to_llm_messages_preserves_terminal_process_list_summary_when_body_is_omitted() -> None:
+def test_msg_to_llm_messages_preserves_terminal_process_list_summary_when_body_is_omitted() -> (
+    None
+):
     payload = {
         "status": "success",
         "terminal_process_action": "list",
         "processes": [
-            {"process_id": "proc:running", "status": "running", "cwd": "/workspace", "exit_code": None},
+            {
+                "process_id": "proc:running",
+                "status": "running",
+                "cwd": "/workspace",
+                "exit_code": None,
+            },
             {
                 "process_id": "proc:old-done",
                 "status": "success",
@@ -763,27 +1005,42 @@ def test_msg_to_llm_messages_compact_envelope_keeps_primary_preview_artifact() -
         )
     ]
 
-    llm_messages = msg_to_llm_messages(messages, LoopBudget(tool_result_context_chars=1))
+    llm_messages = msg_to_llm_messages(
+        messages, LoopBudget(tool_result_context_chars=1)
+    )
     rendered = "\n".join("\n".join(message.content) for message in llm_messages)
     envelope = json.loads(rendered.split("\n", 1)[1])
 
     assert envelope["artifacts"][0]["artifact_id"] == "artifact:combined"
-    assert envelope["artifacts"][0]["preview"]["read_more"]["artifact_id"] == "artifact:combined"
+    assert (
+        envelope["artifacts"][0]["preview"]["read_more"]["artifact_id"]
+        == "artifact:combined"
+    )
     assert envelope["artifact_refs_omitted"] == 1
     assert "artifact:diagnostics" not in rendered
 
 
 def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Say done"))
+    result = asyncio.run(run_agent_task(agent, "Say done"))
 
     assert result.status is LoopStatus.FINISHED
     assert result.stop_reason == "final"
     assert result.final_text == "done"
-    assert any(event.type is EventType.TEXT_BLOCK_DELTA for event in agent.runtime_session.event_log.iter())
-    assert agent.runtime_session.event_log.replay(result.state.reply_id).content[0].text == "done"
+    assert any(
+        event.type is EventType.TEXT_BLOCK_DELTA
+        for event in agent.runtime_session.event_log.iter()
+    )
+    assert (
+        agent.runtime_session.event_log.replay(result.state.reply_id).content[0].text
+        == "done"
+    )
 
 
 def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
@@ -796,18 +1053,26 @@ def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
         workspace_kind="project",
     )
 
-    result = asyncio.run(agent.run_task("Say done"))
+    result = asyncio.run(run_agent_task(agent, "Say done"))
 
     assert result.status is LoopStatus.FINISHED
     system_prompt = transport.contexts[0].system_prompt or ""
-    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    context_text = "\n".join(
+        text for message in transport.contexts[0].messages for text in message.content
+    )
     assert "<runtime-context>" not in system_prompt
     assert "<runtime-context>" in context_text
     assert f"Workspace root: {tmp_path.resolve()}" in context_text
     assert "Workspace kind: project" in context_text
     assert f"Terminal current cwd: {tmp_path.resolve()}" in context_text
-    assert "Terminal workdir, when provided, must stay inside workspace_root" in context_text
-    assert "Read-only filesystem tools may read ordinary text files outside workspace_root" in context_text
+    assert (
+        "Terminal workdir, when provided, must stay inside workspace_root"
+        in context_text
+    )
+    assert (
+        "Read-only filesystem tools may read ordinary text files outside workspace_root"
+        in context_text
+    )
     assert runtime_session.terminal_sessions.session_count() == 0
 
 
@@ -847,33 +1112,52 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
 
     asyncio.run(run())
 
-    assert any(isinstance(event, RunEndEvent) and event.status == "aborted" for event in delivered)
+    assert any(
+        isinstance(event, RunEndEvent) and event.status == "aborted"
+        for event in delivered
+    )
 
 
 def test_agent_runtime_accepts_prior_messages(tmp_path) -> None:
     prior = [UserMsg(name="user", content="previous sentinel")]
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("current", prior_messages=prior))
+    result = asyncio.run(run_agent_task(agent, "current", prior_messages=prior))
 
     assert result.status is LoopStatus.FINISHED
-    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    context_text = "\n".join(
+        text for message in transport.contexts[0].messages for text in message.content
+    )
     assert "previous sentinel" in context_text
     assert "current" in context_text
 
 
-def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(tmp_path) -> None:
+def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(
+    tmp_path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     seen_events: list[EventType] = []
     seen_blocks: list[str] = []
 
-    runtime_session.hook_manager.register_event(None, lambda context, event: seen_events.append(event.type))
-    runtime_session.hook_manager.register_block(None, lambda context, completion: seen_blocks.append(completion.block_type))
+    runtime_session.hook_manager.register_event(
+        None, lambda context, event: seen_events.append(event.type)
+    )
+    runtime_session.hook_manager.register_block(
+        None, lambda context, completion: seen_blocks.append(completion.block_type)
+    )
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Say done"))
+    result = asyncio.run(run_agent_task(agent, "Say done"))
 
     assert result.status is LoopStatus.FINISHED
     assert EventType.TEXT_BLOCK_DELTA in seen_events
@@ -896,15 +1180,24 @@ def test_agent_runtime_executes_tool_then_finishes(tmp_path) -> None:
             {"text": "I read it."},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Read note.txt"))
+    result = asyncio.run(run_agent_task(agent, "Read note.txt"))
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "I read it."
-    assert any(isinstance(event, ToolResultStartEvent) for event in agent.runtime_session.event_log.iter())
+    assert any(
+        isinstance(event, ToolResultStartEvent)
+        for event in agent.runtime_session.event_log.iter()
+    )
     assert len(transport.contexts) == 2
-    second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
+    second_context_text = "\n".join(
+        text for msg in transport.contexts[1].messages for text in msg.content
+    )
     assert "hello from file" in second_context_text
 
 
@@ -932,7 +1225,7 @@ def test_agent_runtime_runs_context_compactor_before_tool_followup(tmp_path) -> 
         context_compactor=compactor,
     )
 
-    result = asyncio.run(agent.run_task("Read note.txt"))
+    result = asyncio.run(run_agent_task(agent, "Read note.txt"))
 
     assert result.status is LoopStatus.FINISHED
     assert len(compactor.calls) == 1
@@ -950,27 +1243,39 @@ def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
 
     runtime_session.hook_manager.register_event(
         None,
-        lambda context, event: seen_tool_result_events.append(event.type)
-        if event.type.name.startswith("TOOL_RESULT")
-        else None,
+        lambda context, event: (
+            seen_tool_result_events.append(event.type)
+            if event.type.name.startswith("TOOL_RESULT")
+            else None
+        ),
     )
     runtime_session.hook_manager.register_block(
         "tool_result",
-        lambda context, completion: seen_tool_result_blocks.append(completion.block.output[0].text),
+        lambda context, completion: seen_tool_result_blocks.append(
+            completion.block.output[0].text
+        ),
     )
     transport = ScriptedTransport(
         [
             {
                 "tool_calls": [
-                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
                 ]
             },
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Read note.txt"))
+    result = asyncio.run(run_agent_task(agent, "Read note.txt"))
 
     assert result.status is LoopStatus.FINISHED
     assert seen_tool_result_events == [
@@ -990,9 +1295,13 @@ def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
 
     runtime_session.hook_manager.register_event(None, failing_hook)
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Say done"))
+    result = asyncio.run(run_agent_task(agent, "Say done"))
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "done"
@@ -1000,22 +1309,32 @@ def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
     assert runtime_session.hook_manager.errors[0].message == "observer failed"
 
 
-def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_path) -> None:
+def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(
+    tmp_path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     (tmp_path / "note.txt").write_text("OLD", encoding="utf-8")
     first_transport = ScriptedTransport(
         [
             {
                 "tool_calls": [
-                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
                 ]
             },
             {"text": "first done"},
         ]
     )
-    first_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(first_transport))
+    first_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(first_transport),
+    )
 
-    first_result = asyncio.run(first_agent.run_task("Read note.txt"))
+    first_result = asyncio.run(run_agent_task(first_agent, "Read note.txt"))
     assert first_result.status is LoopStatus.FINISHED
 
     (tmp_path / "note.txt").write_text("NEW", encoding="utf-8")
@@ -1023,15 +1342,23 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_pat
         [
             {
                 "tool_calls": [
-                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
                 ]
             },
             {"text": "second done"},
         ]
     )
-    second_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(second_transport))
+    second_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(second_transport),
+    )
 
-    second_result = asyncio.run(second_agent.run_task("Read note.txt again"))
+    second_result = asyncio.run(run_agent_task(second_agent, "Read note.txt again"))
     message_output = "\n".join(
         output.text
         for message in second_result.messages
@@ -1041,7 +1368,9 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_pat
         for output in result.output
         if isinstance(output, TextBlock)
     )
-    second_context_text = "\n".join(text for msg in second_transport.contexts[1].messages for text in msg.content)
+    second_context_text = "\n".join(
+        text for msg in second_transport.contexts[1].messages for text in msg.content
+    )
 
     assert second_result.status is LoopStatus.FINISHED
     assert "NEW" in message_output
@@ -1053,18 +1382,32 @@ def test_tool_result_lookup_does_not_cross_runs_with_reused_tool_call_id(tmp_pat
 def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
     transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:bad", "name": "read_file", "arguments": '{"path"'}]},
+            {
+                "tool_calls": [
+                    {"id": "call:bad", "name": "read_file", "arguments": '{"path"'}
+                ]
+            },
             {"text": "Recovered."},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Use a malformed tool."))
+    result = asyncio.run(run_agent_task(agent, "Use a malformed tool."))
     events = agent.runtime_session.event_log.iter()
-    result_events = [event for event in events if getattr(event, "tool_call_id", None) == "call:bad"]
+    result_events = [
+        event for event in events if getattr(event, "tool_call_id", None) == "call:bad"
+    ]
 
     assert result.status is LoopStatus.FINISHED
-    assert [event.type for event in result_events if event.type.name.startswith("TOOL_RESULT")] == [
+    assert [
+        event.type
+        for event in result_events
+        if event.type.name.startswith("TOOL_RESULT")
+    ] == [
         EventType.TOOL_RESULT_START,
         EventType.TOOL_RESULT_TEXT_DELTA,
         EventType.TOOL_RESULT_END,
@@ -1072,9 +1415,13 @@ def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
     assert isinstance(result_events[-1], ToolResultEndEvent)
     assert result_events[-1].state is ToolResultState.ERROR
     replayed = agent.runtime_session.event_log.replay(result_events[0].reply_id)
-    block = next(block for block in replayed.content if isinstance(block, ToolResultBlock))
+    block = next(
+        block for block in replayed.content if isinstance(block, ToolResultBlock)
+    )
     assert block.state is ToolResultState.ERROR
-    second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
+    second_context_text = "\n".join(
+        text for msg in transport.contexts[1].messages for text in msg.content
+    )
     assert "Malformed JSON arguments" in second_context_text
 
 
@@ -1082,22 +1429,38 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
     runtime_session = in_memory_runtime_session(tmp_path)
     first_transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:bad", "name": "read_file", "arguments": "[]"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:bad", "name": "read_file", "arguments": "[]"}
+                ]
+            },
             {"text": "first recovered"},
         ]
     )
-    first_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(first_transport))
-    asyncio.run(first_agent.run_task("bad first"))
+    first_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(first_transport),
+    )
+    asyncio.run(run_agent_task(first_agent, "bad first"))
 
     second_transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:bad", "name": "read_file", "arguments": '{"second"'}]},
+            {
+                "tool_calls": [
+                    {"id": "call:bad", "name": "read_file", "arguments": '{"second"'}
+                ]
+            },
             {"text": "second recovered"},
         ]
     )
-    second_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(second_transport))
+    second_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(second_transport),
+    )
 
-    second_result = asyncio.run(second_agent.run_task("bad second"))
+    second_result = asyncio.run(run_agent_task(second_agent, "bad second"))
     message_output = "\n".join(
         output.text
         for message in second_result.messages
@@ -1107,7 +1470,9 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
         for output in result.output
         if isinstance(output, TextBlock)
     )
-    second_context_text = "\n".join(text for msg in second_transport.contexts[1].messages for text in msg.content)
+    second_context_text = "\n".join(
+        text for msg in second_transport.contexts[1].messages for text in msg.content
+    )
 
     assert "Malformed JSON arguments" in message_output
     assert "must be a JSON object" not in message_output
@@ -1118,14 +1483,24 @@ def test_malformed_tool_json_reused_id_does_not_replay_prior_error(tmp_path) -> 
 def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
     transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:missing", "name": "missing_tool", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:missing", "name": "missing_tool", "arguments": "{}"}
+                ]
+            },
             {"text": "Recovered from missing tool."},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Call a missing tool."))
-    second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
+    result = asyncio.run(run_agent_task(agent, "Call a missing tool."))
+    second_context_text = "\n".join(
+        text for msg in transport.contexts[1].messages for text in msg.content
+    )
 
     assert result.status is LoopStatus.FINISHED
     assert result.state.in_run_recovery is not None
@@ -1133,13 +1508,16 @@ def test_unknown_tool_becomes_error_observation(tmp_path) -> None:
     assert result.state.in_run_recovery.consecutive_failures == 1
     assert "Unknown tool: missing_tool" in second_context_text
     assert any(
-        isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:missing" and event.state is ToolResultState.ERROR
+        isinstance(event, ToolResultEndEvent)
+        and event.tool_call_id == "call:missing"
+        and event.state is ToolResultState.ERROR
         for event in agent.runtime_session.event_log.iter()
     )
 
 
 def test_model_failure_sets_typed_in_run_recovery_state(tmp_path) -> None:
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([])),
     )
@@ -1168,24 +1546,30 @@ def test_agent_runtime_exceeds_max_turns(tmp_path) -> None:
             }
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_turns=1),
     )
 
-    result = asyncio.run(agent.run_task("Read forever."))
+    result = asyncio.run(run_agent_task(agent, "Read forever."))
 
     assert result.status is LoopStatus.FAILED
     assert result.stop_reason == "max_turns"
-    assert any(event.type is EventType.EXCEED_MAX_ITERS for event in agent.runtime_session.event_log.iter())
+    assert any(
+        event.type is EventType.EXCEED_MAX_ITERS
+        for event in agent.runtime_session.event_log.iter()
+    )
 
 
 def test_build_tool_result_error_events_use_standard_event_shape() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
     event_log = InMemoryEventLog()
-    context = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+    context = EventContext(
+        run_id="run:test", turn_id="turn:test", reply_id="reply:test"
+    )
 
     events = event_log.extend(
         build_tool_result_error_events(
@@ -1216,30 +1600,48 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
     runtime_session = in_memory_runtime_session(tmp_path)
     first_transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:deny", "name": "read_file", "arguments": json.dumps({"path": "x"})}]},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:deny",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "x"}),
+                    }
+                ]
+            },
             {"text": "first recovered"},
         ]
     )
-    first_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    first_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(first_transport),
         permission_gate=DenyGate("FIRST_DENY"),
     )
-    asyncio.run(first_agent.run_task("deny first"))
+    asyncio.run(run_agent_task(first_agent, "deny first"))
 
     second_transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:deny", "name": "read_file", "arguments": json.dumps({"path": "x"})}]},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:deny",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "x"}),
+                    }
+                ]
+            },
             {"text": "second recovered"},
         ]
     )
-    second_agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    second_agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(second_transport),
         permission_gate=DenyGate("SECOND_DENY"),
     )
 
-    second_result = asyncio.run(second_agent.run_task("deny second"))
+    second_result = asyncio.run(run_agent_task(second_agent, "deny second"))
     message_output = "\n".join(
         output.text
         for message in second_result.messages
@@ -1249,7 +1651,9 @@ def test_permission_deny_reused_id_does_not_replay_prior_deny_reason(tmp_path) -
         for output in result.output
         if isinstance(output, TextBlock)
     )
-    second_context_text = "\n".join(text for msg in second_transport.contexts[1].messages for text in msg.content)
+    second_context_text = "\n".join(
+        text for msg in second_transport.contexts[1].messages for text in msg.content
+    )
 
     assert "SECOND_DENY" in message_output
     assert "FIRST_DENY" not in message_output
@@ -1271,15 +1675,18 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
             }
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
     )
 
-    result = asyncio.run(agent.run_task("attempt dangerous command"))
+    result = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
-    confirm = next(event for event in events if isinstance(event, RequireUserConfirmEvent))
+    confirm = next(
+        event for event in events if isinstance(event, RequireUserConfirmEvent)
+    )
 
     assert result.status is LoopStatus.WAITING_USER
     assert result.stop_reason == "waiting_user"
@@ -1293,7 +1700,9 @@ def test_terminal_policy_dangerous_command_requires_user_confirmation(tmp_path) 
     assert not any(isinstance(event, RunEndEvent) for event in events)
 
 
-def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_path) -> None:
+def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(
+    tmp_path,
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -1307,13 +1716,14 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_pa
             }
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
     )
 
-    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     result = asyncio.run(agent.abort_run(first.state))
     events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
     run_ends = [event for event in events if isinstance(event, RunEndEvent)]
@@ -1322,15 +1732,21 @@ def test_agent_runtime_abort_run_finalizes_waiting_user_without_run_error(tmp_pa
     assert result.status is LoopStatus.ABORTED
     assert result.stop_reason == "aborted"
     assert result.state.pending_tool_calls == []
-    assert [(event.status, event.stop_reason) for event in run_ends] == [("aborted", "aborted")]
+    assert [(event.status, event.stop_reason) for event in run_ends] == [
+        ("aborted", "aborted")
+    ]
     assert not any(isinstance(event, RunErrorEvent) for event in events)
 
 
 def test_agent_runtime_finalize_run_is_idempotent(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
 
-    result = asyncio.run(agent.run_task("Say done"))
+    result = asyncio.run(run_agent_task(agent, "Say done"))
     second = asyncio.run(agent.abort_run(result.state))
     run_ends = [
         event
@@ -1344,7 +1760,9 @@ def test_agent_runtime_finalize_run_is_idempotent(tmp_path) -> None:
     assert [event.status for event in run_ends] == ["finished"]
 
 
-def test_approval_resume_uses_original_run_snapshot_after_default_switch(tmp_path) -> None:
+def test_approval_resume_uses_original_run_snapshot_after_default_switch(
+    tmp_path,
+) -> None:
     calls: list[str] = []
     transport = ScriptedTransport(
         [
@@ -1360,7 +1778,8 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(tmp_pat
             {"text": "continued"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
@@ -1369,7 +1788,7 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(tmp_pat
     registry.register(RecordingTool("terminal", calls=calls))
     agent.tool_executor.registry = registry
 
-    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     agent.set_permission_policy(preset_to_policy(PermissionMode.READ_ONLY))
     resolution = ApprovalResolution(
         approval_id="host-minted",
@@ -1377,24 +1796,42 @@ def test_approval_resume_uses_original_run_snapshot_after_default_switch(tmp_pat
     )
     result = asyncio.run(agent.resume_after_approval(first.state, resolution))
     events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
-    confirm_index = next(i for i, event in enumerate(events) if isinstance(event, UserConfirmResultEvent))
-    tool_start_index = next(i for i, event in enumerate(events) if isinstance(event, ToolResultStartEvent))
+    confirm_index = next(
+        i for i, event in enumerate(events) if isinstance(event, UserConfirmResultEvent)
+    )
+    tool_start_index = next(
+        i for i, event in enumerate(events) if isinstance(event, ToolResultStartEvent)
+    )
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "continued"
     assert calls == ["call:danger"]
     assert confirm_index < tool_start_index
-    assert [event.status for event in events if isinstance(event, RunEndEvent)] == ["finished"]
+    assert [event.status for event in events if isinstance(event, RunEndEvent)] == [
+        "finished"
+    ]
     assert all(
         event.reply_id == first.state.messages[1].id
         for event in events
-        if isinstance(event, (UserConfirmResultEvent, ToolResultStartEvent, ToolResultTextDeltaEvent, ToolResultEndEvent))
+        if isinstance(
+            event,
+            (
+                UserConfirmResultEvent,
+                ToolResultStartEvent,
+                ToolResultTextDeltaEvent,
+                ToolResultEndEvent,
+            ),
+        )
     )
     assert len(transport.contexts) == 2
-    assert "call:danger" in "\n".join(text for message in transport.contexts[1].messages for text in message.content)
+    assert "call:danger" in "\n".join(
+        text for message in transport.contexts[1].messages for text in message.content
+    )
 
 
-def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path) -> None:
+def test_approval_resume_approved_call_does_not_reenter_permission_gate(
+    tmp_path,
+) -> None:
     calls: list[str] = []
     transport = ScriptedTransport(
         [
@@ -1410,7 +1847,8 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path
             {"text": "continued"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
@@ -1419,7 +1857,7 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path
     registry.register(RecordingTool("terminal", calls=calls))
     agent.tool_executor.registry = registry
 
-    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     before_resume_confirm_count = sum(
         isinstance(event, RequireUserConfirmEvent)
         for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id)
@@ -1429,7 +1867,9 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path
             first.state,
             ApprovalResolution(
                 approval_id="host-minted",
-                decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),),
+                decisions=(
+                    ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),
+                ),
             ),
         )
     )
@@ -1444,7 +1884,9 @@ def test_approval_resume_approved_call_does_not_reenter_permission_gate(tmp_path
     assert after_resume_confirm_count == 1
 
 
-def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_path) -> None:
+def test_approval_resume_deny_returns_denied_tool_result_without_execution(
+    tmp_path,
+) -> None:
     calls: list[str] = []
     transport = ScriptedTransport(
         [
@@ -1460,7 +1902,8 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_p
             {"text": "denial acknowledged"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
@@ -1469,19 +1912,23 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_p
     registry.register(RecordingTool("terminal", calls=calls))
     agent.tool_executor.registry = registry
 
-    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
     result = asyncio.run(
         agent.resume_after_approval(
             first.state,
             ApprovalResolution(
                 approval_id="host-minted",
-                decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=False),),
+                decisions=(
+                    ToolApprovalDecision(tool_call_id="call:danger", confirmed=False),
+                ),
             ),
         )
     )
     events = agent.runtime_session.event_log.iter(run_id=first.state.run_id)
     denied = next(event for event in events if isinstance(event, ToolResultEndEvent))
-    second_context_text = "\n".join(text for message in transport.contexts[1].messages for text in message.content)
+    second_context_text = "\n".join(
+        text for message in transport.contexts[1].messages for text in message.content
+    )
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "denial acknowledged"
@@ -1490,7 +1937,9 @@ def test_approval_resume_deny_returns_denied_tool_result_without_execution(tmp_p
     assert "tool call denied by user approval" in second_context_text
 
 
-def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_path) -> None:
+def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(
+    tmp_path,
+) -> None:
     hooks = RecordingHooks()
     transport = ScriptedTransport(
         [
@@ -1506,7 +1955,8 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_pat
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
@@ -1516,7 +1966,7 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_pat
     registry.register(RecordingTool("terminal", calls=[]))
     agent.tool_executor.registry = registry
 
-    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
 
     assert first.status is LoopStatus.WAITING_USER
     assert "turn_end" not in hooks.calls
@@ -1527,7 +1977,9 @@ def test_approval_resume_defers_finalize_hooks_until_true_terminal_state(tmp_pat
             first.state,
             ApprovalResolution(
                 approval_id="host-minted",
-                decisions=(ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),),
+                decisions=(
+                    ToolApprovalDecision(tool_call_id="call:danger", confirmed=True),
+                ),
             ),
         )
     )
@@ -1543,15 +1995,28 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
         [
             {
                 "tool_calls": [
-                    {"id": "call:a", "name": "terminal", "arguments": json.dumps({"command": "rm -rf build-a"})},
-                    {"id": "call:b", "name": "terminal", "arguments": json.dumps({"command": "rm -rf build-b"})},
-                    {"id": "call:c", "name": "terminal", "arguments": json.dumps({"command": "rm -rf build-c"})},
+                    {
+                        "id": "call:a",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build-a"}),
+                    },
+                    {
+                        "id": "call:b",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build-b"}),
+                    },
+                    {
+                        "id": "call:c",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build-c"}),
+                    },
                 ]
             },
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
@@ -1560,7 +2025,7 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
     registry.register(RecordingTool("terminal", calls=calls))
     agent.tool_executor.registry = registry
 
-    first = asyncio.run(agent.run_task("attempt dangerous commands"))
+    first = asyncio.run(run_agent_task(agent, "attempt dangerous commands"))
     result = asyncio.run(
         agent.resume_after_approval(
             first.state,
@@ -1575,7 +2040,9 @@ def test_approval_resume_partial_decisions_preserve_original_order(tmp_path) -> 
         )
     )
     result_ends = [
-        event for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id) if isinstance(event, ToolResultEndEvent)
+        event
+        for event in agent.runtime_session.event_log.iter(run_id=first.state.run_id)
+        if isinstance(event, ToolResultEndEvent)
     ]
 
     assert result.status is LoopStatus.FINISHED
@@ -1601,13 +2068,14 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
             }
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_ask_policy(),
     )
 
-    first = asyncio.run(agent.run_task("attempt dangerous command"))
+    first = asyncio.run(run_agent_task(agent, "attempt dangerous command"))
 
     with pytest.raises(ValueError, match="unknown tool calls"):
         asyncio.run(
@@ -1615,15 +2083,23 @@ def test_approval_resume_rejects_unknown_or_missing_decisions(tmp_path) -> None:
                 first.state,
                 ApprovalResolution(
                     approval_id="host-minted",
-                    decisions=(ToolApprovalDecision(tool_call_id="call:other", confirmed=True),),
+                    decisions=(
+                        ToolApprovalDecision(tool_call_id="call:other", confirmed=True),
+                    ),
                 ),
             )
         )
     with pytest.raises(ValueError, match="missing decisions"):
-        asyncio.run(agent.resume_after_approval(first.state, ApprovalResolution(approval_id="host-minted", decisions=())))
+        asyncio.run(
+            agent.resume_after_approval(
+                first.state, ApprovalResolution(approval_id="host-minted", decisions=())
+            )
+        )
 
 
-def test_agent_runtime_finished_run_keeps_background_process_until_session_close(tmp_path) -> None:
+def test_agent_runtime_finished_run_keeps_background_process_until_session_close(
+    tmp_path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     transport = ScriptedTransport(
         [
@@ -1632,14 +2108,17 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
                     {
                         "id": "call:bg",
                         "name": "terminal",
-                        "arguments": json.dumps({"command": "sleep 10", "yield_time_ms": 0}),
+                        "arguments": json.dumps(
+                            {"command": "sleep 10", "yield_time_ms": 0}
+                        ),
                     }
                 ]
             },
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=make_llm_runtime(transport),
         permission_policy=_terminal_bypass_policy(),
@@ -1647,29 +2126,44 @@ def test_agent_runtime_finished_run_keeps_background_process_until_session_close
     process_id: str | None = None
 
     try:
-        result = asyncio.run(agent.run_task("start background then finish"))
+        result = asyncio.run(run_agent_task(agent, "start background then finish"))
         tool_delta = next(
             event
             for event in runtime_session.event_log.iter(run_id=result.state.run_id)
-            if isinstance(event, ToolResultTextDeltaEvent) and event.tool_call_id == "call:bg"
+            if isinstance(event, ToolResultTextDeltaEvent)
+            and event.tool_call_id == "call:bg"
         )
         process_id = json.loads(tool_delta.delta)["process_id"]
 
         assert result.status is LoopStatus.FINISHED
-        assert runtime_session.terminal_sessions.poll_process(process_id).status is TerminalStatus.RUNNING
+        assert (
+            runtime_session.terminal_sessions.poll_process(process_id).status
+            is TerminalStatus.RUNNING
+        )
     finally:
         runtime_session.close()
 
     if process_id is not None:
-        assert runtime_session.terminal_sessions.poll_process(process_id).status is TerminalStatus.KILLED
+        assert (
+            runtime_session.terminal_sessions.poll_process(process_id).status
+            is TerminalStatus.KILLED
+        )
 
 
 def test_tool_result_from_event_slice_folds_text_and_data_blocks() -> None:
-    context = EventContext(run_id="run:slice", turn_id="turn:slice", reply_id="reply:slice")
+    context = EventContext(
+        run_id="run:slice", turn_id="turn:slice", reply_id="reply:slice"
+    )
     events = [
-        ToolResultStartEvent(**context.event_fields(), tool_call_id="call:slice", tool_call_name="lookup"),
-        ToolResultTextDeltaEvent(**context.event_fields(), tool_call_id="call:slice", delta="hello "),
-        ToolResultTextDeltaEvent(**context.event_fields(), tool_call_id="call:slice", delta="world"),
+        ToolResultStartEvent(
+            **context.event_fields(), tool_call_id="call:slice", tool_call_name="lookup"
+        ),
+        ToolResultTextDeltaEvent(
+            **context.event_fields(), tool_call_id="call:slice", delta="hello "
+        ),
+        ToolResultTextDeltaEvent(
+            **context.event_fields(), tool_call_id="call:slice", delta="world"
+        ),
         ToolResultDataDeltaEvent(
             **context.event_fields(),
             tool_call_id="call:slice",
@@ -1686,7 +2180,9 @@ def test_tool_result_from_event_slice_folds_text_and_data_blocks() -> None:
             **context.event_fields(),
             tool_call_id="call:slice",
             state=ToolResultState.SUCCESS,
-            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            metadata={
+                "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+            },
         ),
     ]
 
@@ -1704,7 +2200,9 @@ def test_tool_result_from_event_slice_folds_text_and_data_blocks() -> None:
 
 
 def test_tool_result_from_event_slice_rejects_missing_or_malformed_slice() -> None:
-    context = EventContext(run_id="run:slice", turn_id="turn:slice", reply_id="reply:slice")
+    context = EventContext(
+        run_id="run:slice", turn_id="turn:slice", reply_id="reply:slice"
+    )
 
     try:
         _tool_result_from_event_slice([], "call:missing")
@@ -1714,16 +2212,28 @@ def test_tool_result_from_event_slice_rejects_missing_or_malformed_slice() -> No
         raise AssertionError("expected KeyError for missing tool result start")
 
     for events in [
-        [ToolResultTextDeltaEvent(**context.event_fields(), tool_call_id="call:bad", delta="orphan")],
+        [
+            ToolResultTextDeltaEvent(
+                **context.event_fields(), tool_call_id="call:bad", delta="orphan"
+            )
+        ],
         [
             ToolResultEndEvent(
                 **context.event_fields(),
                 tool_call_id="call:bad",
                 state=ToolResultState.ERROR,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             )
         ],
-        [ToolResultStartEvent(**context.event_fields(), tool_call_id="call:bad", tool_call_name="lookup")],
+        [
+            ToolResultStartEvent(
+                **context.event_fields(),
+                tool_call_id="call:bad",
+                tool_call_name="lookup",
+            )
+        ],
     ]:
         try:
             _tool_result_from_event_slice(events, "call:bad")
@@ -1796,7 +2306,12 @@ def _test_tool_descriptor(name: str) -> CapabilityDescriptor:
         id=f"builtin:{name}",
         name=name,
         description=f"{name} test tool",
-        input_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
         namespace=None,
         provider_kind=CapabilityProviderKind.BUILTIN,
         provider_id="static-test",
@@ -1807,15 +2322,21 @@ def _test_tool_descriptor(name: str) -> CapabilityDescriptor:
     )
 
 
-_BUILTIN_TOOL_NAMES = frozenset(descriptor.name for descriptor in builtin_tool_descriptors())
+_BUILTIN_TOOL_NAMES = frozenset(
+    descriptor.name for descriptor in builtin_tool_descriptors()
+)
 
 
-def _install_registry_with_explicit_test_descriptors(agent: AgentRuntime, registry: ToolRegistry) -> None:
+def _install_registry_with_explicit_test_descriptors(
+    agent: AgentRuntime, registry: ToolRegistry
+) -> None:
     agent.tool_executor.registry = registry
     custom_names = tuple(sorted(set(registry.names()).difference(_BUILTIN_TOOL_NAMES)))
     if custom_names:
         agent.capability_runtime = CapabilityRuntime.with_default_providers(
-            StaticCapabilityProvider(tuple(_test_tool_descriptor(name) for name in custom_names))
+            StaticCapabilityProvider(
+                tuple(_test_tool_descriptor(name) for name in custom_names)
+            )
         )
 
 
@@ -1841,23 +2362,28 @@ class SlowProjectionWithBaselineHooks(SlowProjectionHooks):
 def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     hooks = RecordingHooks()
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=hooks,
     )
 
-    asyncio.run(agent.run_task("hi"))
+    asyncio.run(run_agent_task(agent, "hi"))
 
     assert hooks.calls == ["turn_start", "project", "after_model", "turn_end"]
     events = agent.runtime_session.event_log.iter()
     assert any(event.type is EventType.PROJECTION_REQUESTED for event in events)
     assert any(event.type is EventType.PROJECTION_READY for event in events)
-    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    context_text = "\n".join(
+        text for message in transport.contexts[0].messages for text in message.content
+    )
     assert "Recalled Memory" in context_text
 
 
-def test_capability_runtime_resolves_once_per_user_message_and_exposure_is_stable(tmp_path) -> None:
+def test_capability_runtime_resolves_once_per_user_message_and_exposure_is_stable(
+    tmp_path,
+) -> None:
     _write_workspace_skill(
         tmp_path,
         "review-pr",
@@ -1899,7 +2425,7 @@ Use the review checklist.
     registry.register(RecordingTool("noop", calls=[]))
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("$review-pr inspect this"))
+    result = asyncio.run(run_agent_task(agent, "$review-pr inspect this"))
 
     assert result.status is LoopStatus.FINISHED
     assert len(provider.calls) == 1
@@ -1908,14 +2434,18 @@ Use the review checklist.
     assert provider.calls[0].memory_domain == domain
     assert provider.calls[0].available_tool_names == frozenset({"noop"})
     assert len(transport.contexts) == 2
-    assert _without_context_timing_lines(transport.contexts[0].system_prompt or "") == _without_context_timing_lines(
-        transport.contexts[1].system_prompt or ""
+    assert _without_context_timing_lines(
+        transport.contexts[0].system_prompt or ""
+    ) == _without_context_timing_lines(transport.contexts[1].system_prompt or "")
+    first_context_text = "\n".join(
+        text for message in transport.contexts[0].messages for text in message.content
     )
-    first_context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
     assert "Available Skills:" in first_context_text
     assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")
     assert "# Review PR" in (transport.contexts[0].system_prompt or "")
-    assert [[tool.name for tool in context.tools] for context in transport.contexts] == [["noop"], ["noop"]]
+    assert [
+        [tool.name for tool in context.tools] for context in transport.contexts
+    ] == [["noop"], ["noop"]]
 
 
 def test_agent_runtime_accepts_host_selected_active_skill(tmp_path) -> None:
@@ -1933,10 +2463,16 @@ description: Review pull requests.
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(_workspace_only_capability_provider()),
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            _workspace_only_capability_provider()
+        ),
     )
 
-    result = asyncio.run(agent.run_task("inspect this", active_skill_names=frozenset({"review-pr"})))
+    result = asyncio.run(
+        run_agent_task(
+            agent, "inspect this", active_skill_names=frozenset({"review-pr"})
+        )
+    )
 
     assert result.status is LoopStatus.FINISHED
     assert "Active Skill: review-pr" in (transport.contexts[0].system_prompt or "")
@@ -1951,43 +2487,52 @@ def _write_workspace_skill(root, name: str, content: str) -> None:
 
 
 def _workspace_only_capability_provider() -> LocalSkillCapabilityProvider:
-    return LocalSkillCapabilityProvider(provider=LocalSkillProvider(include_user_skills=False))
+    return LocalSkillCapabilityProvider(
+        provider=LocalSkillProvider(include_user_skills=False)
+    )
 
 
 def test_memory_projection_timeout_fails_soft_without_blocking_reply(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=SlowProjectionHooks(),
         budget=LoopBudget(recall_hard_timeout_ms=1),
     )
 
-    result = asyncio.run(agent.run_task("hi"))
+    result = asyncio.run(run_agent_task(agent, "hi"))
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "done"
     assert result.state.memory_projection is None
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
-    failed = next(event for event in events if event.type is EventType.PROJECTION_FAILED)
+    failed = next(
+        event for event in events if event.type is EventType.PROJECTION_FAILED
+    )
     assert failed.error == "recall_timeout"
     assert "Recalled Memory" not in (transport.contexts[0].system_prompt or "")
 
 
 def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=SlowProjectionWithBaselineHooks(),
         budget=LoopBudget(recall_hard_timeout_ms=1),
     )
 
-    result = asyncio.run(agent.run_task("What did I just do?"))
+    result = asyncio.run(run_agent_task(agent, "What did I just do?"))
 
     assert result.status is LoopStatus.FINISHED
     assert result.state.memory_projection is not None
-    assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in result.state.memory_projection["summary"]
+    assert (
+        "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT"
+        in result.state.memory_projection["summary"]
+    )
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
     ready = next(event for event in events if event.type is EventType.PROJECTION_READY)
     assert ready.metadata == {
@@ -1996,7 +2541,9 @@ def test_memory_projection_timeout_preserves_working_context_baseline(tmp_path) 
         "fallback": "baseline_projection",
     }
     assert not any(event.type is EventType.PROJECTION_FAILED for event in events)
-    context_text = "\n".join(text for message in transport.contexts[0].messages for text in message.content)
+    context_text = "\n".join(
+        text for message in transport.contexts[0].messages for text in message.content
+    )
     assert "PULSARA_RECENT_ACTIVITY_SURVIVES_TIMEOUT" in context_text
     assert "empty memory_search result does not invalidate" in context_text
 
@@ -2061,7 +2608,9 @@ class LegacyShapeMemoryHook:
 
 
 class FailingPersistenceHook:
-    async def after_tool_results(self, state: LoopState, results: list[ToolResultBlock]) -> None:
+    async def after_tool_results(
+        self, state: LoopState, results: list[ToolResultBlock]
+    ) -> None:
         raise RuntimeError("persist boom")
 
 
@@ -2082,13 +2631,14 @@ def _assert_memory_hook_failed(agent: AgentRuntime, result, hook_name: str) -> N
 
 def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "should not run"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("on_session_start"),
     )
 
-    result = asyncio.run(agent.run_task("hi"))
+    result = asyncio.run(run_agent_task(agent, "hi"))
 
     _assert_memory_hook_failed(agent, result, "on_turn_start")
     assert "on_session_start boom" in (result.error_message or "")
@@ -2097,13 +2647,14 @@ def test_memory_hook_failure_on_session_start_returns_failed_result(tmp_path) ->
 
 def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("after_model_reply"),
     )
 
-    result = asyncio.run(agent.run_task("hi"))
+    result = asyncio.run(run_agent_task(agent, "hi"))
 
     _assert_memory_hook_failed(agent, result, "after_model_reply")
     assert result.final_text == "done"
@@ -2111,31 +2662,37 @@ def test_memory_hook_failure_after_model_reply_returns_failed_result(tmp_path) -
 
 def test_memory_hook_event_emit_failure_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=InvalidEventHook(),
     )
 
-    result = asyncio.run(agent.run_task("hi"))
+    result = asyncio.run(run_agent_task(agent, "hi"))
 
     _assert_memory_hook_failed(agent, result, "after_model_reply")
     assert result.final_text == "done"
 
 
-def test_agent_runtime_accepts_memory_hook_without_proposal_sink_property(tmp_path) -> None:
+def test_agent_runtime_accepts_memory_hook_without_proposal_sink_property(
+    tmp_path,
+) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=LegacyShapeMemoryHook(),
     )
 
-    result = asyncio.run(agent.run_task("hi"))
+    result = asyncio.run(run_agent_task(agent, "hi"))
 
     assert result.status is LoopStatus.FINISHED
     assert "propose_memory" not in agent.tool_executor.registry.names()
-    assert not any(name.startswith("remember_") for name in agent.tool_executor.registry.names())
+    assert not any(
+        name.startswith("remember_") for name in agent.tool_executor.registry.names()
+    )
 
 
 def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) -> None:
@@ -2144,19 +2701,24 @@ def test_memory_hook_failure_after_tool_results_returns_failed_result(tmp_path) 
         [
             {
                 "tool_calls": [
-                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
                 ]
             },
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("after_tool_results"),
     )
 
-    result = asyncio.run(agent.run_task("read"))
+    result = asyncio.run(run_agent_task(agent, "read"))
 
     _assert_memory_hook_failed(agent, result, "after_tool_results")
     assert len(transport.contexts) == 1
@@ -2174,19 +2736,24 @@ def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> No
         [
             {
                 "tool_calls": [
-                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
                 ]
             },
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         tool_result_persistence_hook=ExecutionEvidencePersistenceHook(ledger),
     )
 
-    result = asyncio.run(agent.run_task("read"))
+    result = asyncio.run(run_agent_task(agent, "read"))
 
     assert result.status is LoopStatus.FINISHED
     tool_results = graph.find_by_type(rt.TOOL_RESULT)
@@ -2197,7 +2764,9 @@ def test_tool_result_persistence_hook_records_runtime_facts_only(tmp_path) -> No
     assert span[rt.SOURCE_SESSION.name] == agent.runtime_session.runtime_session_id
 
 
-def test_tool_result_persistence_hook_rejects_large_external_result_without_artifact_ref(tmp_path) -> None:
+def test_tool_result_persistence_hook_rejects_large_external_result_without_artifact_ref(
+    tmp_path,
+) -> None:
     graph = InMemoryGraphStore()
     ledger = ExecutionEvidenceLedger(
         graph=graph,
@@ -2208,7 +2777,9 @@ def test_tool_result_persistence_hook_rejects_large_external_result_without_arti
     state = LoopState(session_id="runtime:test")
     state.current_scope = "ctx:workspace/test_project"
     state.pending_tool_calls = [
-        ToolCallBlock(id="call:external", name="external_tool", input='{"mode":"external"}')
+        ToolCallBlock(
+            id="call:external", name="external_tool", input='{"mode":"external"}'
+        )
     ]
     result = ToolResultBlock(
         id="call:external",
@@ -2224,7 +2795,9 @@ def test_tool_result_persistence_hook_rejects_large_external_result_without_arti
     assert graph.find_by_type(rt.ARTIFACT) == []
 
 
-def test_tool_result_persistence_hook_accepts_large_artifact_read_with_source_ref(tmp_path) -> None:
+def test_tool_result_persistence_hook_accepts_large_artifact_read_with_source_ref(
+    tmp_path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     artifact_id = "artifact:tool-result:run-source:call-large:output:0"
     write = runtime_session.archive.put_text(
@@ -2250,8 +2823,12 @@ def test_tool_result_persistence_hook_accepts_large_artifact_read_with_source_re
             size_bytes=write.size_bytes,
         )
     )
-    context = EventContext(run_id="run:read", turn_id="turn:read", reply_id="reply:read")
-    executor = runtime_session.create_tool_executor(record_event=runtime_session.make_thread_recorder())
+    context = EventContext(
+        run_id="run:read", turn_id="turn:read", reply_id="reply:read"
+    )
+    executor = runtime_session.create_tool_executor(
+        record_event=runtime_session.make_thread_recorder()
+    )
     result = executor.execute(
         ToolCall(
             id="call:artifact-read",
@@ -2273,10 +2850,16 @@ def test_tool_result_persistence_hook_accepts_large_artifact_read_with_source_re
             gate=MemoryWriteGate(),
         )
     )
-    state = LoopState(session_id=runtime_session.runtime_session_id, turn_id="turn:read")
+    state = LoopState(
+        session_id=runtime_session.runtime_session_id, turn_id="turn:read"
+    )
     state.current_scope = "ctx:workspace/test_project"
     state.pending_tool_calls = [
-        ToolCallBlock(id="call:artifact-read", name="artifact_read", input=json.dumps({"artifact_id": artifact_id}))
+        ToolCallBlock(
+            id="call:artifact-read",
+            name="artifact_read",
+            input=json.dumps({"artifact_id": artifact_id}),
+        )
     ]
 
     asyncio.run(hook.after_tool_results(state, [block]))
@@ -2291,26 +2874,41 @@ def test_tool_result_persistence_hook_failure_does_not_break_run(tmp_path) -> No
         [
             {
                 "tool_calls": [
-                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
                 ]
             },
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         tool_result_persistence_hook=FailingPersistenceHook(),
     )
 
-    result = asyncio.run(agent.run_task("read"))
+    result = asyncio.run(run_agent_task(agent, "read"))
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
 
     assert result.status is LoopStatus.FINISHED
     assert result.stop_reason == "final"
-    assert any(event.type is EventType.CUSTOM and event.name == "tool_result_persistence_failed" for event in events)
-    assert not any(isinstance(event, RunErrorEvent) and event.code == "memory_persistence_error" for event in events)
-    assert any(isinstance(event, RunEndEvent) and event.status == "finished" for event in events)
+    assert any(
+        event.type is EventType.CUSTOM
+        and event.name == "tool_result_persistence_failed"
+        for event in events
+    )
+    assert not any(
+        isinstance(event, RunErrorEvent) and event.code == "memory_persistence_error"
+        for event in events
+    )
+    assert any(
+        isinstance(event, RunEndEvent) and event.status == "finished"
+        for event in events
+    )
 
 
 def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> None:
@@ -2319,19 +2917,24 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
         [
             {
                 "tool_calls": [
-                    {"id": "call:read", "name": "read_file", "arguments": json.dumps({"path": "note.txt"})}
+                    {
+                        "id": "call:read",
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "note.txt"}),
+                    }
                 ]
             },
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("should_compact"),
     )
 
-    result = asyncio.run(agent.run_task("read"))
+    result = asyncio.run(run_agent_task(agent, "read"))
 
     _assert_memory_hook_failed(agent, result, "should_compact")
     assert len(transport.contexts) == 1
@@ -2339,13 +2942,14 @@ def test_memory_hook_failure_should_compact_returns_failed_result(tmp_path) -> N
 
 def test_memory_hook_failure_on_session_end_returns_failed_result(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "done"}])
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         memory_hooks=FailingHook("on_session_end"),
     )
 
-    result = asyncio.run(agent.run_task("hi"))
+    result = asyncio.run(run_agent_task(agent, "hi"))
 
     _assert_memory_hook_failed(agent, result, "on_turn_end")
     assert "on_session_end boom" in (result.error_message or "")
@@ -2359,7 +2963,9 @@ class SleepTool:
     is_read_only: bool = True
     is_concurrency_safe: bool = True
     description: str = "Sleep briefly."
-    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+    parameters: dict = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         time.sleep(self.delay)
@@ -2379,7 +2985,9 @@ class AsyncConcurrencyProbeTool:
     is_read_only: bool = True
     is_concurrency_safe: bool = True
     description: str = "Probe native async tool concurrency."
-    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+    parameters: dict = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
 
     async def execute_async(
         self,
@@ -2427,7 +3035,9 @@ class RecordingTool:
     is_read_only: bool = False
     is_concurrency_safe: bool = False
     description: str = "Record execution."
-    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+    parameters: dict = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         self.calls.append(call.id)
@@ -2446,7 +3056,9 @@ class BlockingUntilStartHookTool:
     is_read_only: bool = True
     is_concurrency_safe: bool = True
     description: str = "Wait until the start hook releases execution."
-    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+    parameters: dict = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         released = self.release.wait(timeout=0.5)
@@ -2465,20 +3077,33 @@ def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> Non
     registry.register(BlockingUntilStartHookTool(release=release))
     transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:block", "name": "blocking_tool", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:block", "name": "blocking_tool", "arguments": "{}"}
+                ]
+            },
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
     def release_on_start(context, event) -> None:
-        if isinstance(event, ToolResultStartEvent) and event.tool_call_id == "call:block":
+        if (
+            isinstance(event, ToolResultStartEvent)
+            and event.tool_call_id == "call:block"
+        ):
             release.set()
 
-    runtime_session.hook_manager.register_event(EventType.TOOL_RESULT_START, release_on_start)
+    runtime_session.hook_manager.register_event(
+        EventType.TOOL_RESULT_START, release_on_start
+    )
 
-    result = asyncio.run(agent.run_task("run blocking tool"))
+    result = asyncio.run(run_agent_task(agent, "run blocking tool"))
 
     assert result.status is LoopStatus.FINISHED
     tool_output = "\n".join(
@@ -2494,7 +3119,9 @@ def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> Non
     assert "not released" not in tool_output
 
 
-def test_duplicate_tool_call_id_becomes_error_observation_without_execution(tmp_path) -> None:
+def test_duplicate_tool_call_id_becomes_error_observation_without_execution(
+    tmp_path,
+) -> None:
     calls: list[str] = []
     transport = ScriptedTransport(
         [
@@ -2507,13 +3134,23 @@ def test_duplicate_tool_call_id_becomes_error_observation_without_execution(tmp_
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
     registry = ToolRegistry()
-    registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        RecordingTool(
+            "dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True
+        )
+    )
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
-    result = asyncio.run(agent.run_task("run duplicate tool ids"))
-    second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
+    result = asyncio.run(run_agent_task(agent, "run duplicate tool ids"))
+    second_context_text = "\n".join(
+        text for msg in transport.contexts[1].messages for text in msg.content
+    )
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "recovered"
@@ -2541,14 +3178,28 @@ def test_duplicate_tool_call_id_only_blocks_the_duplicate_calls(tmp_path) -> Non
             {"text": "recovered"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
     registry = ToolRegistry()
-    registry.register(RecordingTool("ok_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
-    registry.register(RecordingTool("dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        RecordingTool(
+            "ok_tool", calls=calls, is_read_only=True, is_concurrency_safe=True
+        )
+    )
+    registry.register(
+        RecordingTool(
+            "dup_tool", calls=calls, is_read_only=True, is_concurrency_safe=True
+        )
+    )
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
-    result = asyncio.run(agent.run_task("run mixed duplicate tool ids"))
-    second_context_text = "\n".join(text for msg in transport.contexts[1].messages for text in msg.content)
+    result = asyncio.run(run_agent_task(agent, "run mixed duplicate tool ids"))
+    second_context_text = "\n".join(
+        text for msg in transport.contexts[1].messages for text in msg.content
+    )
 
     assert result.status is LoopStatus.FINISHED
     assert result.final_text == "recovered"
@@ -2573,11 +3224,16 @@ def test_tool_budget_blocks_unsafe_tool_before_execution(tmp_path) -> None:
     calls: list[str] = []
     transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:write", "name": "write_side_effect", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:write", "name": "write_side_effect", "arguments": "{}"}
+                ]
+            },
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_tool_calls=0),
@@ -2586,7 +3242,7 @@ def test_tool_budget_blocks_unsafe_tool_before_execution(tmp_path) -> None:
     registry.register(RecordingTool("write_side_effect", calls=calls))
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
-    result = asyncio.run(agent.run_task("run unsafe tool"))
+    result = asyncio.run(run_agent_task(agent, "run unsafe tool"))
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
 
     assert result.status is LoopStatus.FAILED
@@ -2612,17 +3268,26 @@ def test_tool_budget_blocks_concurrent_batch_before_partial_execution(tmp_path) 
             {"text": "should not run"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(transport),
         budget=LoopBudget(max_tool_calls=1),
     )
     registry = ToolRegistry()
-    registry.register(RecordingTool("readonly_a", calls=calls, is_read_only=True, is_concurrency_safe=True))
-    registry.register(RecordingTool("readonly_b", calls=calls, is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        RecordingTool(
+            "readonly_a", calls=calls, is_read_only=True, is_concurrency_safe=True
+        )
+    )
+    registry.register(
+        RecordingTool(
+            "readonly_b", calls=calls, is_read_only=True, is_concurrency_safe=True
+        )
+    )
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
-    result = asyncio.run(agent.run_task("run readonly tools"))
+    result = asyncio.run(run_agent_task(agent, "run readonly tools"))
     events = agent.runtime_session.event_log.iter(run_id=result.state.run_id)
 
     assert result.status is LoopStatus.FAILED
@@ -2647,14 +3312,18 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=in_memory_runtime_session(tmp_path), llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(transport),
+    )
     registry = ToolRegistry()
     registry.register(SleepTool("sleep_a", delay=0.2))
     registry.register(SleepTool("sleep_b", delay=0.2))
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
     started = time.monotonic()
-    asyncio.run(agent.run_task("run both"))
+    asyncio.run(run_agent_task(agent, "run both"))
     elapsed = time.monotonic() - started
     sequences = [event.sequence for event in agent.runtime_session.event_log.iter()]
 
@@ -2662,7 +3331,9 @@ def test_readonly_concurrency_safe_tools_run_concurrently(tmp_path) -> None:
     assert sequences == sorted(sequences)
 
 
-def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurrently(tmp_path) -> None:
+def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurrently(
+    tmp_path,
+) -> None:
     transport = ScriptedTransport(
         [
             {
@@ -2675,14 +3346,18 @@ def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurren
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
     shared: dict[str, object] = {}
     registry = ToolRegistry()
     registry.register(AsyncConcurrencyProbeTool("async_a", shared))
     registry.register(AsyncConcurrencyProbeTool("async_b", shared))
     _install_registry_with_explicit_test_descriptors(agent, registry)
 
-    result = asyncio.run(agent.run_task("run both async tools"))
+    result = asyncio.run(run_agent_task(agent, "run both async tools"))
 
     assert result.status is LoopStatus.FINISHED
     assert shared["max_active"] == 2
@@ -2695,26 +3370,40 @@ def test_native_async_tools_in_one_model_batch_share_main_loop_and_run_concurren
     )
 
 
-def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_context(tmp_path) -> None:
+def test_two_memory_search_calls_in_one_model_batch_run_concurrently_with_trace_context(
+    tmp_path,
+) -> None:
     transport = ScriptedTransport(
         [
             {
                 "tool_calls": [
-                    {"id": "call:memory-a", "name": "memory_search", "arguments": '{"query":"alpha"}'},
-                    {"id": "call:memory-b", "name": "memory_search", "arguments": '{"query":"beta"}'},
+                    {
+                        "id": "call:memory-a",
+                        "name": "memory_search",
+                        "arguments": '{"query":"alpha"}',
+                    },
+                    {
+                        "id": "call:memory-b",
+                        "name": "memory_search",
+                        "arguments": '{"query":"beta"}',
+                    },
                 ]
             },
             {"text": "done"},
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
     recall = _ConcurrentRecallService()
     registry = ToolRegistry()
     registry.register(MemorySearchTool(recall=recall))  # type: ignore[arg-type]
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("search twice"))
+    result = asyncio.run(run_agent_task(agent, "search twice"))
 
     assert result.status is LoopStatus.FINISHED
     assert recall.max_active == 2
@@ -2741,7 +3430,11 @@ def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -
         ]
     )
     runtime_session = in_memory_runtime_session(tmp_path)
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), runtime_session=runtime_session, llm_runtime=make_llm_runtime(transport))
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
     registry = ToolRegistry()
     registry.register(SleepTool("sleep_a", delay=0.2))
     registry.register(SleepTool("sleep_b", delay=0.2))
@@ -2754,7 +3447,7 @@ def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -
 
     runtime_session.hook_manager.register_event(None, record_tool_result_sequences)
 
-    result = asyncio.run(agent.run_task("run both"))
+    result = asyncio.run(run_agent_task(agent, "run both"))
 
     assert result.status is LoopStatus.FINISHED
     assert seen_sequences == sorted(seen_sequences)

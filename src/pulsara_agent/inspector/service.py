@@ -15,6 +15,10 @@ from pulsara_agent.event import (
     ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
     CustomEvent,
+    MemoryReflectionCompletedEvent,
+    MemoryReflectionFailedEvent,
+    ModelCallEndEvent,
+    ModelCallRejectedEvent,
     ModelCallStartEvent,
     ProjectionReadyEvent,
     ReplyStartEvent,
@@ -33,7 +37,12 @@ from pulsara_agent.inspector.diagnostics import (
 from pulsara_agent.inspector.store import PostgresInspectorStore
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.message import AssistantMsg, Msg
-from pulsara_agent.message.blocks import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
+from pulsara_agent.message.blocks import (
+    DataBlock,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime.timeline import build_run_timeline
 from pulsara_agent.runtime.subagent.projection import project_subagent_graph
@@ -79,6 +88,8 @@ class InspectorService:
         runs = self.store.session_runs(session_id)
         diagnostics = sequence_gap_diagnostics(events)
         diagnostics.extend(_compaction_diagnostics(events, self.store))
+        model_contracts = _model_contract_projection(events)
+        diagnostics.extend(model_contracts["diagnostics"])
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -90,13 +101,20 @@ class InspectorService:
             ],
             "capability_surface_as_seen": _capability_surface_projection(events),
             "context_compilations": _context_compilation_projection(events),
+            "model_targets": model_contracts["model_targets"],
+            "model_calls": model_contracts["model_calls"],
+            "model_usage_by_run": model_contracts["usage_by_run"],
+            "compaction_model_contracts": model_contracts["compaction_model_contracts"],
+            "reflection_model_contracts": model_contracts["reflection_model_contracts"],
             "compaction_windows": _compaction_windows(events, self.store),
             "subagent_graph": _subagent_graph_projection(
                 session_id,
                 events,
                 self.store,
             ),
-            "events": _event_summaries(events[:limit_events], include_payload=include_payload),
+            "events": _event_summaries(
+                events[:limit_events], include_payload=include_payload
+            ),
             "event_count": len(events),
             "events_truncated": len(events) > limit_events,
             "diagnostics": diagnostics,
@@ -119,8 +137,12 @@ class InspectorService:
         if not run_events:
             raise KeyError(run_id)
 
-        run_start = next((event for event in run_events if isinstance(event, RunStartEvent)), None)
-        prior_boundary = run_start.sequence if run_start is not None else run_events[0].sequence
+        run_start = next(
+            (event for event in run_events if isinstance(event, RunStartEvent)), None
+        )
+        prior_boundary = (
+            run_start.sequence if run_start is not None else run_events[0].sequence
+        )
         prior_events = [
             event
             for event in session_events
@@ -135,15 +157,21 @@ class InspectorService:
             session_id=session_id,
         )
         compaction_boundary = _latest_compaction_window(prior_events, self.store)
-        timeline = build_run_timeline(run_events, runtime_session_id=session_id, run_id=run_id)
+        timeline = build_run_timeline(
+            run_events, runtime_session_id=session_id, run_id=run_id
+        )
         tool_artifacts = self.store.tool_result_artifacts_for_run(run_id)
         indexed_artifact_ids = {str(row["artifact_id"]) for row in tool_artifacts}
         diagnostics = []
         diagnostics.extend(sequence_gap_diagnostics(session_events))
         diagnostics.extend(run_projection_diagnostics(run, run_events))
         diagnostics.extend(permission_snapshot_diagnostics(run_events))
-        diagnostics.extend(tool_flow_diagnostics(run_events, known_artifact_ids=indexed_artifact_ids))
+        diagnostics.extend(
+            tool_flow_diagnostics(run_events, known_artifact_ids=indexed_artifact_ids)
+        )
         diagnostics.extend(outbox_diagnostics(self.store.outbox_for_run(run_id)))
+        model_contracts = _model_contract_projection(run_events)
+        diagnostics.extend(model_contracts["diagnostics"])
 
         return {
             "inspect_kind": "run",
@@ -158,10 +186,21 @@ class InspectorService:
             },
             "timeline": timeline.to_dict(),
             "compaction_boundary_as_seen": compaction_boundary,
-            "prior_messages_as_seen": [_message_to_dict(message) for message in prior_messages],
-            "projections_as_seen": [_projection_to_dict(event) for event in run_events if isinstance(event, ProjectionReadyEvent)],
+            "prior_messages_as_seen": [
+                _message_to_dict(message) for message in prior_messages
+            ],
+            "projections_as_seen": [
+                _projection_to_dict(event)
+                for event in run_events
+                if isinstance(event, ProjectionReadyEvent)
+            ],
             "capability_surface_as_seen": _capability_surface_projection(run_events),
             "contexts_as_seen": _context_compilation_projection(run_events),
+            "model_targets": model_contracts["model_targets"],
+            "model_calls": model_contracts["model_calls"],
+            "model_usage_by_run": model_contracts["usage_by_run"],
+            "compaction_model_contracts": model_contracts["compaction_model_contracts"],
+            "reflection_model_contracts": model_contracts["reflection_model_contracts"],
             "subagent_graph": _subagent_graph_projection(
                 session_id,
                 session_events,
@@ -170,9 +209,13 @@ class InspectorService:
             ),
             "assistant_replies": _assistant_replies(run_events),
             "tool_result_artifacts": [_json_safe(row) for row in tool_artifacts],
-            "recall_traces": [_json_safe(row) for row in self.store.recall_traces_for_run(run_id)],
+            "recall_traces": [
+                _json_safe(row) for row in self.store.recall_traces_for_run(run_id)
+            ],
             "outbox": [_json_safe(row) for row in self.store.outbox_for_run(run_id)],
-            "events": _event_summaries(run_events[:limit_events], include_payload=include_payload),
+            "events": _event_summaries(
+                run_events[:limit_events], include_payload=include_payload
+            ),
             "events_truncated": len(run_events) > limit_events,
             "diagnostics": diagnostics,
         }
@@ -204,7 +247,9 @@ class InspectorService:
             "inspect_kind": "artifact",
             "artifact": _json_safe(metadata),
             "payload": payload,
-            "tool_refs": [_json_safe(ref) for ref in self.store.artifact_tool_refs(artifact_id)],
+            "tool_refs": [
+                _json_safe(ref) for ref in self.store.artifact_tool_refs(artifact_id)
+            ],
             "diagnostics": _artifact_diagnostics(metadata),
         }
 
@@ -220,8 +265,12 @@ class InspectorService:
             if search is not None:
                 search_rows.append(search)
             vector_rows.extend(self.store.memory_vector_index(str(graph_id), memory_id))
-            usage_rows.extend(self.store.recall_usages_for_memory(str(graph_id), memory_id))
-        if not any((graph_documents, memory_nodes, search_rows, vector_rows, usage_rows)):
+            usage_rows.extend(
+                self.store.recall_usages_for_memory(str(graph_id), memory_id)
+            )
+        if not any(
+            (graph_documents, memory_nodes, search_rows, vector_rows, usage_rows)
+        ):
             raise KeyError(memory_id)
         return {
             "inspect_kind": "memory",
@@ -306,7 +355,11 @@ class InspectorService:
                 """
             )
         except Exception as exc:
-            return {"configured": True, "connected": False, "error": f"{type(exc).__name__}: {exc}"}
+            return {
+                "configured": True,
+                "connected": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         return {"configured": True, "connected": True, "graphs": rows}
 
 
@@ -339,12 +392,18 @@ class _BoundedEventLog:
         if reply_id is not None:
             events = [event for event in events if event.reply_id == reply_id]
         if after_sequence is not None:
-            events = [event for event in events if event.sequence is not None and event.sequence > after_sequence]
+            events = [
+                event
+                for event in events
+                if event.sequence is not None and event.sequence > after_sequence
+            ]
         return list(events)
 
     def replay(self, reply_id: str) -> Msg:
         events = self.iter(reply_id=reply_id)
-        start = next((event for event in events if isinstance(event, ReplyStartEvent)), None)
+        start = next(
+            (event for event in events if isinstance(event, ReplyStartEvent)), None
+        )
         message = AssistantMsg(
             id=reply_id,
             name=start.name if start else "assistant",
@@ -407,11 +466,15 @@ def _subagent_graph_projection(
         "nodes": [_json_safe(asdict(node)) for node in nodes],
         "edges": [_json_safe(asdict(edge)) for edge in edges],
         "tasks": [_json_safe(asdict(task)) for task in tasks],
-        "diagnostics": [_json_safe(diagnostic) for diagnostic in projection.diagnostics],
+        "diagnostics": [
+            _json_safe(diagnostic) for diagnostic in projection.diagnostics
+        ],
     }
 
 
-def _event_summaries(events: Iterable[AgentEvent], *, include_payload: bool) -> list[dict[str, Any]]:
+def _event_summaries(
+    events: Iterable[AgentEvent], *, include_payload: bool
+) -> list[dict[str, Any]]:
     return [_event_summary(event, include_payload=include_payload) for event in events]
 
 
@@ -447,10 +510,7 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "summary_artifact_id",
         "through_sequence",
         "keep_after_sequence",
-        "estimated_tokens_before",
-        "estimated_tokens_after",
         "threshold_tokens",
-        "context_window_tokens",
         "source_event_id",
         "source_event_sequence",
         "candidate_entry_ids",
@@ -462,7 +522,6 @@ def _event_summary(event: AgentEvent, *, include_payload: bool) -> dict[str, Any
         "extractor_version",
         "context_id",
         "model_call_index",
-        "estimated_tokens",
         "tools_estimated_tokens",
         "name",
     ):
@@ -479,7 +538,10 @@ def _capability_surface_projection(events: Iterable[AgentEvent]) -> dict[str, An
     exposures: list[dict[str, Any]] = []
     gate_decisions: list[dict[str, Any]] = []
     for event in events:
-        if isinstance(event, CustomEvent) and event.name == "capability_exposure_resolved":
+        if (
+            isinstance(event, CustomEvent)
+            and event.name == "capability_exposure_resolved"
+        ):
             value = dict(event.value)
             value["sequence"] = event.sequence
             value["run_id"] = event.run_id
@@ -507,7 +569,9 @@ def _capability_gate_decision_payload(event: AgentEvent) -> dict[str, Any] | Non
             "reason_code": event.reason_code,
             "reason_message": event.reason_message,
             "suggested_rules": event.suggested_rules,
-            "result_state": event.result_state.value if event.result_state is not None else None,
+            "result_state": event.result_state.value
+            if event.result_state is not None
+            else None,
             "policy_mode": event.policy_mode,
             "permission_policy": event.permission_policy,
             "exposure_generation": event.exposure_generation,
@@ -538,6 +602,533 @@ def _capability_gate_decision_payload(event: AgentEvent) -> dict[str, Any] | Non
     return payload
 
 
+def _model_contract_projection(events: Iterable[AgentEvent]) -> dict[str, Any]:
+    events_list = list(events)
+    targets: dict[str, dict[str, Any]] = {}
+    calls: dict[str, dict[str, Any]] = {}
+    diagnostics: list[dict[str, Any]] = []
+    compaction_contracts: list[dict[str, Any]] = []
+    reflection_contracts: list[dict[str, Any]] = []
+    run_targets = {
+        event.run_id: event.model_target
+        for event in events_list
+        if isinstance(event, RunStartEvent)
+    }
+
+    def register_target(target, *, sequence: int | None, source: str) -> None:
+        value = target.model_dump(mode="json")
+        fingerprint = target.target_fingerprint
+        existing = targets.get(fingerprint)
+        if existing is not None and existing["fact"] != value:
+            diagnostics.append(
+                _model_contract_diagnostic(
+                    "model_target_fingerprint_mismatch",
+                    "The same target fingerprint carried different target facts.",
+                    {"target_fingerprint": fingerprint, "sequence": sequence},
+                )
+            )
+            return
+        entry = targets.setdefault(
+            fingerprint,
+            {"target_fingerprint": fingerprint, "fact": value, "sources": []},
+        )
+        entry["sources"].append({"source": source, "sequence": sequence})
+
+    def register_call(fact, *, sequence: int | None, source: str) -> dict[str, Any]:
+        call_id = fact.resolved_model_call_id
+        value = fact.model_dump(mode="json")
+        register_target(fact.target, sequence=sequence, source=source)
+        entry = calls.setdefault(
+            call_id,
+            {
+                "resolved_model_call_id": call_id,
+                "fact": value,
+                "purpose": fact.purpose.value,
+                "context_mode": fact.context_mode.value,
+                "target_fingerprint": fact.target.target_fingerprint,
+                "model_id": fact.target.model_id,
+                "requested_model_id": fact.target.model_id,
+                "model_identity_policy": fact.target.model_identity_policy,
+                "reported_model_id": None,
+                "model_identity_relation": None,
+                "provider": fact.target.provider,
+                "api": fact.target.api,
+                "effective_output_tokens": fact.target.context_budget.effective_output_tokens,
+                "input_budget_tokens": fact.target.context_budget.input_budget_tokens,
+                "estimator": fact.target.token_estimator.model_dump(mode="json"),
+                "compile_context_ids": [],
+                "compile_sequences": [],
+                "start_sequence": None,
+                "end_sequence": None,
+                "rejected_sequence": None,
+                "subsystem_terminal_sequence": None,
+                "run_id": None,
+                "usage_status": None,
+                "usage": None,
+                "estimated_input_tokens": None,
+                "fact_mismatch": False,
+                "sources": [],
+            },
+        )
+        if entry["fact"] != value:
+            entry["fact_mismatch"] = True
+            diagnostics.append(
+                _model_contract_diagnostic(
+                    "resolved_model_call_fact_mismatch",
+                    "The same resolved model call id carried different facts.",
+                    {"resolved_model_call_id": call_id, "sequence": sequence},
+                )
+            )
+        entry["sources"].append({"source": source, "sequence": sequence})
+        return entry
+
+    for event in events_list:
+        if isinstance(event, RunStartEvent):
+            register_target(
+                event.model_target, sequence=event.sequence, source="run_start"
+            )
+        elif isinstance(event, ContextCompiledEvent):
+            entry = register_call(
+                event.resolved_call, sequence=event.sequence, source="context_compiled"
+            )
+            entry["compile_context_ids"].append(event.context_id)
+            entry["compile_sequences"].append(event.sequence)
+            entry["run_id"] = event.run_id
+            run_target = run_targets.get(event.run_id)
+            if (
+                run_target is not None
+                and run_target.target_fingerprint
+                != event.resolved_call.target.target_fingerprint
+            ):
+                diagnostics.append(
+                    _model_contract_diagnostic(
+                        "run_model_target_mismatch",
+                        "A compiled call does not use its run's frozen model target.",
+                        {
+                            "run_id": event.run_id,
+                            "resolved_model_call_id": (
+                                event.resolved_call.resolved_model_call_id
+                            ),
+                        },
+                    )
+                )
+        elif isinstance(event, ModelCallStartEvent):
+            entry = register_call(
+                event.resolved_call, sequence=event.sequence, source="model_call_start"
+            )
+            if entry["start_sequence"] is not None:
+                diagnostics.append(
+                    _model_contract_diagnostic(
+                        "duplicate_model_call_start",
+                        "A resolved model call has more than one start event.",
+                        {
+                            "resolved_model_call_id": event.resolved_call.resolved_model_call_id
+                        },
+                    )
+                )
+            entry["start_sequence"] = event.sequence
+            entry["run_id"] = event.run_id
+            if event.context_id not in entry["compile_context_ids"]:
+                entry["compile_context_ids"].append(event.context_id)
+        elif isinstance(event, ModelCallEndEvent):
+            entry = calls.setdefault(
+                event.resolved_model_call_id,
+                {
+                    "resolved_model_call_id": event.resolved_model_call_id,
+                    "fact": None,
+                    "purpose": None,
+                    "context_mode": None,
+                    "target_fingerprint": event.target_fingerprint,
+                    "model_id": None,
+                    "requested_model_id": None,
+                    "model_identity_policy": None,
+                    "reported_model_id": None,
+                    "model_identity_relation": None,
+                    "provider": None,
+                    "api": None,
+                    "effective_output_tokens": None,
+                    "input_budget_tokens": None,
+                    "estimator": None,
+                    "compile_context_ids": [],
+                    "compile_sequences": [],
+                    "start_sequence": None,
+                    "end_sequence": None,
+                    "rejected_sequence": None,
+                    "subsystem_terminal_sequence": None,
+                    "run_id": event.run_id,
+                    "usage_status": None,
+                    "usage": None,
+                    "estimated_input_tokens": None,
+                    "fact_mismatch": False,
+                    "sources": [],
+                },
+            )
+            if (
+                entry.get("target_fingerprint") is not None
+                and entry["target_fingerprint"] != event.target_fingerprint
+            ):
+                entry["fact_mismatch"] = True
+                diagnostics.append(
+                    _model_contract_diagnostic(
+                        "model_target_fingerprint_mismatch",
+                        "A model call end target fingerprint differs from its call fact.",
+                        {"resolved_model_call_id": event.resolved_model_call_id},
+                    )
+                )
+            entry["end_sequence"] = event.sequence
+            entry["reported_model_id"] = event.reported_model_id
+            requested_model_id = entry.get("requested_model_id")
+            entry["model_identity_relation"] = (
+                "missing"
+                if event.reported_model_id is None
+                else "exact"
+                if requested_model_id == event.reported_model_id
+                else "different"
+            )
+            if (
+                entry.get("model_identity_policy") == "exact"
+                and entry["model_identity_relation"] == "different"
+            ):
+                entry["fact_mismatch"] = True
+                diagnostics.append(
+                    _model_contract_diagnostic(
+                        "reported_model_identity_policy_violation",
+                        "The provider-reported model id violates the exact identity policy.",
+                        {
+                            "resolved_model_call_id": event.resolved_model_call_id,
+                            "requested_model_id": requested_model_id,
+                            "reported_model_id": event.reported_model_id,
+                        },
+                    )
+                )
+            entry["usage_status"] = event.usage_status
+            entry["usage"] = (
+                event.usage.model_dump(mode="json") if event.usage else None
+            )
+            entry["estimated_input_tokens"] = event.estimated_input_tokens
+            entry["sources"].append(
+                {"source": "model_call_end", "sequence": event.sequence}
+            )
+        elif isinstance(event, ModelCallRejectedEvent):
+            entry = register_call(
+                event.resolved_call,
+                sequence=event.sequence,
+                source="model_call_rejected",
+            )
+            entry["rejected_sequence"] = event.sequence
+            entry["run_id"] = event.run_id
+            entry["estimated_input_tokens"] = event.estimated_input_tokens
+            entry["rejection_reason_code"] = event.reason_code
+        elif isinstance(event, ContextCompactionStartedEvent):
+            register_target(
+                event.target_model_target,
+                sequence=event.sequence,
+                source="compaction_target",
+            )
+            entry = register_call(
+                event.summarizer_call,
+                sequence=event.sequence,
+                source="compaction_started",
+            )
+            entry["run_id"] = event.run_id
+            compaction_contracts.append(
+                {
+                    "sequence": event.sequence,
+                    "compaction_id": event.compaction_id,
+                    "status": "started",
+                    "resolved_model_call_id": event.summarizer_call.resolved_model_call_id,
+                    "target_fingerprint": event.target_model_target.target_fingerprint,
+                    "target_estimate": event.target_estimate.model_dump(mode="json"),
+                }
+            )
+        elif isinstance(event, ContextCompactionCompletedEvent):
+            register_target(
+                event.target_model_target,
+                sequence=event.sequence,
+                source="compaction_target",
+            )
+            entry = register_call(
+                event.summarizer_call,
+                sequence=event.sequence,
+                source="compaction_completed",
+            )
+            _apply_outer_usage(
+                entry,
+                sequence=event.sequence,
+                run_id=event.run_id,
+                usage_status=event.summarizer_usage_status,
+                usage=event.summarizer_usage,
+                estimated_input_tokens=event.summarizer_estimated_input_tokens,
+                reported_model_id=event.summarizer_reported_model_id,
+            )
+            compaction_contracts.append(
+                {
+                    "sequence": event.sequence,
+                    "compaction_id": event.compaction_id,
+                    "status": "completed",
+                    "resolved_model_call_id": event.summarizer_call.resolved_model_call_id,
+                    "target_fingerprint": event.target_model_target.target_fingerprint,
+                    "target_estimate": event.target_estimate.model_dump(mode="json"),
+                }
+            )
+        elif isinstance(event, ContextCompactionFailedEvent):
+            register_target(
+                event.target_model_target,
+                sequence=event.sequence,
+                source="compaction_target",
+            )
+            call_id = None
+            if event.summarizer_call is not None:
+                entry = register_call(
+                    event.summarizer_call,
+                    sequence=event.sequence,
+                    source="compaction_failed",
+                )
+                _apply_outer_usage(
+                    entry,
+                    sequence=event.sequence,
+                    run_id=event.run_id,
+                    usage_status=event.summarizer_usage_status,
+                    usage=event.summarizer_usage,
+                    estimated_input_tokens=event.summarizer_estimated_input_tokens,
+                    reported_model_id=event.summarizer_reported_model_id,
+                )
+                entry["direct_rejected"] = event.failure_stage in {
+                    "summarizer_input_build",
+                    "started_append",
+                    "model_validation",
+                }
+                call_id = event.summarizer_call.resolved_model_call_id
+            compaction_contracts.append(
+                {
+                    "sequence": event.sequence,
+                    "compaction_id": event.compaction_id,
+                    "status": "failed",
+                    "failure_stage": event.failure_stage,
+                    "resolved_model_call_id": call_id,
+                    "target_estimate": (
+                        event.target_estimate.model_dump(mode="json")
+                        if event.target_estimate is not None
+                        else None
+                    ),
+                    "observed_after_measurement": (
+                        event.observed_after_measurement.model_dump(mode="json")
+                        if event.observed_after_measurement is not None
+                        else None
+                    ),
+                }
+            )
+        elif isinstance(event, MemoryReflectionCompletedEvent):
+            entry = register_call(
+                event.resolved_call,
+                sequence=event.sequence,
+                source="reflection_completed",
+            )
+            _apply_outer_usage(
+                entry,
+                sequence=event.sequence,
+                run_id=event.run_id,
+                usage_status=event.usage_status,
+                usage=event.usage,
+                estimated_input_tokens=event.estimated_input_tokens,
+                reported_model_id=event.reported_model_id,
+            )
+            reflection_contracts.append(
+                {
+                    "sequence": event.sequence,
+                    "reflection_id": event.reflection_id,
+                    "status": "completed",
+                    "resolved_model_call_id": event.resolved_call.resolved_model_call_id,
+                }
+            )
+        elif isinstance(event, MemoryReflectionFailedEvent):
+            call_id = None
+            if event.resolved_call is not None:
+                entry = register_call(
+                    event.resolved_call,
+                    sequence=event.sequence,
+                    source="reflection_failed",
+                )
+                _apply_outer_usage(
+                    entry,
+                    sequence=event.sequence,
+                    run_id=event.run_id,
+                    usage_status=event.usage_status,
+                    usage=event.usage,
+                    estimated_input_tokens=event.estimated_input_tokens,
+                    reported_model_id=event.reported_model_id,
+                )
+                entry["direct_rejected"] = event.failure_stage == "model_validation"
+                call_id = event.resolved_call.resolved_model_call_id
+            reflection_contracts.append(
+                {
+                    "sequence": event.sequence,
+                    "reflection_id": event.reflection_id,
+                    "status": "failed",
+                    "failure_stage": event.failure_stage,
+                    "resolved_model_call_id": call_id,
+                }
+            )
+
+    for entry in calls.values():
+        entry["join_status"] = _model_call_join_status(entry)
+        if (
+            entry["end_sequence"] is not None
+            and entry["start_sequence"] is None
+            and not entry.get("subsystem_terminal_sequence")
+        ):
+            diagnostics.append(
+                _model_contract_diagnostic(
+                    "model_call_end_missing_start",
+                    "A model call end event has no matching start event.",
+                    {"resolved_model_call_id": entry["resolved_model_call_id"]},
+                )
+            )
+        if (
+            entry["rejected_sequence"] is not None
+            and entry["start_sequence"] is not None
+        ):
+            diagnostics.append(
+                _model_contract_diagnostic(
+                    "model_call_rejected_after_start",
+                    "A rejected call also has a provider start event.",
+                    {"resolved_model_call_id": entry["resolved_model_call_id"]},
+                )
+            )
+
+    usage_by_run = _model_usage_projection(calls.values())
+    return {
+        "model_targets": list(targets.values()),
+        "model_calls": list(calls.values()),
+        "usage_by_run": usage_by_run,
+        "compaction_model_contracts": compaction_contracts,
+        "reflection_model_contracts": reflection_contracts,
+        "diagnostics": diagnostics,
+    }
+
+
+def _apply_outer_usage(
+    entry: dict[str, Any],
+    *,
+    sequence: int | None,
+    run_id: str,
+    usage_status: str,
+    usage,
+    estimated_input_tokens: int | None,
+    reported_model_id: str | None,
+) -> None:
+    entry["subsystem_terminal_sequence"] = sequence
+    entry["run_id"] = run_id
+    entry["usage_status"] = usage_status
+    entry["usage"] = usage.model_dump(mode="json") if usage is not None else None
+    entry["estimated_input_tokens"] = estimated_input_tokens
+    entry["reported_model_id"] = reported_model_id
+    entry["model_identity_relation"] = (
+        "missing"
+        if reported_model_id is None
+        else "exact"
+        if entry.get("requested_model_id") == reported_model_id
+        else "different"
+    )
+
+
+def _model_call_join_status(entry: dict[str, Any]) -> str:
+    if entry.get("fact_mismatch"):
+        return "fact_mismatch"
+    if entry.get("fact") is None:
+        return "end_missing_start"
+    if entry.get("direct_rejected"):
+        return "direct_rejected"
+    if entry["context_mode"] == "direct":
+        if entry["subsystem_terminal_sequence"] is not None:
+            return "direct_started_completed"
+        if entry["start_sequence"] is not None and entry["end_sequence"] is None:
+            return "started_missing_end"
+        return "fact_mismatch"
+    if entry["rejected_sequence"] is not None:
+        return "compiled_rejected"
+    if entry["start_sequence"] is not None and entry["end_sequence"] is not None:
+        return "compiled_started_completed"
+    if entry["start_sequence"] is not None:
+        return "started_missing_end"
+    if entry["compile_sequences"]:
+        return "compiled_pressure_only"
+    return "fact_mismatch"
+
+
+def _model_usage_projection(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_run: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        run_id = entry.get("run_id")
+        if not isinstance(run_id, str):
+            continue
+        aggregate = by_run.setdefault(
+            run_id,
+            {
+                "run_id": run_id,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cached_input_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "cached_input_tokens_complete": True,
+                "reasoning_output_tokens_complete": True,
+                "reported_call_count": 0,
+                "missing_usage_call_count": 0,
+                "by_purpose": {},
+            },
+        )
+        purpose = entry.get("purpose") or "unknown"
+        purpose_aggregate = aggregate["by_purpose"].setdefault(
+            purpose,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "reported_call_count": 0,
+                "missing_usage_call_count": 0,
+            },
+        )
+        usage = entry.get("usage")
+        if entry.get("usage_status") != "reported" or not isinstance(usage, dict):
+            aggregate["missing_usage_call_count"] += 1
+            purpose_aggregate["missing_usage_call_count"] += 1
+            continue
+        aggregate["reported_call_count"] += 1
+        purpose_aggregate["reported_call_count"] += 1
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            aggregate[key] += int(usage[key])
+            purpose_aggregate[key] += int(usage[key])
+        if usage.get("cached_input_tokens") is None:
+            aggregate["cached_input_tokens_complete"] = False
+        else:
+            aggregate["cached_input_tokens"] += int(usage["cached_input_tokens"])
+        if usage.get("reasoning_output_tokens") is None:
+            aggregate["reasoning_output_tokens_complete"] = False
+        else:
+            aggregate["reasoning_output_tokens"] += int(
+                usage["reasoning_output_tokens"]
+            )
+    for aggregate in by_run.values():
+        if not aggregate["cached_input_tokens_complete"]:
+            aggregate["cached_input_tokens"] = None
+        if not aggregate["reasoning_output_tokens_complete"]:
+            aggregate["reasoning_output_tokens"] = None
+        aggregate["by_purpose"] = [
+            {"purpose": purpose, **values}
+            for purpose, values in sorted(aggregate["by_purpose"].items())
+        ]
+    return list(by_run.values())
+
+
+def _model_contract_diagnostic(
+    code: str,
+    message: str,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    return {"code": code, "severity": "error", "message": message, "details": details}
+
+
 def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, Any]:
     context_events: list[ContextCompiledEvent] = []
     model_starts: list[ModelCallStartEvent] = []
@@ -549,25 +1140,55 @@ def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, A
     contexts_by_id = {event.context_id: event for event in context_events}
     joins: list[dict[str, Any]] = []
     for start in model_starts:
-        compiled = contexts_by_id.get(start.context_id or "")
+        if start.resolved_call.context_mode == "direct":
+            joins.append(
+                {
+                    "context_id": start.context_id,
+                    "model_call_index": start.model_call_index,
+                    "resolved_model_call_id": start.resolved_call.resolved_model_call_id,
+                    "target_fingerprint": start.resolved_call.target.target_fingerprint,
+                    "model_call_sequence": start.sequence,
+                    "context_compiled_sequence": None,
+                    "join_status": "direct_context_not_applicable",
+                    "model_name": start.resolved_call.target.model_id,
+                    "model_role": start.resolved_call.target.model_role,
+                    "provider": start.resolved_call.target.provider,
+                }
+            )
+            continue
+        compiled = contexts_by_id.get(start.context_id)
+        join_status = "matched"
+        if compiled is None:
+            join_status = "missing_context_compiled"
+        elif (
+            compiled.resolved_call.resolved_model_call_id
+            != start.resolved_call.resolved_model_call_id
+            or compiled.resolved_call != start.resolved_call
+            or compiled.model_call_index != start.model_call_index
+        ):
+            join_status = "model_call_fact_mismatch"
         joins.append(
             {
                 "context_id": start.context_id,
                 "model_call_index": start.model_call_index,
+                "resolved_model_call_id": start.resolved_call.resolved_model_call_id,
+                "target_fingerprint": start.resolved_call.target.target_fingerprint,
                 "model_call_sequence": start.sequence,
-                "context_compiled_sequence": compiled.sequence if compiled is not None else None,
-                "join_status": "matched" if compiled is not None else "missing_context_compiled",
-                "model_name": start.model_name,
-                "model_role": start.model_role,
-                "provider": start.provider,
+                "context_compiled_sequence": compiled.sequence
+                if compiled is not None
+                else None,
+                "join_status": join_status,
+                "model_name": start.resolved_call.target.model_id,
+                "model_role": start.resolved_call.target.model_role,
+                "provider": start.resolved_call.target.provider,
             }
         )
     diagnostics: list[dict[str, Any]] = []
     for join in joins:
-        if join["join_status"] != "matched":
+        if join["join_status"] == "missing_context_compiled":
             diagnostics.append(
                 {
-                    "code": "context_compiled_missing_for_model_call",
+                    "code": "model_call_start_missing_compiled_context",
                     "severity": "warning",
                     "message": "A model call start event did not have a matching ContextCompiledEvent.",
                     "details": {
@@ -576,8 +1197,22 @@ def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, A
                     },
                 }
             )
+        elif join["join_status"] == "model_call_fact_mismatch":
+            diagnostics.append(
+                {
+                    "code": "context_model_call_identity_mismatch",
+                    "severity": "error",
+                    "message": "Compiled context and model call start facts do not match.",
+                    "details": {
+                        "context_id": join["context_id"],
+                        "resolved_model_call_id": join["resolved_model_call_id"],
+                    },
+                }
+            )
     return {
-        "latest": _context_compiled_to_dict(context_events[-1]) if context_events else None,
+        "latest": _context_compiled_to_dict(context_events[-1])
+        if context_events
+        else None,
         "contexts": [_context_compiled_to_dict(event) for event in context_events],
         "model_call_joins": joins,
         "diagnostics": diagnostics,
@@ -598,12 +1233,16 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "run_id": event.run_id,
         "turn_id": event.turn_id,
         "reply_id": event.reply_id,
-        "model_role": event.model_role,
+        "resolved_call": event.resolved_call.model_dump(mode="json"),
+        "model_role": event.resolved_call.target.model_role,
         "model_call_index": event.model_call_index,
-        "estimated_tokens": event.estimated_tokens,
-        "context_window_tokens": event.context_window_tokens,
-        "reserved_output_tokens": event.reserved_output_tokens,
-        "tools_estimated_tokens": event.tools_estimated_tokens,
+        "compile_attempt_index": event.compile_attempt_index,
+        "context_retry_index": event.context_retry_index,
+        "final_payload_estimated_tokens": event.budget.final_payload_estimated_tokens,
+        "total_context_tokens": event.budget.total_context_tokens,
+        "effective_output_tokens": event.budget.effective_output_tokens,
+        "tools_estimated_tokens": event.budget.tools_estimated_tokens,
+        "budget": event.budget.model_dump(mode="json"),
         "section_count": len(event.sections),
         "included_section_count": len(event.sections) - len(omitted),
         "omitted_section_count": len(omitted),
@@ -617,7 +1256,9 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "tool_result_render_decisions": [
             _json_safe(decision) for decision in event.tool_result_render_decisions
         ],
-        "tool_result_timings": _tool_result_timing_projection(event.tool_result_render_decisions),
+        "tool_result_timings": _tool_result_timing_projection(
+            event.tool_result_render_decisions
+        ),
         "tool_result_budget_report": _json_safe(event.tool_result_budget_report),
     }
 
@@ -639,7 +1280,9 @@ def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
         metadata = section.get("metadata")
         timing = metadata.get("timing") if isinstance(metadata, dict) else None
         if isinstance(timing, dict):
-            source = timing.get("source") if isinstance(timing.get("source"), dict) else {}
+            source = (
+                timing.get("source") if isinstance(timing.get("source"), dict) else {}
+            )
             freshness = source.get("freshness") if isinstance(source, dict) else None
             status = "present"
         else:
@@ -661,18 +1304,28 @@ def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
                 "channel": section.get("channel"),
                 "status": status,
                 "freshness": freshness or "unknown",
-                "compiled_at_utc": timing.get("compiled_at_utc") if isinstance(timing, dict) else None,
+                "compiled_at_utc": timing.get("compiled_at_utc")
+                if isinstance(timing, dict)
+                else None,
                 "observed_at": observed_at,
-                "source_started_at": source.get("source_started_at") if isinstance(source, dict) else None,
-                "source_ended_at": source.get("source_ended_at") if isinstance(source, dict) else None,
-                "age_seconds": timing.get("age_seconds") if isinstance(timing, dict) else None,
+                "source_started_at": source.get("source_started_at")
+                if isinstance(source, dict)
+                else None,
+                "source_ended_at": source.get("source_ended_at")
+                if isinstance(source, dict)
+                else None,
+                "age_seconds": timing.get("age_seconds")
+                if isinstance(timing, dict)
+                else None,
                 "timing": _json_safe(timing) if isinstance(timing, dict) else None,
             }
         )
     return projected
 
 
-def _tool_result_timing_projection(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _tool_result_timing_projection(
+    decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     projected: list[dict[str, Any]] = []
     for index, decision in enumerate(decisions):
         timing = decision.get("tool_observation_timing")
@@ -697,19 +1350,31 @@ def _tool_result_timing_projection(decisions: list[dict[str, Any]]) -> list[dict
                 "tool_call_id": decision.get("tool_call_id"),
                 "tool_name": decision.get("tool_name"),
                 "model_tool_name": decision.get("model_tool_name"),
-                "tool_origin": timing.get("tool_origin") if isinstance(timing, dict) else None,
+                "tool_origin": timing.get("tool_origin")
+                if isinstance(timing, dict)
+                else None,
                 "status": status,
                 "observed_at": observed_at,
-                "source_started_at": timing.get("source_started_at") if isinstance(timing, dict) else None,
-                "source_ended_at": timing.get("source_ended_at") if isinstance(timing, dict) else None,
+                "source_started_at": timing.get("source_started_at")
+                if isinstance(timing, dict)
+                else None,
+                "source_ended_at": timing.get("source_ended_at")
+                if isinstance(timing, dict)
+                else None,
                 "observation_duration_seconds": (
-                    timing.get("observation_duration_seconds") if isinstance(timing, dict) else None
+                    timing.get("observation_duration_seconds")
+                    if isinstance(timing, dict)
+                    else None
                 ),
                 "tool_reported_duration_seconds": (
-                    timing.get("tool_reported_duration_seconds") if isinstance(timing, dict) else None
+                    timing.get("tool_reported_duration_seconds")
+                    if isinstance(timing, dict)
+                    else None
                 ),
                 "freshness": freshness,
-                "clock_source": timing.get("clock_source") if isinstance(timing, dict) else None,
+                "clock_source": timing.get("clock_source")
+                if isinstance(timing, dict)
+                else None,
                 "timing_policy": timing_policy or "unknown",
                 "rendered_timing_chars": decision.get("rendered_timing_chars", 0),
                 "diagnostics": _json_safe(decision.get("diagnostics", [])),
@@ -748,10 +1413,14 @@ def _projection_to_dict(event: ProjectionReadyEvent) -> dict[str, Any]:
     }
 
 
-def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> list[dict[str, Any]]:
+def _compaction_windows(
+    events: Iterable[AgentEvent], store: PostgresInspectorStore
+) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
     events_list = list(events)
-    proposals_by_compaction: dict[str, list[ContextCompactionMemoryCandidatesProposedEvent]] = {}
+    proposals_by_compaction: dict[
+        str, list[ContextCompactionMemoryCandidatesProposedEvent]
+    ] = {}
     for event in events_list:
         if isinstance(event, ContextCompactionMemoryCandidatesProposedEvent):
             proposals_by_compaction.setdefault(event.compaction_id, []).append(event)
@@ -772,7 +1441,9 @@ def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorSt
                 "phase": event.metadata.get("phase", _phase_from_reason(event.reason)),
                 "safe_point": event.metadata.get("safe_point"),
                 "current_run_id": event.metadata.get("current_run_id"),
-                "max_compactable_sequence": event.metadata.get("max_compactable_sequence"),
+                "max_compactable_sequence": event.metadata.get(
+                    "max_compactable_sequence"
+                ),
                 "tail_message_count": event.metadata.get("tail_message_count"),
                 "window_number": event.window_number,
                 "window_id": event.window_id,
@@ -780,10 +1451,26 @@ def _compaction_windows(events: Iterable[AgentEvent], store: PostgresInspectorSt
                 "summary_artifact_present": artifact is not None,
                 "through_sequence": event.through_sequence,
                 "keep_after_sequence": event.keep_after_sequence,
-                "estimated_tokens_before": event.estimated_tokens_before,
-                "estimated_tokens_after": event.estimated_tokens_after,
+                "target_model_target": event.target_model_target.model_dump(
+                    mode="json"
+                ),
+                "target_estimate": event.target_estimate.model_dump(mode="json"),
+                "estimated_tokens_before": event.target_estimate.estimated_tokens_before,
+                "estimated_tokens_after": event.target_estimate.estimated_tokens_after,
                 "threshold_tokens": event.threshold_tokens,
-                "context_window_tokens": event.context_window_tokens,
+                "post_compaction_target_tokens": event.post_compaction_target_tokens,
+                "target_input_budget_tokens": event.target_input_budget_tokens,
+                "summarizer_call": event.summarizer_call.model_dump(mode="json"),
+                "summarizer_context_id": event.summarizer_context_id,
+                "summarizer_input_estimated_tokens": event.summarizer_input_estimated_tokens,
+                "summarizer_input_budget_tokens": event.summarizer_input_budget_tokens,
+                "summarizer_usage_status": event.summarizer_usage_status,
+                "summarizer_usage": (
+                    event.summarizer_usage.model_dump(mode="json")
+                    if event.summarizer_usage is not None
+                    else None
+                ),
+                "predicted_post_target_reached": event.predicted_post_target_reached,
                 "included_run_ids": list(event.included_run_ids),
                 "included_artifact_ids": list(event.included_artifact_ids),
                 "candidate_proposals": [
@@ -811,11 +1498,15 @@ def _compaction_candidate_proposal_projection(
         "duplicate_count": event.duplicate_count,
         "error_count": event.error_count,
         "extractor_version": event.extractor_version,
-        "diagnostics": [diagnostic.model_dump(mode="json") for diagnostic in event.diagnostics],
+        "diagnostics": [
+            diagnostic.model_dump(mode="json") for diagnostic in event.diagnostics
+        ],
     }
 
 
-def _memory_candidate_projection(row: dict[str, Any], store: PostgresInspectorStore) -> dict[str, Any]:
+def _memory_candidate_projection(
+    row: dict[str, Any], store: PostgresInspectorStore
+) -> dict[str, Any]:
     entry_id = str(row["entry_id"])
     return {
         "entry_id": entry_id,
@@ -846,7 +1537,9 @@ def _phase_from_reason(reason: str) -> str:
     return "unknown"
 
 
-def _latest_compaction_window(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> dict[str, Any] | None:
+def _latest_compaction_window(
+    events: Iterable[AgentEvent], store: PostgresInspectorStore
+) -> dict[str, Any] | None:
     windows = _compaction_windows(events, store)
     for window in reversed(windows):
         if window["summary_artifact_present"]:
@@ -854,7 +1547,9 @@ def _latest_compaction_window(events: Iterable[AgentEvent], store: PostgresInspe
     return None
 
 
-def _compaction_diagnostics(events: Iterable[AgentEvent], store: PostgresInspectorStore) -> list[dict[str, Any]]:
+def _compaction_diagnostics(
+    events: Iterable[AgentEvent], store: PostgresInspectorStore
+) -> list[dict[str, Any]]:
     events_list = list(events)
     completed_ids = {
         event.compaction_id
@@ -868,7 +1563,10 @@ def _compaction_diagnostics(events: Iterable[AgentEvent], store: PostgresInspect
     }
     diagnostics: list[dict[str, Any]] = []
     for event in events_list:
-        if isinstance(event, ContextCompactionStartedEvent) and event.compaction_id not in completed_ids | failed_ids:
+        if (
+            isinstance(event, ContextCompactionStartedEvent)
+            and event.compaction_id not in completed_ids | failed_ids
+        ):
             diagnostics.append(
                 {
                     "code": "context_compaction_dangling_started",
@@ -882,7 +1580,10 @@ def _compaction_diagnostics(events: Iterable[AgentEvent], store: PostgresInspect
                     },
                 }
             )
-        if isinstance(event, ContextCompactionCompletedEvent) and store.artifact(event.summary_artifact_id) is None:
+        if (
+            isinstance(event, ContextCompactionCompletedEvent)
+            and store.artifact(event.summary_artifact_id) is None
+        ):
             diagnostics.append(
                 {
                     "code": "context_compaction_missing_summary_artifact",
@@ -925,7 +1626,9 @@ def _message_to_dict(message: Msg) -> dict[str, Any]:
         "created_at": message.created_at,
         "finished_at": message.finished_at,
         "metadata": message.metadata,
-        "usage": message.usage.model_dump(mode="json") if message.usage is not None else None,
+        "usage": message.usage.model_dump(mode="json")
+        if message.usage is not None
+        else None,
         "content": [_block_to_dict(block) for block in message.content],
     }
 
@@ -947,11 +1650,23 @@ def _block_to_dict(block) -> dict[str, Any]:
             "id": block.id,
             "name": block.name,
             "state": str(block.state),
-            "text": _truncate("".join(part.text for part in block.output if isinstance(part, TextBlock)), 2_000),
-            "artifacts": [artifact.model_dump(mode="json") for artifact in block.artifacts],
+            "text": _truncate(
+                "".join(
+                    part.text for part in block.output if isinstance(part, TextBlock)
+                ),
+                2_000,
+            ),
+            "artifacts": [
+                artifact.model_dump(mode="json") for artifact in block.artifacts
+            ],
         }
     if isinstance(block, DataBlock):
-        return {"type": "data", "id": block.id, "name": block.name, "source_type": block.source.type}
+        return {
+            "type": "data",
+            "id": block.id,
+            "name": block.name,
+            "source_type": block.source.type,
+        }
     return {"type": getattr(block, "type", "unknown"), "id": getattr(block, "id", None)}
 
 

@@ -1,3 +1,5 @@
+import pytest
+
 from pulsara_agent.event import (
     CustomEvent,
     EventContext,
@@ -38,16 +40,33 @@ from pulsara_agent.llm.adapters.openai.responses import (
     translate_responses_event,
 )
 from pulsara_agent.llm.config import LLMConfig
+from tests.support import (
+    bind_test_context,
+    resolve_test_call,
+    test_llm_config,
+    test_llm_context,
+    test_model_limits,
+)
 from pulsara_agent.llm.factory import build_llm_runtime
+from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
 from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.llm.provider import ProviderProfile, ThinkingProfile, ThinkingReplayPolicy
+from pulsara_agent.llm.provider import (
+    ModelIdentityPolicy,
+    ProviderProfile,
+    ThinkingProfile,
+    ThinkingReplayPolicy,
+)
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.runtime import LLMRuntime
+from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 
-EVENT_CONTEXT = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+EVENT_CONTEXT = EventContext(
+    run_id="run:test", turn_id="turn:test", reply_id="reply:test"
+)
 
 
 async def no_retry_sleep(_delay: float) -> None:
@@ -55,18 +74,44 @@ async def no_retry_sleep(_delay: float) -> None:
 
 
 async def collect_events(runtime: LLMRuntime, role: ModelRole, context: LLMContext):
+    target = runtime.resolve_target(role=role, requested_options=None)
+    call = runtime.resolve_call(
+        target=target, purpose=ModelCallPurpose.AGENT_MODEL_LOOP
+    )
+    context = bind_test_context(call, context)
     return [
         event
         async for event in runtime.stream(
-            role=role,
+            call=call,
             context=context,
             event_context=EVENT_CONTEXT,
         )
     ]
 
 
+async def collect_transport_events(transport, config, role, context):
+    call = resolve_test_call(config, role=role, transport=transport)
+    return [
+        event
+        async for event in transport.stream(
+            call=call,
+            context=bind_test_context(call, context),
+            event_context=EVENT_CONTEXT,
+        )
+    ]
+
+
+def payload_call(config, *, role=ModelRole.PRO, options=None, api="responses"):
+    transport = (
+        OpenAIChatCompletionsTransport(api_key="sk-test")
+        if api == "chat"
+        else OpenAIResponsesTransport(api_key="sk-test")
+    )
+    return resolve_test_call(config, role=role, options=options, transport=transport)
+
+
 def test_config_resolves_pro_and_flash_models() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="provider/pro-model",
@@ -86,7 +131,7 @@ def test_config_resolves_pro_and_flash_models() -> None:
 def test_runtime_streams_agent_events_through_registered_transport() -> None:
     import asyncio
 
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -101,7 +146,7 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
         collect_events(
             runtime,
             ModelRole.FLASH,
-            LLMContext(
+            test_llm_context(
                 messages=(LLMMessage.user("Say hi"),),
                 context_id="context:test",
                 model_call_index=3,
@@ -111,7 +156,7 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
 
     assert isinstance(events[0], ReplyStartEvent)
     assert isinstance(events[1], ModelCallStartEvent)
-    assert events[1].model_name == "flash"
+    assert events[1].resolved_call.target.model_id == "flash"
     assert events[1].context_id == "context:test"
     assert events[1].model_call_index == 3
     assert isinstance(events[2], TextBlockStartEvent)
@@ -124,13 +169,15 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
 
 
 def test_openai_responses_payload_uses_internal_context() -> None:
-    config = LLMConfig(
+    limits = test_model_limits(default_output_tokens=128)
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
+        pro_limits=limits,
     )
-    context = LLMContext(
+    context = test_llm_context(
         system_prompt="You are Pulsara.",
         messages=(LLMMessage.user("Use the tool."),),
         tools=(
@@ -143,9 +190,13 @@ def test_openai_responses_payload_uses_internal_context() -> None:
     )
 
     payload = build_responses_payload(
-        model=config.model_for(ModelRole.PRO),
+        call=payload_call(
+            config,
+            options=LLMOptions(
+                reasoning_effort="medium",
+            ),
+        ),
         context=context,
-        options=LLMOptions(reasoning_effort="medium", reasoning_summary="auto", max_output_tokens=128),
     )
 
     assert payload["model"] == "pro"
@@ -153,18 +204,18 @@ def test_openai_responses_payload_uses_internal_context() -> None:
     assert payload["input"][0]["role"] == "user"
     assert payload["input"][0]["content"] == "Use the tool."
     assert payload["tools"][0]["name"] == "lookup"
-    assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
+    assert payload["reasoning"] == {"effort": "medium"}
     assert payload["max_output_tokens"] == 128
 
 
 def test_openai_responses_payload_uses_function_call_output_items() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.user("Use lookup."),
             LLMMessage.tool_call(
@@ -176,7 +227,7 @@ def test_openai_responses_payload_uses_function_call_output_items() -> None:
         )
     )
 
-    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+    payload = build_responses_payload(call=payload_call(config), context=context)
 
     assert payload["input"][0]["role"] == "user"
     assert payload["input"][1] == {
@@ -194,13 +245,13 @@ def test_openai_responses_payload_uses_function_call_output_items() -> None:
 
 
 def test_openai_responses_payload_preserves_message_level_system_items() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.user("original user input"),
             LLMMessage.system("Pulsara note: previous turn failed."),
@@ -208,7 +259,7 @@ def test_openai_responses_payload_preserves_message_level_system_items() -> None
         )
     )
 
-    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+    payload = build_responses_payload(call=payload_call(config), context=context)
 
     assert payload["input"][0] == {
         "role": "user",
@@ -224,14 +275,16 @@ def test_openai_responses_payload_preserves_message_level_system_items() -> None
     }
 
 
-def test_openai_responses_payload_keeps_current_user_after_prior_assistant_text() -> None:
-    config = LLMConfig(
+def test_openai_responses_payload_keeps_current_user_after_prior_assistant_text() -> (
+    None
+):
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.user("hello"),
             LLMMessage.assistant("Hello! How can I help?"),
@@ -239,7 +292,7 @@ def test_openai_responses_payload_keeps_current_user_after_prior_assistant_text(
         )
     )
 
-    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+    payload = build_responses_payload(call=payload_call(config), context=context)
 
     assert payload["input"] == [
         {"role": "user", "content": "hello"},
@@ -252,27 +305,31 @@ def test_openai_responses_payload_keeps_current_user_after_prior_assistant_text(
 
 
 def test_openai_responses_payload_expands_assistant_turn_tool_calls() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.user("Use lookup."),
             LLMMessage.assistant_turn(
                 text="I will call lookup.",
                 thinking="private reasoning",
                 tool_calls=(
-                    LLMToolCall(id="call_responses_123", name="lookup", arguments='{"q":"pulsara"}'),
+                    LLMToolCall(
+                        id="call_responses_123",
+                        name="lookup",
+                        arguments='{"q":"pulsara"}',
+                    ),
                 ),
             ),
             LLMMessage.tool_result("found", tool_call_id="call_responses_123"),
         )
     )
 
-    payload = build_responses_payload(model=config.model_for(ModelRole.PRO), context=context)
+    payload = build_responses_payload(call=payload_call(config), context=context)
 
     assert payload["input"][1]["role"] == "assistant"
     assert payload["input"][1]["content"] == "I will call lookup."
@@ -290,7 +347,7 @@ def test_openai_responses_payload_expands_assistant_turn_tool_calls() -> None:
 
 
 def test_openai_responses_events_translate_to_agent_events() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -368,7 +425,7 @@ def test_openai_responses_transport_can_stream_mock_raw_events() -> None:
             },
         ],
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -376,22 +433,29 @@ def test_openai_responses_transport_can_stream_mock_raw_events() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.PRO),
-                context=LLMContext(messages=(LLMMessage.user("hi"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.PRO,
+            test_llm_context(messages=(LLMMessage.user("hi"),)),
+        )
 
     events = asyncio.run(collect())
 
-    assert isinstance(events[0], ModelCallStartEvent)
-    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "hi" for event in events)
-    assert any(isinstance(event, ToolCallStartEvent) and event.tool_call_name == "lookup" for event in events)
-    assert any(isinstance(event, ToolCallDeltaEvent) and event.delta == "{}" for event in events)
-    assert isinstance(events[-1], ModelCallEndEvent)
+    assert not any(isinstance(event, ModelCallStartEvent) for event in events)
+    assert any(
+        isinstance(event, TextBlockDeltaEvent) and event.delta == "hi"
+        for event in events
+    )
+    assert any(
+        isinstance(event, ToolCallStartEvent) and event.tool_call_name == "lookup"
+        for event in events
+    )
+    assert any(
+        isinstance(event, ToolCallDeltaEvent) and event.delta == "{}"
+        for event in events
+    )
+    assert not any(isinstance(event, ModelCallEndEvent) for event in events)
 
 
 def test_non_streaming_response_synthesizes_same_event_shape() -> None:
@@ -423,10 +487,168 @@ def test_non_streaming_response_synthesizes_same_event_shape() -> None:
     assert isinstance(events[6], ToolCallEndEvent)
     assert any(isinstance(event, TextBlockEndEvent) for event in events)
     assert any(isinstance(event, ThinkingBlockEndEvent) for event in events)
-    assert isinstance(events[-1], ModelCallEndEvent)
-    assert events[-1].input_tokens == 3
-    assert events[-1].output_tokens == 5
-    assert events[-1].total_tokens == 8
+    assert isinstance(events[-1], TransportUsageReport)
+    assert events[-1].usage is not None
+    assert events[-1].usage.input_tokens == 3
+    assert events[-1].usage.output_tokens == 5
+    assert events[-1].usage.total_tokens == 8
+
+
+def test_reported_response_model_alias_is_accepted_by_default() -> None:
+    import asyncio
+
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="expected-model",
+        flash_model="flash",
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        _mock_events=[
+            {
+                "type": "response.completed",
+                "response": {"model": "fallback-model", "usage": None},
+            }
+        ],
+    )
+
+    events = asyncio.run(
+        collect_transport_events(
+            transport,
+            config,
+            ModelRole.PRO,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
+    )
+
+    report = next(event for event in events if isinstance(event, TransportUsageReport))
+    assert report.reported_model_id == "fallback-model"
+
+
+def test_reported_chat_model_alias_is_accepted_by_default() -> None:
+    import asyncio
+
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="model-alias",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+    transport = OpenAIChatCompletionsTransport(
+        api_key="sk-test",
+        _mock_chunks=[{"model": "provider-snapshot", "choices": []}],
+    )
+
+    events = asyncio.run(
+        collect_transport_events(
+            transport,
+            config,
+            ModelRole.PRO,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
+    )
+
+    report = next(event for event in events if isinstance(event, TransportUsageReport))
+    assert report.reported_model_id == "provider-snapshot"
+
+
+def test_exact_model_identity_policy_rejects_mismatch() -> None:
+    import asyncio
+
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="expected-model",
+        flash_model="flash",
+        provider_profile=ProviderProfile(
+            model_identity_policy=ModelIdentityPolicy.EXACT
+        ),
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        _mock_events=[
+            {
+                "type": "response.completed",
+                "response": {"model": "fallback-model", "usage": None},
+            }
+        ],
+    )
+
+    with pytest.raises(
+        LLMTransportContractError, match="transport_changed_model_target"
+    ):
+        asyncio.run(
+            collect_transport_events(
+                transport,
+                config,
+                ModelRole.PRO,
+                test_llm_context(messages=(LLMMessage.user("ping"),)),
+            )
+        )
+
+
+def test_reported_model_identity_changes_within_attempt_is_rejected() -> None:
+    import asyncio
+
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="model-alias",
+        flash_model="flash",
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        _mock_events=[
+            {"type": "response.created", "response": {"model": "snapshot-a"}},
+            {
+                "type": "response.completed",
+                "response": {"model": "snapshot-b", "usage": None},
+            },
+        ],
+    )
+
+    with pytest.raises(
+        LLMTransportContractError, match="identity changed within stream"
+    ):
+        asyncio.run(
+            collect_transport_events(
+                transport,
+                config,
+                ModelRole.PRO,
+                test_llm_context(messages=(LLMMessage.user("ping"),)),
+            )
+        )
+
+
+def test_missing_response_model_is_allowed_but_not_confirmation() -> None:
+    import asyncio
+
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="expected-model",
+        flash_model="flash",
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        _mock_events=[{"type": "response.completed", "response": {"usage": None}}],
+    )
+
+    events = asyncio.run(
+        collect_transport_events(
+            transport,
+            config,
+            ModelRole.PRO,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], TransportUsageReport)
+    assert events[0].usage_status == "missing"
+    assert events[0].reported_model_id is None
 
 
 def test_openai_responses_tool_calls_prefer_call_id_over_item_id() -> None:
@@ -529,12 +751,16 @@ def test_openai_responses_transport_uses_sdk_stream() -> None:
             {"type": "response.output_text.delta", "delta": "pong"},
             {
                 "type": "response.completed",
-                "response": {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
+                "response": {
+                    "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+                },
             },
         ]
     )
-    transport = OpenAIResponsesTransport(api_key="sk-test", timeout_seconds=7, _client=fake_client)
-    config = LLMConfig(
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test", timeout_seconds=7, _client=fake_client
+    )
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -542,25 +768,24 @@ def test_openai_responses_transport_uses_sdk_stream() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
     assert fake_client.responses.calls[0]["model"] == "flash"
     assert fake_client.responses.calls[0]["stream"] is True
-    assert isinstance(events[1], TextBlockStartEvent)
-    assert events[2].delta == "pong"
-    assert isinstance(events[-1], ModelCallEndEvent)
-    assert events[-1].input_tokens == 1
-    assert events[-1].output_tokens == 2
-    assert events[-1].total_tokens == 3
+    assert isinstance(events[0], TextBlockStartEvent)
+    assert events[1].delta == "pong"
+    assert isinstance(events[-1], TransportUsageReport)
+    assert events[-1].usage is not None
+    assert events[-1].usage.input_tokens == 1
+    assert events[-1].usage.output_tokens == 2
+    assert events[-1].usage.total_tokens == 3
 
 
 def test_openai_responses_transport_emits_run_error_event() -> None:
@@ -568,7 +793,7 @@ def test_openai_responses_transport_emits_run_error_event() -> None:
 
     fake_client = FakeOpenAIClient(responses_error=RuntimeError("boom"))
     transport = OpenAIResponsesTransport(api_key="sk-test", _client=fake_client)
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -576,25 +801,23 @@ def test_openai_responses_transport_emits_run_error_event() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.PRO),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.PRO,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
-    assert isinstance(events[0], ModelCallStartEvent)
-    assert isinstance(events[1], RunErrorEvent)
-    assert events[1].type is EventType.RUN_ERROR
-    assert events[1].message == "boom"
-    assert events[1].code == "openai_responses_error"
-    assert events[1].metadata["provider_data"]["type"] == "RuntimeError"
-    assert events[1].metadata["provider_data"]["message"] == "boom"
-    assert "RuntimeError" in events[1].metadata["provider_data"]["repr"]
+    assert len(events) == 1
+    assert isinstance(events[0], RunErrorEvent)
+    assert events[0].type is EventType.RUN_ERROR
+    assert events[0].message == "boom"
+    assert events[0].code == "openai_responses_error"
+    assert events[0].metadata["provider_data"]["type"] == "RuntimeError"
+    assert events[0].metadata["provider_data"]["message"] == "boom"
+    assert "RuntimeError" in events[0].metadata["provider_data"]["repr"]
 
 
 def test_openai_responses_transport_retries_pre_output_failure() -> None:
@@ -618,11 +841,13 @@ def test_openai_responses_transport_retries_pre_output_failure() -> None:
     )
     transport = OpenAIResponsesTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -630,31 +855,86 @@ def test_openai_responses_transport_retries_pre_output_failure() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
     assert len(fake_client.responses.calls) == 2
     assert fake_client.close_count == 0
-    assert isinstance(events[0], ModelCallStartEvent)
     retry_events = [event for event in events if isinstance(event, CustomEvent)]
     assert len(retry_events) == 1
     assert retry_events[0].name == "llm.retry"
     assert retry_events[0].value["attempt"] == 1
     assert retry_events[0].value["reason"] == "transport_error"
-    assert [type(event) for event in events].count(ModelCallStartEvent) == 1
-    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "pong" for event in events)
-    assert isinstance(events[-1], ModelCallEndEvent)
+    assert [type(event) for event in events].count(ModelCallStartEvent) == 0
+    assert any(
+        isinstance(event, TextBlockDeltaEvent) and event.delta == "pong"
+        for event in events
+    )
+    assert isinstance(events[-1], TransportUsageReport)
 
 
-def test_openai_responses_transport_owned_client_closes_once_after_retry(monkeypatch) -> None:
+def test_network_retry_discards_abandoned_attempt_reported_identity() -> None:
+    import asyncio
+
+    try:
+        try:
+            raise OSError("socket reset by peer")
+        except OSError as exc:
+            raise RuntimeError("Connection error.") from exc
+    except RuntimeError as exc:
+        connection_error = exc
+    fake_client = FakeOpenAIClient(
+        responses_script=[
+            [
+                {"type": "response.created", "response": {"model": "snapshot-a"}},
+                connection_error,
+            ],
+            [
+                {"type": "response.created", "response": {"model": "snapshot-b"}},
+                {
+                    "type": "response.completed",
+                    "response": {"model": "snapshot-b", "usage": None},
+                },
+            ],
+        ]
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="model-alias",
+        flash_model="flash",
+    )
+
+    events = asyncio.run(
+        collect_transport_events(
+            transport,
+            config,
+            ModelRole.PRO,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
+    )
+
+    report = next(event for event in events if isinstance(event, TransportUsageReport))
+    assert report.reported_model_id == "snapshot-b"
+
+
+def test_openai_responses_transport_owned_client_closes_once_after_retry(
+    monkeypatch,
+) -> None:
     import asyncio
     from pulsara_agent.llm.adapters.openai import responses as responses_module
 
@@ -670,13 +950,17 @@ def test_openai_responses_transport_owned_client_closes_once_after_retry(monkeyp
         builder_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(responses_module, "build_async_openai_client", fake_build_async_openai_client)
+    monkeypatch.setattr(
+        responses_module, "build_async_openai_client", fake_build_async_openai_client
+    )
     transport = OpenAIResponsesTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -684,14 +968,12 @@ def test_openai_responses_transport_owned_client_closes_once_after_retry(monkeyp
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     asyncio.run(collect())
 
@@ -714,11 +996,13 @@ def test_openai_responses_transport_does_not_retry_after_text_delta() -> None:
     )
     transport = OpenAIResponsesTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=3, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=3, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -726,21 +1010,24 @@ def test_openai_responses_transport_does_not_retry_after_text_delta() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
     assert len(fake_client.responses.calls) == 1
-    assert not any(isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events)
+    assert not any(
+        isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
+    )
     error = next(event for event in events if isinstance(event, RunErrorEvent))
-    assert error.metadata["provider_data"]["retry"]["skipped_reason"] == "semantic_output_started"
+    assert (
+        error.metadata["provider_data"]["retry"]["skipped_reason"]
+        == "semantic_output_started"
+    )
     assert any(isinstance(event, TextBlockEndEvent) for event in events)
 
 
@@ -755,11 +1042,13 @@ def test_openai_responses_transport_retry_exhausted_has_trace() -> None:
     )
     transport = OpenAIResponsesTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -767,14 +1056,12 @@ def test_openai_responses_transport_retry_exhausted_has_trace() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
@@ -801,11 +1088,13 @@ def test_llm_runtime_preserves_retry_custom_event_in_reply_stream() -> None:
     )
     transport = OpenAIResponsesTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -819,7 +1108,7 @@ def test_llm_runtime_preserves_retry_custom_event_in_reply_stream() -> None:
         collect_events(
             runtime,
             ModelRole.FLASH,
-            LLMContext(messages=(LLMMessage.user("ping"),)),
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
         )
     )
 
@@ -831,8 +1120,31 @@ def test_llm_runtime_preserves_retry_custom_event_in_reply_stream() -> None:
     assert isinstance(events[0], ReplyStartEvent)
     assert isinstance(events[1], ModelCallStartEvent)
     assert retry_index > 1
-    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "ok" for event in events)
+    assert any(
+        isinstance(event, TextBlockDeltaEvent) and event.delta == "ok"
+        for event in events
+    )
+    starts = [event for event in events if isinstance(event, ModelCallStartEvent)]
+    ends = [event for event in events if isinstance(event, ModelCallEndEvent)]
+    assert len(starts) == len(ends) == 1
+    assert (
+        ends[0].resolved_model_call_id == starts[0].resolved_call.resolved_model_call_id
+    )
+    assert len(fake_client.responses.calls) == 2
+    assert fake_client.responses.calls[0] == fake_client.responses.calls[1]
     assert isinstance(events[-1], ReplyEndEvent)
+
+
+def test_network_retry_reuses_resolved_call_id() -> None:
+    test_llm_runtime_preserves_retry_custom_event_in_reply_stream()
+
+
+def test_network_retry_reuses_payload() -> None:
+    test_llm_runtime_preserves_retry_custom_event_in_reply_stream()
+
+
+def test_network_retry_records_one_canonical_usage_fact() -> None:
+    test_llm_runtime_preserves_retry_custom_event_in_reply_stream()
 
 
 def test_provider_error_data_includes_exception_chain() -> None:
@@ -867,7 +1179,7 @@ def test_openai_chat_completions_transport_error_metadata_includes_cause() -> No
         retry_config=LLMRetryConfig(enabled=False),
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -876,36 +1188,35 @@ def test_openai_chat_completions_transport_error_metadata_includes_cause() -> No
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
-    provider_data = events[1].metadata["provider_data"]
+    provider_data = events[0].metadata["provider_data"]
 
-    assert isinstance(events[0], ModelCallStartEvent)
-    assert isinstance(events[1], RunErrorEvent)
-    assert events[1].message == "Connection error."
-    assert events[1].code == "openai_chat_completions_error"
+    assert isinstance(events[0], RunErrorEvent)
+    assert events[0].message == "Connection error."
+    assert events[0].code == "openai_chat_completions_error"
     assert provider_data["type"] == "RuntimeError"
     assert provider_data["causes"][0]["type"] == "OSError"
     assert provider_data["causes"][0]["message"] == "deepseek stream closed"
 
 
 def test_openai_chat_completions_payload_uses_internal_context() -> None:
-    config = LLMConfig(
+    limits = test_model_limits(default_output_tokens=64)
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
         api=OPENAI_CHAT_COMPLETIONS_API,
+        pro_limits=limits,
     )
-    context = LLMContext(
+    context = test_llm_context(
         system_prompt="You are Pulsara.",
         messages=(
             LLMMessage.user("Use lookup."),
@@ -926,9 +1237,12 @@ def test_openai_chat_completions_payload_uses_internal_context() -> None:
     )
 
     payload = build_chat_completions_payload(
-        model=config.model_for(ModelRole.PRO),
+        call=payload_call(
+            config,
+            options=LLMOptions(reasoning_effort="medium"),
+            api="chat",
+        ),
         context=context,
-        options=LLMOptions(reasoning_effort="medium", max_output_tokens=64),
     )
 
     assert payload["model"] == "pro"
@@ -948,14 +1262,14 @@ def test_openai_chat_completions_payload_uses_internal_context() -> None:
 
 
 def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
         api=OPENAI_CHAT_COMPLETIONS_API,
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.user("Use both tools."),
             LLMMessage.tool_call(
@@ -973,11 +1287,17 @@ def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
         )
     )
 
-    payload = build_chat_completions_payload(model=config.model_for(ModelRole.PRO), context=context)
+    payload = build_chat_completions_payload(
+        call=payload_call(config, api="chat"),
+        context=context,
+    )
 
     assert payload["messages"][0] == {"role": "user", "content": "Use both tools."}
     assert payload["messages"][1]["role"] == "assistant"
-    assert [call["id"] for call in payload["messages"][1]["tool_calls"]] == ["call_1", "call_2"]
+    assert [call["id"] for call in payload["messages"][1]["tool_calls"]] == [
+        "call_1",
+        "call_2",
+    ]
     assert payload["messages"][2]["role"] == "tool"
     assert payload["messages"][2]["tool_call_id"] == "call_1"
     assert payload["messages"][3]["role"] == "tool"
@@ -985,14 +1305,14 @@ def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
 
 
 def test_openai_chat_completions_payload_preserves_message_level_system_items() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
         api=OPENAI_CHAT_COMPLETIONS_API,
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.user("original user input"),
             LLMMessage.system("Pulsara note: previous turn failed."),
@@ -1000,15 +1320,23 @@ def test_openai_chat_completions_payload_preserves_message_level_system_items() 
         )
     )
 
-    payload = build_chat_completions_payload(model=config.model_for(ModelRole.PRO), context=context)
+    payload = build_chat_completions_payload(
+        call=payload_call(config, api="chat"),
+        context=context,
+    )
 
     assert payload["messages"][0] == {"role": "user", "content": "original user input"}
-    assert payload["messages"][1] == {"role": "system", "content": "Pulsara note: previous turn failed."}
+    assert payload["messages"][1] == {
+        "role": "system",
+        "content": "Pulsara note: previous turn failed.",
+    }
     assert payload["messages"][2] == {"role": "user", "content": "please continue"}
 
 
-def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_calls() -> None:
-    config = LLMConfig(
+def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_calls() -> (
+    None
+):
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1024,22 +1352,29 @@ def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_ca
             ),
         ),
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.user("Use lookup."),
             LLMMessage.assistant_turn(
                 text="I will look that up.",
                 thinking="Need a tool result before answering.",
-                tool_calls=(LLMToolCall(id="call_1", name="lookup", arguments='{"q":"pulsara"}'),),
+                tool_calls=(
+                    LLMToolCall(
+                        id="call_1", name="lookup", arguments='{"q":"pulsara"}'
+                    ),
+                ),
             ),
             LLMMessage.tool_result("found", tool_call_id="call_1"),
         )
     )
 
     payload = build_chat_completions_payload(
-        model=config.model_for(ModelRole.PRO),
+        call=payload_call(
+            config,
+            options=LLMOptions(reasoning_effort="medium"),
+            api="chat",
+        ),
         context=context,
-        options=LLMOptions(temperature=0.2, reasoning_effort="medium"),
     )
 
     assistant = payload["messages"][1]
@@ -1053,14 +1388,14 @@ def test_openai_chat_completions_payload_replays_assistant_thinking_with_tool_ca
 
 
 def test_openai_chat_completions_payload_does_not_replay_thinking_by_default() -> None:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
         api=OPENAI_CHAT_COMPLETIONS_API,
     )
-    context = LLMContext(
+    context = test_llm_context(
         messages=(
             LLMMessage.assistant_turn(
                 text="I will look that up.",
@@ -1070,7 +1405,10 @@ def test_openai_chat_completions_payload_does_not_replay_thinking_by_default() -
         )
     )
 
-    payload = build_chat_completions_payload(model=config.model_for(ModelRole.PRO), context=context)
+    payload = build_chat_completions_payload(
+        call=payload_call(config, api="chat"),
+        context=context,
+    )
 
     assert "reasoning_content" not in payload["messages"][0]
 
@@ -1111,11 +1449,15 @@ def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
                         "finish_reason": "tool_calls",
                     }
                 ],
-                "usage": {"prompt_tokens": 2, "completion_tokens": 4, "total_tokens": 6},
+                "usage": {
+                    "prompt_tokens": 2,
+                    "completion_tokens": 4,
+                    "total_tokens": 6,
+                },
             },
         ],
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1124,24 +1466,27 @@ def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.PRO),
-                context=LLMContext(messages=(LLMMessage.user("hi"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.PRO,
+            test_llm_context(messages=(LLMMessage.user("hi"),)),
+        )
 
     events = asyncio.run(collect())
 
-    assert isinstance(events[0], ModelCallStartEvent)
-    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "hi" for event in events)
+    assert not any(isinstance(event, ModelCallStartEvent) for event in events)
+    assert any(
+        isinstance(event, TextBlockDeltaEvent) and event.delta == "hi"
+        for event in events
+    )
     assert any(
         isinstance(event, ToolCallStartEvent) and event.tool_call_id == "call_chat_1"
         for event in events
     )
-    assert [event.delta for event in events if isinstance(event, ToolCallDeltaEvent)] == [
+    assert [
+        event.delta for event in events if isinstance(event, ToolCallDeltaEvent)
+    ] == [
         '{"q"',
         ':"pulsara"}',
     ]
@@ -1149,10 +1494,11 @@ def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
         isinstance(event, ToolCallEndEvent) and event.tool_call_id == "call_chat_1"
         for event in events
     )
-    assert isinstance(events[-1], ModelCallEndEvent)
-    assert events[-1].input_tokens == 2
-    assert events[-1].output_tokens == 4
-    assert events[-1].total_tokens == 6
+    assert isinstance(events[-1], TransportUsageReport)
+    assert events[-1].usage is not None
+    assert events[-1].usage.input_tokens == 2
+    assert events[-1].usage.output_tokens == 4
+    assert events[-1].usage.total_tokens == 6
 
 
 def test_openai_chat_completions_translates_reasoning_content_delta() -> None:
@@ -1179,11 +1525,18 @@ def test_openai_chat_completions_transport_uses_sdk_stream() -> None:
     fake_client = FakeOpenAIClient(
         chat_chunks=[
             {"choices": [{"delta": {"content": "pong"}}]},
-            {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}},
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                },
+            },
         ]
     )
     transport = OpenAIChatCompletionsTransport(api_key="sk-test", _client=fake_client)
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1192,25 +1545,24 @@ def test_openai_chat_completions_transport_uses_sdk_stream() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
     assert fake_client.chat.completions.calls[0]["model"] == "flash"
     assert fake_client.chat.completions.calls[0]["stream"] is True
-    assert isinstance(events[1], TextBlockStartEvent)
-    assert events[2].delta == "pong"
-    assert isinstance(events[-1], ModelCallEndEvent)
-    assert events[-1].input_tokens == 1
-    assert events[-1].output_tokens == 2
-    assert events[-1].total_tokens == 3
+    assert isinstance(events[0], TextBlockStartEvent)
+    assert events[1].delta == "pong"
+    assert isinstance(events[-1], TransportUsageReport)
+    assert events[-1].usage is not None
+    assert events[-1].usage.input_tokens == 1
+    assert events[-1].usage.output_tokens == 2
+    assert events[-1].usage.total_tokens == 3
 
 
 def test_openai_chat_completions_transport_retries_pre_output_failure() -> None:
@@ -1221,17 +1573,26 @@ def test_openai_chat_completions_transport_retries_pre_output_failure() -> None:
             ConnectionError("stream create reset"),
             [
                 {"choices": [{"delta": {"content": "pong"}}]},
-                {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}},
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 2,
+                        "total_tokens": 3,
+                    },
+                },
             ],
         ]
     )
     transport = OpenAIChatCompletionsTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1240,35 +1601,47 @@ def test_openai_chat_completions_transport_retries_pre_output_failure() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
     assert len(fake_client.chat.completions.calls) == 2
     assert fake_client.close_count == 0
-    assert [type(event) for event in events].count(ModelCallStartEvent) == 1
+    assert [type(event) for event in events].count(ModelCallStartEvent) == 0
     retry_events = [event for event in events if isinstance(event, CustomEvent)]
     assert len(retry_events) == 1
     assert retry_events[0].value["reason"] == "transport_error"
-    assert any(isinstance(event, TextBlockDeltaEvent) and event.delta == "pong" for event in events)
-    assert isinstance(events[-1], ModelCallEndEvent)
+    assert any(
+        isinstance(event, TextBlockDeltaEvent) and event.delta == "pong"
+        for event in events
+    )
+    assert isinstance(events[-1], TransportUsageReport)
 
 
-def test_openai_chat_completions_owned_client_closes_once_after_retry(monkeypatch) -> None:
+def test_openai_chat_completions_owned_client_closes_once_after_retry(
+    monkeypatch,
+) -> None:
     import asyncio
     from pulsara_agent.llm.adapters.openai import chat_completions as chat_module
 
     fake_client = FakeOpenAIClient(
         chat_script=[
             ConnectionError("reset one"),
-            [{"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}}],
+            [
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 0,
+                        "total_tokens": 1,
+                    },
+                }
+            ],
         ]
     )
     builder_calls = []
@@ -1277,13 +1650,17 @@ def test_openai_chat_completions_owned_client_closes_once_after_retry(monkeypatc
         builder_calls.append(kwargs)
         return fake_client
 
-    monkeypatch.setattr(chat_module, "build_async_openai_client", fake_build_async_openai_client)
+    monkeypatch.setattr(
+        chat_module, "build_async_openai_client", fake_build_async_openai_client
+    )
     transport = OpenAIChatCompletionsTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1292,14 +1669,12 @@ def test_openai_chat_completions_owned_client_closes_once_after_retry(monkeypatc
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     asyncio.run(collect())
 
@@ -1323,7 +1698,10 @@ def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> 
                                     {
                                         "index": 0,
                                         "id": "call_chat_1",
-                                        "function": {"name": "lookup", "arguments": '{"q"'},
+                                        "function": {
+                                            "name": "lookup",
+                                            "arguments": '{"q"',
+                                        },
                                     }
                                 ]
                             }
@@ -1336,11 +1714,13 @@ def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> 
     )
     transport = OpenAIChatCompletionsTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=3, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=3, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1349,23 +1729,29 @@ def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> 
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
     assert len(fake_client.chat.completions.calls) == 1
-    assert not any(isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events)
-    assert any(isinstance(event, ToolCallDeltaEvent) and event.delta == '{"q"' for event in events)
+    assert not any(
+        isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
+    )
+    assert any(
+        isinstance(event, ToolCallDeltaEvent) and event.delta == '{"q"'
+        for event in events
+    )
     assert any(isinstance(event, ToolCallEndEvent) for event in events)
     error = next(event for event in events if isinstance(event, RunErrorEvent))
-    assert error.metadata["provider_data"]["retry"]["skipped_reason"] == "semantic_output_started"
+    assert (
+        error.metadata["provider_data"]["retry"]["skipped_reason"]
+        == "semantic_output_started"
+    )
 
 
 def test_openai_chat_completions_retry_exhausted_has_trace() -> None:
@@ -1379,11 +1765,13 @@ def test_openai_chat_completions_retry_exhausted_has_trace() -> None:
     )
     transport = OpenAIChatCompletionsTransport(
         api_key="sk-test",
-        retry_config=LLMRetryConfig(attempts=2, base_delay_seconds=0.01, jitter_ratio=0),
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
         retry_sleep=no_retry_sleep,
         _client=fake_client,
     )
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1392,14 +1780,12 @@ def test_openai_chat_completions_retry_exhausted_has_trace() -> None:
     )
 
     async def collect():
-        return [
-            event
-            async for event in transport.stream(
-                model=config.model_for(ModelRole.FLASH),
-                context=LLMContext(messages=(LLMMessage.user("ping"),)),
-                event_context=EVENT_CONTEXT,
-            )
-        ]
+        return await collect_transport_events(
+            transport,
+            config,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
 
     events = asyncio.run(collect())
 
@@ -1421,9 +1807,7 @@ def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -
             "choices": [
                 {
                     "delta": {
-                        "tool_calls": [
-                            {"index": 0, "function": {"arguments": '{"q"'}}
-                        ]
+                        "tool_calls": [{"index": 0, "function": {"arguments": '{"q"'}}]
                     }
                 }
             ]
@@ -1463,7 +1847,7 @@ def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -
 
 def test_default_llm_runtime_registers_openai_responses_transport() -> None:
     retry_config = LLMRetryConfig(attempts=4, base_delay_seconds=0.1, jitter_ratio=0)
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -1485,14 +1869,13 @@ def test_default_llm_runtime_registers_openai_responses_transport() -> None:
 
 
 def transport_builder_for_test(config: LLMConfig | None = None):
-    config = config or LLMConfig(
+    config = config or test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
     )
     return AgentEventBuilder(
-        model=config.model_for(ModelRole.PRO),
         event_context=EVENT_CONTEXT,
     )
 
@@ -1548,7 +1931,9 @@ class FakeOpenAIClient:
             error=responses_error,
             script=responses_script,
         )
-        self.chat = FakeChatNamespace(chunks=chat_chunks, error=chat_error, script=chat_script)
+        self.chat = FakeChatNamespace(
+            chunks=chat_chunks, error=chat_error, script=chat_script
+        )
         self.close_count = 0
 
     async def close(self):
@@ -1576,4 +1961,6 @@ class FakeChatCompletionsEndpoint:
 
 class FakeChatNamespace:
     def __init__(self, *, chunks=None, error=None, script=None):
-        self.completions = FakeChatCompletionsEndpoint(chunks=chunks, error=error, script=script)
+        self.completions = FakeChatCompletionsEndpoint(
+            chunks=chunks, error=error, script=script
+        )

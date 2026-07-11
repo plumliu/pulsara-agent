@@ -71,7 +71,7 @@ async def run_memory_recall_dogfood(
             memory_domain_id=domain_id,
         ),
         model_role=ModelRole.FLASH,
-        options=LLMOptions(temperature=0, max_output_tokens=256),
+        options=LLMOptions(),
         system_prompt=_DOGFOOD_SYSTEM_PROMPT,
         memory_reflection=False,
     )
@@ -145,7 +145,7 @@ async def run_memory_recall_dogfood(
                 memory_domain_id=domain_id,
             ),
             model_role=ModelRole.FLASH,
-            options=LLMOptions(temperature=0, max_output_tokens=192),
+            options=LLMOptions(),
             system_prompt=_DOGFOOD_SYSTEM_PROMPT,
             memory_reflection=False,
         )
@@ -185,12 +185,18 @@ async def _run_turn(session, label: str, prompt: str) -> DogfoodTurn:
         status=result.status.value,
         final_text=result.final_text.strip(),
         tool_names=tuple(
-            event.tool_call_name for event in events if isinstance(event, ToolCallStartEvent)
+            event.tool_call_name
+            for event in events
+            if isinstance(event, ToolCallStartEvent)
         ),
         tool_result_texts=tuple(
-            event.delta for event in events if isinstance(event, ToolResultTextDeltaEvent)
+            event.delta
+            for event in events
+            if isinstance(event, ToolResultTextDeltaEvent)
         ),
-        projection_ids=tuple((result.state.memory_projection or {}).get("included_memory_ids") or ()),
+        projection_ids=tuple(
+            (result.state.memory_projection or {}).get("included_memory_ids") or ()
+        ),
     )
 
 
@@ -235,7 +241,11 @@ def _seed_memories(session, *, graph_id: str, hidden_scope: str) -> dict[str, st
             scope="ctx:user",
             applies_when="Any change targets production billing configuration.",
             do_not_apply_when="The work is read-only or confined to a disposable sandbox.",
-            trigger_keywords=("production billing", "billing configuration", "payment settings"),
+            trigger_keywords=(
+                "production billing",
+                "billing configuration",
+                "payment settings",
+            ),
             **common,
         ),
         Decision(
@@ -266,11 +276,16 @@ def _seed_memories(session, *, graph_id: str, hidden_scope: str) -> dict[str, st
 def _vector_row_count(dsn: str, graph_id: str) -> int:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT count(*) FROM memory_vector_index WHERE graph_id = %s", (graph_id,))
+            cursor.execute(
+                "SELECT count(*) FROM memory_vector_index WHERE graph_id = %s",
+                (graph_id,),
+            )
             return int(cursor.fetchone()[0])
 
 
-def _load_traces(dsn: str, graph_id: str, run_ids: set[str]) -> tuple[dict[str, Any], ...]:
+def _load_traces(
+    dsn: str, graph_id: str, run_ids: set[str]
+) -> tuple[dict[str, Any], ...]:
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -315,12 +330,23 @@ def _cleanup(dsn: str, *, graph_id: str, runtime_session_ids: list[str]) -> None
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM recall_traces WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,))
+            cursor.execute(
+                "DELETE FROM memory_write_outbox WHERE graph_id = %s", (graph_id,)
+            )
+            cursor.execute(
+                "DELETE FROM memory_relations WHERE graph_id = %s", (graph_id,)
+            )
+            cursor.execute(
+                "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
+            )
             cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))
-            cursor.execute("DELETE FROM artifacts WHERE session_id = ANY(%s)", (runtime_session_ids,))
-            cursor.execute("DELETE FROM sessions WHERE id = ANY(%s)", (runtime_session_ids,))
+            cursor.execute(
+                "DELETE FROM artifacts WHERE session_id = ANY(%s)",
+                (runtime_session_ids,),
+            )
+            cursor.execute(
+                "DELETE FROM sessions WHERE id = ANY(%s)", (runtime_session_ids,)
+            )
 
 
 _DOGFOOD_SYSTEM_PROMPT = """

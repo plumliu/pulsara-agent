@@ -5,16 +5,18 @@ import asyncio
 from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.llm import ModelRole
-from pulsara_agent.llm.config import LLMConfig
+from tests.support import test_llm_config
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 from tests.support.settings import compatibility_storage_config
 
 
-def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(tmp_path) -> None:
+def test_host_session_aclose_boundedly_cancels_inflight_retrieval_borrower(
+    tmp_path,
+) -> None:
     async def scenario() -> None:
         settings = PulsaraSettings(
-            llm=LLMConfig(
+            llm=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
                 pro_model="test-pro",

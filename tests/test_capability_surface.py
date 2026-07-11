@@ -8,7 +8,11 @@ import pytest
 
 from tests.support.runtime_session import in_memory_runtime_session
 
-from pulsara_agent.capability import LocalSkillCapabilityProvider, LocalSkillProvider, SkillHealthResolver
+from pulsara_agent.capability import (
+    LocalSkillCapabilityProvider,
+    LocalSkillProvider,
+    SkillHealthResolver,
+)
 from pulsara_agent.capability.descriptor import (
     CapabilityAdvertisePolicy,
     CapabilityArtifactMode,
@@ -21,14 +25,15 @@ from pulsara_agent.capability.exposure import build_exposure_plan
 from pulsara_agent.capability.provider import CapabilityProviderOutput
 from pulsara_agent.capability.registry import CapabilityRegistry
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResolveContext
+from pulsara_agent.capability.types import (
+    ActiveSkillInjection,
+    CapabilityResolveContext,
+)
 from pulsara_agent.event import (
     AgentEvent,
     CapabilityGateDecisionEvent,
     CustomEvent,
     EventContext,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     PlanModeEnteredEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -38,12 +43,19 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
     ToolResultEndEvent,
 )
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
+from pulsara_agent.llm import LLMRuntime
+from tests.support import run_agent_task, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultState
-from pulsara_agent.runtime import AgentRuntime, ApprovalResolution, LoopState, LoopStatus, ToolApprovalDecision
+from pulsara_agent.runtime import (
+    AgentRuntime,
+    ApprovalResolution,
+    LoopState,
+    LoopStatus,
+    ToolApprovalDecision,
+)
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     ApprovalPolicy,
@@ -72,7 +84,9 @@ class DummyTool:
     is_read_only: bool
     is_concurrency_safe: bool
     description: str = "dummy"
-    parameters: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
+    parameters: dict = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
     calls: list[str] = field(default_factory=list)
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
@@ -121,7 +135,9 @@ def _gate_decisions(agent: AgentRuntime) -> list[CapabilityGateDecisionEvent]:
     ]
 
 
-def _gate_decisions_by_call(agent: AgentRuntime) -> dict[str, CapabilityGateDecisionEvent]:
+def _gate_decisions_by_call(
+    agent: AgentRuntime,
+) -> dict[str, CapabilityGateDecisionEvent]:
     return {event.tool_call_id: event for event in _gate_decisions(agent)}
 
 
@@ -228,7 +244,9 @@ def test_agent_runtime_requires_explicit_capability_runtime(tmp_path) -> None:
         )
 
 
-def test_exposure_plan_separates_direct_deferred_hidden_unavailable_and_callable() -> None:
+def test_exposure_plan_separates_direct_deferred_hidden_unavailable_and_callable() -> (
+    None
+):
     exposure = _exposure_for_descriptors(
         _descriptor("direct"),
         _descriptor("deferred", advertise_policy=CapabilityAdvertisePolicy.DEFERRED),
@@ -262,9 +280,13 @@ def test_exposure_plan_hides_direct_descriptor_without_execution_binding() -> No
     ]
 
 
-def test_exposure_plan_diagnoses_non_direct_descriptor_without_execution_binding() -> None:
+def test_exposure_plan_diagnoses_non_direct_descriptor_without_execution_binding() -> (
+    None
+):
     exposure = _exposure_for_descriptors(
-        _descriptor("ghost_deferred", advertise_policy=CapabilityAdvertisePolicy.DEFERRED),
+        _descriptor(
+            "ghost_deferred", advertise_policy=CapabilityAdvertisePolicy.DEFERRED
+        ),
         bound_tool_names=frozenset(),
     )
 
@@ -278,7 +300,9 @@ def test_exposure_plan_diagnoses_non_direct_descriptor_without_execution_binding
 def test_capability_gate_denies_hidden_unavailable_and_not_callable_calls() -> None:
     hidden = _descriptor("hidden", advertise_policy=CapabilityAdvertisePolicy.HIDDEN)
     unavailable = _descriptor("down", availability=CapabilityAvailability.UNAVAILABLE)
-    deferred = _descriptor("deferred", advertise_policy=CapabilityAdvertisePolicy.DEFERRED)
+    deferred = _descriptor(
+        "deferred", advertise_policy=CapabilityAdvertisePolicy.DEFERRED
+    )
     exposure = _exposure_for_descriptors(hidden, unavailable, deferred)
     gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
@@ -289,10 +313,16 @@ def test_capability_gate_denies_hidden_unavailable_and_not_callable_calls() -> N
         inner=AllowAllPermissionGate(),
     )
 
-    hidden_decision = asyncio.run(gate.evaluate([ToolCall(id="call:hidden", name="hidden")], exposure=exposure))
-    unavailable_decision = asyncio.run(gate.evaluate([ToolCall(id="call:down", name="down")], exposure=exposure))
+    hidden_decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:hidden", name="hidden")], exposure=exposure)
+    )
+    unavailable_decision = asyncio.run(
+        gate.evaluate([ToolCall(id="call:down", name="down")], exposure=exposure)
+    )
     deferred_decision = asyncio.run(
-        gate.evaluate([ToolCall(id="call:deferred", name="deferred")], exposure=exposure)
+        gate.evaluate(
+            [ToolCall(id="call:deferred", name="deferred")], exposure=exposure
+        )
     )
 
     assert hidden_decision.kind is PermissionDecisionKind.DENY
@@ -300,10 +330,15 @@ def test_capability_gate_denies_hidden_unavailable_and_not_callable_calls() -> N
     assert unavailable_decision.kind is PermissionDecisionKind.DENY
     assert unavailable_decision.reason == "capability_unavailable: down"
     assert deferred_decision.kind is PermissionDecisionKind.DENY
-    assert deferred_decision.reason == "capability_not_callable_in_current_exposure: deferred"
+    assert (
+        deferred_decision.reason
+        == "capability_not_callable_in_current_exposure: deferred"
+    )
 
 
-def test_capability_gate_preserves_terminal_process_observe_contract_and_terminal_off() -> None:
+def test_capability_gate_preserves_terminal_process_observe_contract_and_terminal_off() -> (
+    None
+):
     terminal_process = CapabilityDescriptor(
         id="builtin:terminal_process",
         name="terminal_process",
@@ -319,7 +354,9 @@ def test_capability_gate_preserves_terminal_process_observe_contract_and_termina
         permission_category="terminal",
     )
     exposure = _exposure_for_descriptors(terminal_process)
-    observe = ToolCall(id="call:observe", name="terminal_process", arguments={"action": "list"})
+    observe = ToolCall(
+        id="call:observe", name="terminal_process", arguments={"action": "list"}
+    )
 
     ask_gate = PolicyPermissionGate(
         EffectivePermissionPolicy(
@@ -338,13 +375,21 @@ def test_capability_gate_preserves_terminal_process_observe_contract_and_termina
         inner=AllowAllPermissionGate(),
     )
 
-    assert asyncio.run(ask_gate.evaluate([observe], exposure=exposure)).kind is PermissionDecisionKind.ALLOW
+    assert (
+        asyncio.run(ask_gate.evaluate([observe], exposure=exposure)).kind
+        is PermissionDecisionKind.ALLOW
+    )
     off_decision = asyncio.run(off_gate.evaluate([observe], exposure=exposure))
     assert off_decision.kind is PermissionDecisionKind.DENY
-    assert off_decision.reason == "tool 'terminal_process' is not allowed by permission policy"
+    assert (
+        off_decision.reason
+        == "tool 'terminal_process' is not allowed by permission policy"
+    )
 
 
-def test_terminal_process_observe_gate_event_records_effective_category(tmp_path) -> None:
+def test_terminal_process_observe_gate_event_records_effective_category(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
             {
@@ -362,14 +407,18 @@ def test_terminal_process_observe_gate_event_records_effective_category(tmp_path
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=_runtime_for_descriptors(_descriptor("terminal_process", permission_category="terminal")),
+        capability_runtime=_runtime_for_descriptors(
+            _descriptor("terminal_process", permission_category="terminal")
+        ),
         permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("list processes"))
+    result = asyncio.run(run_agent_task(agent, "list processes"))
 
     assert result.status is LoopStatus.FINISHED
     gate_decision = _gate_decisions(agent)[0]
@@ -400,18 +449,25 @@ def test_wait_for_user_batch_suspension_reason_code(tmp_path) -> None:
         permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("read_file", is_read_only=True, is_concurrency_safe=True))
-    registry.register(DummyTool("terminal", is_read_only=False, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("read_file", is_read_only=True, is_concurrency_safe=True)
+    )
+    registry.register(
+        DummyTool("terminal", is_read_only=False, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("read and terminal"))
+    result = asyncio.run(run_agent_task(agent, "read and terminal"))
 
     assert result.status is LoopStatus.WAITING_USER
     gate_decisions = _gate_decisions_by_call(agent)
     assert gate_decisions["call:terminal"].decision == "wait_for_user"
     assert gate_decisions["call:terminal"].reason_code == "permission_wait_for_user"
     assert gate_decisions["call:read"].decision == "wait_for_user"
-    assert gate_decisions["call:read"].reason_code == "permission_wait_for_user_batch_suspension"
+    assert (
+        gate_decisions["call:read"].reason_code
+        == "permission_wait_for_user_batch_suspension"
+    )
     assert gate_decisions["call:read"].reason_message == (
         "terminal access requires user confirmation by permission policy"
     )
@@ -438,16 +494,23 @@ def test_multiple_independent_wait_calls_keep_own_reason_code(tmp_path) -> None:
         permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("write_file", is_read_only=False, is_concurrency_safe=True))
-    registry.register(DummyTool("terminal", is_read_only=False, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("write_file", is_read_only=False, is_concurrency_safe=True)
+    )
+    registry.register(
+        DummyTool("terminal", is_read_only=False, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("write and terminal"))
+    result = asyncio.run(run_agent_task(agent, "write and terminal"))
 
     assert result.status is LoopStatus.WAITING_USER
     gate_decisions = _gate_decisions_by_call(agent)
     assert gate_decisions["call:write"].reason_code == "permission_wait_for_user"
-    assert gate_decisions["call:write"].reason_message == "file write tool requires user confirmation by approval policy"
+    assert (
+        gate_decisions["call:write"].reason_message
+        == "file write tool requires user confirmation by approval policy"
+    )
     assert gate_decisions["call:terminal"].reason_code == "permission_wait_for_user"
     assert gate_decisions["call:terminal"].reason_message == (
         "terminal access requires user confirmation by permission policy"
@@ -478,13 +541,15 @@ def test_permission_prepass_does_not_invoke_inner_gate_per_call(tmp_path) -> Non
     registry.register(DummyTool("b", is_read_only=True, is_concurrency_safe=True))
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("call two tools"))
+    result = asyncio.run(run_agent_task(agent, "call two tools"))
 
     assert result.status is LoopStatus.FINISHED
     assert inner_gate.call_batches == [["call:a", "call:b"]]
 
 
-def test_workflow_control_emits_gate_decision_before_execution_and_suppresses_siblings(tmp_path) -> None:
+def test_workflow_control_emits_gate_decision_before_execution_and_suppresses_siblings(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
             {
@@ -505,11 +570,13 @@ def test_workflow_control_emits_gate_decision_before_execution_and_suppresses_si
         ),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("enter_plan", is_read_only=False, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("enter_plan", is_read_only=False, is_concurrency_safe=True)
+    )
     registry.register(DummyTool("noop", is_read_only=True, is_concurrency_safe=True))
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("enter plan and noop"))
+    result = asyncio.run(run_agent_task(agent, "enter plan and noop"))
 
     assert result.status is LoopStatus.FINISHED
     gate_decisions = _gate_decisions_by_call(agent)
@@ -517,7 +584,9 @@ def test_workflow_control_emits_gate_decision_before_execution_and_suppresses_si
     assert gate_decisions["call:plan"].permission_category == "plan_workflow"
     assert gate_decisions["call:noop"].decision == "deny"
     assert gate_decisions["call:noop"].result_state is ToolResultState.DENIED
-    assert gate_decisions["call:noop"].reason_code == "workflow_control_batch_suppressed"
+    assert (
+        gate_decisions["call:noop"].reason_code == "workflow_control_batch_suppressed"
+    )
     assert gate_decisions["call:noop"].reason_message == (
         "tool call suppressed because workflow control tool 'enter_plan' owns this tool batch"
     )
@@ -536,7 +605,9 @@ def test_hardline_terminal_reason_codes_are_stable_and_specific(tmp_path) -> Non
                     {
                         "id": "call:terminal-process",
                         "name": "terminal_process",
-                        "arguments": json.dumps({"action": "write", "data": "rm -rf /"}),
+                        "arguments": json.dumps(
+                            {"action": "write", "data": "rm -rf /"}
+                        ),
                     },
                 ]
             },
@@ -552,24 +623,38 @@ def test_hardline_terminal_reason_codes_are_stable_and_specific(tmp_path) -> Non
         ),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("terminal", is_read_only=False, is_concurrency_safe=True))
-    registry.register(DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("terminal", is_read_only=False, is_concurrency_safe=True)
+    )
+    registry.register(
+        DummyTool("terminal_process", is_read_only=False, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("dangerous terminal calls"))
+    result = asyncio.run(run_agent_task(agent, "dangerous terminal calls"))
 
     assert result.status is LoopStatus.FINISHED
     gate_decisions = _gate_decisions_by_call(agent)
     assert gate_decisions["call:terminal"].decision == "deny"
-    assert gate_decisions["call:terminal"].reason_code == "hardline_terminal_command_blocked"
+    assert (
+        gate_decisions["call:terminal"].reason_code
+        == "hardline_terminal_command_blocked"
+    )
     assert gate_decisions["call:terminal-process"].decision == "deny"
-    assert gate_decisions["call:terminal-process"].reason_code == "hardline_terminal_process_input_blocked"
+    assert (
+        gate_decisions["call:terminal-process"].reason_code
+        == "hardline_terminal_process_input_blocked"
+    )
 
 
 def test_degraded_descriptor_gate_event_projection(tmp_path) -> None:
     transport = _ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:degraded", "name": "degraded", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:degraded", "name": "degraded", "arguments": "{}"}
+                ]
+            },
             {"text": "done"},
         ]
     )
@@ -581,10 +666,12 @@ def test_degraded_descriptor_gate_event_projection(tmp_path) -> None:
         ),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("degraded", is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("degraded", is_read_only=True, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("call degraded"))
+    result = asyncio.run(run_agent_task(agent, "call degraded"))
 
     assert result.status is LoopStatus.FINISHED
     gate_decision = _gate_decisions(agent)[0]
@@ -605,7 +692,9 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
             tool_result_message_context_chars=20,
         ),
     )
-    context = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+    context = EventContext(
+        run_id="run:test", turn_id="turn:test", reply_id="reply:test"
+    )
     artifact_read = _descriptor("artifact_read")
     artifact_read = replace(artifact_read, artifact_mode=CapabilityArtifactMode.NEVER)
     always = _descriptor("small_json")
@@ -643,6 +732,8 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
 
 class _ScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[dict]) -> None:
         self.replies = replies
@@ -651,23 +742,18 @@ class _ScriptedTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        del options
+        del call
         self.contexts.append(context)
         reply = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         if "text" in reply:
             yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:1", delta=reply["text"])
+            yield TextBlockDeltaEvent(
+                **event_context.event_fields(), block_id="text:1", delta=reply["text"]
+            )
             yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
             yield ToolCallStartEvent(
@@ -680,15 +766,16 @@ class _ScriptedTransport:
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
-        yield ModelCallEndEvent(**event_context.event_fields())
+            yield ToolCallEndEvent(
+                **event_context.event_fields(), tool_call_id=call["id"]
+            )
 
 
 def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
     registry = LLMTransportRegistry()
     registry.register(transport)
     return LLMRuntime(
-        config=LLMConfig(
+        config=test_llm_config(
             api_key="sk-test",
             base_url="https://example.test/v1",
             pro_model="pro",
@@ -699,7 +786,9 @@ def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
     )
 
 
-def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(tmp_path) -> None:
+def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
             {"tool_calls": [{"id": "call:noop", "name": "noop", "arguments": "{}"}]},
@@ -715,12 +804,16 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(tmp_path
     registry.register(DummyTool("noop", is_read_only=True, is_concurrency_safe=True))
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("use noop"))
+    result = asyncio.run(run_agent_task(agent, "use noop"))
 
     assert result.status is LoopStatus.FINISHED
-    assert [[tool.name for tool in context.tools] for context in transport.contexts] == [["noop"], ["noop"]]
+    assert [
+        [tool.name for tool in context.tools] for context in transport.contexts
+    ] == [["noop"], ["noop"]]
     custom_events = [
-        event for event in agent.runtime_session.event_log.iter() if isinstance(event, CustomEvent)
+        event
+        for event in agent.runtime_session.event_log.iter()
+        if isinstance(event, CustomEvent)
     ]
     assert [event.name for event in custom_events] == ["capability_exposure_resolved"]
     assert custom_events[0].value["direct_names"] == ["noop"]
@@ -731,7 +824,10 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(tmp_path
     assert gate_decision.decision == "allow"
     assert gate_decision.reason_code is None
     assert gate_decision.permission_policy
-    assert gate_decision.exposure_generation == custom_events[0].value["registry_generation"]
+    assert (
+        gate_decision.exposure_generation
+        == custom_events[0].value["registry_generation"]
+    )
     assert gate_decision.availability == "available"
     assert gate_decision.permission_category == "general"
     assert gate_decision.effective_permission_category == "general"
@@ -739,10 +835,16 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(tmp_path
     assert gate_decision.capability_context == {}
 
 
-def test_terminal_gate_decision_records_active_skill_capability_context(tmp_path) -> None:
+def test_terminal_gate_decision_records_active_skill_capability_context(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                ]
+            },
             {"text": "done"},
         ]
     )
@@ -756,10 +858,12 @@ def test_terminal_gate_decision_records_active_skill_capability_context(tmp_path
         capability_runtime=_runtime_for_provider(provider),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("search with $firecrawl-search"))
+    result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
     assert result.status is LoopStatus.FINISHED
     gate_decision = _gate_decisions(agent)[0]
@@ -777,33 +881,49 @@ def test_terminal_gate_decision_records_active_skill_capability_context(tmp_path
     }
 
 
-def test_terminal_gate_decision_has_no_active_skill_context_without_active_skill(tmp_path) -> None:
+def test_terminal_gate_decision_has_no_active_skill_context_without_active_skill(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                ]
+            },
             {"text": "done"},
         ]
     )
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=_runtime_for_descriptors(_descriptor("terminal", permission_category="terminal")),
+        capability_runtime=_runtime_for_descriptors(
+            _descriptor("terminal", permission_category="terminal")
+        ),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("run terminal"))
+    result = asyncio.run(run_agent_task(agent, "run terminal"))
 
     assert result.status is LoopStatus.FINISHED
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.capability_context == {}
 
 
-def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(tmp_path) -> None:
+def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                ]
+            },
             {"text": "done"},
         ]
     )
@@ -818,22 +938,34 @@ def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(tmp
         permission_policy=preset_to_policy(PermissionMode.READ_ONLY),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("search with $firecrawl-search"))
+    result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
     assert result.status is LoopStatus.FINISHED
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.decision == "deny"
     assert gate_decision.result_state is ToolResultState.DENIED
-    assert gate_decision.capability_context["active_skill_names"] == ["firecrawl-search"]
+    assert gate_decision.capability_context["active_skill_names"] == [
+        "firecrawl-search"
+    ]
     assert gate_decision.capability_context["cli_required_binaries"] == ["firecrawl"]
 
 
-def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(tmp_path) -> None:
+def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
-        [{"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]}]
+        [
+            {
+                "tool_calls": [
+                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                ]
+            }
+        ]
     )
     provider = StaticCapabilityProvider(
         descriptors=(_descriptor("terminal", permission_category="terminal"),),
@@ -846,16 +978,20 @@ def test_asking_terminal_gate_decision_keeps_active_skill_capability_context(tmp
         permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("search with $firecrawl-search"))
+    result = asyncio.run(run_agent_task(agent, "search with $firecrawl-search"))
 
     assert result.status is LoopStatus.WAITING_USER
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.decision == "wait_for_user"
     assert gate_decision.reason_code == "permission_wait_for_user"
-    assert gate_decision.capability_context["active_skill_names"] == ["firecrawl-search"]
+    assert gate_decision.capability_context["active_skill_names"] == [
+        "firecrawl-search"
+    ]
 
 
 def test_huggingface_local_skill_terminal_context_dogfood(tmp_path) -> None:
@@ -880,13 +1016,19 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
     )
     transport = _ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:terminal", "name": "terminal", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                ]
+            },
             {"text": "done"},
         ]
     )
     provider = LocalSkillCapabilityProvider(
         provider=LocalSkillProvider(include_user_skills=False),
-        skill_health_resolver=SkillHealthResolver(which=lambda binary: "/usr/bin/git" if binary == "git" else None),
+        skill_health_resolver=SkillHealthResolver(
+            which=lambda binary: "/usr/bin/git" if binary == "git" else None
+        ),
     )
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
@@ -894,10 +1036,14 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
         capability_runtime=CapabilityRuntime.with_default_providers(provider),
     )
     registry = ToolRegistry()
-    registry.register(DummyTool("terminal", is_read_only=True, is_concurrency_safe=True))
+    registry.register(
+        DummyTool("terminal", is_read_only=True, is_concurrency_safe=True)
+    )
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("$huggingface-local-models list local model caches"))
+    result = asyncio.run(
+        run_agent_task(agent, "$huggingface-local-models list local model caches")
+    )
 
     assert result.status is LoopStatus.FINISHED
     system_prompt = transport.contexts[0].system_prompt or ""
@@ -907,19 +1053,24 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
     exposure_event = next(
         event.value
         for event in agent.runtime_session.event_log.iter()
-        if isinstance(event, CustomEvent) and event.name == "capability_exposure_resolved"
+        if isinstance(event, CustomEvent)
+        and event.name == "capability_exposure_resolved"
     )
     assert "skill_required_binary_missing" in [
         diagnostic["code"] for diagnostic in exposure_event["diagnostics"]
     ]
     gate_decision = _gate_decisions(agent)[0]
-    assert gate_decision.capability_context["active_skill_names"] == ["huggingface-local-models"]
+    assert gate_decision.capability_context["active_skill_names"] == [
+        "huggingface-local-models"
+    ]
     assert gate_decision.capability_context["cli_required_binaries"] == ["hf"]
     assert gate_decision.capability_context["cli_external_services"] == ["huggingface"]
     assert gate_decision.capability_context["auth_required"] == "optional"
 
 
-def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(tmp_path) -> None:
+def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
             {
@@ -941,7 +1092,7 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(tmp_
     registry.register(ok_tool)
     agent.tool_executor.registry = registry
 
-    result = asyncio.run(agent.run_task("call missing and ok"))
+    result = asyncio.run(run_agent_task(agent, "call missing and ok"))
 
     assert result.status is LoopStatus.FINISHED
     assert ok_tool.calls == ["call:ok"]
@@ -963,7 +1114,9 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(tmp_
     assert gate_decisions["call:ok"].result_state is None
 
 
-def test_agent_runtime_approval_resume_fails_closed_without_descriptor(tmp_path) -> None:
+def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport([{"text": "done"}])
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
@@ -971,6 +1124,7 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(tmp_path)
         capability_runtime=CapabilityRuntime(providers=()),
     )
     state = LoopState(session_id=agent.runtime_session.runtime_session_id)
+    state.run_model_target = agent.resolve_run_model_target()
     state.permission_snapshot = snapshot_from_mode(
         runtime_session_id=agent.runtime_session.runtime_session_id,
         run_id=state.run_id,
@@ -983,7 +1137,9 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(tmp_path)
         ToolCallBlock(
             id="call:write",
             name="write_file",
-            input=json.dumps({"path": "review_tmp.txt", "content": "should not be written"}),
+            input=json.dumps(
+                {"path": "review_tmp.txt", "content": "should not be written"}
+            ),
             state=ToolCallState.ASKING,
         )
     ]
@@ -993,7 +1149,9 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(tmp_path)
             state,
             ApprovalResolution(
                 approval_id="approval:test",
-                decisions=(ToolApprovalDecision(tool_call_id="call:write", confirmed=True),),
+                decisions=(
+                    ToolApprovalDecision(tool_call_id="call:write", confirmed=True),
+                ),
             ),
         )
     )
@@ -1006,17 +1164,26 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(tmp_path)
     assert gate_decision.descriptor_id is None
     assert gate_decision.decision == "deny"
     assert gate_decision.reason_code == "capability_descriptor_missing"
-    assert gate_decision.reason_message == "Unknown tool: write_file (capability_descriptor_missing)"
+    assert (
+        gate_decision.reason_message
+        == "Unknown tool: write_file (capability_descriptor_missing)"
+    )
     assert gate_decision.policy_mode == "bypass-permissions"
     assert gate_decision.permission_policy
     assert gate_decision.exposure_generation == 0
     assert gate_decision.result_state is ToolResultState.ERROR
 
 
-def test_agent_runtime_workflow_control_fails_closed_without_descriptor(tmp_path) -> None:
+def test_agent_runtime_workflow_control_fails_closed_without_descriptor(
+    tmp_path,
+) -> None:
     transport = _ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:plan", "name": "enter_plan", "arguments": "{}"}]},
+            {
+                "tool_calls": [
+                    {"id": "call:plan", "name": "enter_plan", "arguments": "{}"}
+                ]
+            },
             {"text": "done"},
         ]
     )
@@ -1026,14 +1193,20 @@ def test_agent_runtime_workflow_control_fails_closed_without_descriptor(tmp_path
         capability_runtime=CapabilityRuntime(providers=()),
     )
 
-    result = asyncio.run(agent.run_task("enter plan"))
+    result = asyncio.run(run_agent_task(agent, "enter plan"))
 
     assert result.status is LoopStatus.FINISHED
-    assert not any(isinstance(event, PlanModeEnteredEvent) for event in agent.runtime_session.event_log.iter())
+    assert not any(
+        isinstance(event, PlanModeEnteredEvent)
+        for event in agent.runtime_session.event_log.iter()
+    )
     assert not agent._plan_state(result.state).active
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.tool_call_id == "call:plan"
     assert gate_decision.decision == "deny"
     assert gate_decision.reason_code == "capability_descriptor_missing"
-    assert gate_decision.reason_message == "Unknown tool: enter_plan (capability_descriptor_missing)"
+    assert (
+        gate_decision.reason_message
+        == "Unknown tool: enter_plan (capability_descriptor_missing)"
+    )
     assert gate_decision.result_state is ToolResultState.ERROR

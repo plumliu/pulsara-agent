@@ -8,7 +8,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.host import HostCore, HostWorkspaceInput
-from pulsara_agent.llm.config import LLMConfig
+from tests.support import test_llm_config
 from pulsara_agent.memory.canonical.mutation_outbox import (
     CanonicalMutationLane,
     CanonicalMutationPayload,
@@ -107,7 +107,9 @@ def test_retrieval_resources_cancel_hung_tasks_with_bounded_shutdown() -> None:
     asyncio.run(scenario())
 
 
-def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(tmp_path, monkeypatch) -> None:
+def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(
+    tmp_path, monkeypatch
+) -> None:
     async def scenario() -> None:
         storage = StorageConfig.from_env()
         try:
@@ -121,7 +123,7 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(tmp_pat
             lambda _config: resources,
         )
         settings = PulsaraSettings(
-            llm=LLMConfig(
+            llm=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
                 pro_model="test-pro",
@@ -156,7 +158,16 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(tmp_pat
                     cursor.execute(MEMORY_SUBSTRATE_SCHEMA_SQL)
                     cursor.execute(
                         "INSERT INTO graph_documents (graph_id, id, type, payload) VALUES (%s, %s, 'Preference', %s)",
-                        (graph_id, memory_id, Jsonb({"@id": memory_id, "statement": "Worker materialization"})),
+                        (
+                            graph_id,
+                            memory_id,
+                            Jsonb(
+                                {
+                                    "@id": memory_id,
+                                    "statement": "Worker materialization",
+                                }
+                            ),
+                        ),
                     )
                     cursor.execute(
                         """
@@ -171,8 +182,7 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(tmp_pat
                     mutation_lane=CanonicalMutationLane.GOVERNED_MEMORY,
                     dirty_memory_ids=(memory_id,),
                     surface_apply_status={
-                        CanonicalMutationSurface.VECTOR_INDEX.value:
-                            CanonicalMutationSurfaceState.PENDING.value
+                        CanonicalMutationSurface.VECTOR_INDEX.value: CanonicalMutationSurfaceState.PENDING.value
                     },
                 ),
                 graph_id=graph_id,
@@ -193,15 +203,24 @@ def test_hostcore_shares_one_vector_worker_and_materializes_woken_outbox(tmp_pat
                             break
                 await asyncio.sleep(0.02)
             else:
-                raise AssertionError("HostCore vector worker did not materialize the outbox mutation")
+                raise AssertionError(
+                    "HostCore vector worker did not materialize the outbox mutation"
+                )
         finally:
             await core.shutdown()
             with psycopg.connect(storage.postgres_dsn) as connection:
                 with connection.cursor() as cursor:
                     if outbox_id:
-                        cursor.execute("DELETE FROM memory_write_outbox WHERE outbox_id = %s", (outbox_id,))
-                    cursor.execute("DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,))
-                    cursor.execute("DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,))
+                        cursor.execute(
+                            "DELETE FROM memory_write_outbox WHERE outbox_id = %s",
+                            (outbox_id,),
+                        )
+                    cursor.execute(
+                        "DELETE FROM graph_documents WHERE graph_id = %s", (graph_id,)
+                    )
+                    cursor.execute(
+                        "DELETE FROM memory_nodes WHERE graph_id = %s", (graph_id,)
+                    )
         assert resources.closed is True
         assert provider.close_calls == 1
 

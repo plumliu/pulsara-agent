@@ -10,8 +10,6 @@ from uuid import uuid4
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -23,16 +21,18 @@ from pulsara_agent.event import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
-from pulsara_agent.llm.models import ModelProfile
-from pulsara_agent.llm.usage import Usage
+from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.errors import LLMTransportContractError
+from pulsara_agent.llm.provider import ModelIdentityPolicy
+from pulsara_agent.primitives.model_call import (
+    ModelCallDiagnosticFact,
+    ModelTokenUsageFact,
+)
 
 
 @dataclass(slots=True)
 class AgentEventBuilder:
-    model: ModelProfile
     event_context: EventContext
-    context_id: str | None = None
-    model_call_index: int | None = None
     text_block_id: str | None = None
     thinking_block_id: str | None = None
     active_tool_call_ids: set[str] = field(default_factory=set)
@@ -42,25 +42,6 @@ class AgentEventBuilder:
 
     def event_fields(self) -> dict[str, str]:
         return self.event_context.event_fields()
-
-    def model_start(self) -> ModelCallStartEvent:
-        return ModelCallStartEvent(
-            **self.event_fields(),
-            model_name=self.model.id,
-            model_role=self.model.role.value,
-            provider=self.model.provider,
-            context_id=self.context_id,
-            model_call_index=self.model_call_index,
-        )
-
-    def model_end(self, usage: Usage | None = None) -> ModelCallEndEvent:
-        usage = usage or Usage()
-        return ModelCallEndEvent(
-            **self.event_fields(),
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-        )
 
     def run_error(
         self,
@@ -84,8 +65,14 @@ class AgentEventBuilder:
         events: list[AgentEvent] = []
         if self.text_block_id is None:
             self.text_block_id = f"text:{uuid4()}"
-            events.append(TextBlockStartEvent(**self.event_fields(), block_id=self.text_block_id))
-        events.append(TextBlockDeltaEvent(**self.event_fields(), block_id=self.text_block_id, delta=delta))
+            events.append(
+                TextBlockStartEvent(**self.event_fields(), block_id=self.text_block_id)
+            )
+        events.append(
+            TextBlockDeltaEvent(
+                **self.event_fields(), block_id=self.text_block_id, delta=delta
+            )
+        )
         return events
 
     def thinking_delta(self, delta: str) -> list[AgentEvent]:
@@ -96,7 +83,9 @@ class AgentEventBuilder:
         if self.thinking_block_id is None:
             self.thinking_block_id = f"thinking:{uuid4()}"
             events.append(
-                ThinkingBlockStartEvent(**self.event_fields(), block_id=self.thinking_block_id)
+                ThinkingBlockStartEvent(
+                    **self.event_fields(), block_id=self.thinking_block_id
+                )
             )
         events.append(
             ThinkingBlockDeltaEvent(
@@ -134,9 +123,15 @@ class AgentEventBuilder:
         self.has_semantic_output = True
         events: list[AgentEvent] = []
         if tool_call_id not in self.active_tool_call_ids:
-            events.extend(self.tool_call_start(tool_call_id=tool_call_id, tool_call_name=""))
+            events.extend(
+                self.tool_call_start(tool_call_id=tool_call_id, tool_call_name="")
+            )
         self.tool_call_has_arguments.add(tool_call_id)
-        events.append(ToolCallDeltaEvent(**self.event_fields(), tool_call_id=tool_call_id, delta=delta))
+        events.append(
+            ToolCallDeltaEvent(
+                **self.event_fields(), tool_call_id=tool_call_id, delta=delta
+            )
+        )
         return events
 
     def tool_call_end(self, *, tool_call_id: str) -> list[AgentEvent]:
@@ -146,11 +141,19 @@ class AgentEventBuilder:
         self.active_tool_call_ids.remove(tool_call_id)
         return [ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id)]
 
-    def tool_call(self, *, tool_call_id: str, tool_call_name: str, arguments: str) -> list[AgentEvent]:
+    def tool_call(
+        self, *, tool_call_id: str, tool_call_name: str, arguments: str
+    ) -> list[AgentEvent]:
         events: list[AgentEvent] = []
-        events.extend(self.tool_call_start(tool_call_id=tool_call_id, tool_call_name=tool_call_name))
+        events.extend(
+            self.tool_call_start(
+                tool_call_id=tool_call_id, tool_call_name=tool_call_name
+            )
+        )
         if arguments:
-            events.extend(self.tool_call_delta(tool_call_id=tool_call_id, delta=arguments))
+            events.extend(
+                self.tool_call_delta(tool_call_id=tool_call_id, delta=arguments)
+            )
         events.extend(self.tool_call_end(tool_call_id=tool_call_id))
         return events
 
@@ -163,13 +166,21 @@ class AgentEventBuilder:
     def close_active_blocks(self) -> list[AgentEvent]:
         events: list[AgentEvent] = []
         if self.text_block_id is not None:
-            events.append(TextBlockEndEvent(**self.event_fields(), block_id=self.text_block_id))
+            events.append(
+                TextBlockEndEvent(**self.event_fields(), block_id=self.text_block_id)
+            )
             self.text_block_id = None
         if self.thinking_block_id is not None:
-            events.append(ThinkingBlockEndEvent(**self.event_fields(), block_id=self.thinking_block_id))
+            events.append(
+                ThinkingBlockEndEvent(
+                    **self.event_fields(), block_id=self.thinking_block_id
+                )
+            )
             self.thinking_block_id = None
         for tool_call_id in list(self.active_tool_call_ids):
-            events.append(ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id))
+            events.append(
+                ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id)
+            )
             self.active_tool_call_ids.remove(tool_call_id)
         return events
 
@@ -191,6 +202,47 @@ def sdk_event_to_dict(raw_event: Any) -> dict[str, Any]:
     return {"value": raw_event}
 
 
+@dataclass(slots=True)
+class ReportedModelIdentityObserver:
+    """Observe one provider attempt without confusing aliases with fallback."""
+
+    requested_model_id: str
+    policy: ModelIdentityPolicy
+    reported_model_id: str | None = None
+
+    def observe(self, value: object) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        reported = value.strip()
+        if (
+            self.policy is ModelIdentityPolicy.EXACT
+            and reported != self.requested_model_id
+        ):
+            raise LLMTransportContractError(
+                "transport_changed_model_target: provider reported "
+                f"{reported!r}, expected exact identity {self.requested_model_id!r}",
+                reason_code="transport_changed_model_target",
+            )
+        if self.reported_model_id is not None and self.reported_model_id != reported:
+            raise LLMTransportContractError(
+                "transport_changed_model_target: provider model identity changed within stream",
+                reason_code="transport_changed_model_target",
+            )
+        self.reported_model_id = reported
+
+
+def responses_reported_model(raw_event: Any) -> object:
+    event = sdk_event_to_dict(raw_event)
+    response = event.get("response")
+    if isinstance(response, dict) and response.get("model") is not None:
+        return response.get("model")
+    return event.get("model")
+
+
+def chat_completion_reported_model(raw_chunk: Any) -> object:
+    return sdk_event_to_dict(raw_chunk).get("model")
+
+
 def arguments_to_json_string(raw_arguments: Any) -> str:
     if isinstance(raw_arguments, str):
         return raw_arguments
@@ -199,22 +251,65 @@ def arguments_to_json_string(raw_arguments: Any) -> str:
     return "{}"
 
 
-def usage_from_mapping(raw_usage: Any) -> Usage:
+def transport_usage_report_from_mapping(raw_usage: Any) -> TransportUsageReport:
     usage = sdk_event_to_dict(raw_usage) if raw_usage is not None else {}
     if not usage:
-        return Usage()
-    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
-    output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
-    total_tokens = usage.get("total_tokens", 0) or 0
-    return Usage(
-        input_tokens=int(input_tokens),
-        output_tokens=int(output_tokens),
-        total_tokens=int(total_tokens),
+        return TransportUsageReport(usage_status="missing", usage=None)
+    input_raw = usage.get("input_tokens", usage.get("prompt_tokens"))
+    output_raw = usage.get("output_tokens", usage.get("completion_tokens"))
+    if input_raw is None or output_raw is None:
+        return TransportUsageReport(
+            usage_status="missing",
+            usage=None,
+            provider_diagnostics=(
+                ModelCallDiagnosticFact(code="provider_usage_incomplete"),
+            ),
+        )
+    input_tokens = int(input_raw)
+    output_tokens = int(output_raw)
+    normalized_total = input_tokens + output_tokens
+    diagnostics: list[ModelCallDiagnosticFact] = []
+    provider_total = usage.get("total_tokens")
+    if provider_total is not None and int(provider_total) != normalized_total:
+        diagnostics.append(
+            ModelCallDiagnosticFact(
+                code="provider_usage_total_mismatch",
+                attributes=(
+                    ("normalized_total", normalized_total),
+                    ("provider_total", int(provider_total)),
+                ),
+            )
+        )
+    input_details = usage.get(
+        "input_tokens_details", usage.get("prompt_tokens_details")
     )
-
-
-def event_includes_model_end(events: list[AgentEvent]) -> bool:
-    return any(isinstance(event, ModelCallEndEvent) for event in events)
+    output_details = usage.get(
+        "output_tokens_details", usage.get("completion_tokens_details")
+    )
+    cached = (
+        input_details.get("cached_tokens")
+        if isinstance(input_details, dict)
+        and input_details.get("cached_tokens") is not None
+        else None
+    )
+    reasoning = (
+        output_details.get("reasoning_tokens")
+        if isinstance(output_details, dict)
+        and output_details.get("reasoning_tokens") is not None
+        else None
+    )
+    fact = ModelTokenUsageFact(
+        input_tokens=input_tokens,
+        cached_input_tokens=int(cached) if cached is not None else None,
+        output_tokens=output_tokens,
+        reasoning_output_tokens=int(reasoning) if reasoning is not None else None,
+        total_tokens=normalized_total,
+    )
+    return TransportUsageReport(
+        usage_status="reported",
+        usage=fact,
+        provider_diagnostics=tuple(diagnostics),
+    )
 
 
 def event_includes_run_error(events: list[AgentEvent]) -> bool:

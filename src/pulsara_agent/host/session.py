@@ -18,6 +18,7 @@ from pulsara_agent.event import (
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
+    RunStartEvent,
 )
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages
@@ -63,7 +64,11 @@ from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import McpServerStatus
 from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
-from pulsara_agent.capability.providers.mcp import McpCapabilityBindingBundle, McpCapabilityProvider, build_mcp_bundle
+from pulsara_agent.capability.providers.mcp import (
+    McpCapabilityBindingBundle,
+    McpCapabilityProvider,
+    build_mcp_bundle,
+)
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 
@@ -97,7 +102,9 @@ _STREAM_DONE = object()
 _STREAM_QUEUE_MAX_ITEMS = 128
 
 
-def _replace_mcp_tool_bindings(current: tuple[object, ...], mcp_tools: tuple[object, ...]) -> tuple[object, ...]:
+def _replace_mcp_tool_bindings(
+    current: tuple[object, ...], mcp_tools: tuple[object, ...]
+) -> tuple[object, ...]:
     return (
         *(tool for tool in current if not isinstance(tool, McpCapabilityTool)),
         *mcp_tools,
@@ -122,7 +129,9 @@ def _replace_mcp_capability_provider(
     return CapabilityRuntime(providers=tuple(providers))
 
 
-def _mcp_ready_server_ids(mcp_bundle: McpCapabilityBindingBundle | None) -> frozenset[str]:
+def _mcp_ready_server_ids(
+    mcp_bundle: McpCapabilityBindingBundle | None,
+) -> frozenset[str]:
     if mcp_bundle is None:
         return frozenset()
     return frozenset(
@@ -187,13 +196,25 @@ class HostSession:
     _suspended_state: LoopState | None = None
     _active_state: LoopState | None = None
     _active_task: asyncio.Task[Any] | None = None
-    _compaction_listeners: list[Callable[[AgentEvent], None]] = field(default_factory=list, init=False, repr=False)
-    _run_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _compaction_listeners: list[Callable[[AgentEvent], None]] = field(
+        default_factory=list, init=False, repr=False
+    )
+    _run_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _stop_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
-        reduced = reduce_plan_workflow_state(self.wiring.runtime_wiring.event_log.iter())
-        if reduced.active or reduced.latest_accepted_plan_summary or reduced.latest_accepted_plan_artifact_id:
+        reduced = reduce_plan_workflow_state(
+            self.wiring.runtime_wiring.event_log.iter()
+        )
+        if (
+            reduced.active
+            or reduced.latest_accepted_plan_summary
+            or reduced.latest_accepted_plan_artifact_id
+        ):
             self.plan_state = reduced
 
     @property
@@ -222,11 +243,19 @@ class HostSession:
     @property
     def terminal_summary(self) -> dict[str, object]:
         terminal_sessions = self.wiring.runtime_wiring.runtime_session.terminal_sessions
-        processes = terminal_sessions.list_processes(owner_host_session_id=self.host_session_id)
+        processes = terminal_sessions.list_processes(
+            owner_host_session_id=self.host_session_id
+        )
         return {
-            "has_live_processes": terminal_sessions.has_live_processes(owner_host_session_id=self.host_session_id),
-            "live_process_count": terminal_sessions.live_process_count(owner_host_session_id=self.host_session_id),
-            "finished_process_count": terminal_sessions.finished_process_count(owner_host_session_id=self.host_session_id),
+            "has_live_processes": terminal_sessions.has_live_processes(
+                owner_host_session_id=self.host_session_id
+            ),
+            "live_process_count": terminal_sessions.live_process_count(
+                owner_host_session_id=self.host_session_id
+            ),
+            "finished_process_count": terminal_sessions.finished_process_count(
+                owner_host_session_id=self.host_session_id
+            ),
             "pending_completion_count": terminal_sessions.pending_completion_count(
                 owner_host_session_id=self.host_session_id
             ),
@@ -244,7 +273,9 @@ class HostSession:
         supervisor = self.mcp_supervisor
         if supervisor is None:
             return
-        old_ready_server_ids = _mcp_ready_server_ids(self.wiring.runtime_wiring.mcp_bundle)
+        old_ready_server_ids = _mcp_ready_server_ids(
+            self.wiring.runtime_wiring.mcp_bundle
+        )
         configs = load_mcp_server_configs(workspace_root=self.workspace.workspace_root)
         manager = await supervisor.sync_servers(configs)
         mcp_bundle = build_mcp_bundle(manager) if manager is not None else None
@@ -263,7 +294,9 @@ class HostSession:
             ),
         )
         self.wiring.agent_runtime.refresh_capability_runtime(
-            _replace_mcp_capability_provider(self.wiring.agent_runtime.capability_runtime, mcp_bundle)
+            _replace_mcp_capability_provider(
+                self.wiring.agent_runtime.capability_runtime, mcp_bundle
+            )
         )
         if self._suspended_state is not None:
             self._suspended_state.scratchpad.pop("capability_exposure", None)
@@ -298,13 +331,18 @@ class HostSession:
         self._raise_if_active_run()
         async with self._run_lock:
             await self._sync_mcp_servers_for_turn()
-            prior_messages = await self._prepare_prior_messages_for_turn(user_input)
+            run_model_target = self.wiring.agent_runtime.resolve_run_model_target()
+            prior_messages = await self._prepare_prior_messages_for_turn(
+                user_input,
+                target_model_target=run_model_target,
+            )
             prior_messages.extend(self._plan_runtime_messages())
             state = self._begin_active_state()
             return await self._run_owned(
                 state,
                 lambda: self.wiring.agent_runtime.run_task(
                     user_input,
+                    run_model_target=run_model_target,
                     prior_messages=prior_messages,
                     state=state,
                     active_skill_names=active_skill_names,
@@ -324,13 +362,18 @@ class HostSession:
         self._raise_if_active_run()
         async with self._run_lock:
             await self._sync_mcp_servers_for_turn()
-            prior_messages = await self._prepare_prior_messages_for_turn(user_input)
+            run_model_target = self.wiring.agent_runtime.resolve_run_model_target()
+            prior_messages = await self._prepare_prior_messages_for_turn(
+                user_input,
+                target_model_target=run_model_target,
+            )
             prior_messages.extend(self._plan_runtime_messages())
             state = self._begin_active_state()
             async for event in self._stream_owned(
                 state,
                 lambda: self.wiring.agent_runtime.stream_task(
                     user_input,
+                    run_model_target=run_model_target,
                     prior_messages=prior_messages,
                     state=state,
                     active_skill_names=active_skill_names,
@@ -339,7 +382,11 @@ class HostSession:
                 yield event
 
     def get_pending_approval(self) -> PendingApproval | None:
-        return self.pending_interaction if isinstance(self.pending_interaction, PendingApproval) else None
+        return (
+            self.pending_interaction
+            if isinstance(self.pending_interaction, PendingApproval)
+            else None
+        )
 
     def get_pending_interaction(self) -> PendingInteraction | None:
         return self.pending_interaction
@@ -369,7 +416,9 @@ class HostSession:
     def current_permission_policy(self) -> EffectivePermissionPolicy:
         return self.effective_next_run_permission_policy()
 
-    def set_permission_mode(self, mode: str | PermissionMode) -> EffectivePermissionPolicy:
+    def set_permission_mode(
+        self, mode: str | PermissionMode
+    ) -> EffectivePermissionPolicy:
         """Switch the conversation's permission mode at a turn boundary.
 
         Only the user/host may call this; the agent has no self-switch tool.
@@ -403,7 +452,9 @@ class HostSession:
             state = self._resume_active_state(pending)
             return await self._run_owned(
                 state,
-                lambda: self.wiring.agent_runtime.resume_after_approval(state, resolution),
+                lambda: self.wiring.agent_runtime.resume_after_approval(
+                    state, resolution
+                ),
             )
 
     async def stream_approval_resolution(
@@ -420,7 +471,9 @@ class HostSession:
             state = self._resume_active_state(pending)
             async for event in self._stream_owned(
                 state,
-                lambda: self.wiring.agent_runtime.stream_after_approval(state, resolution),
+                lambda: self.wiring.agent_runtime.stream_after_approval(
+                    state, resolution
+                ),
             ):
                 yield event
 
@@ -439,7 +492,9 @@ class HostSession:
             self._prepare_state_for_plan(state)
             return await self._run_owned(
                 state,
-                lambda: self.wiring.agent_runtime.resume_after_plan_interaction(state, resolution),
+                lambda: self.wiring.agent_runtime.resume_after_plan_interaction(
+                    state, resolution
+                ),
             )
 
     async def resolve_mcp_elicitation(
@@ -456,7 +511,9 @@ class HostSession:
             state = self._resume_active_state(pending)
             return await self._run_owned(
                 state,
-                lambda: self.wiring.agent_runtime.resume_after_mcp_elicitation(state, resolution),
+                lambda: self.wiring.agent_runtime.resume_after_mcp_elicitation(
+                    state, resolution
+                ),
             )
 
     async def resolve_mcp_input_required(
@@ -473,7 +530,9 @@ class HostSession:
             state = self._resume_active_state(pending)
             return await self._run_owned(
                 state,
-                lambda: self.wiring.agent_runtime.resume_after_mcp_input_required(state, resolution),
+                lambda: self.wiring.agent_runtime.resume_after_mcp_input_required(
+                    state, resolution
+                ),
             )
 
     async def exit_plan_workflow(
@@ -524,10 +583,14 @@ class HostSession:
             await self._emit_plan_mode_exited(
                 state,
                 source=source,
-                exit_request_id=pending.exit_request_id if isinstance(pending, PendingPlanInteraction) else None,
+                exit_request_id=pending.exit_request_id
+                if isinstance(pending, PendingPlanInteraction)
+                else None,
             )
             if pending is not None:
-                await self.wiring.agent_runtime.abort_run(state, reason=AbortKind.USER_STOP)
+                await self.wiring.agent_runtime.abort_run(
+                    state, reason=AbortKind.USER_STOP
+                )
                 self._suspended_state = None
                 self.suspended_run_id = None
                 self.pending_interaction = None
@@ -548,7 +611,9 @@ class HostSession:
             self._prepare_state_for_plan(state)
             async for event in self._stream_owned(
                 state,
-                lambda: self.wiring.agent_runtime.stream_after_plan_interaction(state, resolution),
+                lambda: self.wiring.agent_runtime.stream_after_plan_interaction(
+                    state, resolution
+                ),
             ):
                 yield event
 
@@ -574,7 +639,9 @@ class HostSession:
                     self.stopping_run_id = state.run_id
                     self.last_active_at = time.monotonic()
                     try:
-                        result = await self.wiring.agent_runtime.abort_run(state, reason=reason)
+                        result = await self.wiring.agent_runtime.abort_run(
+                            state, reason=reason
+                        )
                         self._capture_pending_interaction(result.state)
                         return result
                     finally:
@@ -624,16 +691,28 @@ class HostSession:
             event_log = self.wiring.runtime_wiring.event_log
             before_sequence = await asyncio.to_thread(event_log.next_sequence)
             try:
-                event = await service.compact(trigger="manual", reason="user_requested", force=True)
+                target = self.wiring.agent_runtime.resolve_run_model_target()
+                event = await service.compact(
+                    target_model_target=target,
+                    trigger="manual",
+                    reason="user_requested",
+                    force=True,
+                )
             finally:
                 await self._publish_compaction_events_after(before_sequence)
             return {
                 "compacted": event is not None,
                 "compaction_id": event.compaction_id if event is not None else None,
-                "summary_artifact_id": event.summary_artifact_id if event is not None else None,
+                "summary_artifact_id": event.summary_artifact_id
+                if event is not None
+                else None,
                 "window_id": event.window_id if event is not None else None,
-                "through_sequence": event.through_sequence if event is not None else None,
-                "keep_after_sequence": event.keep_after_sequence if event is not None else None,
+                "through_sequence": event.through_sequence
+                if event is not None
+                else None,
+                "keep_after_sequence": event.keep_after_sequence
+                if event is not None
+                else None,
             }
 
     # -- Close / teardown -----------------------------------------------------
@@ -671,9 +750,13 @@ class HostSession:
         if self._lifecycle is HostSessionLifecycle.CLOSED:
             return
         self.begin_close()
-        await self.drain_active_run(reason=reason, timeout_seconds=drain_timeout_seconds)
+        await self.drain_active_run(
+            reason=reason, timeout_seconds=drain_timeout_seconds
+        )
         await self._finalize_suspended_run(reason)
-        subagent_runtime = getattr(self.wiring.runtime_wiring.runtime_session, "subagent_runtime", None)
+        subagent_runtime = getattr(
+            self.wiring.runtime_wiring.runtime_session, "subagent_runtime", None
+        )
         if subagent_runtime is not None:
             await subagent_runtime.cancel_active_children(
                 reason_code="subagent_host_session_close",
@@ -748,8 +831,12 @@ class HostSession:
             "stopping_run_id": self.stopping_run_id,
             "is_stopping": self.stopping_run_id is not None,
             "suspended_run_id": self.suspended_run_id,
-            "pending_approval": self.get_pending_approval().to_dict() if self.get_pending_approval() is not None else None,
-            "pending_interaction": self.pending_interaction.to_dict() if self.pending_interaction is not None else None,
+            "pending_approval": self.get_pending_approval().to_dict()
+            if self.get_pending_approval() is not None
+            else None,
+            "pending_interaction": self.pending_interaction.to_dict()
+            if self.pending_interaction is not None
+            else None,
             "plan": self.plan_state.to_dict(),
             "has_live_processes": self.has_live_processes,
             "terminal": self.terminal_summary,
@@ -767,6 +854,18 @@ class HostSession:
 
     def _resume_active_state(self, pending: PendingInteraction) -> LoopState:
         state = self._require_suspended_state(pending)
+        starts = [
+            event
+            for event in self.wiring.runtime_wiring.event_log.iter()
+            if isinstance(event, RunStartEvent) and event.run_id == state.run_id
+        ]
+        if len(starts) != 1:
+            raise RuntimeError(
+                "suspended run requires exactly one durable RunStart model target contract"
+            )
+        state.run_model_target = self.wiring.agent_runtime.rebind_run_model_target(
+            starts[0].model_target
+        )
         self.active_run_id = state.run_id
         self._active_state = state
         self.last_active_at = time.monotonic()
@@ -785,7 +884,9 @@ class HostSession:
                     request = state.stop_request
                     if request is None:
                         raise
-                    result = await self.wiring.agent_runtime.abort_run(state, reason=request.reason)
+                    result = await self.wiring.agent_runtime.abort_run(
+                        state, reason=request.reason
+                    )
                 self._capture_pending_interaction(result.state)
                 self._clear_plan_entry_audit_if_emitted(result.state)
                 return result
@@ -814,12 +915,16 @@ class HostSession:
             except asyncio.CancelledError:
                 request = state.stop_request
                 if request is not None:
-                    async for event in self.wiring.agent_runtime.stream_abort_run(state, reason=request.reason):
+                    async for event in self.wiring.agent_runtime.stream_abort_run(
+                        state, reason=request.reason
+                    ):
                         await observer.emit(event)
                     await observer.emit(_STREAM_DONE)
                     return
                 raise
-            except Exception as exc:  # surface to consumer, mirror prior direct-iteration semantics
+            except (
+                Exception
+            ) as exc:  # surface to consumer, mirror prior direct-iteration semantics
                 await observer.emit(_StreamError(exc))
                 await observer.emit(_STREAM_DONE)
                 return
@@ -859,14 +964,20 @@ class HostSession:
         self.stopping_run_id = None
         self.last_active_at = time.monotonic()
 
-    async def _prepare_prior_messages_for_turn(self, user_input: str):
+    async def _prepare_prior_messages_for_turn(
+        self,
+        user_input: str,
+        *,
+        target_model_target,
+    ):
         prior_messages = self._prior_messages()
         service = self.wiring.runtime_wiring.compaction_service
         if service is not None:
             compacted = await self._compact_if_needed_and_notify(
                 service,
-                current_user_input=user_input,
-                model_visible_messages=prior_messages,
+                target_model_target=target_model_target,
+                current_user_input_if_not_already_represented=user_input,
+                model_visible_messages_before=prior_messages,
                 reason="preflight_context_threshold",
             )
             if compacted:
@@ -891,15 +1002,23 @@ class HostSession:
             self._notify_compaction_listeners(terminal_event)
         return compacted
 
-    async def _publish_compaction_events_after(self, before_sequence: int) -> list[AgentEvent]:
-        compaction_events = await asyncio.to_thread(self._compaction_events_after, before_sequence - 1)
-        self.wiring.runtime_wiring.runtime_session.publish_stored_events(compaction_events)
+    async def _publish_compaction_events_after(
+        self, before_sequence: int
+    ) -> list[AgentEvent]:
+        compaction_events = await asyncio.to_thread(
+            self._compaction_events_after, before_sequence - 1
+        )
+        self.wiring.runtime_wiring.runtime_session.publish_stored_events(
+            compaction_events
+        )
         return compaction_events
 
     def _compaction_events_after(self, after_sequence: int) -> list[AgentEvent]:
         return [
             event
-            for event in self.wiring.runtime_wiring.event_log.iter(after_sequence=after_sequence)
+            for event in self.wiring.runtime_wiring.event_log.iter(
+                after_sequence=after_sequence
+            )
             if isinstance(
                 event,
                 (
@@ -911,11 +1030,15 @@ class HostSession:
             )
         ]
 
-    def _latest_terminal_compaction_event(self, events: list[AgentEvent]) -> AgentEvent | None:
+    def _latest_terminal_compaction_event(
+        self, events: list[AgentEvent]
+    ) -> AgentEvent | None:
         terminal_events = [
             event
             for event in events
-            if isinstance(event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent))
+            if isinstance(
+                event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent)
+            )
         ]
         return terminal_events[-1] if terminal_events else None
 
@@ -929,13 +1052,21 @@ class HostSession:
     def _capture_pending_interaction(self, state: LoopState) -> None:
         if state.status is LoopStatus.WAITING_USER:
             if state.pending_interaction_kind == "plan":
-                self.pending_interaction = pending_plan_interaction_from_state(state, self.host_session_id)
+                self.pending_interaction = pending_plan_interaction_from_state(
+                    state, self.host_session_id
+                )
             elif state.pending_interaction_kind == "mcp_elicitation":
-                self.pending_interaction = pending_mcp_elicitation_from_state(state, self.host_session_id)
+                self.pending_interaction = pending_mcp_elicitation_from_state(
+                    state, self.host_session_id
+                )
             elif state.pending_interaction_kind == "mcp_input_required":
-                self.pending_interaction = pending_mcp_input_required_from_state(state, self.host_session_id)
+                self.pending_interaction = pending_mcp_input_required_from_state(
+                    state, self.host_session_id
+                )
             else:
-                self.pending_interaction = pending_approval_from_state(state, self.host_session_id)
+                self.pending_interaction = pending_approval_from_state(
+                    state, self.host_session_id
+                )
             self._suspended_state = state
             self.suspended_run_id = state.run_id
             return
@@ -957,28 +1088,42 @@ class HostSession:
             raise ValueError("approval id does not match the pending approval")
         return pending
 
-    def _require_pending_plan_interaction(self, interaction_id: str) -> PendingPlanInteraction:
+    def _require_pending_plan_interaction(
+        self, interaction_id: str
+    ) -> PendingPlanInteraction:
         pending = self.pending_interaction
         if not isinstance(pending, PendingPlanInteraction):
             raise ValueError("host session has no pending plan interaction")
         if pending.interaction_id != interaction_id:
-            raise ValueError("plan interaction id does not match the pending interaction")
+            raise ValueError(
+                "plan interaction id does not match the pending interaction"
+            )
         return pending
 
-    def _require_pending_mcp_elicitation(self, interaction_id: str) -> PendingMcpElicitation:
+    def _require_pending_mcp_elicitation(
+        self, interaction_id: str
+    ) -> PendingMcpElicitation:
         pending = self.pending_interaction
         if not isinstance(pending, PendingMcpElicitation):
             raise ValueError("host session has no pending MCP elicitation")
         if pending.interaction_id != interaction_id:
-            raise ValueError("MCP elicitation id does not match the pending interaction")
+            raise ValueError(
+                "MCP elicitation id does not match the pending interaction"
+            )
         return pending
 
-    def _require_pending_mcp_input_required(self, interaction_id: str) -> PendingMcpInputRequired:
+    def _require_pending_mcp_input_required(
+        self, interaction_id: str
+    ) -> PendingMcpInputRequired:
         pending = self.pending_interaction
         if not isinstance(pending, PendingMcpInputRequired):
-            raise ValueError("host session has no pending MCP input-required interaction")
+            raise ValueError(
+                "host session has no pending MCP input-required interaction"
+            )
         if pending.interaction_id != interaction_id:
-            raise ValueError("MCP input-required id does not match the pending interaction")
+            raise ValueError(
+                "MCP input-required id does not match the pending interaction"
+            )
         return pending
 
     def _require_suspended_state(self, pending: PendingInteraction) -> LoopState:
@@ -1021,7 +1166,8 @@ class HostSession:
                 reply_id=f"reply:host-plan-entry:{suffix}",
                 source="user",
                 previous_permission_mode=self.plan_state.pre_plan_permission_mode,
-                previous_permission_policy=self.plan_state.pre_plan_permission_policy or {},
+                previous_permission_policy=self.plan_state.pre_plan_permission_policy
+                or {},
                 reason=reason,
             )
         )
@@ -1054,7 +1200,8 @@ class HostSession:
             state.scratchpad["plan_entry_audit"] = {
                 "source": "user",
                 "previous_permission_mode": self.plan_state.pre_plan_permission_mode,
-                "previous_permission_policy": self.plan_state.pre_plan_permission_policy or {},
+                "previous_permission_policy": self.plan_state.pre_plan_permission_policy
+                or {},
                 "reason": self.plan_state.entry_reason,
             }
 
@@ -1065,7 +1212,9 @@ class HostSession:
     def _pre_plan_policy(self) -> EffectivePermissionPolicy:
         payload = self.plan_state.pre_plan_permission_policy or {}
         if not payload or self.plan_state.pre_plan_permission_mode is None:
-            raise ValueError("plan workflow is missing preset previous permission facts")
+            raise ValueError(
+                "plan workflow is missing preset previous permission facts"
+            )
         validate_preset_policy_payload(
             self.plan_state.pre_plan_permission_mode,
             dict(payload),

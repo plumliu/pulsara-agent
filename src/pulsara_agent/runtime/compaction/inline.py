@@ -17,6 +17,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.message import Msg
 from pulsara_agent.runtime.compaction.planner import latest_completed_boundary
 from pulsara_agent.runtime.compaction.service import ContextCompactionService
@@ -39,6 +40,7 @@ class RuntimeContextCompactorProtocol(Protocol):
         *,
         state: LoopState,
         model_visible_messages: list[Msg],
+        protected_model_visible_messages_after: tuple[LLMMessage, ...],
     ) -> MidTurnCompactionResult: ...
 
 
@@ -49,8 +51,9 @@ class NoopRuntimeContextCompactor:
         *,
         state: LoopState,
         model_visible_messages: list[Msg],
+        protected_model_visible_messages_after: tuple[LLMMessage, ...],
     ) -> MidTurnCompactionResult:
-        del state, model_visible_messages
+        del state, model_visible_messages, protected_model_visible_messages_after
         return MidTurnCompactionResult(compacted=False, skipped_reason="disabled")
 
 
@@ -66,6 +69,7 @@ class RuntimeContextCompactor:
         *,
         state: LoopState,
         model_visible_messages: list[Msg],
+        protected_model_visible_messages_after: tuple[LLMMessage, ...],
     ) -> MidTurnCompactionResult:
         guard_reason = self._safe_point_guard(state)
         if guard_reason is not None:
@@ -93,7 +97,10 @@ class RuntimeContextCompactor:
             archive=self.archive,
             session_id=self.runtime_session.runtime_session_id,
         )
-        if latest_boundary is not None and max_compactable_sequence <= latest_boundary.keep_after_sequence:
+        if (
+            latest_boundary is not None
+            and max_compactable_sequence <= latest_boundary.keep_after_sequence
+        ):
             diagnostic = await self._emit_skip_diagnostic(
                 state,
                 reason="no_compactable_prefix_before_current_run",
@@ -120,10 +127,32 @@ class RuntimeContextCompactor:
                 skipped_reason="current_run_tail_missing",
             )
 
+        if not protected_model_visible_messages_after:
+            diagnostic = await self._emit_skip_diagnostic(
+                state,
+                reason="current_run_rendered_tail_missing",
+                current_run_start_sequence=current_run_start_sequence,
+                max_compactable_sequence=max_compactable_sequence,
+            )
+            return MidTurnCompactionResult(
+                compacted=False,
+                events=(diagnostic,),
+                skipped_reason="current_run_rendered_tail_missing",
+            )
+
         before_sequence = await asyncio.to_thread(self.event_log.next_sequence)
         try:
+            if state.run_model_target is None:
+                raise RuntimeError(
+                    "mid-turn compaction requires the frozen run model target"
+                )
             compacted = await self.service.compact_if_needed(
-                model_visible_messages=model_visible_messages,
+                target_model_target=state.run_model_target,
+                model_visible_messages_before=model_visible_messages,
+                protected_model_visible_messages_after=(
+                    protected_model_visible_messages_after
+                ),
+                current_user_input_if_not_already_represented="",
                 reason="mid_turn_context_threshold",
                 max_compactable_sequence=max_compactable_sequence,
                 keep_recent_runs_override=1,
@@ -138,11 +167,17 @@ class RuntimeContextCompactor:
                 },
             )
         finally:
-            compaction_events = await asyncio.to_thread(self._compaction_events_after, before_sequence - 1)
+            compaction_events = await asyncio.to_thread(
+                self._compaction_events_after, before_sequence - 1
+            )
             self.runtime_session.publish_stored_events(compaction_events, state=state)
 
         if not compacted:
-            return MidTurnCompactionResult(compacted=False, events=tuple(compaction_events), skipped_reason="not_needed")
+            return MidTurnCompactionResult(
+                compacted=False,
+                events=tuple(compaction_events),
+                skipped_reason="not_needed",
+            )
 
         completed = _latest_completed(compaction_events)
         if completed is None:
@@ -158,10 +193,7 @@ class RuntimeContextCompactor:
             session_id=self.runtime_session.runtime_session_id,
             before_sequence=current_run_start_sequence,
         )
-        rewritten = tuple(
-            message.model_copy(deep=True)
-            for message in [*prefix, *tail]
-        )
+        rewritten = tuple(message.model_copy(deep=True) for message in [*prefix, *tail])
         state.compacted = True
         state.scratchpad["mid_turn_compaction"] = {
             "compaction_id": completed.compaction_id,
@@ -187,7 +219,11 @@ class RuntimeContextCompactor:
         if state.stop_request is not None:
             return "stop_requested"
         completed_tool_ids = {result.id for result in state.tool_results}
-        missing_results = [call.id for call in state.pending_tool_calls if call.id not in completed_tool_ids]
+        missing_results = [
+            call.id
+            for call in state.pending_tool_calls
+            if call.id not in completed_tool_ids
+        ]
         if missing_results:
             return "pending_tool_results"
         return None
@@ -244,7 +280,11 @@ def _current_run_tail_from_state(state: LoopState) -> list[Msg]:
     in_current_run = False
     user_message_id = f"user-message:{state.run_id}"
     for message in state.messages:
-        metadata_run_id = message.metadata.get("run_id") if isinstance(message.metadata, dict) else None
+        metadata_run_id = (
+            message.metadata.get("run_id")
+            if isinstance(message.metadata, dict)
+            else None
+        )
         if metadata_run_id == state.run_id or message.id == user_message_id:
             in_current_run = True
         if in_current_run:
@@ -252,7 +292,9 @@ def _current_run_tail_from_state(state: LoopState) -> list[Msg]:
     return tail
 
 
-def _latest_completed(events: list[AgentEvent]) -> ContextCompactionCompletedEvent | None:
+def _latest_completed(
+    events: list[AgentEvent],
+) -> ContextCompactionCompletedEvent | None:
     for event in reversed(events):
         if isinstance(event, ContextCompactionCompletedEvent):
             return event

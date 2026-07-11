@@ -11,6 +11,7 @@ from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, Usage
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
 
 if TYPE_CHECKING:
+    from pulsara_agent.llm.resolution import ResolvedModelTarget
     from pulsara_agent.runtime.recovery import (
         AbortKind,
         InRunRecoveryState,
@@ -108,6 +109,7 @@ class LoopState:
     scratchpad: dict[str, Any] = field(default_factory=dict)
     budget: LoopBudget = field(default_factory=LoopBudget)
     permission_snapshot: RunPermissionSnapshot | None = None
+    run_model_target: ResolvedModelTarget | None = None
 
     def begin_next_turn(self) -> None:
         self.turn_index += 1

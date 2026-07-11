@@ -10,8 +10,6 @@ from pulsara_agent.event import (
     EventContext,
     EventType,
     MemoryWriteResultEvent,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -25,9 +23,11 @@ from pulsara_agent.event import (
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
+from pulsara_agent.llm import LLMRuntime
+from tests.support import test_llm_config, test_model_limits
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.memory import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
@@ -51,39 +51,50 @@ from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
+from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from tests.support.memory_uow import fake_memory_uow_factory
 
 
 class _ScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
-    def __init__(self, replies: list[str]) -> None:
+    def __init__(
+        self,
+        replies: list[str],
+        *,
+        usage: ModelTokenUsageFact | None = None,
+    ) -> None:
         self.replies = replies
+        self.usage = usage
         self.contexts: list[LLMContext] = []
 
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
         self.contexts.append(context)
         text = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-        yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:1", delta=text)
+        yield TextBlockDeltaEvent(
+            **event_context.event_fields(), block_id="text:1", delta=text
+        )
         yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
-        yield ModelCallEndEvent(**event_context.event_fields())
+        if self.usage is not None:
+            yield TransportUsageReport(
+                usage_status="reported",
+                usage=self.usage,
+                reported_model_id=call.target.fact.model_id,
+            )
 
 
-def test_memory_governance_engine_submits_pending_candidate_with_synthetic_context() -> None:
+def test_memory_governance_engine_submits_pending_candidate_with_synthetic_context() -> (
+    None
+):
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     log = InMemoryEventLog()
@@ -124,10 +135,19 @@ def test_memory_governance_engine_submits_pending_candidate_with_synthetic_conte
         EventType.MEMORY_CANDIDATE_PROPOSED,
         EventType.MEMORY_WRITE_RESULT,
     ]
-    assert all(event.run_id == "run:governance/governance:test:engine" for event in result.applied[0].events)
+    assert all(
+        event.run_id == "run:governance/governance:test:engine"
+        for event in result.applied[0].events
+    )
     assert pool.list_pending() == []
     assert len(graph.find_by_type(memory.PREFERENCE)) == 1
     assert "Memory Governance Agent" in transport.contexts[0].system_prompt
+    assert result.resolved_model_call is not None
+    assert result.resolved_model_call.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
+    assert result.usage_status == "missing"
+    assert result.usage is None
+    assert result.estimated_input_tokens is not None
+    assert result.estimated_input_tokens > 0
 
 
 def test_memory_governance_engine_exposes_whole_batch_and_merges_before_apply() -> None:
@@ -216,9 +236,25 @@ def test_governance_compaction_candidate_uses_bounded_window_evidence_view() -> 
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     log = InMemoryEventLog()
-    source_ctx = EventContext(run_id="run:source:compaction", turn_id="turn:source:compaction", reply_id="reply:source:compaction")
-    first = log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:one", delta="The user asks to sync release."))
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:two", delta="The user asks to push GitHub."))
+    source_ctx = EventContext(
+        run_id="run:source:compaction",
+        turn_id="turn:source:compaction",
+        reply_id="reply:source:compaction",
+    )
+    first = log.append(
+        TextBlockDeltaEvent(
+            **source_ctx.event_fields(),
+            block_id="text:one",
+            delta="The user asks to sync release.",
+        )
+    )
+    log.append(
+        TextBlockDeltaEvent(
+            **source_ctx.event_fields(),
+            block_id="text:two",
+            delta="The user asks to push GitHub.",
+        )
+    )
     candidate = pool.append_candidate(
         _pooled_preference(
             source_run_id="run:compaction:attribution",
@@ -254,7 +290,9 @@ def test_governance_compaction_candidate_uses_bounded_window_evidence_view() -> 
 
     assert snapshot["origin"] == "compaction"
     assert snapshot["metadata"]["summary_excerpt"].startswith("The user repeatedly")
-    assert snapshot["attribution_context"]["source_run_id"] == "run:compaction:attribution"
+    assert (
+        snapshot["attribution_context"]["source_run_id"] == "run:compaction:attribution"
+    )
     evidence_view = snapshot["compaction_evidence_view"]
     assert evidence_view["compaction_id"] == "context_compaction:test"
     assert evidence_view["summary_artifact_id"] == "context_compaction:test:summary"
@@ -291,7 +329,9 @@ def test_memory_governance_parser_accepts_contradict_and_submit() -> None:
     )
 
     assert [decision.kind for decision in output.decisions] == ["contradict_and_submit"]
-    assert output.decisions[0].contradicted_memory_ids == ("preference:likes-egg-tarts",)
+    assert output.decisions[0].contradicted_memory_ids == (
+        "preference:likes-egg-tarts",
+    )
 
 
 def test_memory_governance_engine_invalid_target_returns_error_without_write() -> None:
@@ -339,14 +379,22 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     log = InMemoryEventLog()
-    candidate = pool.append_candidate(_pooled_preference(source_run_id="run:source:audit"))
+    candidate = pool.append_candidate(
+        _pooled_preference(source_run_id="run:source:audit")
+    )
     assert isinstance(candidate.payload, ValidCandidatePayload)
-    existing = candidate.payload.candidate.model_copy(update={"candidate_id": "candidate:existing"})
+    existing = candidate.payload.candidate.model_copy(
+        update={"candidate_id": "candidate:existing"}
+    )
     existing_outcome = _service_on(graph).submit(
         existing,
-        event_context=EventContext(run_id="run:old", turn_id="turn:old", reply_id="reply:old"),
+        event_context=EventContext(
+            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
+        ),
     )
-    assert any(isinstance(event, MemoryWriteResultEvent) for event in existing_outcome.events)
+    assert any(
+        isinstance(event, MemoryWriteResultEvent) for event in existing_outcome.events
+    )
     log.extend(
         [
             ToolCallStartEvent(
@@ -389,14 +437,18 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
                 reply_id=candidate.source_reply_id,
                 tool_call_id="call:remember",
                 state=ToolResultState.SUCCESS,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             ),
         ]
     )
     pool.append_decision(
         MemoryGovernanceDecisionRecord(
             governance_batch_id="governance:test:previous-failure",
-            decision=SubmitAsIsDecision(target_entry_id=candidate.entry_id, reason="previous try"),
+            decision=SubmitAsIsDecision(
+                target_entry_id=candidate.entry_id, reason="previous try"
+            ),
             write_outcome=WriteFailedOutcome(
                 error_type="RuntimeError",
                 message="temporary store failure",
@@ -440,9 +492,17 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
     assert snapshot["entry_id"] == candidate.entry_id
     assert snapshot["user_quote"] == "Please remember that I prefer concise summaries."
     assert snapshot["content_key"]
-    assert any(event["tool_call_name"] == "remember_preference" for event in snapshot["source_events"])
-    assert any("status" in event.get("delta", "") for event in snapshot["source_events"])
-    assert snapshot["prior_governance_decisions"][0]["write_outcome"]["kind"] == "write_failed"
+    assert any(
+        event["tool_call_name"] == "remember_preference"
+        for event in snapshot["source_events"]
+    )
+    assert any(
+        "status" in event.get("delta", "") for event in snapshot["source_events"]
+    )
+    assert (
+        snapshot["prior_governance_decisions"][0]["write_outcome"]["kind"]
+        == "write_failed"
+    )
     assert snapshot["related_existing_memories"][0]["memory_id"]
     assert snapshot["related_existing_memories"][0]["is_exact_duplicate"] is True
 
@@ -462,18 +522,113 @@ def test_memory_governance_engine_empty_pool_does_not_call_llm() -> None:
     assert result.decisions == []
     assert result.applied == []
     assert transport.contexts == []
+    assert result.resolved_model_call is None
+    assert result.usage_status is None
+    assert result.usage is None
+    assert result.estimated_input_tokens is None
 
 
-def test_related_existing_memories_returns_active_same_scope_type_ranked_and_marks_duplicates() -> None:
+def test_governance_resolves_direct_call() -> None:
+    test_memory_governance_engine_submits_pending_candidate_with_synthetic_context()
+
+
+def test_governance_empty_batch_does_not_resolve_call() -> None:
+    test_memory_governance_engine_empty_pool_does_not_call_llm()
+
+
+def test_governance_result_carries_call_fact() -> None:
+    test_memory_governance_engine_submits_pending_candidate_with_synthetic_context()
+
+
+def test_governance_result_carries_usage_without_durable_session_projection() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    pool.append_candidate(_pooled_preference())
+    usage = ModelTokenUsageFact(
+        input_tokens=101,
+        cached_input_tokens=11,
+        output_tokens=7,
+        reasoning_output_tokens=None,
+        total_tokens=108,
+    )
+    transport = _ScriptedTransport(
+        [json.dumps({"reason": "skip", "decisions": []})],
+        usage=usage,
+    )
+    engine = MemoryGovernanceEngine(
+        llm_runtime=_llm_runtime(transport),
+        executor=_executor(pool=pool, graph=graph, log=log),
+    )
+
+    result = asyncio.run(engine.run_pending(trigger_reason="usage-contract"))
+
+    assert result.resolved_model_call is not None
+    assert result.usage_status == "reported"
+    assert result.usage == usage
+    assert result.estimated_input_tokens is not None
+    assert result.reported_model_id == result.resolved_model_call.target.model_id
+    # Governance deliberately has no independent session-event append in this
+    # hard cut; the later governance-UOW chapter owns durable history.
+    assert log.iter(run_id=result.resolved_model_call.resolved_model_call_id) == []
+
+
+def test_governance_oversized_context_fails_before_provider() -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    log = InMemoryEventLog()
+    pool.append_candidate(_pooled_preference(statement="x" * 8_000))
+    transport = _ScriptedTransport([])
+    runtime = _llm_runtime(
+        transport,
+        flash_limits=test_model_limits(
+            total_context_tokens=256,
+            max_input_tokens=224,
+            max_output_tokens=64,
+            default_output_tokens=32,
+            input_safety_margin_tokens=8,
+        ),
+    )
+    engine = MemoryGovernanceEngine(
+        llm_runtime=runtime,
+        executor=_executor(pool=pool, graph=graph, log=log),
+        options=MemoryGovernanceOptions(llm_options=LLMOptions()),
+    )
+
+    result = asyncio.run(engine.run_pending(trigger_reason="oversized"))
+
+    assert result.error_type == "ModelInputBudgetExceeded"
+    assert result.resolved_model_call is not None
+    assert result.usage_status == "missing"
+    assert result.usage is None
+    assert result.estimated_input_tokens is not None
+    assert transport.contexts == []
+
+
+def test_direct_call_rejection_uses_subsystem_terminal_fact() -> None:
+    test_governance_oversized_context_fails_before_provider()
+
+
+def test_pr1_direct_validation_rejection_writes_subsystem_terminal_failure() -> None:
+    test_governance_oversized_context_fails_before_provider()
+
+
+def test_related_existing_memories_returns_active_same_scope_type_ranked_and_marks_duplicates() -> (
+    None
+):
     graph = InMemoryGraphStore()
     service = _service_on(graph)
     service.submit(
         _preference("candidate:dup", "The user prefers concise summaries."),
-        event_context=EventContext(run_id="run:dup", turn_id="turn:dup", reply_id="reply:dup"),
+        event_context=EventContext(
+            run_id="run:dup", turn_id="turn:dup", reply_id="reply:dup"
+        ),
     )
     service.submit(
         _preference("candidate:unrelated", "The user likes dark mode in the IDE."),
-        event_context=EventContext(run_id="run:un", turn_id="turn:un", reply_id="reply:un"),
+        event_context=EventContext(
+            run_id="run:un", turn_id="turn:un", reply_id="reply:un"
+        ),
     )
     candidate = _pooled_preference()
 
@@ -564,12 +719,17 @@ def _pooled_preference(
     )
 
 
-def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
-    config = LLMConfig(
+def _llm_runtime(
+    transport: _ScriptedTransport,
+    *,
+    flash_limits=None,
+) -> LLMRuntime:
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
+        flash_limits=flash_limits,
         api="scripted",
     )
     registry = LLMTransportRegistry()

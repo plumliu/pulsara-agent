@@ -13,8 +13,6 @@ from tests.conftest import run_start_permission_fields
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     RunEndEvent,
     RunStartEvent,
     TextBlockDeltaEvent,
@@ -26,10 +24,15 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.host.identity import resolve_workspace
-from pulsara_agent.host.session_manifest import SessionManifest, SessionManifestStore, permission_policy_from_manifest
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
+from pulsara_agent.host.session_manifest import (
+    SessionManifest,
+    SessionManifestStore,
+    permission_policy_from_manifest,
+)
+from pulsara_agent.llm import LLMRuntime, ModelRole
+from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
@@ -44,6 +47,8 @@ from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
 class ScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[str]) -> None:
         self.replies = replies
@@ -52,27 +57,24 @@ class ScriptedTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        del call
         self.contexts.append(context)
         text = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
+        yield TextBlockStartEvent(
+            **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
         )
-        yield TextBlockStartEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
         yield TextBlockDeltaEvent(
             **event_context.event_fields(),
             block_id=f"text:{len(self.contexts)}",
             delta=text,
         )
-        yield TextBlockEndEvent(**event_context.event_fields(), block_id=f"text:{len(self.contexts)}")
-        yield ModelCallEndEvent(**event_context.event_fields())
+        yield TextBlockEndEvent(
+            **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
+        )
 
 
 def _settings_or_skip() -> PulsaraSettings:
@@ -84,7 +86,7 @@ def _settings_or_skip() -> PulsaraSettings:
     except psycopg.OperationalError as exc:
         pytest.skip(f"Postgres is not available at configured DSN: {exc}")
     return PulsaraSettings(
-        llm=LLMConfig(
+        llm=test_llm_config(
             api_key="sk-test",
             base_url="https://example.test/v1",
             pro_model="pro",
@@ -95,7 +97,9 @@ def _settings_or_skip() -> PulsaraSettings:
     )
 
 
-def _patch_llm(monkeypatch, settings: PulsaraSettings, transport: ScriptedTransport) -> None:
+def _patch_llm(
+    monkeypatch, settings: PulsaraSettings, transport: ScriptedTransport
+) -> None:
     registry = LLMTransportRegistry()
     registry.register(transport)
 
@@ -129,11 +133,15 @@ def _delete_session(dsn: str, runtime_session_id: str) -> None:
 def _session_row(dsn: str, runtime_session_id: str):
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("select metadata from sessions where id = %s", (runtime_session_id,))
+            cursor.execute(
+                "select metadata from sessions where id = %s", (runtime_session_id,)
+            )
             return cursor.fetchone()
 
 
-def test_resume_reopens_same_runtime_session_and_replays_prior_messages(tmp_path, monkeypatch) -> None:
+def test_resume_reopens_same_runtime_session_and_replays_prior_messages(
+    tmp_path, monkeypatch
+) -> None:
     settings = _settings_or_skip()
     transport = ScriptedTransport(["first durable reply", "second durable reply"])
     _patch_llm(monkeypatch, settings, transport)
@@ -149,7 +157,9 @@ def test_resume_reopens_same_runtime_session_and_replays_prior_messages(tmp_path
         )
         await session.run_turn("first durable user")
         runtime_session_id = session.runtime_session_id
-        await first_core.shutdown()  # detach process resources, keep durable conversation resumable
+        await (
+            first_core.shutdown()
+        )  # detach process resources, keep durable conversation resumable
 
         second_core = HostCore(settings=settings)
         resumed = await second_core.resume_session(
@@ -160,8 +170,12 @@ def test_resume_reopens_same_runtime_session_and_replays_prior_messages(tmp_path
         assert resumed.runtime_session_id == runtime_session_id
         assert resumed.host_session_id != session.host_session_id
         await resumed.run_turn("second durable user")
-        summaries = await second_core.list_resumable_sessions(workspace_input=_workspace(tmp_path), limit=5)
-        await second_core.close_session(resumed.host_session_id, close_conversation=True)
+        summaries = await second_core.list_resumable_sessions(
+            workspace_input=_workspace(tmp_path), limit=5
+        )
+        await second_core.close_session(
+            resumed.host_session_id, close_conversation=True
+        )
         await second_core.shutdown()
         return summaries
 
@@ -170,7 +184,9 @@ def test_resume_reopens_same_runtime_session_and_replays_prior_messages(tmp_path
         assert runtime_session_id is not None
         assert "first durable user" in _context_text(transport.contexts[1])
         assert "first durable reply" in _context_text(transport.contexts[1])
-        assert any(summary.runtime_session_id == runtime_session_id for summary in summaries)
+        assert any(
+            summary.runtime_session_id == runtime_session_id for summary in summaries
+        )
         row = _session_row(settings.storage.postgres_dsn, runtime_session_id)
         assert row is not None
         assert row[0]["lifecycle"]["closed_at"] is not None
@@ -206,7 +222,9 @@ def test_closed_runtime_session_is_not_resumable(tmp_path, monkeypatch) -> None:
             _delete_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
-def test_resume_restores_manifest_permission_mode_when_not_overridden(tmp_path, monkeypatch) -> None:
+def test_resume_restores_manifest_permission_mode_when_not_overridden(
+    tmp_path, monkeypatch
+) -> None:
     settings = _settings_or_skip()
     transport = ScriptedTransport(["first"])
     _patch_llm(monkeypatch, settings, transport)
@@ -224,9 +242,13 @@ def test_resume_restores_manifest_permission_mode_when_not_overridden(tmp_path, 
         await first_core.shutdown()
 
         second_core = HostCore(settings=settings)
-        resumed = await second_core.resume_session(runtime_session_id, model_role=ModelRole.FLASH)
+        resumed = await second_core.resume_session(
+            runtime_session_id, model_role=ModelRole.FLASH
+        )
         mode = resumed.current_permission_mode
-        await second_core.close_session(resumed.host_session_id, close_conversation=True)
+        await second_core.close_session(
+            resumed.host_session_id, close_conversation=True
+        )
         await second_core.shutdown()
         return mode
 
@@ -238,7 +260,9 @@ def test_resume_restores_manifest_permission_mode_when_not_overridden(tmp_path, 
             _delete_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
-def test_manifest_permission_mode_without_policy_recovers_that_preset_not_default() -> None:
+def test_manifest_permission_mode_without_policy_recovers_that_preset_not_default() -> (
+    None
+):
     manifest = SessionManifest(
         runtime_session_id="runtime:manifest:read-only",
         conversation_id="conversation:manifest:read-only",
@@ -281,11 +305,15 @@ def test_manifest_without_permission_facts_is_contract_error() -> None:
         metadata={},
     )
 
-    with pytest.raises(ValueError, match="permission_mode and permission_policy are required"):
+    with pytest.raises(
+        ValueError, match="permission_mode and permission_policy are required"
+    ):
         permission_policy_from_manifest(manifest)
 
 
-def test_session_manifest_rejects_custom_policy_that_only_matches_preset_axes(tmp_path) -> None:
+def test_session_manifest_rejects_custom_policy_that_only_matches_preset_axes(
+    tmp_path,
+) -> None:
     settings = _settings_or_skip()
     store = SessionManifestStore(settings.storage.postgres_dsn)
     runtime_session_id = f"runtime:manifest-custom:{uuid4().hex}"
@@ -310,7 +338,9 @@ def test_session_manifest_rejects_custom_policy_that_only_matches_preset_axes(tm
         _delete_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
-def test_resume_repairs_dangling_running_run_before_replay(tmp_path, monkeypatch) -> None:
+def test_resume_repairs_dangling_running_run_before_replay(
+    tmp_path, monkeypatch
+) -> None:
     settings = _settings_or_skip()
     transport = ScriptedTransport(["after repair"])
     _patch_llm(monkeypatch, settings, transport)
@@ -338,8 +368,17 @@ def test_resume_repairs_dangling_running_run_before_replay(tmp_path, monkeypatch
     )
     log.extend(
         [
-            RunStartEvent(**ctx.event_fields(), **run_start_permission_fields(ctx.run_id), user_input_chars=13, metadata={"user_input": "dangling user"}),
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:dangling", tool_call_name="terminal"),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id),
+                user_input_chars=13,
+                metadata={"user_input": "dangling user"},
+            ),
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:dangling",
+                tool_call_name="terminal",
+            ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:dangling"),
         ]
     )
@@ -358,7 +397,10 @@ def test_resume_repairs_dangling_running_run_before_replay(tmp_path, monkeypatch
     try:
         asyncio.run(run())
         events = log.iter(run_id=ctx.run_id)
-        assert any(isinstance(event, RunEndEvent) and event.status == "aborted" for event in events)
+        assert any(
+            isinstance(event, RunEndEvent) and event.status == "aborted"
+            for event in events
+        )
         assert HOST_TEARDOWN_NOTE_TEXT in _context_text(transport.contexts[0])
         assert "dangling user" in _context_text(transport.contexts[0])
     finally:

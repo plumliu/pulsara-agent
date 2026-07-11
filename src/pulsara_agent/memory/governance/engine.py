@@ -6,15 +6,21 @@ import json
 import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pulsara_agent.event import EventContext, RunErrorEvent, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.llm import LLMRuntime, ModelRole
+from pulsara_agent.llm.direct import DirectModelCallResult, collect_direct_model_call
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.primitives.model_call import (
+    ModelCallPurpose,
+    ModelTokenUsageFact,
+    ResolvedModelCallFact,
+)
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     GovernanceDecision,
@@ -24,7 +30,10 @@ from pulsara_agent.memory.candidates.pool import (
     new_governance_batch_id,
 )
 from pulsara_agent.memory.governance.dedupe import candidate_fingerprint
-from pulsara_agent.memory.governance.executor import MemoryGovernanceApplyResult, MemoryGovernanceExecutor
+from pulsara_agent.memory.governance.executor import (
+    MemoryGovernanceApplyResult,
+    MemoryGovernanceExecutor,
+)
 from pulsara_agent.memory.governance.relatedness import (
     GovernanceRelatednessService,
     RelatednessAvailability,
@@ -56,7 +65,7 @@ class MemoryGovernanceOutput(BaseModel):
 class MemoryGovernanceOptions:
     model_role: ModelRole = ModelRole.FLASH
     llm_options: LLMOptions = field(
-        default_factory=lambda: LLMOptions(temperature=0, max_output_tokens=1_024)
+        default_factory=LLMOptions
     )
     limit: int = 20
 
@@ -69,6 +78,11 @@ class MemoryGovernanceRunResult:
     relatedness_diagnostics: dict[str, Any] = field(default_factory=dict)
     error_type: str | None = None
     error_message: str | None = None
+    resolved_model_call: ResolvedModelCallFact | None = None
+    usage_status: Literal["reported", "missing"] | None = None
+    usage: ModelTokenUsageFact | None = None
+    estimated_input_tokens: int | None = None
+    reported_model_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -98,7 +112,9 @@ class MemoryGovernanceEngine:
             if candidate.source_session_id == self.executor.runtime_session_id
         ][: limit or self.options.limit]
         if not pending:
-            return MemoryGovernanceRunResult(governance_batch_id=batch_id, decisions=[], applied=[])
+            return MemoryGovernanceRunResult(
+                governance_batch_id=batch_id, decisions=[], applied=[]
+            )
 
         if self.relatedness_service is not None:
             try:
@@ -131,8 +147,26 @@ class MemoryGovernanceEngine:
             candidates=snapshots,
             allowed_scopes=sorted(self.executor.allowed_write_scopes),
         )
+        call_result: DirectModelCallResult | None = None
+        resolved_call = None
         try:
-            output = _parse_governance_output(await self._call_flash(governance_input))
+            target = self.llm_runtime.resolve_target(
+                role=self.options.model_role,
+                requested_options=self.options.llm_options,
+            )
+            resolved_call = self.llm_runtime.resolve_call(
+                target=target,
+                purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
+            )
+            call_result = await self._call_flash(
+                governance_input,
+                call=resolved_call,
+            )
+            if call_result.outcome != "completed":
+                raise RuntimeError(
+                    call_result.error.message if call_result.error else "provider error"
+                )
+            output = _parse_governance_output(call_result.text)
         except Exception as exc:
             return MemoryGovernanceRunResult(
                 governance_batch_id=batch_id,
@@ -141,6 +175,31 @@ class MemoryGovernanceEngine:
                 relatedness_diagnostics=relatedness_diagnostics,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
+                resolved_model_call=(
+                    call_result.resolved_call
+                    if call_result
+                    else resolved_call.fact
+                    if resolved_call is not None
+                    else None
+                ),
+                usage_status=(
+                    call_result.usage_status
+                    if call_result
+                    else "missing"
+                    if resolved_call is not None
+                    else None
+                ),
+                usage=(call_result.usage if call_result else None),
+                estimated_input_tokens=(
+                    call_result.estimated_input_tokens
+                    if call_result
+                    else getattr(
+                        getattr(exc, "estimate", None), "total_input_tokens", None
+                    )
+                ),
+                reported_model_id=(
+                    call_result.reported_model_id if call_result else None
+                ),
             )
 
         applied: list[MemoryGovernanceApplyResult] = []
@@ -161,40 +220,58 @@ class MemoryGovernanceEngine:
                 relatedness_diagnostics=relatedness_diagnostics,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
+                resolved_model_call=call_result.resolved_call,
+                usage_status=call_result.usage_status,
+                usage=call_result.usage,
+                estimated_input_tokens=call_result.estimated_input_tokens,
+                reported_model_id=call_result.reported_model_id,
             )
         return MemoryGovernanceRunResult(
             governance_batch_id=batch_id,
             decisions=output.decisions,
             applied=applied,
             relatedness_diagnostics=relatedness_diagnostics,
+            resolved_model_call=call_result.resolved_call,
+            usage_status=call_result.usage_status,
+            usage=call_result.usage,
+            estimated_input_tokens=call_result.estimated_input_tokens,
+            reported_model_id=call_result.reported_model_id,
         )
 
-    async def _call_flash(self, governance_input: MemoryGovernanceInput) -> str:
-        text_parts: list[str] = []
-        async for event in self.llm_runtime.stream(
-            role=self.options.model_role,
+    async def _call_flash(
+        self,
+        governance_input: MemoryGovernanceInput,
+        *,
+        call,
+    ) -> DirectModelCallResult:
+        context_id = f"context:governance:{governance_input.governance_batch_id}"
+        stream = self.llm_runtime.stream(
+            call=call,
             context=LLMContext(
-                system_prompt=_governance_system_prompt(self.executor.allowed_write_scopes),
+                system_prompt=_governance_system_prompt(
+                    self.executor.allowed_write_scopes
+                ),
                 messages=(
                     LLMMessage.user(
                         "Govern these memory candidates and output JSON only:\n"
-                        + json.dumps(governance_input.model_dump(mode="json"), ensure_ascii=False)
+                        + json.dumps(
+                            governance_input.model_dump(mode="json"), ensure_ascii=False
+                        )
                     ),
                 ),
                 tools=(),
+                context_id=context_id,
+                resolved_model_call_id=call.fact.resolved_model_call_id,
+                target_fingerprint=call.target.fact.target_fingerprint,
+                model_call_index=None,
             ),
             event_context=EventContext(
                 run_id=f"run:governance-planner/{governance_input.governance_batch_id}",
                 turn_id=f"turn:governance-planner/{governance_input.governance_batch_id}",
                 reply_id=f"reply:governance-planner/{governance_input.governance_batch_id}",
             ),
-            options=self.options.llm_options,
-        ):
-            if isinstance(event, TextBlockDeltaEvent):
-                text_parts.append(event.delta)
-            elif isinstance(event, RunErrorEvent):
-                raise RuntimeError(event.message)
-        return "".join(text_parts)
+        )
+        return await collect_direct_model_call(stream, expected_call=call)
 
     def _candidate_snapshot(
         self,
@@ -203,7 +280,9 @@ class MemoryGovernanceEngine:
         relatedness: RelatednessBatchResult | None = None,
     ) -> dict[str, Any]:
         if candidate.origin is CandidateOrigin.COMPACTION:
-            source_events = _compaction_source_events(self.executor.event_log, candidate)
+            source_events = _compaction_source_events(
+                self.executor.event_log, candidate
+            )
         else:
             source_events = self.executor.event_log.iter(run_id=candidate.source_run_id)
         decisions = [
@@ -214,7 +293,9 @@ class MemoryGovernanceEngine:
         snapshot = candidate.model_dump(mode="json")
         snapshot["source_events"] = _source_event_summaries(source_events)
         if candidate.origin is CandidateOrigin.COMPACTION:
-            snapshot["compaction_evidence_view"] = _compaction_evidence_view(candidate, source_events)
+            snapshot["compaction_evidence_view"] = _compaction_evidence_view(
+                candidate, source_events
+            )
             snapshot["attribution_context"] = {
                 "source_run_id": candidate.source_run_id,
                 "source_turn_id": candidate.source_turn_id,
@@ -490,11 +571,15 @@ def _source_event_summaries(events, *, limit: int = 80) -> list[dict[str, Any]]:
             item[attr] = value
         summaries.append(item)
     if len(events) > limit:
-        summaries.append({"event_type": "TRUNCATED", "omitted_event_count": len(events) - limit})
+        summaries.append(
+            {"event_type": "TRUNCATED", "omitted_event_count": len(events) - limit}
+        )
     return summaries
 
 
-def _compaction_source_events(event_log, candidate: PooledMemoryCandidate, *, limit: int = 80):
+def _compaction_source_events(
+    event_log, candidate: PooledMemoryCandidate, *, limit: int = 80
+):
     metadata = candidate.metadata or {}
     included_run_ids = _bounded_strings(metadata.get("included_run_ids"), limit=5)
     through_sequence = _int_or_none(metadata.get("through_sequence"))
@@ -506,9 +591,17 @@ def _compaction_source_events(event_log, candidate: PooledMemoryCandidate, *, li
             if event.id in seen:
                 continue
             sequence = event.sequence
-            if through_sequence is not None and sequence is not None and sequence > through_sequence:
+            if (
+                through_sequence is not None
+                and sequence is not None
+                and sequence > through_sequence
+            ):
                 continue
-            if keep_after_sequence is not None and sequence is not None and sequence > keep_after_sequence:
+            if (
+                keep_after_sequence is not None
+                and sequence is not None
+                and sequence > keep_after_sequence
+            ):
                 continue
             seen.add(event.id)
             events.append(event)
@@ -525,12 +618,15 @@ def _compaction_source_events(event_log, candidate: PooledMemoryCandidate, *, li
     return events[:limit]
 
 
-def _compaction_evidence_view(candidate: PooledMemoryCandidate, source_events) -> dict[str, Any]:
+def _compaction_evidence_view(
+    candidate: PooledMemoryCandidate, source_events
+) -> dict[str, Any]:
     metadata = candidate.metadata or {}
     return {
         "kind": "context_compaction",
         "compaction_id": metadata.get("compaction_id"),
-        "summary_artifact_id": metadata.get("summary_artifact_id") or candidate.source_artifact_id,
+        "summary_artifact_id": metadata.get("summary_artifact_id")
+        or candidate.source_artifact_id,
         "summary_excerpt": metadata.get("summary_excerpt"),
         "summary_excerpt_chars": metadata.get("summary_excerpt_chars"),
         "summary_excerpt_truncated": metadata.get("summary_excerpt_truncated", False),
@@ -558,7 +654,9 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-def _decision_summaries(decisions: list[MemoryGovernanceDecisionRecord]) -> list[dict[str, Any]]:
+def _decision_summaries(
+    decisions: list[MemoryGovernanceDecisionRecord],
+) -> list[dict[str, Any]]:
     return [
         {
             "decision_id": decision.decision_id,
@@ -595,7 +693,9 @@ def _related_existing_memories(
             continue
         statement = str(record.get(memory.STATEMENT.name, ""))
         memory_id = str(record.get("@id", ""))
-        exact_duplicate = _normalize(statement) == _normalize(memory_candidate.statement)
+        exact_duplicate = _normalize(statement) == _normalize(
+            memory_candidate.statement
+        )
         overlap = len(candidate_tokens & _overlap_tokens(statement))
         # Token overlap is only a v1 stopgap for subject relatedness; a future
         # structured subject key should replace this prompt-ranking hint.

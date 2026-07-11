@@ -20,20 +20,19 @@ from pulsara_agent.capability.descriptor import (
     CapabilityProvenance,
 )
 from pulsara_agent.capability.provider import CapabilityProviderOutput
-from pulsara_agent.capability.providers.mcp import McpCapabilityProvider, build_mcp_bundle
+from pulsara_agent.capability.providers.mcp import (
+    McpCapabilityProvider,
+    build_mcp_bundle,
+)
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.types import CapabilityResolveContext
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     CustomEvent,
     EventContext,
-    ReplyEndEvent,
-    ReplyStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     ToolResultEndEvent,
     ToolCallDeltaEvent,
     ToolCallEndEvent,
@@ -44,9 +43,10 @@ from pulsara_agent.host import session as host_session_module
 from pulsara_agent.host.core import HostCore
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultState
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
+from pulsara_agent.llm import LLMRuntime
+from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.transport import LLMTransport
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
@@ -83,7 +83,10 @@ from pulsara_agent.runtime.mcp.sdk import (
     _sdk_input_responses,
     mcp_tool_result_from_sdk,
 )
-from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor, _config_fingerprint
+from pulsara_agent.runtime.mcp.supervisor import (
+    McpServerSupervisor,
+    _config_fingerprint,
+)
 from pulsara_agent.cli import _format_repl_mcp_startup_notice, _mcp_command
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
@@ -95,7 +98,12 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolExecutionSuspended, ToolRuntimeContext
+from pulsara_agent.tools.base import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolExecutionSuspended,
+    ToolRuntimeContext,
+)
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 
 
@@ -114,11 +122,15 @@ def _tool(
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
         },
-        annotations=McpToolAnnotations(read_only_hint=read_only, destructive_hint=destructive),
+        annotations=McpToolAnnotations(
+            read_only_hint=read_only, destructive_hint=destructive
+        ),
     )
 
 
-def _snapshot(*tools: McpDiscoveredTool, status: McpServerStatus = McpServerStatus.READY) -> McpServerSnapshot:
+def _snapshot(
+    *tools: McpDiscoveredTool, status: McpServerStatus = McpServerStatus.READY
+) -> McpServerSnapshot:
     return McpServerSnapshot(
         config=McpServerConfig(
             server_id="docs",
@@ -171,7 +183,9 @@ def _mcp_input_required_host_session(
             ),
         )
 
-    manager = MockMcpClientManager((_snapshot(tool or _tool()),), handlers={("docs", "lookup"): request_input})
+    manager = MockMcpClientManager(
+        (_snapshot(tool or _tool()),), handlers={("docs", "lookup"): request_input}
+    )
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
@@ -192,13 +206,17 @@ def _mcp_input_required_host_session(
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)),
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            McpCapabilityProvider(bundle)
+        ),
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+        ),
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
     return session, manager, runtime_wiring, agent
@@ -234,7 +252,9 @@ def _utc_z(value: object) -> str:
 class _LegacyMcpElicitationFixtureTool:
     name: str = "legacy_mcp_elicitation_fixture"
     description: str = "Test-only legacy MCP elicitation fixture."
-    parameters: dict[str, object] = field(default_factory=lambda: {"type": "object", "properties": {}})
+    parameters: dict[str, object] = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
     is_read_only: bool = False
     is_concurrency_safe: bool = False
     responses: list[tuple[str, str, dict[str, object]]] = field(default_factory=list)
@@ -275,7 +295,10 @@ class _LegacyMcpElicitationFixtureTool:
             call_id=str(answer["tool_call_id"]),
             tool_name=self.name,
             status=ToolResultState.SUCCESS,
-            output=json.dumps({"elicitation_response": answer, "request_id": request_id}, sort_keys=True),
+            output=json.dumps(
+                {"elicitation_response": answer, "request_id": request_id},
+                sort_keys=True,
+            ),
         )
 
 
@@ -284,7 +307,9 @@ class _FixtureCapabilityProvider:
     tool_name: str
     provider_id: str = "fixture"
 
-    def resolve(self, context: CapabilityResolveContext, *, bound_tool_names: frozenset[str]) -> CapabilityProviderOutput:
+    def resolve(
+        self, context: CapabilityResolveContext, *, bound_tool_names: frozenset[str]
+    ) -> CapabilityProviderOutput:
         del context, bound_tool_names
         return CapabilityProviderOutput(
             descriptors=(
@@ -412,9 +437,15 @@ def test_mcp_config_dto_filters_tools_and_statuses() -> None:
         config=config,
         status=McpServerStatus.READY,
         tools=(
-            McpDiscoveredTool(server_id="docs_server", name="lookup", description="", input_schema={}),
-            McpDiscoveredTool(server_id="docs_server", name="delete", description="", input_schema={}),
-            McpDiscoveredTool(server_id="docs_server", name="other", description="", input_schema={}),
+            McpDiscoveredTool(
+                server_id="docs_server", name="lookup", description="", input_schema={}
+            ),
+            McpDiscoveredTool(
+                server_id="docs_server", name="delete", description="", input_schema={}
+            ),
+            McpDiscoveredTool(
+                server_id="docs_server", name="other", description="", input_schema={}
+            ),
         ),
     )
 
@@ -429,7 +460,9 @@ def test_mcp_model_tool_name_is_stable_bounded_and_hashed() -> None:
     tool_name = "very-long-tool-name-" * 4
     long_a = mangle_mcp_tool_name(server_id, tool_name)
     long_b = mangle_mcp_tool_name(server_id, tool_name)
-    digest = hashlib.sha256(f"{server_id}\0{tool_name}".encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha256(f"{server_id}\0{tool_name}".encode("utf-8")).hexdigest()[
+        :10
+    ]
 
     assert short == "mcp__docs__lookup"
     assert long_a == long_b
@@ -476,11 +509,15 @@ def test_mcp_input_required_payload_is_pulsara_owned_and_nullable_state() -> Non
     }
 
 
-def test_sdk_mcp_manager_discovers_calls_resources_prompts_and_closes(tmp_path: Path) -> None:
+def test_sdk_mcp_manager_discovers_calls_resources_prompts_and_closes(
+    tmp_path: Path,
+) -> None:
     fixture = _write_sdk_stdio_fixture(tmp_path)
     config = McpServerConfig(
         server_id="sdk_docs",
-        transport=McpStdioConfig(command=sys.executable, args=(str(fixture),), cwd=tmp_path),
+        transport=McpStdioConfig(
+            command=sys.executable, args=(str(fixture),), cwd=tmp_path
+        ),
         startup_timeout_ms=3_000,
         tool_timeout_ms=3_000,
     )
@@ -492,18 +529,26 @@ def test_sdk_mcp_manager_discovers_calls_resources_prompts_and_closes(tmp_path: 
             assert snapshot.status is McpServerStatus.READY
             assert snapshot.protocol_version == "2026-07-28"
             assert [tool.name for tool in snapshot.tools] == ["lookup"]
-            assert [resource.uri for resource in snapshot.resources] == ["docs://status"]
+            assert [resource.uri for resource in snapshot.resources] == [
+                "docs://status"
+            ]
             assert [prompt.name for prompt in snapshot.prompts] == ["greet"]
 
-            tool_result = await manager.call_tool("sdk_docs", "lookup", {"query": "pulsara"}, timeout_ms=3_000)
+            tool_result = await manager.call_tool(
+                "sdk_docs", "lookup", {"query": "pulsara"}, timeout_ms=3_000
+            )
             assert tool_result.output.startswith("lookup:pulsara")
             assert tool_result.metadata["mcp_result_type"] == "CallToolResult"
 
-            resource_result = await manager.read_resource("sdk_docs", "docs://status", timeout_ms=3_000)
+            resource_result = await manager.read_resource(
+                "sdk_docs", "docs://status", timeout_ms=3_000
+            )
             assert "status:ok" in resource_result.output
             assert resource_result.artifacts
 
-            prompt_result = await manager.get_prompt("sdk_docs", "greet", {"name": "Pulsara"}, timeout_ms=3_000)
+            prompt_result = await manager.get_prompt(
+                "sdk_docs", "greet", {"name": "Pulsara"}, timeout_ms=3_000
+            )
             assert "Say hello to Pulsara" in prompt_result.output
         finally:
             await manager.aclose(timeout_seconds=1)
@@ -511,7 +556,9 @@ def test_sdk_mcp_manager_discovers_calls_resources_prompts_and_closes(tmp_path: 
     asyncio.run(run())
 
 
-def test_sdk_mcp_manager_close_suppresses_internal_cancel_scope_without_poisoning_caller() -> None:
+def test_sdk_mcp_manager_close_suppresses_internal_cancel_scope_without_poisoning_caller() -> (
+    None
+):
     class CancelOnExitClient:
         exit_called = False
 
@@ -573,7 +620,9 @@ def test_sdk_mcp_manager_maps_input_required_to_pulsara_dto(tmp_path: Path) -> N
     fixture = _write_sdk_input_required_fixture(tmp_path)
     config = McpServerConfig(
         server_id="sdk_auth",
-        transport=McpStdioConfig(command=sys.executable, args=(str(fixture),), cwd=tmp_path),
+        transport=McpStdioConfig(
+            command=sys.executable, args=(str(fixture),), cwd=tmp_path
+        ),
         startup_timeout_ms=3_000,
         tool_timeout_ms=3_000,
     )
@@ -585,7 +634,9 @@ def test_sdk_mcp_manager_maps_input_required_to_pulsara_dto(tmp_path: Path) -> N
             assert snapshot.status is McpServerStatus.READY
             assert [tool.name for tool in snapshot.tools] == ["needs_token"]
 
-            result = await manager.call_tool("sdk_auth", "needs_token", {"query": "pulsara"}, timeout_ms=3_000)
+            result = await manager.call_tool(
+                "sdk_auth", "needs_token", {"query": "pulsara"}, timeout_ms=3_000
+            )
 
             assert isinstance(result, McpInputRequired)
             assert result.request_state is None
@@ -623,10 +674,14 @@ def test_sdk_input_required_resolution_builds_typed_sdk_responses() -> None:
     responses = _sdk_input_responses(resolution)
 
     assert responses is not None
-    assert sdk_types.ElicitResult.model_validate(responses["token"]).content == {"value": "secret"}
+    assert sdk_types.ElicitResult.model_validate(responses["token"]).content == {
+        "value": "secret"
+    }
 
 
-def test_mcp_redaction_covers_url_userinfo_query_headers_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_redaction_covers_url_userinfo_query_headers_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("MCP_SECRET_TOKEN", "env-secret")
     config = McpServerConfig(
         server_id="secure",
@@ -671,7 +726,9 @@ def test_mcp_runtime_error_redaction_covers_runtime_exception_strings() -> None:
     assert "X-Api-Key: [redacted]" in redacted
 
 
-def test_sdk_mcp_manager_reports_missing_bearer_token_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sdk_mcp_manager_reports_missing_bearer_token_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("PULSARA_TEST_MISSING_SDK_MCP_TOKEN", raising=False)
     config = McpServerConfig(
         server_id="secure_sdk",
@@ -699,7 +756,9 @@ def test_sdk_mcp_manager_tool_call_timeout_is_bounded(tmp_path: Path) -> None:
     fixture = _write_sdk_slow_fixture(tmp_path)
     config = McpServerConfig(
         server_id="sdk_slow",
-        transport=McpStdioConfig(command=sys.executable, args=(str(fixture),), cwd=tmp_path),
+        transport=McpStdioConfig(
+            command=sys.executable, args=(str(fixture),), cwd=tmp_path
+        ),
         startup_timeout_ms=3_000,
         tool_timeout_ms=3_000,
     )
@@ -709,7 +768,9 @@ def test_sdk_mcp_manager_tool_call_timeout_is_bounded(tmp_path: Path) -> None:
         try:
             assert manager.snapshots[0].status is McpServerStatus.READY
             with pytest.raises(Exception):
-                await manager.call_tool("sdk_slow", "slow", {"delay": 2.0}, timeout_ms=10)
+                await manager.call_tool(
+                    "sdk_slow", "slow", {"delay": 2.0}, timeout_ms=10
+                )
         finally:
             await manager.aclose(timeout_seconds=1)
 
@@ -737,7 +798,10 @@ def test_sdk_tool_result_mapping_preserves_error_and_non_text_artifacts() -> Non
     assert "[image:image/png] 8 bytes archived" in mapped.output
     assert "[structured_content]" in mapped.output
     assert mapped.structured_content == {"status": "bad"}
-    assert [artifact.role for artifact in mapped.artifacts] == ["content_1_image", "structured_content"]
+    assert [artifact.role for artifact in mapped.artifacts] == [
+        "content_1_image",
+        "structured_content",
+    ]
     assert mapped.artifacts[0].data == image_bytes
     assert mapped.artifacts[1].text and '"status": "bad"' in mapped.artifacts[1].text
 
@@ -746,13 +810,17 @@ def test_mcp_supervisor_reconciles_desired_state_and_closes(tmp_path: Path) -> N
     fixture = _write_sdk_stdio_fixture(tmp_path)
     config = McpServerConfig(
         server_id="sdk_docs",
-        transport=McpStdioConfig(command=sys.executable, args=(str(fixture),), cwd=tmp_path),
+        transport=McpStdioConfig(
+            command=sys.executable, args=(str(fixture),), cwd=tmp_path
+        ),
         startup_timeout_ms=3_000,
         tool_timeout_ms=3_000,
     )
     disabled = McpServerConfig(
         server_id="sdk_docs",
-        transport=McpStdioConfig(command=sys.executable, args=(str(fixture),), cwd=tmp_path),
+        transport=McpStdioConfig(
+            command=sys.executable, args=(str(fixture),), cwd=tmp_path
+        ),
         enabled=False,
     )
 
@@ -763,7 +831,9 @@ def test_mcp_supervisor_reconciles_desired_state_and_closes(tmp_path: Path) -> N
         assert supervisor.snapshots[0].status is McpServerStatus.READY
         same_manager = await supervisor.sync_servers((config,))
         assert same_manager is not None
-        assert [snapshot.config.server_id for snapshot in supervisor.snapshots] == ["sdk_docs"]
+        assert [snapshot.config.server_id for snapshot in supervisor.snapshots] == [
+            "sdk_docs"
+        ]
 
         closed_manager = await supervisor.sync_servers((disabled,))
         assert closed_manager is supervisor
@@ -773,7 +843,9 @@ def test_mcp_supervisor_reconciles_desired_state_and_closes(tmp_path: Path) -> N
     asyncio.run(run())
 
 
-def test_mcp_supervisor_retries_unready_server_after_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_supervisor_retries_unready_server_after_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("PULSARA_TEST_MISSING_SUPERVISOR_MCP_TOKEN", raising=False)
     config = McpServerConfig(
         server_id="secure",
@@ -906,14 +978,24 @@ def test_repl_mcp_startup_notice_summarizes_snapshots() -> None:
 
     notice = _format_repl_mcp_startup_notice(session)
 
-    assert notice == "MCP servers: docs=ready (1 tools); auth=needs_auth (missing bearer token; 1 diagnostics)"
+    assert (
+        notice
+        == "MCP servers: docs=ready (1 tools); auth=needs_auth (missing bearer token; 1 diagnostics)"
+    )
 
 
-def test_mcp_bundle_builds_descriptor_and_execution_binding_from_same_snapshot() -> None:
-    manager = MockMcpClientManager((_snapshot(_tool(read_only=True)),), handlers={("docs", "lookup"): lambda args: args})
+def test_mcp_bundle_builds_descriptor_and_execution_binding_from_same_snapshot() -> (
+    None
+):
+    manager = MockMcpClientManager(
+        (_snapshot(_tool(read_only=True)),),
+        handlers={("docs", "lookup"): lambda args: args},
+    )
     bundle = build_mcp_bundle(manager)
 
-    assert [descriptor.name for descriptor in bundle.descriptors] == ["mcp__docs__lookup"]
+    assert [descriptor.name for descriptor in bundle.descriptors] == [
+        "mcp__docs__lookup"
+    ]
     assert [tool.name for tool in bundle.tools] == ["mcp__docs__lookup"]
     descriptor = bundle.descriptors[0]
     assert descriptor.provider_kind is CapabilityProviderKind.MCP
@@ -925,8 +1007,13 @@ def test_mcp_bundle_builds_descriptor_and_execution_binding_from_same_snapshot()
     assert bundle.generation == 7
 
 
-def test_mcp_provider_exposure_uses_bundle_descriptors_and_registry_bindings(tmp_path: Path) -> None:
-    manager = MockMcpClientManager((_snapshot(_tool(read_only=True)),), handlers={("docs", "lookup"): lambda args: args})
+def test_mcp_provider_exposure_uses_bundle_descriptors_and_registry_bindings(
+    tmp_path: Path,
+) -> None:
+    manager = MockMcpClientManager(
+        (_snapshot(_tool(read_only=True)),),
+        handlers={("docs", "lookup"): lambda args: args},
+    )
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
@@ -945,9 +1032,11 @@ def test_mcp_provider_exposure_uses_bundle_descriptors_and_registry_bindings(tmp
     )
 
     assert "mcp__docs__lookup" in exposure.callable_names
-    assert [spec.name for spec in exposure.direct_tool_specs if spec.name.startswith("mcp__")] == [
-        "mcp__docs__lookup"
-    ]
+    assert [
+        spec.name
+        for spec in exposure.direct_tool_specs
+        if spec.name.startswith("mcp__")
+    ] == ["mcp__docs__lookup"]
 
 
 def test_mcp_mock_adapter_executes_through_tool_executor(tmp_path: Path) -> None:
@@ -962,8 +1051,12 @@ def test_mcp_mock_adapter_executes_through_tool_executor(tmp_path: Path) -> None
 
     result = asyncio.run(
         executor.execute_async(
-            ToolCall(id="call:mcp", name="mcp__docs__lookup", arguments={"query": "pulsara"}),
-            event_context=EventContext(run_id="run:1", turn_id="turn:1", reply_id="reply:1"),
+            ToolCall(
+                id="call:mcp", name="mcp__docs__lookup", arguments={"query": "pulsara"}
+            ),
+            event_context=EventContext(
+                run_id="run:1", turn_id="turn:1", reply_id="reply:1"
+            ),
             descriptor=bundle.descriptors[0],
         )
     )
@@ -973,7 +1066,9 @@ def test_mcp_mock_adapter_executes_through_tool_executor(tmp_path: Path) -> None
     assert manager.calls == [("docs", "lookup", {"query": "pulsara"})]
 
 
-def test_mcp_adapter_does_not_accept_legacy_elicitation_argument(tmp_path: Path) -> None:
+def test_mcp_adapter_does_not_accept_legacy_elicitation_argument(
+    tmp_path: Path,
+) -> None:
     manager = MockMcpClientManager(
         (_snapshot(_tool(read_only=True)),),
         handlers={("docs", "lookup"): lambda args: {"args": args}},
@@ -990,13 +1085,17 @@ def test_mcp_adapter_does_not_accept_legacy_elicitation_argument(tmp_path: Path)
                 name="mcp__docs__lookup",
                 arguments={"__mcp_elicitation__": {"request_id": "fake"}},
             ),
-            event_context=EventContext(run_id="run:1", turn_id="turn:1", reply_id="reply:1"),
+            event_context=EventContext(
+                run_id="run:1", turn_id="turn:1", reply_id="reply:1"
+            ),
             descriptor=bundle.descriptors[0],
         )
     )
 
     assert result.status is ToolResultState.SUCCESS
-    assert manager.calls == [("docs", "lookup", {"__mcp_elicitation__": {"request_id": "fake"}})]
+    assert manager.calls == [
+        ("docs", "lookup", {"__mcp_elicitation__": {"request_id": "fake"}})
+    ]
 
 
 def test_large_mcp_result_uses_tool_artifact_service(tmp_path: Path) -> None:
@@ -1011,8 +1110,14 @@ def test_large_mcp_result_uses_tool_artifact_service(tmp_path: Path) -> None:
 
     result = asyncio.run(
         executor.execute_async(
-            ToolCall(id="call:mcp-large", name="mcp__docs__lookup", arguments={"query": "big"}),
-            event_context=EventContext(run_id="run:large", turn_id="turn:large", reply_id="reply:large"),
+            ToolCall(
+                id="call:mcp-large",
+                name="mcp__docs__lookup",
+                arguments={"query": "big"},
+            ),
+            event_context=EventContext(
+                run_id="run:large", turn_id="turn:large", reply_id="reply:large"
+            ),
             descriptor=bundle.descriptors[0],
         )
     )
@@ -1026,16 +1131,23 @@ def test_large_mcp_result_uses_tool_artifact_service(tmp_path: Path) -> None:
 
 
 def test_mcp_tools_fail_closed_under_read_only_profile(tmp_path: Path) -> None:
-    manager = MockMcpClientManager((_snapshot(_tool(read_only=True)),), handlers={("docs", "lookup"): lambda args: args})
+    manager = MockMcpClientManager(
+        (_snapshot(_tool(read_only=True)),),
+        handlers={("docs", "lookup"): lambda args: args},
+    )
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    exposure = CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)).resolve_for_turn(
+    exposure = CapabilityRuntime.with_default_providers(
+        McpCapabilityProvider(bundle)
+    ).resolve_for_turn(
         CapabilityResolveContext(
             workspace_root=tmp_path,
             workspace_kind="transient",
             memory_domain=None,
-            available_tool_names=frozenset(wiring.runtime_session.create_tool_executor().registry.names()),
+            available_tool_names=frozenset(
+                wiring.runtime_session.create_tool_executor().registry.names()
+            ),
             user_input="",
         ),
         tool_registry=wiring.runtime_session.create_tool_executor().registry,
@@ -1051,7 +1163,11 @@ def test_mcp_tools_fail_closed_under_read_only_profile(tmp_path: Path) -> None:
 
     decision = asyncio.run(
         gate.evaluate(
-            [ToolCall(id="call:mcp", name="mcp__docs__lookup", arguments={"query": "x"})],
+            [
+                ToolCall(
+                    id="call:mcp", name="mcp__docs__lookup", arguments={"query": "x"}
+                )
+            ],
             exposure=exposure,
         )
     )
@@ -1061,25 +1177,33 @@ def test_mcp_tools_fail_closed_under_read_only_profile(tmp_path: Path) -> None:
 
 
 def test_mcp_unready_snapshot_is_hidden_with_diagnostic(tmp_path: Path) -> None:
-    manager = MockMcpClientManager((_snapshot(_tool(), status=McpServerStatus.NEEDS_AUTH),))
+    manager = MockMcpClientManager(
+        (_snapshot(_tool(), status=McpServerStatus.NEEDS_AUTH),)
+    )
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    exposure = CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)).resolve_for_turn(
+    exposure = CapabilityRuntime.with_default_providers(
+        McpCapabilityProvider(bundle)
+    ).resolve_for_turn(
         CapabilityResolveContext(
             workspace_root=tmp_path,
             workspace_kind="transient",
             memory_domain=None,
-            available_tool_names=frozenset(wiring.runtime_session.create_tool_executor().registry.names()),
+            available_tool_names=frozenset(
+                wiring.runtime_session.create_tool_executor().registry.names()
+            ),
             user_input="",
         ),
         tool_registry=wiring.runtime_session.create_tool_executor().registry,
     )
 
     assert not any(name.startswith("mcp__") for name in exposure.direct_names)
-    assert [diagnostic.code for diagnostic in exposure.diagnostics if diagnostic.code.startswith("mcp_")] == [
-        "mcp_server_needs_auth"
-    ]
+    assert [
+        diagnostic.code
+        for diagnostic in exposure.diagnostics
+        if diagnostic.code.startswith("mcp_")
+    ] == ["mcp_server_needs_auth"]
 
 
 def test_mcp_supervisor_refreshes_ready_manager_snapshot_on_safe_point() -> None:
@@ -1121,7 +1245,9 @@ def test_mcp_supervisor_refreshes_ready_manager_snapshot_on_safe_point() -> None
         server_id="docs",
         transport=McpStreamableHttpConfig(url="http://127.0.0.1:8765/mcp"),
     )
-    manager = RefreshingManager((_snapshot_for_config(config, _tool("lookup"), generation=7),), config=config)
+    manager = RefreshingManager(
+        (_snapshot_for_config(config, _tool("lookup"), generation=7),), config=config
+    )
     supervisor = McpServerSupervisor()
     supervisor._managers["docs"] = manager  # noqa: SLF001
     supervisor._fingerprints["docs"] = _config_fingerprint(config)  # noqa: SLF001
@@ -1131,19 +1257,25 @@ def test_mcp_supervisor_refreshes_ready_manager_snapshot_on_safe_point() -> None
     assert synced is supervisor
     assert manager.refresh_count == 1
     bundle = build_mcp_bundle(supervisor)
-    assert [descriptor.metadata["original_tool_name"] for descriptor in bundle.descriptors] == [
+    assert [
+        descriptor.metadata["original_tool_name"] for descriptor in bundle.descriptors
+    ] == [
         "lookup",
         "new_lookup",
     ]
 
 
-def test_host_core_keeps_empty_mcp_supervisor_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_host_core_keeps_empty_mcp_supervisor_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         "pulsara_agent.host.core.load_mcp_server_configs",
         lambda *, workspace_root: (),
     )
     core = HostCore(settings=object(), durable=False)  # type: ignore[arg-type]
-    workspace = resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path))
+    workspace = resolve_workspace(
+        HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+    )
 
     supervisor = asyncio.run(core._build_mcp_supervisor(workspace))
 
@@ -1162,7 +1294,7 @@ def test_host_session_mcp_refresh_preserves_non_mcp_bindings_and_providers(
     provider = _FixtureCapabilityProvider(fixture_tool.name)
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_FinalTextRuntime(),
+        llm_runtime=_llm_runtime(_ScriptedTransport([{"text": "done"}])),
         capability_runtime=CapabilityRuntime.with_default_providers(provider),
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
@@ -1180,7 +1312,9 @@ def test_host_session_mcp_refresh_preserves_non_mcp_bindings_and_providers(
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+        ),
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
         mcp_supervisor=McpServerSupervisor(),
     )
@@ -1188,20 +1322,30 @@ def test_host_session_mcp_refresh_preserves_non_mcp_bindings_and_providers(
     asyncio.run(session._sync_mcp_servers_for_turn())
 
     assert fixture_tool in runtime_wiring.runtime_session.extra_tool_bindings
-    assert not any(isinstance(tool, McpCapabilityTool) for tool in runtime_wiring.runtime_session.extra_tool_bindings)
+    assert not any(
+        isinstance(tool, McpCapabilityTool)
+        for tool in runtime_wiring.runtime_session.extra_tool_bindings
+    )
     assert any(existing is provider for existing in agent.capability_runtime.providers)
-    assert any(isinstance(existing, McpCapabilityProvider) for existing in agent.capability_runtime.providers)
+    assert any(
+        isinstance(existing, McpCapabilityProvider)
+        for existing in agent.capability_runtime.providers
+    )
 
 
 def test_host_session_close_closes_mcp_manager_once(tmp_path: Path) -> None:
-    manager = MockMcpClientManager((_snapshot(_tool()),), handlers={("docs", "lookup"): lambda args: args})
+    manager = MockMcpClientManager(
+        (_snapshot(_tool()),), handlers={("docs", "lookup"): lambda args: args}
+    )
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+        ),
         wiring=AgentRuntimeWiring(
             agent_runtime=_CloseOnlyAgentRuntime(runtime_wiring.runtime_session),
             runtime_wiring=runtime_wiring,
@@ -1215,7 +1359,9 @@ def test_host_session_close_closes_mcp_manager_once(tmp_path: Path) -> None:
     assert manager.cancel_count == 1
 
 
-def test_host_session_close_suppresses_mcp_manager_internal_cancel(tmp_path: Path) -> None:
+def test_host_session_close_suppresses_mcp_manager_internal_cancel(
+    tmp_path: Path,
+) -> None:
     class CancelCloseMcpManager:
         snapshots = (_snapshot(_tool()),)
         close_count = 0
@@ -1234,7 +1380,9 @@ def test_host_session_close_suppresses_mcp_manager_internal_cancel(tmp_path: Pat
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+        ),
         wiring=AgentRuntimeWiring(
             agent_runtime=_CloseOnlyAgentRuntime(runtime_wiring.runtime_session),
             runtime_wiring=runtime_wiring,
@@ -1278,13 +1426,17 @@ def test_host_session_captures_and_resolves_mcp_elicitation(tmp_path: Path) -> N
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(_FixtureCapabilityProvider(fixture_tool.name)),
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            _FixtureCapabilityProvider(fixture_tool.name)
+        ),
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+        ),
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
 
@@ -1322,7 +1474,11 @@ def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -
     assert isinstance(pending, PendingMcpInputRequired)
     assert pending.request_state is None
     assert pending.input_requests == (
-        {"key": "token", "method": "elicitation/create", "params": {"message": "Need a token", "mode": "form"}},
+        {
+            "key": "token",
+            "method": "elicitation/create",
+            "params": {"message": "Need a token", "mode": "form"},
+        },
     )
     assert pending.original_request == {
         "source_method": "tools/call",
@@ -1351,7 +1507,9 @@ def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -
     _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
 
 
-def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path: Path) -> None:
+def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(
+    tmp_path: Path,
+) -> None:
     session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
     first = asyncio.run(session.run_turn("call mcp"))
     assert first.status.value == "waiting_user"
@@ -1377,7 +1535,8 @@ def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path:
     gate_decisions = [
         event
         for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and event.tool_call_id == "call:mcp-input"
     ]
     assert gate_decisions[-1].decision == "deny"
     assert gate_decisions[-1].reason_code == "capability_descriptor_missing"
@@ -1385,8 +1544,12 @@ def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(tmp_path:
     _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
 
 
-def test_mcp_input_required_resume_permission_denial_preserves_timing_seed(tmp_path: Path) -> None:
-    session, _manager, runtime_wiring, _agent = _mcp_input_required_host_session(tmp_path)
+def test_mcp_input_required_resume_permission_denial_preserves_timing_seed(
+    tmp_path: Path,
+) -> None:
+    session, _manager, runtime_wiring, _agent = _mcp_input_required_host_session(
+        tmp_path
+    )
     first = asyncio.run(session.run_turn("call mcp"))
     assert first.status.value == "waiting_user"
     pending = session.get_pending_interaction()
@@ -1414,14 +1577,17 @@ def test_mcp_input_required_resume_permission_denial_preserves_timing_seed(tmp_p
     gate_decisions = [
         event
         for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and event.tool_call_id == "call:mcp-input"
     ]
     assert gate_decisions[-1].decision == "deny"
     assert gate_decisions[-1].result_state is ToolResultState.DENIED
     _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
 
 
-def test_mcp_input_required_resume_wait_unsupported_preserves_timing_seed(tmp_path: Path) -> None:
+def test_mcp_input_required_resume_wait_unsupported_preserves_timing_seed(
+    tmp_path: Path,
+) -> None:
     session, _manager, runtime_wiring, _agent = _mcp_input_required_host_session(
         tmp_path,
         tool=_tool(destructive=True),
@@ -1453,16 +1619,23 @@ def test_mcp_input_required_resume_wait_unsupported_preserves_timing_seed(tmp_pa
     gate_decisions = [
         event
         for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and event.tool_call_id == "call:mcp-input"
     ]
     assert gate_decisions[-1].decision == "deny"
-    assert gate_decisions[-1].reason_code == "mcp_resume_permission_approval_unsupported"
+    assert (
+        gate_decisions[-1].reason_code == "mcp_resume_permission_approval_unsupported"
+    )
     assert gate_decisions[-1].result_state is ToolResultState.DENIED
     _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
 
 
-def test_mcp_input_required_resume_missing_resume_method_preserves_timing_seed(tmp_path: Path) -> None:
-    session, _manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
+def test_mcp_input_required_resume_missing_resume_method_preserves_timing_seed(
+    tmp_path: Path,
+) -> None:
+    session, _manager, runtime_wiring, agent = _mcp_input_required_host_session(
+        tmp_path
+    )
     first = asyncio.run(session.run_turn("call mcp"))
     assert first.status.value == "waiting_user"
     pending = session.get_pending_interaction()
@@ -1520,7 +1693,8 @@ def test_mcp_input_required_resume_uses_original_run_snapshot_after_read_only_de
     gate_decisions = [
         event
         for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and event.tool_call_id == "call:mcp-input"
     ]
     assert gate_decisions[-1].decision == "allow"
     assert gate_decisions[-1].reason_code is None
@@ -1529,7 +1703,9 @@ def test_mcp_input_required_resume_uses_original_run_snapshot_after_read_only_de
     assert gate_decisions[-1].permission_policy["terminal_access"] == "allow"
 
 
-def test_mcp_input_required_resume_uses_original_run_snapshot_after_ask_default_switch(tmp_path: Path) -> None:
+def test_mcp_input_required_resume_uses_original_run_snapshot_after_ask_default_switch(
+    tmp_path: Path,
+) -> None:
     session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
     first = asyncio.run(session.run_turn("call mcp"))
     assert first.status.value == "waiting_user"
@@ -1557,7 +1733,8 @@ def test_mcp_input_required_resume_uses_original_run_snapshot_after_ask_default_
     gate_decisions = [
         event
         for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent) and event.tool_call_id == "call:mcp-input"
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and event.tool_call_id == "call:mcp-input"
     ]
     assert gate_decisions[-1].decision == "allow"
     assert gate_decisions[-1].reason_code is None
@@ -1566,7 +1743,9 @@ def test_mcp_input_required_resume_uses_original_run_snapshot_after_ask_default_
     assert gate_decisions[-1].permission_policy["terminal_access"] == "allow"
 
 
-def test_mcp_adapter_preserves_wrapper_tool_call_id_on_multi_round_input_required() -> None:
+def test_mcp_adapter_preserves_wrapper_tool_call_id_on_multi_round_input_required() -> (
+    None
+):
     class SecondRoundManager(MockMcpClientManager):
         async def resume_suspended_request(self, **kwargs):  # type: ignore[no-untyped-def]
             resolution = kwargs["resolution"]
@@ -1624,7 +1803,9 @@ def test_mcp_adapter_preserves_wrapper_tool_call_id_on_multi_round_input_require
             ),
             runtime_context=ToolRuntimeContext(
                 runtime_session_id="runtime:test",
-                event_context=EventContext(run_id="run:1", turn_id="turn:1", reply_id="reply:1"),
+                event_context=EventContext(
+                    run_id="run:1", turn_id="turn:1", reply_id="reply:1"
+                ),
             ),
         )
     )
@@ -1635,7 +1816,9 @@ def test_mcp_adapter_preserves_wrapper_tool_call_id_on_multi_round_input_require
     assert result.payload["round_count"] == 2
 
 
-def test_mcp_input_required_resume_failure_preserves_pending_interaction(tmp_path: Path) -> None:
+def test_mcp_input_required_resume_failure_preserves_pending_interaction(
+    tmp_path: Path,
+) -> None:
     class FailingResumeManager(MockMcpClientManager):
         async def resume_suspended_request(self, **kwargs):  # type: ignore[no-untyped-def]
             raise ValueError(
@@ -1663,7 +1846,9 @@ def test_mcp_input_required_resume_failure_preserves_pending_interaction(tmp_pat
             ),
         )
 
-    manager = FailingResumeManager((_snapshot(_tool()),), handlers={("docs", "lookup"): request_input})
+    manager = FailingResumeManager(
+        (_snapshot(_tool()),), handlers={("docs", "lookup"): request_input}
+    )
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
@@ -1683,13 +1868,17 @@ def test_mcp_input_required_resume_failure_preserves_pending_interaction(tmp_pat
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
         llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle)),
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            McpCapabilityProvider(bundle)
+        ),
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     session = HostSession(
         host_session_id="host:test",
         conversation_id="conversation:test",
-        workspace=resolve_workspace(HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)),
+        workspace=resolve_workspace(
+            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+        ),
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
     first = asyncio.run(session.run_turn("call mcp"))
@@ -1713,7 +1902,8 @@ def test_mcp_input_required_resume_failure_preserves_pending_interaction(tmp_pat
     failure_events = [
         event
         for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CustomEvent) and event.name == "mcp_input_required_resume_failed"
+        if isinstance(event, CustomEvent)
+        and event.name == "mcp_input_required_resume_failed"
     ]
     assert failure_events
     message = failure_events[-1].value["message"]
@@ -1723,18 +1913,23 @@ def test_mcp_input_required_resume_failure_preserves_pending_interaction(tmp_pat
     assert "plain-secret" not in message
 
 
-def test_mcp_elicitation_suspends_and_resume_routes_answer_to_manager(tmp_path: Path) -> None:
+def test_mcp_elicitation_suspends_and_resume_routes_answer_to_manager(
+    tmp_path: Path,
+) -> None:
     fixture_tool = _LegacyMcpElicitationFixtureTool()
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     runtime_wiring.runtime_session.extra_tool_bindings = (fixture_tool,)
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_FinalTextRuntime(),
-        capability_runtime=CapabilityRuntime.with_default_providers(_FixtureCapabilityProvider(fixture_tool.name)),
+        llm_runtime=_llm_runtime(_ScriptedTransport([{"text": "done"}])),
+        capability_runtime=CapabilityRuntime.with_default_providers(
+            _FixtureCapabilityProvider(fixture_tool.name)
+        ),
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     state = agent.new_state()
+    state.run_model_target = agent.resolve_run_model_target()
     state.permission_snapshot = snapshot_from_mode(
         runtime_session_id=agent.runtime_session.runtime_session_id,
         run_id=state.run_id,
@@ -1793,21 +1988,29 @@ def test_mcp_elicitation_suspends_and_resume_routes_answer_to_manager(tmp_path: 
     assert fixture_tool.responses == [
         ("docs", "request-1", {"value": "secret", "tool_call_id": "call:mcp"})
     ]
-    assert any(message.role == "tool_result" and message.name == fixture_tool.name for message in state.messages)
+    assert any(
+        message.role == "tool_result" and message.name == fixture_tool.name
+        for message in state.messages
+    )
 
 
-def test_approved_pending_mcp_call_reruns_capability_gate_and_fails_closed(tmp_path: Path) -> None:
-    manager = MockMcpClientManager((_snapshot(_tool()),), handlers={("docs", "lookup"): lambda args: args})
+def test_approved_pending_mcp_call_reruns_capability_gate_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manager = MockMcpClientManager(
+        (_snapshot(_tool()),), handlers={("docs", "lookup"): lambda args: args}
+    )
     bundle = build_mcp_bundle(manager)
     with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
         runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
     agent = AgentRuntime(
         runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_FinalTextRuntime(),
+        llm_runtime=_llm_runtime(_ScriptedTransport([{"text": "done"}])),
         capability_runtime=CapabilityRuntime(providers=()),
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     state = agent.new_state()
+    state.run_model_target = agent.resolve_run_model_target()
     state.permission_snapshot = snapshot_from_mode(
         runtime_session_id=agent.runtime_session.runtime_session_id,
         run_id=state.run_id,
@@ -1830,14 +2033,18 @@ def test_approved_pending_mcp_call_reruns_capability_gate_and_fails_closed(tmp_p
             state,
             ApprovalResolution(
                 approval_id="approval:test",
-                decisions=(ToolApprovalDecision(tool_call_id="call:mcp", confirmed=True),),
+                decisions=(
+                    ToolApprovalDecision(tool_call_id="call:mcp", confirmed=True),
+                ),
             ),
         )
     )
 
     assert result.status.value == "finished"
     assert manager.calls == []
-    tool_messages = [message for message in state.messages if message.role == "tool_result"]
+    tool_messages = [
+        message for message in state.messages if message.role == "tool_result"
+    ]
     assert tool_messages
     assert "capability_descriptor_missing" in tool_messages[0].content[0].output[0].text
 
@@ -1855,10 +2062,17 @@ def test_streamable_http_mcp_manager_discovers_and_calls_fake_server() -> None:
             assert manager.snapshots[0].status is McpServerStatus.READY
             assert [tool.name for tool in manager.snapshots[0].tools] == ["lookup"]
 
-            result = asyncio.run(manager.call_tool("http_docs", "lookup", {"query": "mcp"}, timeout_ms=1_000))
+            result = asyncio.run(
+                manager.call_tool(
+                    "http_docs", "lookup", {"query": "mcp"}, timeout_ms=1_000
+                )
+            )
 
             assert result == "lookup:mcp"
-            assert [request["method"] for request in seen] == ["tools/list", "tools/call"]
+            assert [request["method"] for request in seen] == [
+                "tools/list",
+                "tools/call",
+            ]
         finally:
             asyncio.run(manager.aclose())
     finally:
@@ -1942,7 +2156,9 @@ while True:
             assert manager.snapshots[0].status is McpServerStatus.READY
             assert [tool.name for tool in manager.snapshots[0].tools] == ["lookup"]
 
-            result = await manager.call_tool("stdio_docs", "lookup", {"query": "mcp"}, timeout_ms=1_000)
+            result = await manager.call_tool(
+                "stdio_docs", "lookup", {"query": "mcp"}, timeout_ms=1_000
+            )
 
             assert result == "stdio:mcp"
         finally:
@@ -1979,13 +2195,16 @@ def _start_http_mcp_fixture():
                     "content": [
                         {
                             "type": "text",
-                            "text": "lookup:" + str((params.get("arguments") or {}).get("query")),
+                            "text": "lookup:"
+                            + str((params.get("arguments") or {}).get("query")),
                         }
                     ]
                 }
             else:
                 result = {"ok": True}
-            body = json.dumps({"jsonrpc": "2.0", "id": payload.get("id"), "result": result}).encode("utf-8")
+            body = json.dumps(
+                {"jsonrpc": "2.0", "id": payload.get("id"), "result": result}
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -2006,18 +2225,10 @@ async def _collect(stream):
     return [event async for event in stream]
 
 
-class _FinalTextRuntime:
-    async def stream(self, *, role, context, event_context, options=None):
-        del role, context, options
-        yield ReplyStartEvent(**event_context.event_fields(), name="assistant")
-        yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:final")
-        yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:final", delta="done")
-        yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:final")
-        yield ReplyEndEvent(**event_context.event_fields())
-
-
 class _ScriptedTransport(LLMTransport):
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[dict]) -> None:
         self.replies = replies
@@ -2026,24 +2237,25 @@ class _ScriptedTransport(LLMTransport):
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ):
-        del options
+        del call
         self.contexts.append(context)
         reply = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:scripted")
-            yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:scripted", delta=reply["text"])
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:scripted")
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id="text:scripted"
+            )
+            yield TextBlockDeltaEvent(
+                **event_context.event_fields(),
+                block_id="text:scripted",
+                delta=reply["text"],
+            )
+            yield TextBlockEndEvent(
+                **event_context.event_fields(), block_id="text:scripted"
+            )
         for call in reply.get("tool_calls", []):
             yield ToolCallStartEvent(
                 **event_context.event_fields(),
@@ -2055,12 +2267,13 @@ class _ScriptedTransport(LLMTransport):
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
-        yield ModelCallEndEvent(**event_context.event_fields())
+            yield ToolCallEndEvent(
+                **event_context.event_fields(), tool_call_id=call["id"]
+            )
 
 
 def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",

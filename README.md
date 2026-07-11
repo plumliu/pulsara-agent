@@ -318,10 +318,31 @@ PULSARA_API_KEY=sk-your-api-key
 PULSARA_BASE_URL=https://api.openai.com/v1
 PULSARA_PRO_MODEL=gpt-5
 PULSARA_FLASH_MODEL=gpt-5-mini
+PULSARA_MODEL_IDENTITY_POLICY=accept_reported
+PULSARA_PRO_TOTAL_CONTEXT_TOKENS=4096
+PULSARA_PRO_MAX_INPUT_TOKENS=3584
+PULSARA_PRO_MAX_OUTPUT_TOKENS=1024
+PULSARA_PRO_DEFAULT_OUTPUT_TOKENS=512
+PULSARA_PRO_INPUT_SAFETY_MARGIN_TOKENS=128
+PULSARA_FLASH_TOTAL_CONTEXT_TOKENS=4096
+PULSARA_FLASH_MAX_INPUT_TOKENS=3584
+PULSARA_FLASH_MAX_OUTPUT_TOKENS=1024
+PULSARA_FLASH_DEFAULT_OUTPUT_TOKENS=512
+PULSARA_FLASH_INPUT_SAFETY_MARGIN_TOKENS=128
 
 PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
 PULSARA_OXIGRAPH_URL=http://localhost:7878
 ```
+
+The model-limit values above are only internally consistent examples, not a
+model catalog. Set them to the documented limits of the exact provider/model
+you use. Pulsara validates the contract but does not guess limits from a model
+name.
+
+`PULSARA_MODEL_IDENTITY_POLICY` defaults to `accept_reported`, so a provider may
+resolve a requested alias to a concrete snapshot while Pulsara records both
+identities. Set it to `exact` only when the provider guarantees that response
+model IDs exactly echo requested IDs.
 
 The main path targets OpenAI-compatible Responses APIs today. Other compatible
 providers can work when their wire behavior matches the configured API mode.

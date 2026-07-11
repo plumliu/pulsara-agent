@@ -22,8 +22,6 @@ from tests.support.settings import compatibility_storage_config
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     RunEndEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -44,11 +42,16 @@ from pulsara_agent.host import (
     WorkspaceClosingError,
 )
 from pulsara_agent.host.session_manifest import SessionManifest
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile, ModelRole
+from pulsara_agent.llm import LLMRuntime, ModelRole
+from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime import AbortKind, ApprovalResolution, ToolApprovalDecision
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode, preset_to_policy
+from pulsara_agent.runtime.permission import (
+    EffectivePermissionPolicy,
+    PermissionMode,
+    preset_to_policy,
+)
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
     PendingTerminalCompletionError,
@@ -62,6 +65,8 @@ from pulsara_agent.settings import PulsaraSettings
 
 class ScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[dict], *, delay: float = 0) -> None:
         self.replies = replies
@@ -71,24 +76,20 @@ class ScriptedTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        del call
         self.contexts.append(context)
         if self.delay:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         if "text" in reply:
             yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:1", delta=reply["text"])
+            yield TextBlockDeltaEvent(
+                **event_context.event_fields(), block_id="text:1", delta=reply["text"]
+            )
             yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
             yield ToolCallStartEvent(
@@ -96,14 +97,19 @@ class ScriptedTransport:
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(**event_context.event_fields(), tool_call_id=call["id"], delta=call["arguments"])
-            yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
-        yield ModelCallEndEvent(**event_context.event_fields())
+            yield ToolCallDeltaEvent(
+                **event_context.event_fields(),
+                tool_call_id=call["id"],
+                delta=call["arguments"],
+            )
+            yield ToolCallEndEvent(
+                **event_context.event_fields(), tool_call_id=call["id"]
+            )
 
 
 def _settings() -> PulsaraSettings:
     return PulsaraSettings(
-        llm=LLMConfig(
+        llm=test_llm_config(
             api_key="sk-test",
             base_url="https://example.test/v1",
             pro_model="pro",
@@ -137,9 +143,13 @@ def _trusted_terminal_ask_policy() -> EffectivePermissionPolicy:
     return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
 
 
-async def _open(core, root, *, host_session_id="host:test", conversation_id=None, policy=None):
+async def _open(
+    core, root, *, host_session_id="host:test", conversation_id=None, policy=None
+):
     return await core.open_session(
-        HostWorkspaceInput(workspace_kind="project", workspace_root=root, memory_domain_id="u_test"),
+        HostWorkspaceInput(
+            workspace_kind="project", workspace_root=root, memory_domain_id="u_test"
+        ),
         host_session_id=host_session_id,
         conversation_id=conversation_id or f"conversation:{host_session_id}",
         model_role=ModelRole.FLASH,
@@ -151,22 +161,44 @@ async def _open(core, root, *, host_session_id="host:test", conversation_id=None
 # --- §12.1 identity + open transaction ---------------------------------------
 
 
-def test_duplicate_host_session_id_fail_closed_and_does_not_disturb_live_owner(tmp_path, monkeypatch) -> None:
+def test_duplicate_host_session_id_fail_closed_and_does_not_disturb_live_owner(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:a", "name": "terminal", "arguments": json.dumps({"command": "sleep 10", "yield_time_ms": 0})}]},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:a",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "sleep 10", "yield_time_ms": 0}
+                        ),
+                    }
+                ]
+            },
             {"text": "a started"},
         ]
     )
     core = _core(monkeypatch, transport)
 
     async def run():
-        a = await _open(core, tmp_path, host_session_id="host:dup", policy=_trusted_terminal_policy())
+        a = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:dup",
+            policy=_trusted_terminal_policy(),
+        )
         await a.run_turn("start a process")
         manager = a.wiring.runtime_wiring.runtime_session.terminal_sessions
         a_proc = manager.list_owned("host:dup")[0].process_id
         with pytest.raises(DuplicateHostSessionError):
-            await _open(core, tmp_path, host_session_id="host:dup", conversation_id="conversation:other")
+            await _open(
+                core,
+                tmp_path,
+                host_session_id="host:dup",
+                conversation_id="conversation:other",
+            )
         same = await core.get_session("host:dup")
         proc_status = manager.poll_process(a_proc).status
         sessions = await core.list_sessions()
@@ -184,9 +216,19 @@ def test_duplicate_conversation_id_fail_closed(tmp_path, monkeypatch) -> None:
     core = _core(monkeypatch, transport)
 
     async def run():
-        a = await _open(core, tmp_path, host_session_id="host:a", conversation_id="conversation:shared")
+        a = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:a",
+            conversation_id="conversation:shared",
+        )
         with pytest.raises(DuplicateHostSessionError):
-            await _open(core, tmp_path, host_session_id="host:b", conversation_id="conversation:shared")
+            await _open(
+                core,
+                tmp_path,
+                host_session_id="host:b",
+                conversation_id="conversation:shared",
+            )
         resolved = await core.find_by_conversation("conversation:shared")
         sessions = await core.list_sessions()
         await core.shutdown()
@@ -222,7 +264,9 @@ def test_stale_reservation_cannot_release_or_publish_aba_successor() -> None:
     assert len({stale_token, current_token, replacement_token}) == 3
 
 
-def test_registry_capacity_failure_leaks_no_supervisor_owner(tmp_path, monkeypatch) -> None:
+def test_registry_capacity_failure_leaks_no_supervisor_owner(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "a"}])
     core = _core(monkeypatch, transport)
     core.registry = HostSessionRegistry(max_sessions=1)
@@ -237,7 +281,9 @@ def test_registry_capacity_failure_leaks_no_supervisor_owner(tmp_path, monkeypat
 
     snapshots = asyncio.run(run())
     assert len(snapshots) == 1
-    assert snapshots[0].owner_session_count == 1  # only host:a; the over-capacity open left no lease
+    assert (
+        snapshots[0].owner_session_count == 1
+    )  # only host:a; the over-capacity open left no lease
 
 
 def test_wiring_failure_rolls_back_lease_and_reservation(tmp_path, monkeypatch) -> None:
@@ -275,17 +321,38 @@ def test_wiring_failure_rolls_back_lease_and_reservation(tmp_path, monkeypatch) 
 # --- §12.2 session close ------------------------------------------------------
 
 
-def test_session_close_is_idempotent_and_releases_owner_exactly_once(tmp_path, monkeypatch) -> None:
+def test_session_close_is_idempotent_and_releases_owner_exactly_once(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:bg", "name": "terminal", "arguments": json.dumps({"command": "sleep 30", "yield_time_ms": 0, "terminal_session_id": "work"})}]},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:bg",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {
+                                "command": "sleep 30",
+                                "yield_time_ms": 0,
+                                "terminal_session_id": "work",
+                            }
+                        ),
+                    }
+                ]
+            },
             {"text": "started"},
         ]
     )
     core = _core(monkeypatch, transport)
 
     async def run():
-        s = await _open(core, tmp_path, host_session_id="host:cap", policy=_trusted_terminal_policy())
+        s = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:cap",
+            policy=_trusted_terminal_policy(),
+        )
         await s.run_turn("start bg")
         manager = s.wiring.runtime_wiring.runtime_session.terminal_sessions
         proc = manager.list_owned("host:cap")[0].process_id
@@ -303,7 +370,9 @@ def test_session_close_is_idempotent_and_releases_owner_exactly_once(tmp_path, m
     assert status is TerminalStatus.KILLED
 
 
-def test_begin_close_closes_mutation_gate_and_concurrent_close_waits(tmp_path, monkeypatch) -> None:
+def test_begin_close_closes_mutation_gate_and_concurrent_close_waits(
+    tmp_path, monkeypatch
+) -> None:
     core = _core(monkeypatch, ScriptedTransport([{"text": "unused"}]))
     close_entered = asyncio.Event()
     release_close = asyncio.Event()
@@ -337,7 +406,9 @@ def test_begin_close_closes_mutation_gate_and_concurrent_close_waits(tmp_path, m
     assert sessions == []
 
 
-def test_session_cleanup_failure_does_not_wedge_registry_close(tmp_path, monkeypatch) -> None:
+def test_session_cleanup_failure_does_not_wedge_registry_close(
+    tmp_path, monkeypatch
+) -> None:
     core = _core(monkeypatch, ScriptedTransport([]))
 
     async def release_boom(self, lease):
@@ -367,7 +438,9 @@ def test_session_drain_failure_preserves_lease_and_allows_close_retry(
     original_close = HostSession.aclose
     attempts = 0
 
-    async def fail_once(self, *, reason=AbortKind.HOST_TEARDOWN, drain_timeout_seconds=5.0):
+    async def fail_once(
+        self, *, reason=AbortKind.HOST_TEARDOWN, drain_timeout_seconds=5.0
+    ):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -435,7 +508,9 @@ def test_concurrent_session_close_waiters_share_failure_and_retry_attempt(
     monkeypatch.setattr(HostSession, "aclose", controlled_close)
 
     async def run() -> None:
-        session = await _open(core, tmp_path, host_session_id="host:shared-close-result")
+        session = await _open(
+            core, tmp_path, host_session_id="host:shared-close-result"
+        )
         owner = asyncio.create_task(core.close_session(session.host_session_id))
         await first_entered.wait()
         waiter = asyncio.create_task(core.close_session(session.host_session_id))
@@ -552,7 +627,9 @@ def test_shutdown_close_attempt_merges_competing_explicit_close_intent(
     monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
 
     async def run() -> str:
-        session = await _open(core, tmp_path, host_session_id="host:shutdown-close-intent")
+        session = await _open(
+            core, tmp_path, host_session_id="host:shutdown-close-intent"
+        )
         core.durable = True
         shutdown = asyncio.create_task(core.shutdown())
         await close_entered.wait()
@@ -593,7 +670,9 @@ def test_explicit_close_arriving_after_detach_intent_seal_closes_manifest(
     monkeypatch.setattr(HostCore, "_manifest_store", lambda self: _ManifestStore())
 
     async def run() -> str:
-        session = await _open(core, tmp_path, host_session_id="host:late-explicit-intent")
+        session = await _open(
+            core, tmp_path, host_session_id="host:late-explicit-intent"
+        )
         core.durable = True
         detach = asyncio.create_task(core.detach_session(session.host_session_id))
         await sealed.wait()
@@ -691,7 +770,9 @@ def test_late_explicit_manifest_failure_keeps_tombstone_for_retry(
     )
 
     async def run() -> str:
-        session = await _open(core, tmp_path, host_session_id="host:late-manifest-retry")
+        session = await _open(
+            core, tmp_path, host_session_id="host:late-manifest-retry"
+        )
         core.durable = True
         detach = asyncio.create_task(core.detach_session(session.host_session_id))
         await sealed.wait()
@@ -844,12 +925,16 @@ def test_runtime_reservation_atomically_rejects_pending_manifest_tombstone(
         with pytest.raises(RuntimeError, match="manifest unavailable"):
             await core.close_session(session.host_session_id, close_conversation=True)
 
-        with pytest.raises(DuplicateHostSessionError, match="conversation_id pending close"):
+        with pytest.raises(
+            DuplicateHostSessionError, match="conversation_id pending close"
+        ):
             await core.registry.reserve(
                 "host:new-conversation",
                 "conversation:same-runtime",
             )
-        with pytest.raises(DuplicateHostSessionError, match="runtime_session_id.*pending close"):
+        with pytest.raises(
+            DuplicateHostSessionError, match="runtime_session_id.*pending close"
+        ):
             await core.registry.reserve(
                 "host:new-runtime",
                 "conversation:new-runtime",
@@ -929,7 +1014,9 @@ def test_tombstoned_resume_rejects_before_dangling_repair(
         with pytest.raises(RuntimeError, match="manifest unavailable"):
             await core.close_session(session.host_session_id, close_conversation=True)
 
-        with pytest.raises(DuplicateHostSessionError, match="runtime_session_id.*pending close"):
+        with pytest.raises(
+            DuplicateHostSessionError, match="runtime_session_id.*pending close"
+        ):
             await core.resume_session(
                 session.runtime_session_id,
                 host_session_id="host:resume-new",
@@ -952,7 +1039,9 @@ def test_host_shutdown_stops_before_shared_teardown_when_session_drain_fails(
     original_close = HostSession.aclose
     attempts = 0
 
-    async def fail_once(self, *, reason=AbortKind.HOST_TEARDOWN, drain_timeout_seconds=5.0):
+    async def fail_once(
+        self, *, reason=AbortKind.HOST_TEARDOWN, drain_timeout_seconds=5.0
+    ):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -1030,9 +1119,12 @@ def test_host_close_pending_terminal_completion_preserves_retryable_session_and_
         assert await core.registry.get(session.host_session_id) is session
         assert core._session_leases[session.host_session_id] is lease  # noqa: SLF001
         assert lease.workspace_key in core._supervisors  # noqa: SLF001
-        assert lease.manager.pending_completion_count(
-            owner_host_session_id=session.host_session_id
-        ) == 1
+        assert (
+            lease.manager.pending_completion_count(
+                owner_host_session_id=session.host_session_id
+            )
+            == 1
+        )
 
         available = True
         await core.close_session(session.host_session_id)
@@ -1044,23 +1136,45 @@ def test_host_close_pending_terminal_completion_preserves_retryable_session_and_
     asyncio.run(run())
 
 
-def test_repeated_owner_release_does_not_exhaust_shared_session_capacity(tmp_path, monkeypatch) -> None:
+def test_repeated_owner_release_does_not_exhaust_shared_session_capacity(
+    tmp_path, monkeypatch
+) -> None:
     # The §15.2 experiment: an anchor keeps the supervisor alive while ephemeral
     # owners reuse the default terminal and close. With kill_owned-only this hit
     # "terminal session limit reached: max 4" by the 4th ephemeral; release_owner
     # must prune stale session keys so capacity recovers.
     replies: list[dict] = []
     for i in range(7):
-        replies.append({"tool_calls": [{"id": f"call:{i}", "name": "terminal", "arguments": json.dumps({"command": "printf ok"})}]})
+        replies.append(
+            {
+                "tool_calls": [
+                    {
+                        "id": f"call:{i}",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf ok"}),
+                    }
+                ]
+            }
+        )
         replies.append({"text": f"ok {i}"})
     core = _core(monkeypatch, ScriptedTransport(replies))
 
     async def run():
-        anchor = await _open(core, tmp_path, host_session_id="host:anchor", policy=_trusted_terminal_policy())
+        anchor = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:anchor",
+            policy=_trusted_terminal_policy(),
+        )
         await anchor.run_turn("anchor uses terminal")
         manager = anchor.wiring.runtime_wiring.runtime_session.terminal_sessions
         for i in range(6):
-            s = await _open(core, tmp_path, host_session_id=f"host:eph-{i}", policy=_trusted_terminal_policy())
+            s = await _open(
+                core,
+                tmp_path,
+                host_session_id=f"host:eph-{i}",
+                policy=_trusted_terminal_policy(),
+            )
             await s.run_turn(f"use terminal {i}")
             await core.close_session(f"host:eph-{i}")
         count = manager.session_count()
@@ -1073,8 +1187,13 @@ def test_repeated_owner_release_does_not_exhaust_shared_session_capacity(tmp_pat
 
 def test_borrowed_runtime_close_does_not_touch_shared_manager(tmp_path) -> None:
     manager = TerminalSessionManager(tmp_path)
-    owner = TerminalOwnerContext(host_session_id="host:x", conversation_id="conversation:x")
-    rs = in_memory_runtime_session(tmp_path, terminal_binding=BorrowedWorkspaceTerminalRuntime(owner=owner, manager=manager))
+    owner = TerminalOwnerContext(
+        host_session_id="host:x", conversation_id="conversation:x"
+    )
+    rs = in_memory_runtime_session(
+        tmp_path,
+        terminal_binding=BorrowedWorkspaceTerminalRuntime(owner=owner, manager=manager),
+    )
     manager.get_or_create("work", owner_host_session_id="host:x")
     assert manager.session_count() == 1
     assert rs.terminal_owner_host_session_id == "host:x"
@@ -1092,7 +1211,9 @@ def test_owned_runtime_close_is_idempotent(tmp_path) -> None:
     rs.close()  # second close is a no-op
 
 
-def test_close_active_streaming_run_emits_auditable_host_teardown(tmp_path, monkeypatch) -> None:
+def test_close_active_streaming_run_emits_auditable_host_teardown(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "streaming"}], delay=0.3)
     core = _core(monkeypatch, transport)
 
@@ -1122,14 +1243,31 @@ def test_close_active_streaming_run_emits_auditable_host_teardown(tmp_path, monk
     assert run_ends[-1].abort_kind == "host_teardown"  # not masqueraded as user_stop
 
 
-def test_close_suspended_run_emits_auditable_host_teardown(tmp_path, monkeypatch) -> None:
+def test_close_suspended_run_emits_auditable_host_teardown(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport(
-        [{"tool_calls": [{"id": "call:danger", "name": "terminal", "arguments": json.dumps({"command": "rm -rf build"})}]}]
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:danger",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "rm -rf build"}),
+                    }
+                ]
+            }
+        ]
     )
     core = _core(monkeypatch, transport)
 
     async def run():
-        s = await _open(core, tmp_path, host_session_id="host:susp", policy=_trusted_terminal_ask_policy())
+        s = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:susp",
+            policy=_trusted_terminal_ask_policy(),
+        )
         first = await s.run_turn("danger")
         assert s.get_pending_approval() is not None
         await core.close_session("host:susp")
@@ -1140,13 +1278,23 @@ def test_close_suspended_run_emits_auditable_host_teardown(tmp_path, monkeypatch
     assert closed
     run_ends = [e for e in events if isinstance(e, RunEndEvent) and e.run_id == run_id]
     # The suspended run is not silently dropped; it gets a terminal RunEnd.
-    assert any(e.status == "aborted" and e.abort_kind == "host_teardown" for e in run_ends)
+    assert any(
+        e.status == "aborted" and e.abort_kind == "host_teardown" for e in run_ends
+    )
 
 
 def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> None:
     transport = ScriptedTransport(
         [
-            {"tool_calls": [{"id": "call:ask", "name": "terminal", "arguments": json.dumps({"command": "printf ok"})}]},
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:ask",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "printf ok"}),
+                    }
+                ]
+            },
             {"text": "resumed"},
         ],
         delay=0.2,
@@ -1154,7 +1302,12 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
     core = _core(monkeypatch, transport)
 
     async def run():
-        s = await _open(core, tmp_path, host_session_id="host:resume", policy=_trusted_terminal_ask_policy())
+        s = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:resume",
+            policy=_trusted_terminal_ask_policy(),
+        )
         await s.run_turn("do x")  # suspends on terminal-ask approval
         pending = s.get_pending_approval()
         events: list[AgentEvent] = []
@@ -1163,7 +1316,10 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
             async for event in s.stream_approval_resolution(
                 ApprovalResolution(
                     approval_id=pending.approval_id,
-                    decisions=tuple(ToolApprovalDecision(tool_call_id=c.id, confirmed=True) for c in pending.tool_calls),
+                    decisions=tuple(
+                        ToolApprovalDecision(tool_call_id=c.id, confirmed=True)
+                        for c in pending.tool_calls
+                    ),
                 )
             ):
                 events.append(event)
@@ -1179,25 +1335,26 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
     assert owned
 
 
-def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(tmp_path, monkeypatch) -> None:
+def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(
+    tmp_path, monkeypatch
+) -> None:
     from pulsara_agent.host.session import _STREAM_QUEUE_MAX_ITEMS
 
     total_deltas = _STREAM_QUEUE_MAX_ITEMS * 3
 
     class BurstTransport:
         api = "scripted"
+        binding_id = "test.scripted"
+        contract_version = "v1"
 
         def __init__(self) -> None:
             self.produced = 0
 
-        async def stream(self, *, model, context, event_context, options=None):
-            yield ModelCallStartEvent(
-                **event_context.event_fields(),
-                model_name=model.id,
-                model_role=model.role.value,
-                provider=model.provider,
+        async def stream(self, *, call, context, event_context):
+            del call
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id="text:burst"
             )
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:burst")
             for _ in range(total_deltas):
                 self.produced += 1
                 yield TextBlockDeltaEvent(
@@ -1205,8 +1362,9 @@ def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(tmp_path, mon
                     block_id="text:burst",
                     delta="x",
                 )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:burst")
-            yield ModelCallEndEvent(**event_context.event_fields())
+            yield TextBlockEndEvent(
+                **event_context.event_fields(), block_id="text:burst"
+            )
 
     transport = BurstTransport()
     core = _core(monkeypatch, transport)  # type: ignore[arg-type]
@@ -1234,23 +1392,23 @@ def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(tmp_path, mon
     assert produced_after_detach == total_deltas
 
 
-def test_detached_stream_remains_active_and_blocks_second_run(tmp_path, monkeypatch) -> None:
+def test_detached_stream_remains_active_and_blocks_second_run(
+    tmp_path, monkeypatch
+) -> None:
     paused = asyncio.Event()
     release = asyncio.Event()
 
     class PausingTransport:
         api = "scripted"
+        binding_id = "test.scripted"
+        contract_version = "v1"
 
-        async def stream(self, *, model, context, event_context, options=None):
-            yield ModelCallStartEvent(
-                **event_context.event_fields(),
-                model_name=model.id,
-                model_role=model.role.value,
-                provider=model.provider,
-            )
+        async def stream(self, *, call, context, event_context):
+            del call
             paused.set()
             await release.wait()
-            yield ModelCallEndEvent(**event_context.event_fields())
+            if False:
+                yield
 
     core = _core(monkeypatch, PausingTransport())  # type: ignore[arg-type]
 
@@ -1272,21 +1430,22 @@ def test_detached_stream_remains_active_and_blocks_second_run(tmp_path, monkeypa
     assert asyncio.run(run()) is None
 
 
-def test_host_close_aborts_run_after_stream_observer_detaches(tmp_path, monkeypatch) -> None:
+def test_host_close_aborts_run_after_stream_observer_detaches(
+    tmp_path, monkeypatch
+) -> None:
     paused = asyncio.Event()
 
     class PausingTransport:
         api = "scripted"
+        binding_id = "test.scripted"
+        contract_version = "v1"
 
-        async def stream(self, *, model, context, event_context, options=None):
-            yield ModelCallStartEvent(
-                **event_context.event_fields(),
-                model_name=model.id,
-                model_role=model.role.value,
-                provider=model.provider,
-            )
+        async def stream(self, *, call, context, event_context):
+            del call
             paused.set()
             await asyncio.Event().wait()
+            if False:
+                yield
 
     core = _core(monkeypatch, PausingTransport())  # type: ignore[arg-type]
 
@@ -1308,7 +1467,9 @@ def test_host_close_aborts_run_after_stream_observer_detaches(tmp_path, monkeypa
 # --- §12.4 workspace close ----------------------------------------------------
 
 
-def test_workspace_close_rejects_concurrent_open_in_same_workspace(tmp_path, monkeypatch) -> None:
+def test_workspace_close_rejects_concurrent_open_in_same_workspace(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "a"}, {"text": "b"}])
     core = _core(monkeypatch, transport)
     reached = asyncio.Event()
@@ -1324,7 +1485,9 @@ def test_workspace_close_rejects_concurrent_open_in_same_workspace(tmp_path, mon
 
     async def run():
         a = await _open(core, tmp_path, host_session_id="host:a")
-        close_task = asyncio.create_task(core.close_workspace(a.workspace.workspace_key))
+        close_task = asyncio.create_task(
+            core.close_workspace(a.workspace.workspace_key)
+        )
         await reached.wait()  # supervisor is CLOSING, paused inside close_session
         with pytest.raises(WorkspaceClosingError):
             await _open(core, tmp_path, host_session_id="host:b")
@@ -1336,7 +1499,9 @@ def test_workspace_close_rejects_concurrent_open_in_same_workspace(tmp_path, mon
     assert sessions == []
 
 
-def test_workspace_close_invalidates_lease_acquired_by_unpublished_open(tmp_path, monkeypatch) -> None:
+def test_workspace_close_invalidates_lease_acquired_by_unpublished_open(
+    tmp_path, monkeypatch
+) -> None:
     """The open-before-close interleaving must lose at its publish boundary."""
     core = _core(monkeypatch, ScriptedTransport([]))
     attached = asyncio.Event()
@@ -1352,7 +1517,9 @@ def test_workspace_close_invalidates_lease_acquired_by_unpublished_open(tmp_path
     monkeypatch.setattr(HostCore, "_attach_supervisor", barrier_after_attach)
 
     async def run():
-        opening = asyncio.create_task(_open(core, tmp_path, host_session_id="host:mid-open"))
+        opening = asyncio.create_task(
+            _open(core, tmp_path, host_session_id="host:mid-open")
+        )
         await attached.wait()
         workspace_key, supervisor = next(iter(core._supervisors.items()))
         manager = supervisor.terminal_sessions
@@ -1362,7 +1529,10 @@ def test_workspace_close_invalidates_lease_acquired_by_unpublished_open(tmp_path
         release.set()
         with pytest.raises(WorkspaceClosingError):
             await opening
-        return await core.list_sessions(), await core.list_workspace_terminal_snapshots()
+        return (
+            await core.list_sessions(),
+            await core.list_workspace_terminal_snapshots(),
+        )
 
     sessions, supervisors = asyncio.run(run())
     assert sessions == []
@@ -1372,7 +1542,9 @@ def test_workspace_close_invalidates_lease_acquired_by_unpublished_open(tmp_path
 # --- §12.5 HostCore shutdown --------------------------------------------------
 
 
-def test_shutdown_gate_rejects_start_and_continue_facades_and_is_idempotent(tmp_path, monkeypatch) -> None:
+def test_shutdown_gate_rejects_start_and_continue_facades_and_is_idempotent(
+    tmp_path, monkeypatch
+) -> None:
     transport = ScriptedTransport([{"text": "ok"}])
     core = _core(monkeypatch, transport)
 
@@ -1398,7 +1570,9 @@ def test_shutdown_gate_rejects_start_and_continue_facades_and_is_idempotent(tmp_
     assert sessions == []
 
 
-def test_concurrent_shutdown_waits_for_owner_even_when_cleanup_fails(monkeypatch) -> None:
+def test_concurrent_shutdown_waits_for_owner_even_when_cleanup_fails(
+    monkeypatch,
+) -> None:
     core = _core(monkeypatch, ScriptedTransport([]))
     close_entered = asyncio.Event()
     release_close = asyncio.Event()
@@ -1427,7 +1601,9 @@ def test_concurrent_shutdown_waits_for_owner_even_when_cleanup_fails(monkeypatch
     assert asyncio.run(run()) is HostCoreLifecycle.CLOSED
 
 
-def test_open_parked_at_attach_then_shutdown_leaves_no_session(tmp_path, monkeypatch) -> None:
+def test_open_parked_at_attach_then_shutdown_leaves_no_session(
+    tmp_path, monkeypatch
+) -> None:
     # Linearization (P0-2): an open that passed the entry check but is still mid
     # transaction when shutdown completes must roll back, never leak a session
     # into a closed HostCore.
@@ -1446,7 +1622,9 @@ def test_open_parked_at_attach_then_shutdown_leaves_no_session(tmp_path, monkeyp
     monkeypatch.setattr(HostCore, "_attach_supervisor", barrier_attach)
 
     async def run():
-        open_task = asyncio.create_task(_open(core, tmp_path, host_session_id="host:late"))
+        open_task = asyncio.create_task(
+            _open(core, tmp_path, host_session_id="host:late")
+        )
         await reached.wait()
         await core.shutdown()  # completes while the open is parked
         release.set()
@@ -1495,7 +1673,9 @@ def test_nonstream_close_waits_for_abort_finalization(tmp_path, monkeypatch) -> 
 # --- §12.6 event-loop responsiveness -----------------------------------------
 
 
-def test_slow_owner_release_runs_off_lock_and_does_not_block_other_workspace(tmp_path, monkeypatch) -> None:
+def test_slow_owner_release_runs_off_lock_and_does_not_block_other_workspace(
+    tmp_path, monkeypatch
+) -> None:
     ws_a = tmp_path / "A"
     ws_a.mkdir()
     ws_b = tmp_path / "B"
@@ -1510,7 +1690,9 @@ def test_slow_owner_release_runs_off_lock_and_does_not_block_other_workspace(tmp
         time.sleep(0.3)  # synchronous, would block the loop if run on it
         return original_release(self, owner_host_session_id)
 
-    monkeypatch.setattr(manager_mod.TerminalSessionManager, "release_owner", slow_release)
+    monkeypatch.setattr(
+        manager_mod.TerminalSessionManager, "release_owner", slow_release
+    )
 
     async def run():
         await _open(core, ws_a, host_session_id="host:a")
@@ -1528,7 +1710,9 @@ def test_slow_owner_release_runs_off_lock_and_does_not_block_other_workspace(tmp
     assert elapsed < 0.2  # not serialized behind the 0.3s synchronous teardown
 
 
-def test_release_owner_is_thread_safe_with_concurrent_sibling_session_create(tmp_path) -> None:
+def test_release_owner_is_thread_safe_with_concurrent_sibling_session_create(
+    tmp_path,
+) -> None:
     manager = TerminalSessionManager(tmp_path, max_sessions=8)
     released_session = manager.get_or_create("one", owner_host_session_id="host:a")
     manager.get_or_create("two", owner_host_session_id="host:a")
@@ -1569,7 +1753,9 @@ def test_release_owner_is_thread_safe_with_concurrent_sibling_session_create(tmp
     assert not create_thread.is_alive()
     assert errors == []
     assert manager.owner_session_counts() == {"host:b": 1}
-    stale_result = released_session.execute(TerminalRequest(command="printf should-not-run"))
+    stale_result = released_session.execute(
+        TerminalRequest(command="printf should-not-run")
+    )
     assert stale_result.status is TerminalStatus.BLOCKED
     assert "released" in (stale_result.error or "")
 
@@ -1577,20 +1763,42 @@ def test_release_owner_is_thread_safe_with_concurrent_sibling_session_create(tmp
 # --- §12.7 shared capacity ----------------------------------------------------
 
 
-def test_shared_capacity_limit_error_reports_owner_distribution(tmp_path, monkeypatch) -> None:
+def test_shared_capacity_limit_error_reports_owner_distribution(
+    tmp_path, monkeypatch
+) -> None:
     # Two host sessions sharing one workspace each create named terminal sessions
     # until the workspace-wide ceiling trips; the error must name the owners.
     replies: list[dict] = []
-    for owner_idx, name in [("a", "one"), ("a", "two"), ("b", "three"), ("b", "four"), ("b", "five")]:
+    for owner_idx, name in [
+        ("a", "one"),
+        ("a", "two"),
+        ("b", "three"),
+        ("b", "four"),
+        ("b", "five"),
+    ]:
         replies.append(
-            {"tool_calls": [{"id": f"call:{name}", "name": "terminal", "arguments": json.dumps({"command": "printf ok", "terminal_session_id": name})}]}
+            {
+                "tool_calls": [
+                    {
+                        "id": f"call:{name}",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "printf ok", "terminal_session_id": name}
+                        ),
+                    }
+                ]
+            }
         )
         replies.append({"text": f"ok {name}"})
     core = _core(monkeypatch, ScriptedTransport(replies))
 
     async def run():
-        a = await _open(core, tmp_path, host_session_id="host:a", policy=_trusted_terminal_policy())
-        b = await _open(core, tmp_path, host_session_id="host:b", policy=_trusted_terminal_policy())
+        a = await _open(
+            core, tmp_path, host_session_id="host:a", policy=_trusted_terminal_policy()
+        )
+        b = await _open(
+            core, tmp_path, host_session_id="host:b", policy=_trusted_terminal_policy()
+        )
         await a.run_turn("named one")
         await a.run_turn("named two")
         await b.run_turn("named three")

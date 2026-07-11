@@ -15,6 +15,7 @@ import pytest
 
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityGateDecisionEvent,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
@@ -71,11 +72,15 @@ class PlanDogfoodEvidence:
 
 def test_real_plan_mode_job_queue_long_dogfood(monkeypatch: pytest.MonkeyPatch) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_LLM") != "1":
         pytest.skip("Set PULSARA_RUN_DOGFOOD_LLM=1 to run dogfood real LLM tests.")
     if os.getenv("PULSARA_RUN_DOGFOOD_PLAN_LONG") != "1":
-        pytest.skip("Set PULSARA_RUN_DOGFOOD_PLAN_LONG=1 to run the long Plan workflow dogfood.")
+        pytest.skip(
+            "Set PULSARA_RUN_DOGFOOD_PLAN_LONG=1 to run the long Plan workflow dogfood."
+        )
 
     result = asyncio.run(
         asyncio.wait_for(
@@ -84,7 +89,9 @@ def test_real_plan_mode_job_queue_long_dogfood(monkeypatch: pytest.MonkeyPatch) 
         )
     )
 
-    assert result["ok"], f"{result.get('error', 'plan dogfood failed')}\n{result['evidence']}"
+    assert result["ok"], (
+        f"{result.get('error', 'plan dogfood failed')}\n{result['evidence']}"
+    )
 
 
 async def _run_real_plan_mode_job_queue_long_dogfood(
@@ -119,18 +126,33 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
             host_session_id=f"host:plan-dogfood-queue:{uuid4().hex[:12]}",
             conversation_id=f"conversation:plan-dogfood-queue:{uuid4().hex[:12]}",
             model_role=ModelRole.FLASH,
-            options=LLMOptions(temperature=0, max_output_tokens=4096),
+            options=LLMOptions(),
             memory_reflection=False,
             system_prompt=_PLAN_DOGFOOD_SYSTEM_PROMPT,
             permission_policy=policy,
         )
-        evidence.registry_names = sorted(session.wiring.agent_runtime.tool_executor.registry.names())
-        _require({"read_file", "edit_file", "write_file", "terminal", "ask_plan_question", "exit_plan"}.issubset(
-            set(evidence.registry_names)
-        ), "plan dogfood expected core tools in registry", evidence)
+        evidence.registry_names = sorted(
+            session.wiring.agent_runtime.tool_executor.registry.names()
+        )
+        _require(
+            {
+                "read_file",
+                "edit_file",
+                "write_file",
+                "terminal",
+                "ask_plan_question",
+                "exit_plan",
+            }.issubset(set(evidence.registry_names)),
+            "plan dogfood expected core tools in registry",
+            evidence,
+        )
 
         session.enter_plan(reason=PLAN_REASON)
-        _require(session.current_permission_mode is PermissionMode.READ_ONLY, "enter_plan did not switch read-only", evidence)
+        _require(
+            session.current_permission_mode is PermissionMode.READ_ONLY,
+            "enter_plan did not switch read-only",
+            evidence,
+        )
         first = await _await_with_plan_trace(
             session,
             session.run_turn(_PLAN_DOGFOOD_USER_REQUEST),
@@ -146,8 +168,14 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
                 break
             if pending.kind == "question":
                 question_count += 1
-                _require(question_count == 1, "plan dogfood expected exactly one plan question", evidence)
-                _record_pending_interaction(evidence, f"round{step}_question_pending", pending)
+                _require(
+                    question_count == 1,
+                    "plan dogfood expected exactly one plan question",
+                    evidence,
+                )
+                _record_pending_interaction(
+                    evidence, f"round{step}_question_pending", pending
+                )
                 last_result = await _await_with_plan_trace(
                     session,
                     session.resolve_plan_interaction(
@@ -163,8 +191,14 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
                 continue
             if pending.kind == "exit":
                 exit_count += 1
-                _require(exit_count == 1, "plan dogfood expected exactly one exit_plan request", evidence)
-                _record_pending_interaction(evidence, f"round{step}_exit_pending", pending)
+                _require(
+                    exit_count == 1,
+                    "plan dogfood expected exactly one exit_plan request",
+                    evidence,
+                )
+                _record_pending_interaction(
+                    evidence, f"round{step}_exit_pending", pending
+                )
                 _validate_exit_plan_text(pending.plan_text, evidence)
                 last_result = await _await_with_plan_trace(
                     session,
@@ -183,9 +217,21 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
                 continue
             raise AssertionError(f"unexpected plan interaction kind: {pending.kind}")
 
-        _require(session.get_pending_interaction() is None, "plan dogfood left pending interaction", evidence)
-        _require(question_count == 1, "plan dogfood did not ask exactly one plan question", evidence)
-        _require(exit_count == 1, "plan dogfood did not request exit_plan exactly once", evidence)
+        _require(
+            session.get_pending_interaction() is None,
+            "plan dogfood left pending interaction",
+            evidence,
+        )
+        _require(
+            question_count == 1,
+            "plan dogfood did not ask exactly one plan question",
+            evidence,
+        )
+        _require(
+            exit_count == 1,
+            "plan dogfood did not request exit_plan exactly once",
+            evidence,
+        )
         if PLAN_SENTINEL not in last_result.final_text:
             _require(
                 session.plan_state.active is False,
@@ -201,9 +247,13 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
 
         events = session.replay_events()
         _collect_artifacts(workspace_root, evidence)
-        _assert_plan_trajectory(events, session, last_result.final_text.strip(), evidence)
+        _assert_plan_trajectory(
+            events, session, last_result.final_text.strip(), evidence
+        )
         return {"ok": True, "evidence": evidence.to_json()}
-    except Exception as exc:  # pragma: no cover - diagnostics for real-provider dogfood.
+    except (
+        Exception
+    ) as exc:  # pragma: no cover - diagnostics for real-provider dogfood.
         failed = True
         _collect_artifacts(workspace_root, evidence)
         return {
@@ -214,13 +264,15 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
     finally:
         if session is not None:
             await core.close_session(session.host_session_id)
-        else:
-            await core.shutdown()
+        await core.shutdown()
+        await asyncio.sleep(0)
         if not failed and os.getenv("PULSARA_DOGFOOD_KEEP_WORKSPACE") != "1":
             shutil.rmtree(temp_root, ignore_errors=True)
 
 
-async def _await_with_plan_trace(session, awaitable, evidence: PlanDogfoodEvidence, round_name: str):
+async def _await_with_plan_trace(
+    session, awaitable, evidence: PlanDogfoodEvidence, round_name: str
+):
     task = asyncio.create_task(awaitable)
     last_sequence = 0
     while not task.done():
@@ -252,7 +304,11 @@ async def _await_with_plan_trace(session, awaitable, evidence: PlanDogfoodEviden
             "stop_reason": result.stop_reason,
             "final_text": result.final_text.strip(),
             "tool_names": _tool_names(run_events),
-            "errors": [_run_error_diagnostic(event) for event in run_events if isinstance(event, RunErrorEvent)],
+            "errors": [
+                _run_error_diagnostic(event)
+                for event in run_events
+                if isinstance(event, RunErrorEvent)
+            ],
             "event_type_counts": _event_type_counts(run_events),
             "tool_results": _tool_result_payloads_by_call_id(run_events),
             "session": _session_trace(session),
@@ -275,7 +331,9 @@ def _prepare_mq_workspace(workspace_root: Path) -> None:
         pyproject.write_text(_FIXTURE_PYPROJECT, encoding="utf-8")
     project = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     dependencies = _dependency_names(project.get("project", {}).get("dependencies", []))
-    dev_dependencies = _dependency_names(project.get("dependency-groups", {}).get("dev", []))
+    dev_dependencies = _dependency_names(
+        project.get("dependency-groups", {}).get("dev", [])
+    )
     missing = {"fastapi", "uvicorn"} - dependencies
     if missing:
         raise AssertionError(f"workspace dependencies missing: {sorted(missing)}")
@@ -306,34 +364,65 @@ def _dependency_names(dependencies: object) -> set[str]:
 
 def _validate_exit_plan_text(plan_text: str, evidence: PlanDogfoodEvidence) -> None:
     text = plan_text.lower()
-    _require(any(term in text for term in ("lazy", "passive", "sweep", "惰性", "扫描")), "exit_plan omitted lazy/passive sweep", evidence)
-    _require(any(term in text for term in ("receipt", "token", "凭证", "令牌")), "exit_plan omitted receipt/token", evidence)
     _require(
-        any(term in text for term in ("locked", "deadline", "expires", "expire", "过期", "超时")),
+        any(term in text for term in ("lazy", "passive", "sweep", "惰性", "扫描")),
+        "exit_plan omitted lazy/passive sweep",
+        evidence,
+    )
+    _require(
+        any(term in text for term in ("receipt", "token", "凭证", "令牌")),
+        "exit_plan omitted receipt/token",
+        evidence,
+    )
+    _require(
+        any(
+            term in text
+            for term in ("locked", "deadline", "expires", "expire", "过期", "超时")
+        ),
         "exit_plan omitted locked/deadline timestamp",
         evidence,
     )
     _require("main.py" in text, "exit_plan omitted main.py", evidence)
-    _require(TEST_COMMAND in plan_text, "exit_plan omitted exact test command", evidence)
+    _require(
+        TEST_COMMAND in plan_text, "exit_plan omitted exact test command", evidence
+    )
 
 
-def _assert_plan_trajectory(events: list[AgentEvent], session, final_text: str, evidence: PlanDogfoodEvidence) -> None:
+def _assert_plan_trajectory(
+    events: list[AgentEvent], session, final_text: str, evidence: PlanDogfoodEvidence
+) -> None:
     entered = [event for event in events if isinstance(event, PlanModeEnteredEvent)]
     exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
     questions = [event for event in events if isinstance(event, PlanQuestionAskedEvent)]
-    answers = [event for event in events if isinstance(event, PlanQuestionAnsweredEvent)]
-    exit_requests = [event for event in events if isinstance(event, PlanExitRequestedEvent)]
-    exit_resolutions = [event for event in events if isinstance(event, PlanExitResolvedEvent)]
+    answers = [
+        event for event in events if isinstance(event, PlanQuestionAnsweredEvent)
+    ]
+    exit_requests = [
+        event for event in events if isinstance(event, PlanExitRequestedEvent)
+    ]
+    exit_resolutions = [
+        event for event in events if isinstance(event, PlanExitResolvedEvent)
+    ]
     _require(entered, "missing PlanModeEnteredEvent", evidence)
-    _require(entered[0].source == "user", "PlanModeEnteredEvent source was not user", evidence)
+    _require(
+        entered[0].source == "user",
+        "PlanModeEnteredEvent source was not user",
+        evidence,
+    )
     _require(
         entered[0].previous_permission_mode == PermissionMode.BYPASS_PERMISSIONS.value,
         "PlanModeEnteredEvent did not capture bypass previous mode",
         evidence,
     )
-    _require(len(questions) == 1, "expected exactly one PlanQuestionAskedEvent", evidence)
-    _require(len(answers) == 1, "expected exactly one PlanQuestionAnsweredEvent", evidence)
-    _require(len(exit_requests) == 1, "expected exactly one PlanExitRequestedEvent", evidence)
+    _require(
+        len(questions) == 1, "expected exactly one PlanQuestionAskedEvent", evidence
+    )
+    _require(
+        len(answers) == 1, "expected exactly one PlanQuestionAnsweredEvent", evidence
+    )
+    _require(
+        len(exit_requests) == 1, "expected exactly one PlanExitRequestedEvent", evidence
+    )
     _require(
         any(event.decision == "approve" for event in exit_resolutions),
         "missing approved PlanExitResolvedEvent",
@@ -344,15 +433,57 @@ def _assert_plan_trajectory(events: list[AgentEvent], session, final_text: str, 
         "missing approved PlanModeExitedEvent",
         evidence,
     )
-    exit_sequence = min(event.sequence or 0 for event in exited if event.source == "approved_exit_plan")
+    exit_sequence = min(
+        event.sequence or 0 for event in exited if event.source == "approved_exit_plan"
+    )
     calls = _tool_calls(events)
     side_effecting = {"write_file", "edit_file", "terminal", "terminal_process"}
-    pre_exit_side_effects = [
+    pre_exit_side_effect_attempts = [
         call
         for call in calls
         if call["sequence"] < exit_sequence and call["name"] in side_effecting
     ]
-    _require(not pre_exit_side_effects, f"side-effecting tools ran before plan exit: {pre_exit_side_effects}", evidence)
+    gate_decisions_by_call_id = {
+        event.tool_call_id: event
+        for event in events
+        if isinstance(event, CapabilityGateDecisionEvent)
+        and (event.sequence or 0) < exit_sequence
+    }
+    unsafe_pre_exit_attempts: list[dict[str, object]] = []
+    for call in pre_exit_side_effect_attempts:
+        decision = gate_decisions_by_call_id.get(str(call["id"]))
+        if (
+            decision is None
+            or decision.decision != "deny"
+            or decision.policy_mode != PermissionMode.READ_ONLY.value
+        ):
+            unsafe_pre_exit_attempts.append(
+                {
+                    **call,
+                    "gate_decision": (
+                        decision.model_dump(mode="json")
+                        if decision is not None
+                        else None
+                    ),
+                }
+            )
+    _require(
+        not unsafe_pre_exit_attempts,
+        "side-effecting tool attempts were not denied by the read-only plan gate: "
+        f"{unsafe_pre_exit_attempts}",
+        evidence,
+    )
+    if pre_exit_side_effect_attempts:
+        evidence.turns.append(
+            {
+                "round": "pre_exit_side_effect_attempts_denied",
+                "attempts": pre_exit_side_effect_attempts,
+                "gate_reason_codes": [
+                    gate_decisions_by_call_id[str(call["id"])].reason_code
+                    for call in pre_exit_side_effect_attempts
+                ],
+            }
+        )
     post_exit_calls = [call for call in calls if call["sequence"] > exit_sequence]
     _require(
         any(call["name"] in {"write_file", "edit_file"} for call in post_exit_calls),
@@ -365,28 +496,58 @@ def _assert_plan_trajectory(events: list[AgentEvent], session, final_text: str, 
         if call["name"] == "terminal" and isinstance(call["arguments"], dict)
     ]
     _require(
-        any(isinstance(command, str) and TEST_COMMAND in command for command in terminal_commands),
+        any(
+            isinstance(command, str) and TEST_COMMAND in command
+            for command in terminal_commands
+        ),
         f"missing terminal test command: {terminal_commands}",
         evidence,
     )
-    _require(session.plan_state.active is False, "plan state remained active after approval", evidence)
+    _require(
+        session.plan_state.active is False,
+        "plan state remained active after approval",
+        evidence,
+    )
     _require(
         session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS,
         "permission mode did not restore to bypass",
         evidence,
     )
-    _require(PLAN_SENTINEL in final_text, "final answer omitted plan dogfood sentinel", evidence)
+    _require(
+        PLAN_SENTINEL in final_text,
+        "final answer omitted plan dogfood sentinel",
+        evidence,
+    )
     _assert_fixture_static_shape(Path(evidence.workspace_root), evidence)
 
 
-def _assert_fixture_static_shape(workspace_root: Path, evidence: PlanDogfoodEvidence) -> None:
+def _assert_fixture_static_shape(
+    workspace_root: Path, evidence: PlanDogfoodEvidence
+) -> None:
     source = (workspace_root / "main.py").read_text(encoding="utf-8")
-    forbidden = ("threading.Timer", "asyncio.create_task", "time.sleep(", "BackgroundTasks", "setTimeout")
+    forbidden = (
+        "threading.Timer",
+        "asyncio.create_task",
+        "time.sleep(",
+        "BackgroundTasks",
+        "setTimeout",
+    )
     offenders = [token for token in forbidden if token in source]
-    _require(not offenders, f"implementation used forbidden active timer pattern: {offenders}", evidence)
-    _require(any(token in source.lower() for token in ("receipt", "token")), "implementation omitted receipt/token", evidence)
     _require(
-        any(token in source.lower() for token in ("locked", "deadline", "expire", "timeout")),
+        not offenders,
+        f"implementation used forbidden active timer pattern: {offenders}",
+        evidence,
+    )
+    _require(
+        any(token in source.lower() for token in ("receipt", "token")),
+        "implementation omitted receipt/token",
+        evidence,
+    )
+    _require(
+        any(
+            token in source.lower()
+            for token in ("locked", "deadline", "expire", "timeout")
+        ),
         "implementation omitted lock/deadline timestamp",
         evidence,
     )
@@ -417,7 +578,9 @@ def _tool_calls(events: list[AgentEvent]) -> list[dict[str, object]]:
     return calls
 
 
-def _record_pending_interaction(evidence: PlanDogfoodEvidence, round_name: str, pending) -> None:
+def _record_pending_interaction(
+    evidence: PlanDogfoodEvidence, round_name: str, pending
+) -> None:
     evidence.turns.append(
         {
             "round": round_name,
@@ -464,7 +627,9 @@ def _session_trace(session) -> dict[str, object]:
     return {
         "summary": session.summary(),
         "permission_mode": (
-            session.current_permission_mode.value if session.current_permission_mode is not None else None
+            session.current_permission_mode.value
+            if session.current_permission_mode is not None
+            else None
         ),
         "plan": session.plan_state.to_dict(),
         "pending_interaction": pending.to_dict() if pending is not None else None,
@@ -481,14 +646,20 @@ def _event_type_counts(events: list[AgentEvent]) -> dict[str, int]:
 
 
 def _tool_names(events: list[AgentEvent]) -> list[str]:
-    return [event.tool_call_name for event in events if isinstance(event, ToolCallStartEvent)]
+    return [
+        event.tool_call_name
+        for event in events
+        if isinstance(event, ToolCallStartEvent)
+    ]
 
 
 def _events_for_run(events: list[AgentEvent], run_id: str) -> list[AgentEvent]:
     return [event for event in events if event.run_id == run_id]
 
 
-def _tool_result_payloads_by_call_id(events: list[AgentEvent]) -> dict[str, dict[str, object]]:
+def _tool_result_payloads_by_call_id(
+    events: list[AgentEvent],
+) -> dict[str, dict[str, object]]:
     deltas_by_call: dict[str, list[str]] = {}
     for event in events:
         if isinstance(event, ToolResultTextDeltaEvent):
@@ -501,7 +672,9 @@ def _tool_result_payloads_by_call_id(events: list[AgentEvent]) -> dict[str, dict
         except json.JSONDecodeError:
             parsed[tool_call_id] = {"_raw": raw[:2000]}
         else:
-            parsed[tool_call_id] = payload if isinstance(payload, dict) else {"_raw": raw[:2000]}
+            parsed[tool_call_id] = (
+                payload if isinstance(payload, dict) else {"_raw": raw[:2000]}
+            )
     return parsed
 
 
@@ -521,7 +694,11 @@ def _trace(evidence: PlanDogfoodEvidence, message: str, **fields: object) -> Non
         "workspace_root": evidence.workspace_root,
         **fields,
     }
-    print("[plan-dogfood-trace] " + json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+    print(
+        "[plan-dogfood-trace] "
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        flush=True,
+    )
 
 
 def _require(condition: bool, message: str, evidence: PlanDogfoodEvidence) -> None:
@@ -629,7 +806,7 @@ stale consumers from completing a job after it has timed out and been reissued.
 """.lstrip()
 
 
-_FIXTURE_MAIN = '''
+_FIXTURE_MAIN = """
 from __future__ import annotations
 
 from typing import Any
@@ -686,10 +863,10 @@ def get_job() -> dict[str, Any] | None:
 @app.post("/jobs/{job_id}/complete")
 def post_complete(job_id: str) -> dict[str, Any]:
     return complete_job(job_id)
-'''.lstrip()
+""".lstrip()
 
 
-_FIXTURE_VISIBILITY_TEST = '''
+_FIXTURE_VISIBILITY_TEST = """
 from __future__ import annotations
 
 from pathlib import Path
@@ -775,4 +952,4 @@ def test_no_per_job_timer_or_background_worker_pattern() -> None:
         "setTimeout",
     ]
     assert [token for token in forbidden if token in source] == []
-'''.lstrip()
+""".lstrip()
