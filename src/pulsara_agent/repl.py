@@ -23,12 +23,13 @@ class ReplPrompt(Protocol):
 class BasicReplPrompt:
     """Fallback for redirected stdin and tests.
 
-    Keeping this path synchronous is intentional: redirected input is already
-    available and should retain ordinary ``input``/EOF semantics.
+    ``input`` retains ordinary redirected-input/EOF semantics, but it must run
+    off the owner event loop so background MCP discovery and close work can
+    continue while a pipe has not produced its next line yet.
     """
 
     async def read_line(self, message: str) -> str:
-        return input(message)
+        return await asyncio.to_thread(input, message)
 
 
 @dataclass(slots=True)

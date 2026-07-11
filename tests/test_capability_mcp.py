@@ -1,1834 +1,507 @@
+from __future__ import annotations
+
 import asyncio
-import base64
-import hashlib
-import json
-import sys
-import threading
-from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-import mcp_types as sdk_types
 
-from pulsara_agent.capability.descriptor import (
-    CapabilityAdvertisePolicy,
-    CapabilityAvailability,
-    CapabilityDescriptor,
-    CapabilityProviderKind,
-    CapabilityProvenance,
-)
-from pulsara_agent.capability.provider import CapabilityProviderOutput
 from pulsara_agent.capability.providers.mcp import (
     McpCapabilityProvider,
-    build_mcp_bundle,
+    build_mcp_installation,
+    empty_mcp_installation,
 )
-from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.types import CapabilityResolveContext
-from pulsara_agent.event import (
-    CapabilityGateDecisionEvent,
-    CustomEvent,
-    EventContext,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolResultEndEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
+from pulsara_agent.primitives.mcp import (
+    McpInstalledServerSnapshotFact,
+    McpReconcileAttemptSummaryFact,
+    McpServerLifecycleTimingFact,
+    McpServerSnapshotFact,
 )
-from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
-from pulsara_agent.host import session as host_session_module
-from pulsara_agent.host.core import HostCore
-from pulsara_agent.host.session import HostSession
-from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultState
-from pulsara_agent.llm import LLMRuntime
-from tests.support import test_llm_config
-from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.llm.transport import LLMTransport
-from pulsara_agent.runtime.agent import AgentRuntime
-from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
-from pulsara_agent.runtime.plan import (
-    McpElicitationResolution,
-    McpInputRequiredInteractionResolution,
-    PendingMcpElicitation,
-    PendingMcpInputRequired,
-)
-from pulsara_agent.runtime.state import LoopStatus
-from pulsara_agent.runtime import AgentRuntimeWiring, build_in_memory_runtime_wiring
-from pulsara_agent.runtime.mcp import (
-    McpDiscoveredTool,
-    HttpMcpClientManager,
+from pulsara_agent.runtime.mcp.manager import MockMcpClientManager
+from pulsara_agent.runtime.mcp.store import McpConfigStore
+from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.types import (
+    McpDrainError,
     McpInputRequestDTO,
     McpInputRequired,
-    McpInputRequiredResolution,
     McpOriginalRequest,
     McpRequestSourceMethod,
+    McpServerCandidate,
     McpServerConfig,
+    McpServerRuntimeSpec,
     McpServerSnapshot,
     McpServerStatus,
     McpStdioConfig,
     McpStreamableHttpConfig,
     McpToolAnnotations,
-    MockMcpClientManager,
-    SdkMcpClientManager,
-    StdioMcpClientManager,
-    mangle_mcp_tool_name,
-)
-from pulsara_agent.runtime.mcp.types import redact_mcp_error_message
-from pulsara_agent.runtime.mcp.sdk import (
-    _redact_diagnostic,
-    _sdk_input_responses,
-    mcp_tool_result_from_sdk,
-)
-from pulsara_agent.runtime.mcp.supervisor import (
-    McpServerSupervisor,
-    _config_fingerprint,
-)
-from pulsara_agent.cli import _format_repl_mcp_startup_notice, _mcp_command
-from pulsara_agent.runtime.permission import (
-    ApprovalPolicy,
-    EffectivePermissionPolicy,
-    PermissionMode,
-    PermissionProfile,
-    PolicyPermissionGate,
-    TerminalAccess,
-    preset_to_policy,
-)
-from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
-from pulsara_agent.tools.base import (
-    ToolCall,
-    ToolExecutionResult,
-    ToolExecutionSuspended,
-    ToolRuntimeContext,
+    McpDiscoveredTool,
+    event_safe_mcp_config_fingerprint,
+    mcp_config_set_fingerprint,
+    new_mcp_slot,
+    runtime_mcp_config_fingerprint,
+    snapshot_semantic_fingerprint,
 )
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
+from pulsara_agent.tools.base import ToolCall, ToolExecutionSuspended, ToolRuntimeContext
+from pulsara_agent.event import EventContext
 
 
-def _tool(
-    name: str = "lookup",
+def _config(
+    server_id: str = "docs",
     *,
-    read_only: bool | None = None,
-    destructive: bool | None = None,
-) -> McpDiscoveredTool:
+    required: bool = False,
+    enabled: bool = True,
+) -> McpServerConfig:
+    return McpServerConfig(
+        server_id=server_id,
+        transport=McpStdioConfig(command="fake-mcp"),
+        required=required,
+        enabled=enabled,
+        connect_timeout_ms=100,
+        discovery_timeout_ms=100,
+        startup_deadline_ms=250,
+        refresh_ttl_ms=60_000,
+        tool_timeout_ms=1_000,
+    )
+
+
+def _tool(name: str = "lookup") -> McpDiscoveredTool:
     return McpDiscoveredTool(
         server_id="docs",
         name=name,
         description="Lookup docs",
-        input_schema={
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-        },
-        annotations=McpToolAnnotations(
-            read_only_hint=read_only, destructive_hint=destructive
-        ),
+        input_schema={"type": "object", "properties": {}},
+        annotations=McpToolAnnotations(read_only_hint=True),
+    )
+
+
+def _timing() -> McpServerLifecycleTimingFact:
+    return McpServerLifecycleTimingFact(
+        queued_at_utc="2026-01-01T00:00:00Z",
+        connect_started_at_utc="2026-01-01T00:00:00Z",
+        connect_ended_at_utc="2026-01-01T00:00:00.010000Z",
+        discovery_started_at_utc="2026-01-01T00:00:00.010000Z",
+        discovery_ended_at_utc="2026-01-01T00:00:00.020000Z",
+        completed_at_utc="2026-01-01T00:00:00.020000Z",
+        connect_duration_seconds=0.01,
+        discovery_duration_seconds=0.01,
+        total_duration_seconds=0.02,
     )
 
 
 def _snapshot(
-    *tools: McpDiscoveredTool, status: McpServerStatus = McpServerStatus.READY
-) -> McpServerSnapshot:
-    return McpServerSnapshot(
-        config=McpServerConfig(
-            server_id="docs",
-            transport=McpStreamableHttpConfig(url="http://127.0.0.1:8765/mcp"),
-            supports_parallel_tool_calls=True,
-            tool_timeout_ms=1_000,
-        ),
-        status=status,
-        tools=tools,
-        generation=7,
-    )
-
-
-def _snapshot_for_config(
-    config: McpServerConfig,
-    *tools: McpDiscoveredTool,
-    status: McpServerStatus = McpServerStatus.READY,
-    generation: int = 7,
-) -> McpServerSnapshot:
-    return McpServerSnapshot(
-        config=config,
-        status=status,
-        tools=tools,
-        generation=generation,
-    )
-
-
-def _mcp_input_required_host_session(
-    tmp_path: Path,
+    config: McpServerConfig | None = None,
     *,
-    tool: McpDiscoveredTool | None = None,
-) -> tuple[HostSession, MockMcpClientManager, AgentRuntimeWiring, AgentRuntime]:
-    def request_input(args: dict[str, object]) -> McpInputRequired:
-        return McpInputRequired(
-            interaction_id="mcp_input_required:host",
-            server_id="docs",
-            protocol_version="2026-07-28",
-            request_state=None,
-            input_requests=(
-                McpInputRequestDTO(
-                    key="token",
-                    method="elicitation/create",
-                    params={"message": "Need a token", "mode": "form"},
-                ),
-            ),
-            original_request=McpOriginalRequest(
-                source_method=McpRequestSourceMethod.TOOL_CALL,
-                tool_name="lookup",
-                arguments=dict(args),
-            ),
-        )
+    status: McpServerStatus = McpServerStatus.READY,
+    attempt_id: str = "mcp_attempt:test",
+    generation: int = 1,
+) -> McpServerSnapshot:
+    config = config or _config()
+    tools = (_tool(),) if status is McpServerStatus.READY else ()
+    return McpServerSnapshot(
+        snapshot_id=f"mcp_snapshot:{attempt_id}",
+        server_id=config.server_id,
+        config_epoch=1,
+        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+        snapshot_semantic_fingerprint=snapshot_semantic_fingerprint(
+            server_id=config.server_id,
+            status=status,
+            tools=tools,
+        ),
+        reconcile_attempt_id=attempt_id,
+        discovery_generation=generation,
+        status=status,
+        required=config.required,
+        tools=tools,
+        timing=_timing(),
+    )
 
+
+def _installed_surface(
+    *,
+    handler=lambda arguments: f"ok:{arguments.get('query', '')}",
+):
+    config = _config()
+    snapshot = _snapshot(config)
     manager = MockMcpClientManager(
-        (_snapshot(tool or _tool()),), handlers={("docs", "lookup"): request_input}
+        _snapshots=(snapshot,),
+        handlers={("docs", "lookup"): handler},
     )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    transport = _ScriptedTransport(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call:mcp-input",
-                        "name": "mcp__docs__lookup",
-                        "arguments": json.dumps({"query": "pulsara"}),
-                    }
-                ]
-            },
-            {"text": "done"},
-        ]
-    )
-    agent = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(
-            McpCapabilityProvider(bundle)
-        ),
-        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
-    )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
-        ),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
-    )
-    return session, manager, runtime_wiring, agent
-
-
-def _latest_tool_result_end(
-    runtime_wiring: AgentRuntimeWiring,
-    tool_call_id: str = "call:mcp-input",
-) -> ToolResultEndEvent:
-    return next(
-        event
-        for event in reversed(runtime_wiring.event_log.iter())
-        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == tool_call_id
-    )
-
-
-def _assert_mcp_resume_timing_preserves_seed(
-    runtime_wiring: AgentRuntimeWiring,
-    seed: dict[str, object],
-) -> None:
-    timing = _latest_tool_result_end(runtime_wiring).metadata["tool_observation_timing"]
-    assert timing["source_started_at"] == _utc_z(seed["source_started_at"])
-    assert timing["suspended_at"] == _utc_z(seed["suspended_at"])
-    assert timing["resumed_at"]
-    assert timing["freshness"] == "suspended_tool_observation"
-
-
-def _utc_z(value: object) -> str:
-    return str(value).replace("+00:00", "Z")
-
-
-@dataclass(slots=True)
-class _LegacyMcpElicitationFixtureTool:
-    name: str = "legacy_mcp_elicitation_fixture"
-    description: str = "Test-only legacy MCP elicitation fixture."
-    parameters: dict[str, object] = field(
-        default_factory=lambda: {"type": "object", "properties": {}}
-    )
-    is_read_only: bool = False
-    is_concurrency_safe: bool = False
-    responses: list[tuple[str, str, dict[str, object]]] = field(default_factory=list)
-
-    async def execute_async(
-        self,
-        call: ToolCall,
-        *,
-        runtime_context: ToolRuntimeContext,
-    ) -> ToolExecutionSuspended:
-        del runtime_context
-        request_id = str(call.arguments.get("request_id") or "request-1")
-        return ToolExecutionSuspended(
-            tool_call_id=call.id,
-            tool_name=call.name,
-            interaction_kind="mcp_elicitation",
-            payload={
-                "interaction_id": f"mcp_elicitation:{request_id}",
-                "tool_call_id": call.id,
-                "tool_name": call.name,
-                "server_id": "docs",
-                "request_id": request_id,
-                "prompt": str(call.arguments.get("prompt") or "Token please"),
-                "schema": dict(call.arguments.get("schema") or {}),
-            },
-        )
-
-    async def resume_elicitation(
-        self,
-        *,
-        request_id: str,
-        answer: dict[str, object],
-        runtime_context: ToolRuntimeContext,
-    ) -> ToolExecutionResult:
-        del runtime_context
-        self.responses.append(("docs", request_id, dict(answer)))
-        return ToolExecutionResult(
-            call_id=str(answer["tool_call_id"]),
-            tool_name=self.name,
-            status=ToolResultState.SUCCESS,
-            output=json.dumps(
-                {"elicitation_response": answer, "request_id": request_id},
-                sort_keys=True,
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _FixtureCapabilityProvider:
-    tool_name: str
-    provider_id: str = "fixture"
-
-    def resolve(
-        self, context: CapabilityResolveContext, *, bound_tool_names: frozenset[str]
-    ) -> CapabilityProviderOutput:
-        del context, bound_tool_names
-        return CapabilityProviderOutput(
-            descriptors=(
-                CapabilityDescriptor(
-                    id=f"fixture:{self.tool_name}",
-                    name=self.tool_name,
-                    description="Test-only fixture capability.",
-                    input_schema={"type": "object", "properties": {}},
-                    namespace="fixture",
-                    provider_kind=CapabilityProviderKind.MCP,
-                    provider_id="fixture",
-                    is_model_callable=True,
-                    is_read_only=False,
-                    is_concurrency_safe=False,
-                    is_destructive=False,
-                    is_open_world=False,
-                    permission_category="mcp",
-                    advertise_policy=CapabilityAdvertisePolicy.DIRECT,
-                    availability=CapabilityAvailability.AVAILABLE,
-                    provenance=CapabilityProvenance(
-                        provider_kind=CapabilityProviderKind.MCP,
-                        provider_id="fixture",
-                        source="test",
-                    ),
-                ),
-            )
-        )
-
-
-def _write_sdk_stdio_fixture(tmp_path: Path) -> Path:
-    fixture = tmp_path / "sdk_mcp_server.py"
-    fixture.write_text(
-        """
-import asyncio
-from mcp.server.mcpserver import MCPServer
-
-server = MCPServer(name="pulsara-test-sdk", version="1.0")
-
-@server.tool(description="Lookup docs")
-def lookup(query: str) -> str:
-    return "lookup:" + query
-
-@server.resource("docs://status", name="status", description="Status resource", mime_type="text/plain")
-def status() -> str:
-    return "status:ok"
-
-@server.prompt(description="Greeting prompt")
-def greet(name: str) -> str:
-    return "Say hello to " + name
-
-if __name__ == "__main__":
-    asyncio.run(server.run_stdio_async())
-""".strip(),
-        encoding="utf-8",
-    )
-    return fixture
-
-
-def _write_sdk_input_required_fixture(tmp_path: Path) -> Path:
-    fixture = tmp_path / "sdk_mcp_input_required_server.py"
-    fixture.write_text(
-        """
-import asyncio
-import mcp_types as types
-from mcp.server.mcpserver import MCPServer
-
-server = MCPServer(name="pulsara-test-input-required", version="1.0")
-
-@server.tool(description="Needs interactive token")
-def needs_token(query: str):
-    return types.InputRequiredResult(
-        inputRequests={
-            "token": types.ElicitRequest(
-                params=types.ElicitRequestFormParams(
-                    message="Need token for " + query,
-                    requestedSchema={
-                        "type": "object",
-                        "properties": {"value": {"type": "string"}},
-                        "required": ["value"],
-                    },
-                )
-            )
-        },
-        requestState=None,
-    )
-
-if __name__ == "__main__":
-    asyncio.run(server.run_stdio_async())
-""".strip(),
-        encoding="utf-8",
-    )
-    return fixture
-
-
-def _write_sdk_slow_fixture(tmp_path: Path) -> Path:
-    fixture = tmp_path / "sdk_mcp_slow_server.py"
-    fixture.write_text(
-        """
-import asyncio
-from mcp.server.mcpserver import MCPServer
-
-server = MCPServer(name="pulsara-test-slow", version="1.0")
-
-@server.tool(description="Slow tool")
-async def slow(delay: float) -> str:
-    await asyncio.sleep(delay)
-    return "done"
-
-if __name__ == "__main__":
-    asyncio.run(server.run_stdio_async())
-""".strip(),
-        encoding="utf-8",
-    )
-    return fixture
-
-
-def test_mcp_config_dto_filters_tools_and_statuses() -> None:
-    config = McpServerConfig(
-        server_id="docs server",
-        transport=McpStdioConfig(command="python", args=("-m", "fake_mcp")),
-        enabled_tools=("lookup",),
-        disabled_tools=("delete",),
-    )
-    snapshot = McpServerSnapshot(
+    spec = McpServerRuntimeSpec(
         config=config,
-        status=McpServerStatus.READY,
-        tools=(
-            McpDiscoveredTool(
-                server_id="docs_server", name="lookup", description="", input_schema={}
-            ),
-            McpDiscoveredTool(
-                server_id="docs_server", name="delete", description="", input_schema={}
-            ),
-            McpDiscoveredTool(
-                server_id="docs_server", name="other", description="", input_schema={}
-            ),
-        ),
+        runtime_config_fingerprint=runtime_mcp_config_fingerprint(config),
+        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
     )
-
-    assert config.server_id == "docs_server"
-    assert config.transport_kind.value == "stdio"
-    assert [tool.name for tool in snapshot.tools] == ["lookup"]
-
-
-def test_mcp_model_tool_name_is_stable_bounded_and_hashed() -> None:
-    short = mangle_mcp_tool_name("docs", "lookup")
-    server_id = "very-long-server-name-" * 4
-    tool_name = "very-long-tool-name-" * 4
-    long_a = mangle_mcp_tool_name(server_id, tool_name)
-    long_b = mangle_mcp_tool_name(server_id, tool_name)
-    digest = hashlib.sha256(f"{server_id}\0{tool_name}".encode("utf-8")).hexdigest()[
-        :10
-    ]
-
-    assert short == "mcp__docs__lookup"
-    assert long_a == long_b
-    assert len(long_a) <= 64
-    assert long_a.startswith("mcp__")
-    assert long_a.endswith(f"__{digest}")
-
-
-def test_mcp_input_required_payload_is_pulsara_owned_and_nullable_state() -> None:
-    pending = McpInputRequired(
-        interaction_id="mcp_input_required:test",
-        server_id="docs",
-        protocol_version="2026-07-28",
-        request_state=None,
-        input_requests=(
-            McpInputRequestDTO(
-                key="token",
-                method="elicitation/create",
-                params={"message": "Need token", "mode": "form"},
-            ),
-        ),
-        original_request=McpOriginalRequest(
-            source_method=McpRequestSourceMethod.TOOL_CALL,
-            tool_name="lookup",
-            arguments={"query": "x"},
-        ),
-        round_count=1,
-    )
-
-    payload = pending.to_payload()
-
-    assert payload["request_state"] is None
-    assert payload["input_requests"] == [
-        {
-            "key": "token",
-            "method": "elicitation/create",
-            "params": {"message": "Need token", "mode": "form"},
-        }
-    ]
-    assert payload["original_request"] == {
-        "source_method": "tools/call",
-        "tool_name": "lookup",
-        "arguments": {"query": "x"},
-    }
-
-
-def test_sdk_mcp_manager_discovers_calls_resources_prompts_and_closes(
-    tmp_path: Path,
-) -> None:
-    fixture = _write_sdk_stdio_fixture(tmp_path)
-    config = McpServerConfig(
-        server_id="sdk_docs",
-        transport=McpStdioConfig(
-            command=sys.executable, args=(str(fixture),), cwd=tmp_path
-        ),
-        startup_timeout_ms=3_000,
-        tool_timeout_ms=3_000,
-    )
-
-    async def run() -> None:
-        manager = await SdkMcpClientManager.start((config,))
-        try:
-            snapshot = manager.snapshots[0]
-            assert snapshot.status is McpServerStatus.READY
-            assert snapshot.protocol_version == "2026-07-28"
-            assert [tool.name for tool in snapshot.tools] == ["lookup"]
-            assert [resource.uri for resource in snapshot.resources] == [
-                "docs://status"
-            ]
-            assert [prompt.name for prompt in snapshot.prompts] == ["greet"]
-
-            tool_result = await manager.call_tool(
-                "sdk_docs", "lookup", {"query": "pulsara"}, timeout_ms=3_000
-            )
-            assert tool_result.output.startswith("lookup:pulsara")
-            assert tool_result.metadata["mcp_result_type"] == "CallToolResult"
-
-            resource_result = await manager.read_resource(
-                "sdk_docs", "docs://status", timeout_ms=3_000
-            )
-            assert "status:ok" in resource_result.output
-            assert resource_result.artifacts
-
-            prompt_result = await manager.get_prompt(
-                "sdk_docs", "greet", {"name": "Pulsara"}, timeout_ms=3_000
-            )
-            assert "Say hello to Pulsara" in prompt_result.output
-        finally:
-            await manager.aclose(timeout_seconds=1)
-
-    asyncio.run(run())
-
-
-def test_sdk_mcp_manager_close_suppresses_internal_cancel_scope_without_poisoning_caller() -> (
-    None
-):
-    class CancelOnExitClient:
-        exit_called = False
-
-        async def __aexit__(self, exc_type, exc, tb):
-            self.exit_called = True
-            raise asyncio.CancelledError("SDK internal close cancellation")
-
-    async def run() -> None:
-        client = CancelOnExitClient()
-        manager = SdkMcpClientManager(
-            _snapshots=(),
-            _connections={
-                "docs": SimpleNamespace(
-                    client=client,
-                    http_client=None,
-                )
-            },
-        )
-
-        await manager.aclose(timeout_seconds=1)
-        await asyncio.sleep(0)
-
-        assert manager._connections == {}
-        assert asyncio.current_task() is not None
-        assert asyncio.current_task().cancelling() == 0
-
-    asyncio.run(run())
-
-
-def test_mcp_supervisor_close_suppresses_manager_cancel_scope() -> None:
-    class CancelCloseManager:
-        snapshots = ()
-        close_count = 0
-
-        async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
-            self.close_count += 1
-            raise asyncio.CancelledError("manager internal close cancellation")
-
-        def cancel_active(self) -> None:
-            pass
-
-    async def run() -> None:
-        manager = CancelCloseManager()
-        supervisor = McpServerSupervisor()
-        supervisor._managers["docs"] = manager  # exercise teardown path directly
-
-        await supervisor.aclose(timeout_seconds=1)
-        await asyncio.sleep(0)
-
-        assert manager.close_count == 1
-        assert supervisor.manager is None
-        assert asyncio.current_task() is not None
-        assert asyncio.current_task().cancelling() == 0
-
-    asyncio.run(run())
-
-
-def test_sdk_mcp_manager_maps_input_required_to_pulsara_dto(tmp_path: Path) -> None:
-    fixture = _write_sdk_input_required_fixture(tmp_path)
-    config = McpServerConfig(
-        server_id="sdk_auth",
-        transport=McpStdioConfig(
-            command=sys.executable, args=(str(fixture),), cwd=tmp_path
-        ),
-        startup_timeout_ms=3_000,
-        tool_timeout_ms=3_000,
-    )
-
-    async def run() -> None:
-        manager = await SdkMcpClientManager.start((config,))
-        try:
-            snapshot = manager.snapshots[0]
-            assert snapshot.status is McpServerStatus.READY
-            assert [tool.name for tool in snapshot.tools] == ["needs_token"]
-
-            result = await manager.call_tool(
-                "sdk_auth", "needs_token", {"query": "pulsara"}, timeout_ms=3_000
-            )
-
-            assert isinstance(result, McpInputRequired)
-            assert result.request_state is None
-            assert result.original_request.to_dict() == {
-                "source_method": "tools/call",
-                "tool_name": "needs_token",
-                "arguments": {"query": "pulsara"},
-            }
-            assert len(result.input_requests) == 1
-            request = result.input_requests[0]
-            assert request.key == "token"
-            assert request.method == "elicitation/create"
-            assert request.params["message"] == "Need token for pulsara"
-            assert request.params["mode"] == "form"
-            assert request.params["requestedSchema"]["required"] == ["value"]
-        finally:
-            await manager.aclose(timeout_seconds=1)
-
-    asyncio.run(run())
-
-
-def test_sdk_input_required_resolution_builds_typed_sdk_responses() -> None:
-    resolution = McpInputRequiredResolution(
-        interaction_id="mcp_input_required:test",
-        responses={"token": {"value": "secret"}},
-        input_requests=(
-            McpInputRequestDTO(
-                key="token",
-                method="elicitation/create",
-                params={"message": "Need token", "mode": "form"},
-            ),
-        ),
-    )
-
-    responses = _sdk_input_responses(resolution)
-
-    assert responses is not None
-    assert sdk_types.ElicitResult.model_validate(responses["token"]).content == {
-        "value": "secret"
-    }
-
-
-def test_mcp_redaction_covers_url_userinfo_query_headers_and_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("MCP_SECRET_TOKEN", "env-secret")
-    config = McpServerConfig(
-        server_id="secure",
-        transport=McpStreamableHttpConfig(
-            url="https://user:pass@example.test/mcp?token=url-secret#frag",
-            headers={"X-Api-Key": "header-secret"},
-            env_headers={"Authorization": "MCP_SECRET_TOKEN"},
-        ),
-    )
-
-    redacted = _redact_diagnostic(
-        "failed https://user:pass@example.test/mcp?token=url-secret#frag header-secret env-secret",
-        config,
-    )
-
-    assert "user:pass" not in redacted
-    assert "url-secret" not in redacted
-    assert "header-secret" not in redacted
-    assert "env-secret" not in redacted
-    assert "<redacted-userinfo>@example.test" in redacted
-
-
-def test_mcp_runtime_error_redaction_covers_runtime_exception_strings() -> None:
-    redacted = redact_mcp_error_message(
-        "failed https://user:pass@example.test/mcp?token=url-secret#frag "
-        "Authorization: Bearer bearer-secret api_key=plain-secret "
-        '{"api_key":"json-secret","token": "json-token"} '
-        "X-Api-Key: header-secret token: colon-secret password: pass-secret"
-    )
-
-    assert "user:pass" not in redacted
-    assert "url-secret" not in redacted
-    assert "bearer-secret" not in redacted
-    assert "plain-secret" not in redacted
-    assert "json-secret" not in redacted
-    assert "json-token" not in redacted
-    assert "header-secret" not in redacted
-    assert "colon-secret" not in redacted
-    assert "pass-secret" not in redacted
-    assert "[redacted]@example.test" in redacted
-    assert '"api_key":"[redacted]"' in redacted
-    assert "X-Api-Key: [redacted]" in redacted
-
-
-def test_sdk_mcp_manager_reports_missing_bearer_token_without_network(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("PULSARA_TEST_MISSING_SDK_MCP_TOKEN", raising=False)
-    config = McpServerConfig(
-        server_id="secure_sdk",
-        transport=McpStreamableHttpConfig(
-            url="https://example.test/mcp",
-            bearer_token_env_var="PULSARA_TEST_MISSING_SDK_MCP_TOKEN",
-        ),
-        startup_timeout_ms=50,
-    )
-
-    async def run() -> None:
-        manager = await SdkMcpClientManager.start((config,))
-        try:
-            snapshot = manager.snapshots[0]
-            assert snapshot.status is McpServerStatus.NEEDS_AUTH
-            assert "missing bearer token" in (snapshot.message or "")
-            assert not snapshot.tools
-        finally:
-            await manager.aclose(timeout_seconds=1)
-
-    asyncio.run(run())
-
-
-def test_sdk_mcp_manager_tool_call_timeout_is_bounded(tmp_path: Path) -> None:
-    fixture = _write_sdk_slow_fixture(tmp_path)
-    config = McpServerConfig(
-        server_id="sdk_slow",
-        transport=McpStdioConfig(
-            command=sys.executable, args=(str(fixture),), cwd=tmp_path
-        ),
-        startup_timeout_ms=3_000,
-        tool_timeout_ms=3_000,
-    )
-
-    async def run() -> None:
-        manager = await SdkMcpClientManager.start((config,))
-        try:
-            assert manager.snapshots[0].status is McpServerStatus.READY
-            with pytest.raises(Exception):
-                await manager.call_tool(
-                    "sdk_slow", "slow", {"delay": 2.0}, timeout_ms=10
-                )
-        finally:
-            await manager.aclose(timeout_seconds=1)
-
-    asyncio.run(run())
-
-
-def test_sdk_tool_result_mapping_preserves_error_and_non_text_artifacts() -> None:
-    image_bytes = b"fake-png"
-    result = sdk_types.CallToolResult(
-        content=[
-            sdk_types.TextContent(text="model-visible error text"),
-            sdk_types.ImageContent(
-                data=base64.b64encode(image_bytes).decode("ascii"),
-                mimeType="image/png",
-            ),
-        ],
-        structuredContent={"status": "bad"},
-        isError=True,
-    )
-
-    mapped = mcp_tool_result_from_sdk(result)
-
-    assert mapped.is_error is True
-    assert "model-visible error text" in mapped.output
-    assert "[image:image/png] 8 bytes archived" in mapped.output
-    assert "[structured_content]" in mapped.output
-    assert mapped.structured_content == {"status": "bad"}
-    assert [artifact.role for artifact in mapped.artifacts] == [
-        "content_1_image",
-        "structured_content",
-    ]
-    assert mapped.artifacts[0].data == image_bytes
-    assert mapped.artifacts[1].text and '"status": "bad"' in mapped.artifacts[1].text
-
-
-def test_mcp_supervisor_reconciles_desired_state_and_closes(tmp_path: Path) -> None:
-    fixture = _write_sdk_stdio_fixture(tmp_path)
-    config = McpServerConfig(
-        server_id="sdk_docs",
-        transport=McpStdioConfig(
-            command=sys.executable, args=(str(fixture),), cwd=tmp_path
-        ),
-        startup_timeout_ms=3_000,
-        tool_timeout_ms=3_000,
-    )
-    disabled = McpServerConfig(
-        server_id="sdk_docs",
-        transport=McpStdioConfig(
-            command=sys.executable, args=(str(fixture),), cwd=tmp_path
-        ),
-        enabled=False,
-    )
-
-    async def run() -> None:
-        supervisor = McpServerSupervisor()
-        manager = await supervisor.sync_servers((config,))
-        assert manager is not None
-        assert supervisor.snapshots[0].status is McpServerStatus.READY
-        same_manager = await supervisor.sync_servers((config,))
-        assert same_manager is not None
-        assert [snapshot.config.server_id for snapshot in supervisor.snapshots] == [
-            "sdk_docs"
-        ]
-
-        closed_manager = await supervisor.sync_servers((disabled,))
-        assert closed_manager is supervisor
-        assert supervisor.snapshots[0].status is McpServerStatus.DISABLED
-        await supervisor.aclose(timeout_seconds=1)
-
-    asyncio.run(run())
-
-
-def test_mcp_supervisor_retries_unready_server_after_backoff(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("PULSARA_TEST_MISSING_SUPERVISOR_MCP_TOKEN", raising=False)
-    config = McpServerConfig(
-        server_id="secure",
-        transport=McpStreamableHttpConfig(
-            url="https://example.test/mcp",
-            bearer_token_env_var="PULSARA_TEST_MISSING_SUPERVISOR_MCP_TOKEN",
-        ),
-        startup_timeout_ms=50,
-    )
-
-    async def run() -> None:
-        supervisor = McpServerSupervisor(retry_base_seconds=60.0)
-        first = await supervisor.sync_servers((config,))
-        assert first is not None
-        assert first.snapshots[0].status is McpServerStatus.NEEDS_AUTH
-
-        second = await supervisor.sync_servers((config,))
-        assert second is first
-
-        supervisor._next_retry_monotonic["secure"] = 0.0
-        third = await supervisor.sync_servers((config,))
-        assert third is not None
-        assert third is first
-        assert third.snapshots[0].status is McpServerStatus.NEEDS_AUTH
-        assert supervisor._retry_attempts["secure"] == 2
-        await supervisor.aclose(timeout_seconds=1)
-
-    asyncio.run(run())
-
-
-def test_mcp_cli_add_list_doctor_and_reconnect_use_sdk_manager(tmp_path: Path) -> None:
-    fixture = _write_sdk_stdio_fixture(tmp_path)
-    config_path = tmp_path / "mcp.yaml"
-
-    add_report = asyncio.run(
-        _mcp_command(
-            SimpleNamespace(
-                mcp_command="add",
-                config=str(config_path),
-                scope="user",
-                env_file=None,
-                override_env=False,
-                workspace=str(tmp_path),
-                server_id="sdk-docs",
-                mcp_stdio_command=sys.executable,
-                arg=[str(fixture)],
-                cwd=str(tmp_path),
-                env=[],
-                url=None,
-                header=[],
-                env_header=[],
-                bearer_token_env_var=None,
-                follow_redirects=False,
-                disabled=False,
-                required=False,
-                startup_timeout_ms=3_000,
-                tool_timeout_ms=3_000,
-                parallel_tools=False,
-                enabled_tool=[],
-                disabled_tool=[],
-            )
-        )
-    )
-    assert add_report["mcp"] == "add"
-
-    list_report = asyncio.run(
-        _mcp_command(
-            SimpleNamespace(
-                mcp_command="list",
-                config=str(config_path),
-                env_file=None,
-                override_env=False,
-                workspace=str(tmp_path),
-            )
-        )
-    )
-    assert [server["server_id"] for server in list_report["servers"]] == ["sdk-docs"]
-
-    doctor_report = asyncio.run(
-        _mcp_command(
-            SimpleNamespace(
-                mcp_command="doctor",
-                config=str(config_path),
-                env_file=None,
-                override_env=False,
-                workspace=str(tmp_path),
-            )
-        )
-    )
-    assert doctor_report["ready_count"] == 1
-    assert doctor_report["cache_policy"]["sdk_cache"] is False
-    assert doctor_report["servers"][0]["tools"][0]["name"] == "lookup"
-
-    reconnect_report = asyncio.run(
-        _mcp_command(
-            SimpleNamespace(
-                mcp_command="reconnect",
-                config=str(config_path),
-                env_file=None,
-                override_env=False,
-                workspace=str(tmp_path),
-            )
-        )
-    )
-    assert reconnect_report["mcp"] == "reconnect"
-    assert reconnect_report["ready_count"] == 1
-    assert reconnect_report["servers"][0]["tools"][0]["name"] == "lookup"
-
-
-def test_repl_mcp_startup_notice_summarizes_snapshots() -> None:
-    manager = MockMcpClientManager(
-        (
-            _snapshot(_tool(), status=McpServerStatus.READY),
-            McpServerSnapshot(
-                config=McpServerConfig(
-                    server_id="auth",
-                    transport=McpStreamableHttpConfig(url="https://example.test/mcp"),
-                ),
-                status=McpServerStatus.NEEDS_AUTH,
-                message="missing bearer token",
-                diagnostics=({"code": "mcp_missing_auth"},),
-            ),
-        )
-    )
-    session = SimpleNamespace(
-        wiring=SimpleNamespace(
-            runtime_wiring=SimpleNamespace(mcp_manager=manager),
-        )
-    )
-
-    notice = _format_repl_mcp_startup_notice(session)
-
-    assert (
-        notice
-        == "MCP servers: docs=ready (1 tools); auth=needs_auth (missing bearer token; 1 diagnostics)"
-    )
-
-
-def test_mcp_bundle_builds_descriptor_and_execution_binding_from_same_snapshot() -> (
-    None
-):
-    manager = MockMcpClientManager(
-        (_snapshot(_tool(read_only=True)),),
-        handlers={("docs", "lookup"): lambda args: args},
-    )
-    bundle = build_mcp_bundle(manager)
-
-    assert [descriptor.name for descriptor in bundle.descriptors] == [
-        "mcp__docs__lookup"
-    ]
-    assert [tool.name for tool in bundle.tools] == ["mcp__docs__lookup"]
-    descriptor = bundle.descriptors[0]
-    assert descriptor.provider_kind is CapabilityProviderKind.MCP
-    assert descriptor.provider_id == "docs"
-    assert descriptor.is_read_only is True
-    assert descriptor.is_concurrency_safe is True
-    assert descriptor.metadata["original_tool_name"] == "lookup"
-    assert bundle.manager is manager
-    assert bundle.generation == 7
-
-
-def test_mcp_provider_exposure_uses_bundle_descriptors_and_registry_bindings(
-    tmp_path: Path,
-) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool(read_only=True)),),
-        handlers={("docs", "lookup"): lambda args: args},
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    executor = wiring.runtime_session.create_tool_executor()
-    runtime = CapabilityRuntime.with_default_providers(McpCapabilityProvider(bundle))
-
-    exposure = runtime.resolve_for_turn(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="transient",
-            memory_domain=None,
-            available_tool_names=frozenset(executor.registry.names()),
-            user_input="",
-        ),
-        tool_registry=executor.registry,
-    )
-
-    assert "mcp__docs__lookup" in exposure.callable_names
-    assert [
-        spec.name
-        for spec in exposure.direct_tool_specs
-        if spec.name.startswith("mcp__")
-    ] == ["mcp__docs__lookup"]
-
-
-def test_mcp_mock_adapter_executes_through_tool_executor(tmp_path: Path) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool(read_only=True)),),
-        handlers={("docs", "lookup"): lambda args: {"echo": args["query"]}},
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    executor = wiring.runtime_session.create_tool_executor()
-
-    result = asyncio.run(
-        executor.execute_async(
-            ToolCall(
-                id="call:mcp", name="mcp__docs__lookup", arguments={"query": "pulsara"}
-            ),
-            event_context=EventContext(
-                run_id="run:1", turn_id="turn:1", reply_id="reply:1"
-            ),
-            descriptor=bundle.descriptors[0],
-        )
-    )
-
-    assert result.status is ToolResultState.SUCCESS
-    assert '"echo": "pulsara"' in result.output
-    assert manager.calls == [("docs", "lookup", {"query": "pulsara"})]
-
-
-def test_mcp_adapter_does_not_accept_legacy_elicitation_argument(
-    tmp_path: Path,
-) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool(read_only=True)),),
-        handlers={("docs", "lookup"): lambda args: {"args": args}},
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    executor = wiring.runtime_session.create_tool_executor()
-
-    result = asyncio.run(
-        executor.execute_async(
-            ToolCall(
-                id="call:mcp-legacy",
-                name="mcp__docs__lookup",
-                arguments={"__mcp_elicitation__": {"request_id": "fake"}},
-            ),
-            event_context=EventContext(
-                run_id="run:1", turn_id="turn:1", reply_id="reply:1"
-            ),
-            descriptor=bundle.descriptors[0],
-        )
-    )
-
-    assert result.status is ToolResultState.SUCCESS
-    assert manager.calls == [
-        ("docs", "lookup", {"__mcp_elicitation__": {"request_id": "fake"}})
-    ]
-
-
-def test_large_mcp_result_uses_tool_artifact_service(tmp_path: Path) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool(read_only=True)),),
-        handlers={("docs", "lookup"): lambda args: "x" * 9_000},
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    executor = wiring.runtime_session.create_tool_executor()
-
-    result = asyncio.run(
-        executor.execute_async(
-            ToolCall(
-                id="call:mcp-large",
-                name="mcp__docs__lookup",
-                arguments={"query": "big"},
-            ),
-            event_context=EventContext(
-                run_id="run:large", turn_id="turn:large", reply_id="reply:large"
-            ),
-            descriptor=bundle.descriptors[0],
-        )
-    )
-
-    assert result.status is ToolResultState.SUCCESS
-    assert wiring.runtime_session.tool_result_artifacts.records
-    assert len(result.output) == 9_000
-    record = next(iter(wiring.runtime_session.tool_result_artifacts.records.values()))
-    assert record.metadata["preview"]["preview_policy"] == "full"
-    assert record.metadata["preview"]["original_chars"] == 9_000
-
-
-def test_mcp_tools_fail_closed_under_read_only_profile(tmp_path: Path) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool(read_only=True)),),
-        handlers={("docs", "lookup"): lambda args: args},
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    exposure = CapabilityRuntime.with_default_providers(
-        McpCapabilityProvider(bundle)
-    ).resolve_for_turn(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="transient",
-            memory_domain=None,
-            available_tool_names=frozenset(
-                wiring.runtime_session.create_tool_executor().registry.names()
-            ),
-            user_input="",
-        ),
-        tool_registry=wiring.runtime_session.create_tool_executor().registry,
-    )
-    gate = PolicyPermissionGate(
-        EffectivePermissionPolicy(
-            profile=PermissionProfile.READ_ONLY,
-            approval=ApprovalPolicy.ON_REQUEST,
-            terminal=TerminalAccess.OFF,
-        ),
-        inner=_AllowAll(),
-    )
-
-    decision = asyncio.run(
-        gate.evaluate(
-            [
-                ToolCall(
-                    id="call:mcp", name="mcp__docs__lookup", arguments={"query": "x"}
-                )
-            ],
-            exposure=exposure,
-        )
-    )
-
-    assert decision.kind.value == "deny"
-    assert "not allowed by permission policy" in (decision.reason or "")
-
-
-def test_mcp_unready_snapshot_is_hidden_with_diagnostic(tmp_path: Path) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool(), status=McpServerStatus.NEEDS_AUTH),)
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    exposure = CapabilityRuntime.with_default_providers(
-        McpCapabilityProvider(bundle)
-    ).resolve_for_turn(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="transient",
-            memory_domain=None,
-            available_tool_names=frozenset(
-                wiring.runtime_session.create_tool_executor().registry.names()
-            ),
-            user_input="",
-        ),
-        tool_registry=wiring.runtime_session.create_tool_executor().registry,
-    )
-
-    assert not any(name.startswith("mcp__") for name in exposure.direct_names)
-    assert [
-        diagnostic.code
-        for diagnostic in exposure.diagnostics
-        if diagnostic.code.startswith("mcp_")
-    ] == ["mcp_server_needs_auth"]
-
-
-def test_mcp_supervisor_refreshes_ready_manager_snapshot_on_safe_point() -> None:
-    @dataclass(slots=True)
-    class RefreshingManager:
-        _snapshots: tuple[McpServerSnapshot, ...]
-        config: McpServerConfig
-        refresh_count: int = 0
-
-        @property
-        def snapshots(self) -> tuple[McpServerSnapshot, ...]:
-            return self._snapshots
-
-        async def refresh(self) -> tuple[McpServerSnapshot, ...]:
-            self.refresh_count += 1
-            self._snapshots = (
-                _snapshot_for_config(
-                    self.config,
-                    _tool("lookup"),
-                    _tool("new_lookup"),
-                    generation=8,
-                ),
-            )
-            return self._snapshots
-
-        async def call_tool(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-            raise AssertionError("not used")
-
-        async def resume_suspended_request(self, **kwargs):  # type: ignore[no-untyped-def]
-            raise AssertionError("not used")
-
-        async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
-            return None
-
-        def cancel_active(self) -> None:
-            return None
-
-    config = McpServerConfig(
-        server_id="docs",
-        transport=McpStreamableHttpConfig(url="http://127.0.0.1:8765/mcp"),
-    )
-    manager = RefreshingManager(
-        (_snapshot_for_config(config, _tool("lookup"), generation=7),), config=config
+    slot = new_mcp_slot(spec=spec, snapshot=snapshot, manager=manager)
+    candidate = McpServerCandidate(
+        ticket_id="mcp_ticket:test",
+        config_epoch=1,
+        reconcile_attempt_id=snapshot.reconcile_attempt_id,
+        reserved_discovery_generation=snapshot.discovery_generation,
+        server_snapshot=snapshot,
+        runtime_spec=spec,
+        manager_slot=slot,
+        trigger="initial",
     )
     supervisor = McpServerSupervisor()
-    supervisor._managers["docs"] = manager  # noqa: SLF001
-    supervisor._fingerprints["docs"] = _config_fingerprint(config)  # noqa: SLF001
-
-    synced = asyncio.run(supervisor.sync_servers((config,)))
-
-    assert synced is supervisor
-    assert manager.refresh_count == 1
-    bundle = build_mcp_bundle(supervisor)
-    assert [
-        descriptor.metadata["original_tool_name"] for descriptor in bundle.descriptors
-    ] == [
-        "lookup",
-        "new_lookup",
-    ]
-
-
-def test_host_core_keeps_empty_mcp_supervisor_alive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "pulsara_agent.host.core.load_mcp_server_configs",
-        lambda *, workspace_root: (),
+    supervisor._desired_specs[config.server_id] = spec
+    supervisor.commit_slot_transition(candidates=(candidate,), retiring_slot_ids=())
+    installation = build_mcp_installation(
+        supervisor=supervisor,
+        config_epoch=1,
+        event_safe_config_set_fingerprint=mcp_config_set_fingerprint((config,), event_safe=True),
+        snapshots=(snapshot,),
+        configs_by_server={"docs": config},
+        slots_by_server={"docs": slot},
     )
-    core = HostCore(settings=object(), durable=False)  # type: ignore[arg-type]
-    workspace = resolve_workspace(
-        HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+    return supervisor, installation, manager, slot
+
+
+def _runtime_context() -> ToolRuntimeContext:
+    return ToolRuntimeContext(
+        runtime_session_id="runtime:test",
+        event_context=EventContext(
+            run_id="run:test",
+            turn_id="turn:test",
+            reply_id="reply:test",
+        ),
     )
 
-    supervisor = asyncio.run(core._build_mcp_supervisor(workspace))
 
-    assert isinstance(supervisor, McpServerSupervisor)
-    assert supervisor.snapshots == ()
+def test_mcp_config_hard_cut_defaults_and_invariants() -> None:
+    config = McpServerConfig(
+        server_id="docs",
+        transport=McpStdioConfig(command="docs"),
+    )
+    assert config.connect_timeout_ms == 10_000
+    assert config.discovery_timeout_ms == 15_000
+    assert config.startup_deadline_ms == 30_000
+    assert config.refresh_ttl_ms == 300_000
+    with pytest.raises(ValueError):
+        replace(config, startup_deadline_ms=5_000)
 
 
-def test_host_session_mcp_refresh_preserves_non_mcp_bindings_and_providers(
-    tmp_path: Path,
+def test_mcp_config_store_rejects_removed_startup_timeout(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.yaml"
+    path.write_text(
+        "servers:\n  docs:\n    command: docs\n    startup_timeout_ms: 1000\n"
+    )
+    with pytest.raises(ValueError, match="removed field"):
+        McpConfigStore(path).load()
+
+
+def test_runtime_fingerprint_detects_secret_rotation_but_event_safe_does_not() -> None:
+    left = McpServerConfig(
+        server_id="docs",
+        transport=McpStreamableHttpConfig(
+            url="https://example.test/mcp?token=one",
+            headers={"Authorization": "Bearer one"},
+        ),
+    )
+    right = replace(
+        left,
+        transport=McpStreamableHttpConfig(
+            url="https://example.test/mcp?token=two",
+            headers={"Authorization": "Bearer two"},
+        ),
+    )
+    assert runtime_mcp_config_fingerprint(left) != runtime_mcp_config_fingerprint(right)
+    assert event_safe_mcp_config_fingerprint(left) == event_safe_mcp_config_fingerprint(right)
+
+
+def test_runtime_fingerprint_detects_environment_secret_rotation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture_tool = _LegacyMcpElicitationFixtureTool()
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    runtime_wiring.runtime_session.extra_tool_bindings = (fixture_tool,)
-    provider = _FixtureCapabilityProvider(fixture_tool.name)
-    agent = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(_ScriptedTransport([{"text": "done"}])),
-        capability_runtime=CapabilityRuntime.with_default_providers(provider),
-        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+    config = McpServerConfig(
+        server_id="docs",
+        transport=McpStreamableHttpConfig(
+            url="https://example.test/mcp",
+            bearer_token_env_var="PULSARA_TEST_MCP_TOKEN",
+            env_headers={"X-Api-Key": "PULSARA_TEST_MCP_API_KEY"},
+        ),
     )
-    monkeypatch.setattr(
-        host_session_module,
-        "load_mcp_server_configs",
-        lambda *, workspace_root: (
-            McpServerConfig(
-                server_id="disabled_docs",
-                enabled=False,
-                transport=McpStreamableHttpConfig(url="http://127.0.0.1:8765/mcp"),
+    monkeypatch.setenv("PULSARA_TEST_MCP_TOKEN", "one")
+    monkeypatch.setenv("PULSARA_TEST_MCP_API_KEY", "alpha")
+    first_runtime = runtime_mcp_config_fingerprint(config)
+    event_safe = event_safe_mcp_config_fingerprint(config)
+
+    monkeypatch.setenv("PULSARA_TEST_MCP_TOKEN", "two")
+    monkeypatch.setenv("PULSARA_TEST_MCP_API_KEY", "beta")
+    assert runtime_mcp_config_fingerprint(config) != first_runtime
+    assert event_safe_mcp_config_fingerprint(config) == event_safe
+
+
+def test_snapshot_semantic_fingerprint_ignores_random_identity_and_timing() -> None:
+    snapshot = _snapshot()
+    changed = replace(
+        snapshot,
+        snapshot_id="mcp_snapshot:other",
+        reconcile_attempt_id="mcp_attempt:other",
+        timing=_timing().model_copy(update={"total_duration_seconds": 9.0}),
+    )
+    assert snapshot.snapshot_semantic_fingerprint == changed.snapshot_semantic_fingerprint
+
+
+def test_snapshot_semantic_fingerprint_changes_with_catalog_semantics() -> None:
+    original = _snapshot()
+    changed_tool = replace(_tool(), description="A materially different capability")
+    changed = snapshot_semantic_fingerprint(
+        server_id=original.server_id,
+        status=original.status,
+        tools=(changed_tool,),
+    )
+    assert changed != original.snapshot_semantic_fingerprint
+
+
+def test_mcp_snapshot_status_timing_invariants() -> None:
+    with pytest.raises(ValueError, match="completed connect/discovery timing"):
+        replace(
+            _snapshot(),
+            timing=McpServerLifecycleTimingFact(
+                queued_at_utc="2026-01-01T00:00:00Z",
+                completed_at_utc="2026-01-01T00:00:01Z",
+                total_duration_seconds=1,
             ),
+        )
+
+    with pytest.raises(ValueError, match="completed timing"):
+        McpServerSnapshotFact(
+            snapshot_id="mcp_snapshot:failed",
+            server_id="docs",
+            config_epoch=1,
+            event_safe_config_fingerprint="sha256:config",
+            snapshot_semantic_fingerprint="sha256:snapshot",
+            reconcile_attempt_id="mcp_attempt:failed",
+            discovery_generation=1,
+            status="failed",
+            required=False,
+            timing=McpServerLifecycleTimingFact(
+                queued_at_utc="2026-01-01T00:00:00Z"
+            ),
+        )
+
+
+def test_mcp_snapshot_fact_rejects_non_null_catalog_artifact_id_in_v1() -> None:
+    attempt = McpReconcileAttemptSummaryFact(
+        server_id="docs",
+        reconcile_attempt_id="mcp_attempt:test",
+        reconcile_trigger="initial",
+        attempt_status="ready",
+        request_count=1,
+        page_count=1,
+        cache_outcome="miss",
+    )
+    with pytest.raises(ValueError):
+        McpInstalledServerSnapshotFact(
+            server_id="docs",
+            status="ready",
+            required=False,
+            changed_in_this_installation=True,
+            attempt=attempt,
+            snapshot_id="mcp_snapshot:test",
+            discovery_generation=1,
+            event_safe_config_fingerprint="sha256:config",
+            snapshot_semantic_fingerprint="sha256:snapshot",
+            lifecycle_timing=_timing(),
+            catalog_artifact_id="artifact:catalog",  # type: ignore[arg-type]
+        )
+
+
+def test_mcp_nested_json_is_recursively_immutable_and_serializable() -> None:
+    source_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+    }
+    tool = McpDiscoveredTool(
+        server_id="docs",
+        name="lookup",
+        description="lookup",
+        input_schema=source_schema,
+    )
+    source_schema["properties"]["query"]["type"] = "integer"
+    assert tool.input_schema["properties"]["query"]["type"] == "string"
+    with pytest.raises(TypeError, match="immutable"):
+        tool.input_schema["properties"]["query"]["type"] = "number"
+
+    fact = McpServerSnapshotFact(
+        snapshot_id="mcp_snapshot:test",
+        server_id="docs",
+        config_epoch=1,
+        event_safe_config_fingerprint="sha256:config",
+        snapshot_semantic_fingerprint="sha256:snapshot",
+        reconcile_attempt_id="mcp_attempt:test",
+        discovery_generation=1,
+        status="ready",
+        required=False,
+        tools=(
+            {
+                "server_id": "docs",
+                "name": "lookup",
+                "description": "lookup",
+                "input_schema": source_schema,
+            },
+        ),
+        timing=_timing(),
+    )
+    with pytest.raises(TypeError, match="immutable"):
+        fact.tools[0].input_schema["properties"] = {}
+    assert fact.model_dump(mode="json")["tools"][0]["input_schema"]["type"] == "object"
+
+
+def test_empty_installation_is_canonical() -> None:
+    installation = empty_mcp_installation()
+    assert installation.installation_id == "mcp_installation:empty"
+    assert not installation.tools
+    assert not installation.binding_identities
+
+
+def test_installation_builds_descriptor_and_exact_binding() -> None:
+    supervisor, installation, _manager, slot = _installed_surface()
+    assert [descriptor.name for descriptor in installation.descriptors] == [
+        "mcp__docs__lookup"
+    ]
+    tool = installation.tools[0]
+    assert isinstance(tool, McpCapabilityTool)
+    assert tool.binding_identity == slot.binding_identity
+    assert not hasattr(tool, "installation_id")
+    output = McpCapabilityProvider(installation).resolve(
+            CapabilityResolveContext(
+                workspace_root=Path.cwd(),
+                workspace_kind="project",
+                memory_domain=None,
+                available_tool_names=frozenset({tool.name}),
+                user_input="lookup",
+            ),
+        bound_tool_names=frozenset({tool.name}),
+    )
+    assert output.descriptors == installation.descriptors
+    assert output.catalog_prompt is not None
+    assert "server=docs; status=ready; installed_tool_count=1" in output.catalog_prompt
+    assert "actual tool schema remains the sole authority" in output.catalog_prompt
+    asyncio.run(supervisor.aclose(timeout_seconds=1))
+
+
+def test_starting_mcp_prompt_strongly_freezes_current_run_availability() -> None:
+    config = _config()
+    starting = McpServerSnapshot(
+        snapshot_id="mcp_snapshot:starting",
+        server_id=config.server_id,
+        config_epoch=1,
+        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+        snapshot_semantic_fingerprint=snapshot_semantic_fingerprint(
+            server_id=config.server_id,
+            status=McpServerStatus.STARTING,
+        ),
+        reconcile_attempt_id="mcp_attempt:starting",
+        discovery_generation=1,
+        status=McpServerStatus.STARTING,
+        required=False,
+        timing=McpServerLifecycleTimingFact(
+            queued_at_utc="2026-01-01T00:00:00Z"
         ),
     )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
+    supervisor = McpServerSupervisor()
+    installation = build_mcp_installation(
+        supervisor=supervisor,
+        config_epoch=1,
+        event_safe_config_set_fingerprint="sha256:starting",
+        snapshots=(starting,),
+        configs_by_server={"docs": config},
+        slots_by_server={},
+        installation_id="mcp_installation:starting",
+    )
+    output = McpCapabilityProvider(installation).resolve(
+        CapabilityResolveContext(
+            workspace_root=Path.cwd(),
+            workspace_kind="project",
+            memory_domain=None,
+            available_tool_names=frozenset(),
+            user_input="Can you see MCP?",
         ),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
-        mcp_supervisor=McpServerSupervisor(),
+        bound_tool_names=frozenset(),
     )
 
-    asyncio.run(session._sync_mcp_servers_for_turn())
+    assert output.descriptors == ()
+    prompt = output.catalog_prompt
+    assert prompt is not None
+    assert "server=docs; status=starting; installed_tool_count=0" in prompt
+    assert "tools are NOT available in this run" in prompt
+    assert "Do not infer current MCP availability from prior messages" in prompt
+    assert "Do not describe status=starting as a configuration failure" in prompt
+    assert "may become available in a later run after a HostSession safe point" in prompt
+    assert "do not promise that the next run will succeed" in prompt
+    asyncio.run(supervisor.aclose(timeout_seconds=1))
 
-    assert fixture_tool in runtime_wiring.runtime_session.extra_tool_bindings
-    assert not any(
-        isinstance(tool, McpCapabilityTool)
-        for tool in runtime_wiring.runtime_session.extra_tool_bindings
+
+def test_unchanged_server_reuses_exact_descriptor_and_binding_objects() -> None:
+    supervisor, installation, manager, slot = _installed_surface()
+    config = _config()
+    snapshot = installation.snapshots[0]
+    rebuilt = build_mcp_installation(
+        supervisor=supervisor,
+        config_epoch=installation.config_epoch + 1,
+        event_safe_config_set_fingerprint=installation.event_safe_config_set_fingerprint,
+        snapshots=(snapshot,),
+        configs_by_server={"docs": config},
+        slots_by_server={"docs": slot},
+        installation_id="mcp_installation:unrelated-change",
+        previous_installation=installation,
     )
-    assert any(existing is provider for existing in agent.capability_runtime.providers)
-    assert any(
-        isinstance(existing, McpCapabilityProvider)
-        for existing in agent.capability_runtime.providers
+    assert rebuilt.tools[0] is installation.tools[0]
+    assert rebuilt.descriptors[0] is installation.descriptors[0]
+
+    replacement_manager = MockMcpClientManager(_snapshots=(snapshot,))
+    spec = McpServerRuntimeSpec(
+        config=config,
+        runtime_config_fingerprint=runtime_mcp_config_fingerprint(config),
+        event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
     )
-
-
-def test_host_session_close_closes_mcp_manager_once(tmp_path: Path) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool()),), handlers={("docs", "lookup"): lambda args: args}
+    replacement_slot = new_mcp_slot(
+        spec=spec,
+        snapshot=snapshot,
+        manager=replacement_manager,
     )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
-        ),
-        wiring=AgentRuntimeWiring(
-            agent_runtime=_CloseOnlyAgentRuntime(runtime_wiring.runtime_session),
-            runtime_wiring=runtime_wiring,
-        ),
+    changed = build_mcp_installation(
+        supervisor=supervisor,
+        config_epoch=installation.config_epoch + 1,
+        event_safe_config_set_fingerprint=installation.event_safe_config_set_fingerprint,
+        snapshots=(snapshot,),
+        configs_by_server={"docs": config},
+        slots_by_server={"docs": replacement_slot},
+        installation_id="mcp_installation:slot-change",
+        previous_installation=installation,
     )
+    assert changed.tools[0] is not installation.tools[0]
+    assert changed.tools[0].binding_identity == replacement_slot.binding_identity
+    assert not hasattr(changed.tools[0], "installation_id")
 
-    asyncio.run(session.aclose())
-    asyncio.run(session.aclose())
-
+    asyncio.run(supervisor.aclose(timeout_seconds=1))
+    asyncio.run(replacement_manager.aclose(timeout_seconds=1))
     assert manager.close_count == 1
-    assert manager.cancel_count == 1
 
 
-def test_host_session_close_suppresses_mcp_manager_internal_cancel(
-    tmp_path: Path,
-) -> None:
-    class CancelCloseMcpManager:
-        snapshots = (_snapshot(_tool()),)
-        close_count = 0
-
-        async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
-            self.close_count += 1
-            raise asyncio.CancelledError("MCP SDK internal close cancellation")
-
-        def cancel_active(self) -> None:
-            pass
-
-    manager = CancelCloseMcpManager()
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
-        ),
-        wiring=AgentRuntimeWiring(
-            agent_runtime=_CloseOnlyAgentRuntime(runtime_wiring.runtime_session),
-            runtime_wiring=runtime_wiring,
-        ),
-    )
+def test_tool_call_uses_and_releases_slot_lease() -> None:
+    supervisor, installation, manager, slot = _installed_surface()
+    tool = installation.tools[0]
 
     async def run() -> None:
-        await session.aclose()
-        await asyncio.sleep(0)
-        assert manager.close_count == 1
-        assert asyncio.current_task() is not None
-        assert asyncio.current_task().cancelling() == 0
+        result = await tool.execute_async(
+            ToolCall(id="call:1", name=tool.name, arguments={"query": "x"}),
+            runtime_context=_runtime_context(),
+        )
+        assert result.output == "ok:x"
+        assert slot.borrower_count == 0
+        assert manager.calls == [("docs", "lookup", {"query": "x"})]
+        await supervisor.aclose(timeout_seconds=1)
 
     asyncio.run(run())
 
 
-def test_host_session_captures_and_resolves_mcp_elicitation(tmp_path: Path) -> None:
-    fixture_tool = _LegacyMcpElicitationFixtureTool()
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    runtime_wiring.runtime_session.extra_tool_bindings = (fixture_tool,)
-    transport = _ScriptedTransport(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call:mcp",
-                        "name": fixture_tool.name,
-                        "arguments": json.dumps(
-                            {
-                                "request_id": "request-host",
-                                "prompt": "Need a token",
-                            }
-                        ),
-                    }
-                ]
-            },
-            {"text": "done"},
-        ]
-    )
-    agent = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(
-            _FixtureCapabilityProvider(fixture_tool.name)
-        ),
-        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
-    )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
-        ),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
-    )
-
-    first = asyncio.run(session.run_turn("call mcp"))
-
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpElicitation)
-    assert pending.tool_call_id == "call:mcp"
-    assert pending.server_id == "docs"
-
-    final = asyncio.run(
-        session.resolve_mcp_elicitation(
-            McpElicitationResolution(
-                interaction_id=pending.interaction_id,
-                answer={"value": "secret"},
-            )
-        )
-    )
-
-    assert final.status.value == "finished"
-    assert session.get_pending_interaction() is None
-    assert fixture_tool.responses == [
-        ("docs", "request-host", {"value": "secret", "tool_call_id": "call:mcp"})
-    ]
-
-
-def test_host_session_captures_and_resolves_mcp_input_required(tmp_path: Path) -> None:
-    session, manager, runtime_wiring, _ = _mcp_input_required_host_session(tmp_path)
-
-    first = asyncio.run(session.run_turn("call mcp"))
-
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-    assert pending.request_state is None
-    assert pending.input_requests == (
-        {
-            "key": "token",
-            "method": "elicitation/create",
-            "params": {"message": "Need a token", "mode": "form"},
-        },
-    )
-    assert pending.original_request == {
-        "source_method": "tools/call",
-        "tool_name": "lookup",
-        "arguments": {"query": "pulsara"},
-    }
-    seed = pending.tool_observation_timing_seed
-    assert seed["tool_call_id"] == "call:mcp-input"
-    assert seed["source_started_at"]
-    assert seed["suspended_at"]
-
-    manager.handlers[("docs", "lookup")] = lambda args: {"resumed": args["query"]}
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "finished"
-    assert session.get_pending_interaction() is None
-    assert manager.calls[-1] == ("docs", "lookup", {"query": "pulsara"})
-    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
-
-
-def test_mcp_input_required_resume_exposure_denial_emits_gate_decision(
-    tmp_path: Path,
-) -> None:
-    session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
-    first = asyncio.run(session.run_turn("call mcp"))
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-    seed = pending.tool_observation_timing_seed
-
-    agent.refresh_capability_runtime(CapabilityRuntime(providers=()))
-    if session._suspended_state is not None:
-        session._suspended_state.scratchpad.pop("capability_exposure", None)
-
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "finished"
-    gate_decisions = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent)
-        and event.tool_call_id == "call:mcp-input"
-    ]
-    assert gate_decisions[-1].decision == "deny"
-    assert gate_decisions[-1].reason_code == "capability_descriptor_missing"
-    assert gate_decisions[-1].result_state is ToolResultState.ERROR
-    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
-
-
-def test_mcp_input_required_resume_permission_denial_preserves_timing_seed(
-    tmp_path: Path,
-) -> None:
-    session, _manager, runtime_wiring, _agent = _mcp_input_required_host_session(
-        tmp_path
-    )
-    first = asyncio.run(session.run_turn("call mcp"))
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-    seed = pending.tool_observation_timing_seed
-    assert session._suspended_state is not None
-    session._suspended_state.permission_snapshot = snapshot_from_mode(
-        runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
-        run_id=session._suspended_state.run_id,
-        permission_mode=PermissionMode.READ_ONLY,
-        permission_snapshot_source="session_default",
-    )
-
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "finished"
-    gate_decisions = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent)
-        and event.tool_call_id == "call:mcp-input"
-    ]
-    assert gate_decisions[-1].decision == "deny"
-    assert gate_decisions[-1].result_state is ToolResultState.DENIED
-    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
-
-
-def test_mcp_input_required_resume_wait_unsupported_preserves_timing_seed(
-    tmp_path: Path,
-) -> None:
-    session, _manager, runtime_wiring, _agent = _mcp_input_required_host_session(
-        tmp_path,
-        tool=_tool(destructive=True),
-    )
-    first = asyncio.run(session.run_turn("call mcp"))
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-    seed = pending.tool_observation_timing_seed
-    assert session._suspended_state is not None
-    session._suspended_state.permission_snapshot = snapshot_from_mode(
-        runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
-        run_id=session._suspended_state.run_id,
-        permission_mode=PermissionMode.ASK_PERMISSIONS,
-        permission_snapshot_source="session_default",
-    )
-
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "finished"
-    gate_decisions = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent)
-        and event.tool_call_id == "call:mcp-input"
-    ]
-    assert gate_decisions[-1].decision == "deny"
-    assert (
-        gate_decisions[-1].reason_code == "mcp_resume_permission_approval_unsupported"
-    )
-    assert gate_decisions[-1].result_state is ToolResultState.DENIED
-    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
-
-
-def test_mcp_input_required_resume_missing_resume_method_preserves_timing_seed(
-    tmp_path: Path,
-) -> None:
-    session, _manager, runtime_wiring, agent = _mcp_input_required_host_session(
-        tmp_path
-    )
-    first = asyncio.run(session.run_turn("call mcp"))
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-    seed = pending.tool_observation_timing_seed
-    agent.tool_executor.registry._tools["mcp__docs__lookup"] = SimpleNamespace(
-        name="mcp__docs__lookup",
-        description="fixture without resume_input_required",
-        parameters={"type": "object"},
-    )
-
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "finished"
-    end = _latest_tool_result_end(runtime_wiring)
-    assert end.state is ToolResultState.ERROR
-    _assert_mcp_resume_timing_preserves_seed(runtime_wiring, seed)
-
-
-def test_mcp_input_required_resume_uses_original_run_snapshot_after_read_only_default_switch(
-    tmp_path: Path,
-) -> None:
-    session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
-    first = asyncio.run(session.run_turn("call mcp"))
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-
-    agent.set_permission_policy(preset_to_policy(PermissionMode.READ_ONLY))
-
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "waiting_user"
-    assert manager.calls == [
-        ("docs", "lookup", {"query": "pulsara"}),
-        ("docs", "lookup", {"query": "pulsara"}),
-    ]
-    assert isinstance(session.get_pending_interaction(), PendingMcpInputRequired)
-    gate_decisions = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent)
-        and event.tool_call_id == "call:mcp-input"
-    ]
-    assert gate_decisions[-1].decision == "allow"
-    assert gate_decisions[-1].reason_code is None
-    assert gate_decisions[-1].result_state is None
-    assert gate_decisions[-1].permission_policy["profile"] == "trusted_host"
-    assert gate_decisions[-1].permission_policy["terminal_access"] == "allow"
-
-
-def test_mcp_input_required_resume_uses_original_run_snapshot_after_ask_default_switch(
-    tmp_path: Path,
-) -> None:
-    session, manager, runtime_wiring, agent = _mcp_input_required_host_session(tmp_path)
-    first = asyncio.run(session.run_turn("call mcp"))
-    assert first.status.value == "waiting_user"
-    pending = session.get_pending_interaction()
-    assert isinstance(pending, PendingMcpInputRequired)
-
-    agent.set_permission_policy(preset_to_policy(PermissionMode.ASK_PERMISSIONS))
-
-    final = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-                cancelled=False,
-            )
-        )
-    )
-
-    assert final.status.value == "waiting_user"
-    assert manager.calls == [
-        ("docs", "lookup", {"query": "pulsara"}),
-        ("docs", "lookup", {"query": "pulsara"}),
-    ]
-    assert isinstance(session.get_pending_interaction(), PendingMcpInputRequired)
-    gate_decisions = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CapabilityGateDecisionEvent)
-        and event.tool_call_id == "call:mcp-input"
-    ]
-    assert gate_decisions[-1].decision == "allow"
-    assert gate_decisions[-1].reason_code is None
-    assert gate_decisions[-1].result_state is None
-    assert gate_decisions[-1].permission_policy["profile"] == "trusted_host"
-    assert gate_decisions[-1].permission_policy["terminal_access"] == "allow"
-
-
-def test_mcp_adapter_preserves_wrapper_tool_call_id_on_multi_round_input_required() -> (
-    None
-):
-    class SecondRoundManager(MockMcpClientManager):
-        async def resume_suspended_request(self, **kwargs):  # type: ignore[no-untyped-def]
-            resolution = kwargs["resolution"]
-            return McpInputRequired(
-                interaction_id="mcp_input_required:second",
-                server_id="docs",
-                protocol_version="2026-07-28",
-                request_state="state:2",
-                input_requests=(
-                    McpInputRequestDTO(
-                        key="token2",
-                        method="elicitation/create",
-                        params={"message": "Need another token", "mode": "form"},
-                    ),
-                ),
-                original_request=McpOriginalRequest(
-                    source_method=McpRequestSourceMethod.TOOL_CALL,
-                    tool_name="lookup",
-                    arguments={"query": "pulsara"},
-                ),
-                round_count=resolution.round_count + 1,
-            )
-
-    manager = SecondRoundManager((_snapshot(_tool()),), handlers={})
-    tool = McpCapabilityTool(
-        name="mcp__docs__lookup",
-        description="Lookup docs",
-        parameters={"type": "object"},
-        server_id="docs",
-        original_tool_name="lookup",
-        client_manager=manager,
-        timeout_ms=1_000,
-    )
-
-    result = asyncio.run(
-        tool.resume_input_required(
-            original_request={
-                "source_method": "tools/call",
-                "tool_name": "lookup",
-                "arguments": {"query": "pulsara"},
-            },
-            request_state="state:1",
-            resolution=McpInputRequiredResolution(
-                interaction_id="mcp_input_required:first",
-                responses={"token": {"value": "secret"}},
-                tool_call_id="call:mcp-input",
-                input_requests=(
-                    McpInputRequestDTO(
-                        key="token",
-                        method="elicitation/create",
-                        params={"message": "Need token", "mode": "form"},
-                    ),
-                ),
-                round_count=1,
-            ),
-            runtime_context=ToolRuntimeContext(
-                runtime_session_id="runtime:test",
-                event_context=EventContext(
-                    run_id="run:1", turn_id="turn:1", reply_id="reply:1"
-                ),
-            ),
-        )
-    )
-
-    assert isinstance(result, ToolExecutionSuspended)
-    assert result.payload["wrapper_tool_call_id"] == "call:mcp-input"
-    assert result.payload["tool_call_id"] == "call:mcp-input"
-    assert result.payload["round_count"] == 2
-
-
-def test_mcp_input_required_resume_failure_preserves_pending_interaction(
-    tmp_path: Path,
-) -> None:
-    class FailingResumeManager(MockMcpClientManager):
-        async def resume_suspended_request(self, **kwargs):  # type: ignore[no-untyped-def]
-            raise ValueError(
-                "invalid MCP input response from https://user:pass@example.test/mcp?token=url-secret "
-                "Authorization: Bearer bearer-secret api_key=plain-secret"
-            )
-
-    def request_input(args: dict[str, object]) -> McpInputRequired:
+def test_suspended_tool_promotes_lease_and_resume_borrows_same_slot() -> None:
+    def handler(arguments):
         return McpInputRequired(
-            interaction_id="mcp_input_required:retry",
+            interaction_id="mcp_input_required:1",
             server_id="docs",
             protocol_version="2026-07-28",
             request_state=None,
@@ -1836,465 +509,1064 @@ def test_mcp_input_required_resume_failure_preserves_pending_interaction(
                 McpInputRequestDTO(
                     key="token",
                     method="elicitation/create",
-                    params={"message": "Need a token", "mode": "form"},
+                    params={"message": "token"},
                 ),
             ),
             original_request=McpOriginalRequest(
                 source_method=McpRequestSourceMethod.TOOL_CALL,
                 tool_name="lookup",
-                arguments=dict(args),
+                arguments=arguments,
             ),
         )
 
-    manager = FailingResumeManager(
-        (_snapshot(_tool()),), handlers={("docs", "lookup"): request_input}
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    transport = _ScriptedTransport(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call:mcp-input",
-                        "name": "mcp__docs__lookup",
-                        "arguments": json.dumps({"query": "pulsara"}),
-                    }
-                ]
-            }
-        ]
-    )
-    agent = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(transport),
-        capability_runtime=CapabilityRuntime.with_default_providers(
-            McpCapabilityProvider(bundle)
-        ),
-        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
-    )
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_kind="transient", workspace_root=tmp_path)
-        ),
-        wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
-    )
-    first = asyncio.run(session.run_turn("call mcp"))
-    pending = session.get_pending_interaction()
-    assert first.status.value == "waiting_user"
-    assert isinstance(pending, PendingMcpInputRequired)
-
-    retry = asyncio.run(
-        session.resolve_mcp_input_required(
-            McpInputRequiredInteractionResolution(
-                interaction_id=pending.interaction_id,
-                responses={"token": {"value": "secret"}},
-            )
-        )
-    )
-
-    assert retry.status.value == "waiting_user"
-    still_pending = session.get_pending_interaction()
-    assert isinstance(still_pending, PendingMcpInputRequired)
-    assert still_pending.interaction_id == pending.interaction_id
-    failure_events = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, CustomEvent)
-        and event.name == "mcp_input_required_resume_failed"
-    ]
-    assert failure_events
-    message = failure_events[-1].value["message"]
-    assert "user:pass" not in message
-    assert "url-secret" not in message
-    assert "bearer-secret" not in message
-    assert "plain-secret" not in message
-
-
-def test_mcp_elicitation_suspends_and_resume_routes_answer_to_manager(
-    tmp_path: Path,
-) -> None:
-    fixture_tool = _LegacyMcpElicitationFixtureTool()
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    runtime_wiring.runtime_session.extra_tool_bindings = (fixture_tool,)
-    agent = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(_ScriptedTransport([{"text": "done"}])),
-        capability_runtime=CapabilityRuntime.with_default_providers(
-            _FixtureCapabilityProvider(fixture_tool.name)
-        ),
-        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
-    )
-    state = agent.new_state()
-    state.run_model_target = agent.resolve_run_model_target()
-    state.permission_snapshot = snapshot_from_mode(
-        runtime_session_id=agent.runtime_session.runtime_session_id,
-        run_id=state.run_id,
-        permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-        permission_snapshot_source="session_default",
-    )
-
-    events = asyncio.run(
-        _collect(
-            agent._stream_parsed_tool_calls(
-                state,
-                [
-                    ToolCall(
-                        id="call:mcp",
-                        name=fixture_tool.name,
-                        arguments={
-                            "request_id": "request-1",
-                            "prompt": "Token please",
-                            "schema": {"type": "object"},
-                        },
-                    )
-                ],
-            )
-        )
-    )
-
-    assert state.status.value == "waiting_user"
-    assert state.pending_interaction_kind == "mcp_elicitation"
-    assert any(
-        isinstance(event, CustomEvent) and event.name == "tool_execution_suspended"
-        for event in events
-    )
-    pending = PendingMcpElicitation(
-        **{
-            **state.pending_interaction_payload,
-            "kind": "mcp_elicitation",
-            "host_session_id": "host:test",
-            "runtime_session_id": state.session_id,
-            "run_id": state.run_id,
-            "turn_id": state.turn_id,
-            "reply_id": state.reply_id,
-        }
-    )
-
-    result = asyncio.run(
-        agent.resume_after_mcp_elicitation(
-            state,
-            McpElicitationResolution(
-                interaction_id=pending.interaction_id,
-                answer={"value": "secret"},
-            ),
-        )
-    )
-
-    assert result.status.value == "finished"
-    assert fixture_tool.responses == [
-        ("docs", "request-1", {"value": "secret", "tool_call_id": "call:mcp"})
-    ]
-    assert any(
-        message.role == "tool_result" and message.name == fixture_tool.name
-        for message in state.messages
-    )
-
-
-def test_approved_pending_mcp_call_reruns_capability_gate_and_fails_closed(
-    tmp_path: Path,
-) -> None:
-    manager = MockMcpClientManager(
-        (_snapshot(_tool()),), handlers={("docs", "lookup"): lambda args: args}
-    )
-    bundle = build_mcp_bundle(manager)
-    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
-        runtime_wiring = build_in_memory_runtime_wiring(tmp_path, mcp_bundle=bundle)
-    agent = AgentRuntime(
-        runtime_session=runtime_wiring.runtime_session,
-        llm_runtime=_llm_runtime(_ScriptedTransport([{"text": "done"}])),
-        capability_runtime=CapabilityRuntime(providers=()),
-        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
-    )
-    state = agent.new_state()
-    state.run_model_target = agent.resolve_run_model_target()
-    state.permission_snapshot = snapshot_from_mode(
-        runtime_session_id=agent.runtime_session.runtime_session_id,
-        run_id=state.run_id,
-        permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-        permission_snapshot_source="session_default",
-    )
-    state.status = LoopStatus.WAITING_USER
-    state.stop_reason = "waiting_user"
-    state.pending_tool_calls = [
-        ToolCallBlock(
-            id="call:mcp",
-            name="mcp__docs__lookup",
-            input=json.dumps({"query": "stale"}),
-            state=ToolCallState.ASKING,
-        )
-    ]
-
-    result = asyncio.run(
-        agent.resume_after_approval(
-            state,
-            ApprovalResolution(
-                approval_id="approval:test",
-                decisions=(
-                    ToolApprovalDecision(tool_call_id="call:mcp", confirmed=True),
-                ),
-            ),
-        )
-    )
-
-    assert result.status.value == "finished"
-    assert manager.calls == []
-    tool_messages = [
-        message for message in state.messages if message.role == "tool_result"
-    ]
-    assert tool_messages
-    assert "capability_descriptor_missing" in tool_messages[0].content[0].output[0].text
-
-
-def test_streamable_http_mcp_manager_discovers_and_calls_fake_server() -> None:
-    server, url, seen = _start_http_mcp_fixture()
-    try:
-        config = McpServerConfig(
-            server_id="http_docs",
-            transport=McpStreamableHttpConfig(url=url),
-            tool_timeout_ms=1_000,
-        )
-        manager = asyncio.run(HttpMcpClientManager.discover((config,)))
-        try:
-            assert manager.snapshots[0].status is McpServerStatus.READY
-            assert [tool.name for tool in manager.snapshots[0].tools] == ["lookup"]
-
-            result = asyncio.run(
-                manager.call_tool(
-                    "http_docs", "lookup", {"query": "mcp"}, timeout_ms=1_000
-                )
-            )
-
-            assert result == "lookup:mcp"
-            assert [request["method"] for request in seen] == [
-                "tools/list",
-                "tools/call",
-            ]
-        finally:
-            asyncio.run(manager.aclose())
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def test_streamable_http_mcp_manager_reports_missing_bearer_token() -> None:
-    config = McpServerConfig(
-        server_id="secure",
-        transport=McpStreamableHttpConfig(
-            url="http://127.0.0.1:9/mcp",
-            bearer_token_env_var="PULSARA_TEST_MISSING_MCP_TOKEN",
-        ),
-    )
-
-    manager = asyncio.run(HttpMcpClientManager.discover((config,)))
-    try:
-        assert manager.snapshots[0].status is McpServerStatus.NEEDS_AUTH
-        assert "missing bearer token" in (manager.snapshots[0].message or "")
-    finally:
-        asyncio.run(manager.aclose())
-
-
-def test_stdio_mcp_manager_discovers_calls_and_closes_fixture(tmp_path: Path) -> None:
-    fixture = tmp_path / "stdio_mcp_fixture.py"
-    fixture.write_text(
-        """
-import json
-import sys
-
-def read_message():
-    headers = []
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line == b"\\r\\n":
-            break
-        headers.append(line.decode("ascii").strip())
-    length = None
-    for header in headers:
-        if header.lower().startswith("content-length:"):
-            length = int(header.split(":", 1)[1].strip())
-    if length is None:
-        raise RuntimeError("missing content length")
-    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
-
-def write_message(payload):
-    body = json.dumps(payload).encode("utf-8")
-    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\\r\\n\\r\\n" + body)
-    sys.stdout.buffer.flush()
-
-while True:
-    request = read_message()
-    if request is None:
-        break
-    method = request.get("method")
-    params = request.get("params") or {}
-    if method == "tools/list":
-        result = {"tools": [{"name": "lookup", "description": "Lookup", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}}]}
-    elif method == "tools/call":
-        result = {"content": [{"type": "text", "text": "stdio:" + str((params.get("arguments") or {}).get("query"))}]}
-    elif method == "elicitation/respond":
-        result = {"ok": True, "answer": params.get("answer")}
-    else:
-        result = {"unknown": method}
-    write_message({"jsonrpc": "2.0", "id": request.get("id"), "result": result})
-""".strip(),
-        encoding="utf-8",
-    )
-    config = McpServerConfig(
-        server_id="stdio_docs",
-        transport=McpStdioConfig(command="python", args=(str(fixture),), cwd=tmp_path),
-        tool_timeout_ms=1_000,
-    )
+    supervisor, installation, _manager, slot = _installed_surface(handler=handler)
+    tool = installation.tools[0]
 
     async def run() -> None:
-        manager = await StdioMcpClientManager.start((config,))
-        try:
-            assert manager.snapshots[0].status is McpServerStatus.READY
-            assert [tool.name for tool in manager.snapshots[0].tools] == ["lookup"]
-
-            result = await manager.call_tool(
-                "stdio_docs", "lookup", {"query": "mcp"}, timeout_ms=1_000
-            )
-
-            assert result == "stdio:mcp"
-        finally:
-            await manager.aclose()
+        suspended = await tool.execute_async(
+            ToolCall(id="call:1", name=tool.name, arguments={"query": "x"}),
+            runtime_context=_runtime_context(),
+        )
+        assert isinstance(suspended, ToolExecutionSuspended)
+        reservation_id = suspended.payload["mcp_pending_lease_reservation_id"]
+        supervisor.confirm_pending_lease("mcp_input_required:1", reservation_id)
+        borrowed = supervisor.borrow_pending_lease(
+            "mcp_input_required:1", tool.binding_identity
+        )
+        assert borrowed.slot_id == slot.slot_id
+        supervisor.return_pending_borrow("mcp_input_required:1")
+        supervisor.complete_pending_lease("mcp_input_required:1")
+        assert slot.borrower_count == 0
+        await supervisor.aclose(timeout_seconds=1)
 
     asyncio.run(run())
 
 
-def _start_http_mcp_fixture():
-    seen: list[dict] = []
+def test_pending_creation_failure_releases_newly_acquired_lease() -> None:
+    def handler(arguments):
+        return McpInputRequired(
+            interaction_id="mcp_input_required:duplicate",
+            server_id="docs",
+            protocol_version="2026-07-28",
+            request_state=None,
+            input_requests=(
+                McpInputRequestDTO(
+                    key="token",
+                    method="elicitation/create",
+                    params={"message": "token"},
+                ),
+            ),
+            original_request=McpOriginalRequest(
+                source_method=McpRequestSourceMethod.TOOL_CALL,
+                tool_name="lookup",
+                arguments=arguments,
+            ),
+        )
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            seen.append(payload)
-            method = payload.get("method")
-            params = payload.get("params") or {}
-            if method == "tools/list":
-                result = {
-                    "tools": [
-                        {
-                            "name": "lookup",
-                            "description": "Lookup",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {"query": {"type": "string"}},
-                            },
-                        }
-                    ]
-                }
-            elif method == "tools/call":
-                result = {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "lookup:"
-                            + str((params.get("arguments") or {}).get("query")),
-                        }
-                    ]
-                }
-            else:
-                result = {"ok": True}
-            body = json.dumps(
-                {"jsonrpc": "2.0", "id": payload.get("id"), "result": result}
-            ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    supervisor, installation, _manager, slot = _installed_surface(handler=handler)
+    tool = installation.tools[0]
 
-        def log_message(self, format, *args):
-            return None
+    async def run() -> None:
+        first = await tool.execute_async(
+            ToolCall(id="call:1", name=tool.name, arguments={}),
+            runtime_context=_runtime_context(),
+        )
+        assert isinstance(first, ToolExecutionSuspended)
+        assert slot.borrower_count == 1
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    return server, f"http://{host}:{port}/mcp", seen
+        second = await tool.execute_async(
+            ToolCall(id="call:2", name=tool.name, arguments={}),
+            runtime_context=_runtime_context(),
+        )
+        assert not isinstance(second, ToolExecutionSuspended)
+        assert second.status.value == "error"
+        assert "pending input ownership failed" in second.output
+        assert slot.borrower_count == 1
+
+        reservation_id = first.payload["mcp_pending_lease_reservation_id"]
+        supervisor.abort_pending_lease(
+            "mcp_input_required:duplicate",
+            reservation_id,
+        )
+        assert slot.borrower_count == 0
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
 
 
-async def _collect(stream):
-    return [event async for event in stream]
+def test_retiring_slot_rejects_new_acquisition_until_borrower_releases() -> None:
+    supervisor, installation, _manager, slot = _installed_surface()
+    identity = installation.tools[0].binding_identity
+    lease = supervisor.acquire_binding_lease(identity)
+    supervisor.commit_slot_transition(candidates=(), retiring_slot_ids=(slot.slot_id,))
+    with pytest.raises(RuntimeError, match="generation_unavailable"):
+        supervisor.acquire_binding_lease(identity)
+    supervisor.release_lease(lease)
+    asyncio.run(supervisor.close_retiring_slots(timeout_seconds=1))
+    assert slot.lifecycle == "closed"
+    asyncio.run(supervisor.aclose(timeout_seconds=1))
 
 
-class _ScriptedTransport(LLMTransport):
-    api = "scripted"
-    binding_id = "test.scripted"
-    contract_version = "v1"
+def test_retiring_slot_closes_when_last_async_borrower_releases() -> None:
+    supervisor, installation, manager, slot = _installed_surface()
+    identity = installation.tools[0].binding_identity
 
-    def __init__(self, replies: list[dict]) -> None:
-        self.replies = replies
-        self.contexts: list[LLMContext] = []
+    async def run() -> None:
+        lease = supervisor.acquire_binding_lease(identity)
+        supervisor.commit_slot_transition(
+            candidates=(),
+            retiring_slot_ids=(slot.slot_id,),
+        )
+        supervisor.release_lease(lease)
+        cleanup = tuple(supervisor._retiring_slot_cleanup_tasks)
+        assert cleanup
+        await asyncio.gather(*cleanup)
+        assert slot.lifecycle == "closed"
+        assert manager.close_count == 1
+        assert supervisor.slots() == ()
+        await supervisor.aclose(timeout_seconds=1)
 
-    async def stream(
-        self,
-        *,
-        call,
-        context: LLMContext,
-        event_context: EventContext,
-    ):
-        del call
-        self.contexts.append(context)
-        reply = self.replies.pop(0)
-        if "text" in reply:
-            yield TextBlockStartEvent(
-                **event_context.event_fields(), block_id="text:scripted"
-            )
-            yield TextBlockDeltaEvent(
-                **event_context.event_fields(),
-                block_id="text:scripted",
-                delta=reply["text"],
-            )
-            yield TextBlockEndEvent(
-                **event_context.event_fields(), block_id="text:scripted"
-            )
-        for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
-                **event_context.event_fields(),
-                tool_call_id=call["id"],
-                tool_call_name=call["name"],
-            )
-            yield ToolCallDeltaEvent(
-                **event_context.event_fields(),
-                tool_call_id=call["id"],
-                delta=call["arguments"],
-            )
-            yield ToolCallEndEvent(
-                **event_context.event_fields(), tool_call_id=call["id"]
-            )
+    asyncio.run(run())
 
 
-def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
-    config = test_llm_config(
-        api_key="sk-test",
-        base_url="https://example.test/v1",
-        pro_model="pro",
-        flash_model="flash",
-        api="scripted",
+def test_pending_lease_prevents_close_until_completed() -> None:
+    supervisor, installation, _manager, _slot = _installed_surface()
+    identity = installation.tools[0].binding_identity
+    lease = supervisor.acquire_binding_lease(identity)
+    reservation = supervisor.promote_lease_to_pending(lease, "interaction:1")
+    supervisor.confirm_pending_lease("interaction:1", reservation.reservation_id)
+
+    async def run() -> None:
+        with pytest.raises(Exception):
+            await supervisor.aclose(timeout_seconds=0.01)
+        supervisor.complete_pending_lease("interaction:1")
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_prepare_optional_returns_before_background_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_run(self, runtime):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", fake_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        ticket = supervisor.prepare((_config(),), trigger="initial")
+        assert ticket.optional_server_ids == ("docs",)
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert supervisor.current_starting_snapshots()[0].status is McpServerStatus.STARTING
+        release.set()
+        await supervisor.await_ticket_snapshots(ticket)
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_server_workers_run_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered = {server_id: asyncio.Event() for server_id in ("one", "two")}
+    release = asyncio.Event()
+
+    async def controlled_run(self, runtime):
+        entered[runtime.spec.config.server_id].set()
+        await release.wait()
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", controlled_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        supervisor.prepare((_config("one"), _config("two")), trigger="initial")
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in entered.values())),
+            timeout=0.2,
+        )
+        release.set()
+        await asyncio.gather(*supervisor._workers.values())
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_worker_exception_returns_background_task_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken_run(self, runtime):
+        raise RuntimeError("synthetic worker architecture fault")
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", broken_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        supervisor.prepare((_config(),), trigger="initial")
+        worker = supervisor._workers["docs"]
+        with pytest.raises(RuntimeError, match="architecture fault"):
+            await worker
+        await asyncio.sleep(0)
+        assert supervisor._owned_background_tasks == set()
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_session_close_cancels_and_drains_mcp_discovery_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    drained = asyncio.Event()
+
+    async def blocked_run(self, runtime):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            drained.set()
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", blocked_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        supervisor.prepare((_config(),), trigger="initial")
+        await asyncio.wait_for(entered.wait(), timeout=0.2)
+        await supervisor.aclose(timeout_seconds=1)
+        assert drained.is_set()
+        assert supervisor.lifecycle == "closed"
+        assert supervisor._owned_background_tasks == set()
+        assert supervisor.slots() == ()
+
+    asyncio.run(run())
+
+
+def test_close_during_discovery_retries_connection_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pulsara_agent.runtime.mcp.supervisor as supervisor_module
+
+    discovery_entered = asyncio.Event()
+    discovery_cancelled = asyncio.Event()
+
+    class FailOnceConnection:
+        def __init__(self):
+            self.close_count = 0
+            self.closed = False
+
+        async def aclose(self, *, timeout_seconds=5.0):
+            del timeout_seconds
+            self.close_count += 1
+            if self.close_count == 1:
+                raise RuntimeError("synthetic connection close failure")
+            self.closed = True
+
+    connection = FailOnceConnection()
+
+    async def fake_connect(cls, config, *, timeout_seconds):
+        del cls, config, timeout_seconds
+        return connection
+
+    async def blocked_discovery(_connection, **_kwargs):
+        discovery_entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            discovery_cancelled.set()
+
+    monkeypatch.setattr(
+        supervisor_module.SdkMcpConnection,
+        "connect",
+        classmethod(fake_connect),
     )
-    registry = LLMTransportRegistry()
-    registry.register(transport)
-    return LLMRuntime(config=config, registry=registry)
+    monkeypatch.setattr(
+        supervisor_module,
+        "discover_mcp_server",
+        blocked_discovery,
+    )
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        supervisor.prepare((_config(),), trigger="initial")
+        await asyncio.wait_for(discovery_entered.wait(), timeout=0.2)
+        await supervisor.aclose(timeout_seconds=1)
+        assert discovery_cancelled.is_set()
+        assert connection.closed
+        assert connection.close_count == 2
+        assert supervisor._orphan_connections == {}
+        assert supervisor.lifecycle == "closed"
+
+    asyncio.run(run())
 
 
-class _AllowAll:
-    async def evaluate(self, calls):
-        from pulsara_agent.runtime.permission import PermissionDecision
+def test_same_config_safe_point_does_not_restart_inflight_optional_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
-        return PermissionDecision.allow()
+    async def slow_run(self, runtime):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", slow_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        first = supervisor.prepare((_config(),), trigger="initial")
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        first_worker = supervisor._workers["docs"]
+        second = supervisor.prepare((_config(),), trigger="config_change")
+        assert second.config_epoch == first.config_epoch
+        assert second.server_attempts == {}
+        assert supervisor._workers["docs"] is first_worker
+        assert not first_worker.cancelled()
+        release.set()
+        await first_worker
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
 
 
-@dataclass(slots=True)
-class _CloseOnlyAgentRuntime:
-    runtime_session: object
+def test_unchanged_installed_config_before_ttl_does_not_schedule_refresh() -> None:
+    supervisor, _installation, _manager, _slot = _installed_surface()
 
-    def close(self) -> None:
-        self.runtime_session.close()
+    async def run() -> None:
+        ticket = supervisor.prepare((_config(),), trigger="config_change")
+        assert ticket.server_attempts == {}
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_reconfigure_does_not_retire_old_slot_before_install_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = asyncio.Event()
+
+    async def slow_run(self, runtime):
+        await release.wait()
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", slow_run)
+    supervisor, installation, _manager, old_slot = _installed_surface()
+    old_identity = installation.tools[0].binding_identity
+
+    async def run() -> None:
+        changed = replace(_config(), tool_timeout_ms=2_000)
+        ticket = supervisor.prepare((changed,), trigger="config_change")
+        assert ticket.server_attempts
+        assert old_slot.lifecycle == "installed"
+        assert not supervisor.binding_matches_current_desired_runtime(old_identity)
+
+        with pytest.raises(RuntimeError, match="generation_unavailable"):
+            supervisor.acquire_binding_lease(old_identity)
+
+        release.set()
+        await supervisor.await_ticket_snapshots(ticket)
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_newer_same_epoch_attempt_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    releases: list[asyncio.Event] = []
+
+    async def fake_run(self, runtime):
+        release = asyncio.Event()
+        releases.append(release)
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            return
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", fake_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        first = supervisor.prepare((_config(),), trigger="initial")
+        await asyncio.sleep(0)
+        second = supervisor.prepare((_config(),), trigger="manual_refresh")
+        assert first.config_epoch == second.config_epoch
+        assert (
+            first.server_attempts["docs"].reconcile_attempt_id
+            != second.server_attempts["docs"].reconcile_attempt_id
+        )
+        releases[-1].set()
+        await supervisor.await_ticket_snapshots(second)
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_newer_same_epoch_attempt_discards_already_queued_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_network(self, runtime):
+        return None
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", no_network)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        config = _config()
+        first = supervisor.prepare((config,), trigger="initial")
+        await asyncio.sleep(0)
+        first_attempt = first.server_attempts["docs"]
+        snapshot = _snapshot(
+            config,
+            attempt_id=first_attempt.reconcile_attempt_id,
+            generation=first_attempt.reserved_discovery_generation,
+        )
+        manager = MockMcpClientManager(_snapshots=(snapshot,))
+        spec = McpServerRuntimeSpec(
+            config=config,
+            runtime_config_fingerprint=runtime_mcp_config_fingerprint(config),
+            event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+        )
+        stale = McpServerCandidate(
+            ticket_id=first.ticket_id,
+            config_epoch=first.config_epoch,
+            reconcile_attempt_id=first_attempt.reconcile_attempt_id,
+            reserved_discovery_generation=first_attempt.reserved_discovery_generation,
+            server_snapshot=snapshot,
+            runtime_spec=spec,
+            manager_slot=new_mcp_slot(spec=spec, snapshot=snapshot, manager=manager),
+            trigger="initial",
+        )
+        supervisor._candidates.append(stale)
+
+        second = supervisor.prepare((config,), trigger="manual_refresh")
+        assert second.config_epoch == first.config_epoch
+        await asyncio.sleep(0)
+        assert manager.closed
+        assert manager.close_count == 1
+        assert supervisor.stale_discard_counts() == {"docs": 1}
+        batch = supervisor.drain_installable_candidates(
+            expected_epoch=second.config_epoch
+        )
+        assert stale not in batch.candidates
+        supervisor.acknowledge_stale_discard_counts({"docs": 1})
+        assert supervisor.stale_discard_counts() == {}
+        await supervisor.aclose(timeout_seconds=1)
+        assert manager.close_count == 1
+
+    asyncio.run(run())
+
+
+def test_required_wait_propagates_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = asyncio.Event()
+
+    async def wait_forever(self, runtime):
+        await release.wait()
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", wait_forever)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        ticket = supervisor.prepare((_config(required=True),), trigger="initial")
+        waiter = asyncio.create_task(supervisor.await_required(ticket))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_mixed_server_ticket_waits_only_for_required_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    optional_entered = asyncio.Event()
+    optional_drained = asyncio.Event()
+
+    async def controlled_run(self, runtime):
+        config = runtime.spec.config
+        if not config.required:
+            optional_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                optional_drained.set()
+            return
+        snapshot = McpServerSnapshot(
+            snapshot_id=f"mcp_snapshot:{runtime.attempt.reconcile_attempt_id}",
+            server_id=config.server_id,
+            config_epoch=runtime.attempt.config_epoch,
+            event_safe_config_fingerprint=runtime.spec.event_safe_config_fingerprint,
+            snapshot_semantic_fingerprint=snapshot_semantic_fingerprint(
+                server_id=config.server_id,
+                status=McpServerStatus.READY,
+            ),
+            reconcile_attempt_id=runtime.attempt.reconcile_attempt_id,
+            discovery_generation=runtime.attempt.reserved_discovery_generation,
+            status=McpServerStatus.READY,
+            required=True,
+            timing=_timing(),
+        )
+        manager = MockMcpClientManager(_snapshots=(snapshot,))
+        candidate = McpServerCandidate(
+            ticket_id=runtime.ticket_id,
+            config_epoch=runtime.attempt.config_epoch,
+            reconcile_attempt_id=runtime.attempt.reconcile_attempt_id,
+            reserved_discovery_generation=runtime.attempt.reserved_discovery_generation,
+            server_snapshot=snapshot,
+            runtime_spec=runtime.spec,
+            manager_slot=new_mcp_slot(
+                spec=runtime.spec,
+                snapshot=snapshot,
+                manager=manager,
+            ),
+            trigger=runtime.trigger,
+        )
+        with self._state_lock:
+            self._candidates.append(candidate)
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", controlled_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        ticket = supervisor.prepare(
+            (
+                _config("required", required=True),
+                _config("optional", required=False),
+            ),
+            trigger="initial",
+        )
+        await asyncio.wait_for(optional_entered.wait(), timeout=0.2)
+        result = await asyncio.wait_for(
+            supervisor.await_required(ticket),
+            timeout=0.2,
+        )
+        assert result.ready_server_ids == ("required",)
+        assert not supervisor._workers["optional"].done()
+        await supervisor.aclose(timeout_seconds=1)
+        assert optional_drained.is_set()
+
+    asyncio.run(run())
+
+
+def test_concurrent_close_waiters_share_failure_and_retry_same_supervisor() -> None:
+    supervisor, installation, _manager, _slot = _installed_surface()
+    identity = installation.tools[0].binding_identity
+    lease = supervisor.acquire_binding_lease(identity)
+    reservation = supervisor.promote_lease_to_pending(lease, "interaction:close")
+    supervisor.confirm_pending_lease(
+        "interaction:close",
+        reservation.reservation_id,
+    )
+
+    async def run() -> None:
+        outcomes = await asyncio.gather(
+            *(supervisor.aclose(timeout_seconds=0.02) for _ in range(16)),
+            return_exceptions=True,
+        )
+        assert all(isinstance(outcome, McpDrainError) for outcome in outcomes)
+        assert {str(outcome) for outcome in outcomes} == {
+            "timed out draining MCP leases"
+        }
+        assert supervisor.lifecycle == "open_with_close_pending"
+        supervisor.complete_pending_lease("interaction:close")
+        await supervisor.aclose(timeout_seconds=1)
+        assert supervisor.lifecycle == "closed"
+
+    asyncio.run(run())
+
+
+def test_cancelled_close_waiter_does_not_cancel_shared_owner_attempt() -> None:
+    supervisor, installation, _manager, _slot = _installed_surface()
+    identity = installation.tools[0].binding_identity
+    lease = supervisor.acquire_binding_lease(identity)
+    reservation = supervisor.promote_lease_to_pending(lease, "interaction:cancel-waiter")
+    supervisor.confirm_pending_lease(
+        "interaction:cancel-waiter",
+        reservation.reservation_id,
+    )
+
+    async def run() -> None:
+        owner = asyncio.create_task(supervisor.aclose(timeout_seconds=1))
+        await asyncio.sleep(0)
+        waiter = asyncio.create_task(supervisor.aclose(timeout_seconds=1))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        supervisor.complete_pending_lease("interaction:cancel-waiter")
+        await owner
+        assert supervisor.lifecycle == "closed"
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_blocked_stale_candidate_close_preserves_manager_for_retry() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingManager:
+        def __init__(self, snapshot):
+            self.snapshots = (snapshot,)
+            self.close_count = 0
+            self.closed = False
+
+        async def aclose(self, *, timeout_seconds=5.0):
+            del timeout_seconds
+            self.close_count += 1
+            entered.set()
+            await release.wait()
+            self.closed = True
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        config = _config()
+        snapshot = _snapshot(config)
+        spec = McpServerRuntimeSpec(
+            config=config,
+            runtime_config_fingerprint=runtime_mcp_config_fingerprint(config),
+            event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+        )
+        manager = BlockingManager(snapshot)
+        candidate = McpServerCandidate(
+            ticket_id="mcp_ticket:stale",
+            config_epoch=1,
+            reconcile_attempt_id=snapshot.reconcile_attempt_id,
+            reserved_discovery_generation=snapshot.discovery_generation,
+            server_snapshot=snapshot,
+            runtime_spec=spec,
+            manager_slot=new_mcp_slot(
+                spec=spec,
+                snapshot=snapshot,
+                manager=manager,
+            ),
+            trigger="initial",
+        )
+        supervisor._schedule_candidate_close(candidate)
+        await asyncio.wait_for(entered.wait(), timeout=0.2)
+
+        with pytest.raises(McpDrainError, match="background MCP manager cleanup"):
+            await supervisor.aclose(timeout_seconds=0.01)
+        assert supervisor.lifecycle == "open_with_close_pending"
+        assert not manager.closed
+        assert id(manager) in supervisor._candidate_cleanup_managers
+
+        release.set()
+        await asyncio.sleep(0)
+        await supervisor.aclose(timeout_seconds=1)
+        assert manager.closed
+        assert manager.close_count == 1
+        assert supervisor.lifecycle == "closed"
+
+    asyncio.run(run())
+
+
+def test_candidate_manager_close_failure_keeps_candidate_for_retry() -> None:
+    class FailOnceManager:
+        def __init__(self, snapshot):
+            self.snapshots = (snapshot,)
+            self.close_count = 0
+            self.closed = False
+
+        async def aclose(self, *, timeout_seconds=5.0):
+            del timeout_seconds
+            self.close_count += 1
+            if self.close_count == 1:
+                raise RuntimeError("synthetic candidate close failure")
+            self.closed = True
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        config = _config()
+        snapshot = _snapshot(config)
+        spec = McpServerRuntimeSpec(
+            config=config,
+            runtime_config_fingerprint=runtime_mcp_config_fingerprint(config),
+            event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+        )
+        manager = FailOnceManager(snapshot)
+        candidate = McpServerCandidate(
+            ticket_id="mcp_ticket:close-retry",
+            config_epoch=1,
+            reconcile_attempt_id=snapshot.reconcile_attempt_id,
+            reserved_discovery_generation=snapshot.discovery_generation,
+            server_snapshot=snapshot,
+            runtime_spec=spec,
+            manager_slot=new_mcp_slot(
+                spec=spec,
+                snapshot=snapshot,
+                manager=manager,
+            ),
+            trigger="initial",
+        )
+        supervisor._candidates.append(candidate)
+
+        with pytest.raises(RuntimeError, match="candidate close failure"):
+            await supervisor.aclose(timeout_seconds=1)
+        assert supervisor.lifecycle == "open_with_close_pending"
+        assert supervisor._candidates == [candidate]
+
+        await supervisor.aclose(timeout_seconds=1)
+        assert manager.closed
+        assert manager.close_count == 2
+        assert supervisor._candidates == []
+        assert supervisor.lifecycle == "closed"
+
+    asyncio.run(run())
+
+
+def test_unrelated_required_failure_preserves_pending_binding_and_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_without_candidate(self, runtime):
+        return None
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", fail_without_candidate)
+    supervisor, installation, _manager, slot = _installed_surface()
+    identity = installation.tools[0].binding_identity
+    lease = supervisor.acquire_binding_lease(identity)
+    reservation = supervisor.promote_lease_to_pending(lease, "interaction:unrelated")
+    supervisor.confirm_pending_lease(
+        "interaction:unrelated",
+        reservation.reservation_id,
+    )
+
+    async def run() -> None:
+        ticket = supervisor.prepare(
+            (
+                _config(),
+                _config("required-other", required=True),
+            ),
+            trigger="config_change",
+        )
+        with pytest.raises(Exception, match="required MCP"):
+            await supervisor.await_required(ticket)
+        borrowed = supervisor.borrow_pending_lease(
+            "interaction:unrelated",
+            identity,
+        )
+        assert borrowed.slot_id == slot.slot_id
+        supervisor.return_pending_borrow("interaction:unrelated")
+        supervisor.complete_pending_lease("interaction:unrelated")
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_same_config_refresh_failure_preserves_valid_pending_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_without_candidate(self, runtime):
+        return None
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", fail_without_candidate)
+    supervisor, installation, _manager, slot = _installed_surface()
+    identity = installation.tools[0].binding_identity
+    lease = supervisor.acquire_binding_lease(identity)
+    reservation = supervisor.promote_lease_to_pending(lease, "interaction:refresh")
+    supervisor.confirm_pending_lease("interaction:refresh", reservation.reservation_id)
+
+    async def run() -> None:
+        ticket = supervisor.prepare((_config(),), trigger="ttl_refresh")
+        await supervisor.await_ticket_snapshots(ticket)
+        assert slot.lifecycle == "installed"
+        borrowed = supervisor.borrow_pending_lease("interaction:refresh", identity)
+        assert borrowed.slot_id == slot.slot_id
+        supervisor.return_pending_borrow("interaction:refresh")
+        supervisor.complete_pending_lease("interaction:refresh")
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_required_ticket_fails_closed_without_ready_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run(self, runtime):
+        return None
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", fake_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        ticket = supervisor.prepare((_config(required=True),), trigger="initial")
+        with pytest.raises(Exception, match="required MCP"):
+            await supervisor.await_required(ticket)
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_required_ready_candidate_from_prior_ticket_installs_on_next_safe_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_network(self, runtime):
+        return None
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", no_network)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        config = _config(required=True)
+        first = supervisor.prepare((config,), trigger="initial")
+        await asyncio.sleep(0)
+        attempt = first.server_attempts["docs"]
+        snapshot = _snapshot(
+            config,
+            attempt_id=attempt.reconcile_attempt_id,
+            generation=attempt.reserved_discovery_generation,
+        )
+        spec = supervisor._desired_specs["docs"]
+        manager = MockMcpClientManager(_snapshots=(snapshot,))
+        candidate = McpServerCandidate(
+            ticket_id=first.ticket_id,
+            config_epoch=first.config_epoch,
+            reconcile_attempt_id=attempt.reconcile_attempt_id,
+            reserved_discovery_generation=attempt.reserved_discovery_generation,
+            server_snapshot=snapshot,
+            runtime_spec=spec,
+            manager_slot=new_mcp_slot(
+                spec=spec,
+                snapshot=snapshot,
+                manager=manager,
+            ),
+            trigger="initial",
+        )
+        supervisor._candidates.append(candidate)
+
+        second = supervisor.prepare((config,), trigger="config_change")
+        assert second.server_attempts == {}
+        ready = await supervisor.await_required(second)
+        assert ready.ready_server_ids == ("docs",)
+        batch = supervisor.drain_installable_candidates(
+            expected_epoch=second.config_epoch
+        )
+        assert batch.candidates == (candidate,)
+        supervisor.reject_candidates(batch.candidates)
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_required_failed_candidate_retries_in_background_with_retry_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    triggers: list[str] = []
+
+    async def no_network(self, runtime):
+        triggers.append(runtime.trigger)
+        return None
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", no_network)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor(
+            retry_base_seconds=0.01,
+            retry_max_seconds=0.01,
+        )
+        config = _config(required=True)
+        first = supervisor.prepare((config,), trigger="initial")
+        await asyncio.sleep(0)
+        runtime = supervisor._current_attempts["docs"]
+        failed = supervisor._failed_candidate(
+            runtime,
+            status=McpServerStatus.FAILED,
+            exc=RuntimeError("synthetic startup failure"),
+        )
+        supervisor._candidates.append(failed)
+        supervisor._schedule_retry("docs")
+
+        before_due = supervisor.prepare((config,), trigger="config_change")
+        assert before_due.server_attempts == {}
+
+        for _ in range(20):
+            if (
+                supervisor._generation_by_server["docs"] == 2
+                and triggers == ["initial", "retry"]
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert supervisor._generation_by_server["docs"] == 2
+        assert triggers == ["initial", "retry"]
+        retried = supervisor._current_attempts["docs"].attempt
+        assert (
+            retried.reconcile_attempt_id
+            != first.server_attempts["docs"].reconcile_attempt_id
+        )
+        assert retried.reserved_discovery_generation == 2
+        assert failed not in supervisor._candidates
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_safe_point_joins_running_required_background_retry_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+
+    async def controlled_run(self, runtime):
+        if runtime.trigger != "retry":
+            return
+        retry_started.set()
+        await release_retry.wait()
+        config = runtime.spec.config
+        snapshot = _snapshot(
+            config,
+            attempt_id=runtime.attempt.reconcile_attempt_id,
+            generation=runtime.attempt.reserved_discovery_generation,
+        )
+        manager = MockMcpClientManager(_snapshots=(snapshot,))
+        candidate = McpServerCandidate(
+            ticket_id=runtime.ticket_id,
+            config_epoch=runtime.attempt.config_epoch,
+            reconcile_attempt_id=runtime.attempt.reconcile_attempt_id,
+            reserved_discovery_generation=(
+                runtime.attempt.reserved_discovery_generation
+            ),
+            server_snapshot=snapshot,
+            runtime_spec=runtime.spec,
+            manager_slot=new_mcp_slot(
+                spec=runtime.spec,
+                snapshot=snapshot,
+                manager=manager,
+            ),
+            trigger="retry",
+            retry_attempt=1,
+        )
+        with self._state_lock:
+            self._candidates.append(candidate)
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", controlled_run)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor(
+            retry_base_seconds=0.01,
+            retry_max_seconds=0.01,
+        )
+        config = _config(required=True)
+        first = supervisor.prepare((config,), trigger="initial")
+        await supervisor._workers["docs"]
+        supervisor._schedule_retry("docs")
+        await asyncio.wait_for(retry_started.wait(), timeout=0.2)
+        retry_runtime = supervisor._current_attempts["docs"]
+        assert retry_runtime.trigger == "retry"
+
+        safe_point_ticket = supervisor.prepare(
+            (config,),
+            trigger="config_change",
+        )
+        assert (
+            safe_point_ticket.server_attempts["docs"]
+            == retry_runtime.attempt
+        )
+        assert (
+            safe_point_ticket.server_attempts["docs"].reconcile_attempt_id
+            != first.server_attempts["docs"].reconcile_attempt_id
+        )
+
+        required_wait = asyncio.create_task(
+            supervisor.await_required(safe_point_ticket)
+        )
+        await asyncio.sleep(0)
+        assert not required_wait.done()
+        release_retry.set()
+        result = await asyncio.wait_for(required_wait, timeout=0.2)
+        assert result.ready_server_ids == ("docs",)
+
+        batch = supervisor.drain_installable_candidates(
+            expected_epoch=safe_point_ticket.config_epoch
+        )
+        supervisor.reject_candidates(batch.candidates)
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_real_attempt_failure_owns_background_retry_timer_until_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pulsara_agent.runtime.mcp.supervisor as supervisor_module
+
+    async def fail_connect(cls, config, *, timeout_seconds):
+        del cls, config, timeout_seconds
+        raise RuntimeError("synthetic connect failure")
+
+    monkeypatch.setattr(
+        supervisor_module.SdkMcpConnection,
+        "connect",
+        classmethod(fail_connect),
+    )
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor(
+            retry_base_seconds=0.01,
+            retry_max_seconds=0.01,
+        )
+        supervisor.prepare((_config(),), trigger="initial")
+        for _ in range(30):
+            if supervisor._generation_by_server.get("docs", 0) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert supervisor._generation_by_server["docs"] >= 2
+        assert supervisor._current_attempts["docs"].trigger == "retry"
+        assert supervisor._retry_attempts["docs"] >= 1
+
+        await supervisor.aclose(timeout_seconds=1)
+        await asyncio.sleep(0)
+        assert supervisor._retry_tasks == {}
+        assert supervisor._retry_timer_tasks == set()
+        assert supervisor._owned_background_tasks == set()
+
+    asyncio.run(run())
+
+
+def test_runtime_config_change_and_removal_reset_retry_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_network(self, runtime):
+        return None
+
+    monkeypatch.setattr(McpServerSupervisor, "_run_attempt", no_network)
+
+    async def run() -> None:
+        supervisor = McpServerSupervisor(retry_base_seconds=60)
+        first = supervisor.prepare((_config(),), trigger="initial")
+        await asyncio.sleep(0)
+        supervisor._schedule_retry("docs")
+        old_timer = supervisor._retry_tasks["docs"]
+        assert supervisor._retry_attempts["docs"] == 1
+
+        second = supervisor.prepare(
+            (_config(), _config("other")),
+            trigger="config_change",
+        )
+        assert second.config_epoch == first.config_epoch + 1
+        assert "docs" not in supervisor._retry_attempts
+        assert "docs" not in supervisor._next_retry_monotonic
+        await asyncio.sleep(0)
+        assert old_timer.done()
+
+        supervisor._schedule_retry("docs")
+        assert "docs" in supervisor._retry_attempts
+        supervisor.prepare((), trigger="config_change")
+        assert "docs" not in supervisor._retry_attempts
+        assert "docs" not in supervisor._next_retry_monotonic
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_config_change_produces_new_epoch() -> None:
+    async def run() -> None:
+        supervisor = McpServerSupervisor()
+        first = supervisor.prepare((_config(),), trigger="initial")
+        second = supervisor.prepare(
+            (replace(_config(), tool_timeout_ms=2_000),),
+            trigger="config_change",
+        )
+        assert second.config_epoch == first.config_epoch + 1
+        await supervisor.aclose(timeout_seconds=1)
+
+    asyncio.run(run())

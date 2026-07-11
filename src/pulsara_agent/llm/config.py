@@ -28,6 +28,14 @@ DEFAULT_CHAT_THINKING_OMIT_PARAMS = (
     "frequency_penalty",
 )
 
+DEFAULT_MODEL_CONTEXT_LIMITS = ModelContextLimits(
+    total_context_tokens=256_000,
+    max_input_tokens=256_000,
+    max_output_tokens=128_000,
+    default_output_tokens=8_192,
+    input_safety_margin_tokens=8_192,
+)
+
 PROVIDER_EXTENSION_ALLOWLIST_BY_API: dict[str, dict[str, frozenset[str]]] = {
     DEFAULT_OPENAI_API: {
         "request_defaults": frozenset({"service_tier"}),
@@ -145,10 +153,12 @@ def _required_env(name: str) -> str:
     return value
 
 
-def _required_int_env(name: str) -> int:
-    raw = _required_env(name)
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
     try:
-        return int(raw)
+        return int(raw.strip())
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
 
@@ -158,16 +168,25 @@ def _model_slot_from_env(*, prefix: str, role: str) -> ModelSlotConfig:
     return ModelSlotConfig(
         model_id=_required_env(f"{field_prefix}_MODEL"),
         limits=ModelContextLimits(
-            total_context_tokens=_required_int_env(
-                f"{field_prefix}_TOTAL_CONTEXT_TOKENS"
+            total_context_tokens=_int_env(
+                f"{field_prefix}_TOTAL_CONTEXT_TOKENS",
+                DEFAULT_MODEL_CONTEXT_LIMITS.total_context_tokens,
             ),
-            max_input_tokens=_required_int_env(f"{field_prefix}_MAX_INPUT_TOKENS"),
-            max_output_tokens=_required_int_env(f"{field_prefix}_MAX_OUTPUT_TOKENS"),
-            default_output_tokens=_required_int_env(
-                f"{field_prefix}_DEFAULT_OUTPUT_TOKENS"
+            max_input_tokens=_int_env(
+                f"{field_prefix}_MAX_INPUT_TOKENS",
+                DEFAULT_MODEL_CONTEXT_LIMITS.max_input_tokens,
             ),
-            input_safety_margin_tokens=_required_int_env(
-                f"{field_prefix}_INPUT_SAFETY_MARGIN_TOKENS"
+            max_output_tokens=_int_env(
+                f"{field_prefix}_MAX_OUTPUT_TOKENS",
+                DEFAULT_MODEL_CONTEXT_LIMITS.max_output_tokens,
+            ),
+            default_output_tokens=_int_env(
+                f"{field_prefix}_DEFAULT_OUTPUT_TOKENS",
+                DEFAULT_MODEL_CONTEXT_LIMITS.default_output_tokens,
+            ),
+            input_safety_margin_tokens=_int_env(
+                f"{field_prefix}_INPUT_SAFETY_MARGIN_TOKENS",
+                DEFAULT_MODEL_CONTEXT_LIMITS.input_safety_margin_tokens,
             ),
         ),
     )

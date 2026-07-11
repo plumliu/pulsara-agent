@@ -325,7 +325,17 @@ Host/Runtime 必须在 model system prompt 中注入当前 runtime context：
 
 ---
 
-## 13. 禁止事项
+## 13. MCP direct CLI contract
+
+`pulsara mcp doctor`与`reconnect`必须使用与Host相同的`McpServerConfig` schema、
+`SdkMcpConnection.connect()`、capability-aware discovery和per-server absolute deadline；不得调用已删除的
+`SdkMcpClientManager.start()`或恢复一套direct CLI专用startup timeout。
+
+Direct CLI只等待其显式请求检查的server，并输出bounded snapshot/diagnostics；它不创建HostSession installation、
+不写RunStart/audit、不建立pending interaction。若resource/prompt/tool discovery返回input-required，direct CLI必须
+fail-closed，不进入交互式resume流程。连接与发现结束后，无论成功失败都必须关闭该命令拥有的worker/manager。
+
+## 14. 禁止事项
 
 - 不允许 CLI 提供 in-memory production backend switch。
 - 不允许恢复 `ephemeral` workspace-kind alias。
@@ -338,7 +348,7 @@ Host/Runtime 必须在 model system prompt 中注入当前 runtime context：
 
 ---
 
-## 14. 测试守护
+## 15. 测试守护
 
 最低测试门槛：
 
@@ -358,3 +368,4 @@ Host/Runtime 必须在 model system prompt 中注入当前 runtime context：
 - bundled skill sync best-effort；status read-only；reset invalid name clean error。
 - host inspect 输出 static workspace capability snapshot 且不 sync bundled skills。
 - runtime context prompt 包含 workspace root/kind、terminal cwd 和 filesystem/terminal boundary。
+- MCP doctor/reconnect与Host使用同一SDK facade、config schema和deadline；旧`start()`入口不存在。

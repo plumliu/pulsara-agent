@@ -17,6 +17,7 @@ from pulsara_agent.event import (
     CustomEvent,
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
+    McpCapabilitySnapshotInstalledEvent,
     ModelCallEndEvent,
     ModelCallRejectedEvent,
     ModelCallStartEvent,
@@ -112,6 +113,7 @@ class InspectorService:
                 events,
                 self.store,
             ),
+            "mcp_installations": _mcp_installation_events_projection(events),
             "events": _event_summaries(
                 events[:limit_events], include_payload=include_payload
             ),
@@ -172,6 +174,26 @@ class InspectorService:
         diagnostics.extend(outbox_diagnostics(self.store.outbox_for_run(run_id)))
         model_contracts = _model_contract_projection(run_events)
         diagnostics.extend(model_contracts["diagnostics"])
+        mcp_installation = _mcp_run_installation_projection(
+            run_start,
+            current_session_id=session_id,
+            current_session_events=session_events,
+            store=self.store,
+        )
+        if mcp_installation.get("status") == "missing":
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "mcp_installation_audit_missing",
+                    "message": "RunStart references an MCP installation audit that could not be located.",
+                    "details": {
+                        "installation_id": mcp_installation.get("installation_id"),
+                        "owner_runtime_session_id": mcp_installation.get(
+                            "owner_runtime_session_id"
+                        ),
+                    },
+                }
+            )
 
         return {
             "inspect_kind": "run",
@@ -183,6 +205,7 @@ class InspectorService:
                 "end_sequence": _max_sequence(run_events),
                 "current_user_input": _run_user_input(run_start),
                 "permission_snapshot": _run_permission_snapshot(run_start),
+                "mcp_installation": mcp_installation,
             },
             "timeline": timeline.to_dict(),
             "compaction_boundary_as_seen": compaction_boundary,
@@ -428,6 +451,93 @@ class _InspectorEventLogLocator:
             runtime_session_id=runtime_session_id,
             workspace_root=str(workspace_root) if workspace_root is not None else None,
         )
+
+
+def _mcp_installation_events_projection(
+    events: Iterable[AgentEvent],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "sequence": event.sequence,
+            "installed_at_utc": event.created_at,
+            "installation_id": event.installation_id,
+            "previous_installation_id": event.previous_installation_id,
+            "config_epoch": event.config_epoch,
+            "event_safe_config_set_fingerprint": (
+                event.event_safe_config_set_fingerprint
+            ),
+            "installation_triggers": list(event.installation_triggers),
+            "coalesced_installation_count": event.coalesced_installation_count,
+            "coalesced_attempt_summaries": [
+                summary.model_dump(mode="json")
+                for summary in event.coalesced_attempt_summaries
+            ],
+            "coalesced_attempt_summaries_omitted": (
+                event.coalesced_attempt_summaries_omitted
+            ),
+            "server_snapshots": [
+                snapshot.model_dump(mode="json")
+                for snapshot in event.server_snapshots
+            ],
+            "total_installed_tool_count": event.total_installed_tool_count,
+            "added_tool_count": event.added_tool_count,
+            "revoked_tool_count": event.revoked_tool_count,
+            "changed_tool_names": list(event.changed_tool_names_bounded),
+            "changed_tool_names_omitted": event.changed_tool_names_omitted,
+            "diagnostics": [
+                diagnostic.model_dump(mode="json")
+                for diagnostic in event.diagnostics
+            ],
+        }
+        for event in events
+        if isinstance(event, McpCapabilitySnapshotInstalledEvent)
+    ]
+
+
+def _mcp_run_installation_projection(
+    run_start: RunStartEvent | None,
+    *,
+    current_session_id: str,
+    current_session_events: Iterable[AgentEvent],
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    if run_start is None:
+        return {"status": "missing_run_start"}
+    installation_id = run_start.mcp_installation_id
+    owner_id = run_start.mcp_installation_owner_runtime_session_id
+    if installation_id == "mcp_installation:empty":
+        return {
+            "status": "canonical_empty",
+            "installation_id": installation_id,
+            "owner_runtime_session_id": owner_id,
+            "owner_is_current_session": owner_id == current_session_id,
+            "audit": None,
+        }
+    owner_events = (
+        list(current_session_events)
+        if owner_id == current_session_id
+        else store.events_for_session(owner_id)
+    )
+    audit = next(
+        (
+            event
+            for event in owner_events
+            if isinstance(event, McpCapabilitySnapshotInstalledEvent)
+            and event.installation_id == installation_id
+        ),
+        None,
+    )
+    return {
+        "status": "durable" if audit is not None else "missing",
+        "installation_id": installation_id,
+        "owner_runtime_session_id": owner_id,
+        "owner_is_current_session": owner_id == current_session_id,
+        "audit": (
+            _mcp_installation_events_projection((audit,))[0]
+            if audit is not None
+            else None
+        ),
+    }
 
 
 def _subagent_graph_projection(

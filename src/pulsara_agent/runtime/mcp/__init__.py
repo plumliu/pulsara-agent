@@ -1,10 +1,10 @@
 """MCP runtime support."""
 
-from pulsara_agent.runtime.mcp.manager import CompositeMcpClientManager, McpClientManager, MockMcpClientManager
-from pulsara_agent.runtime.mcp.client import HttpMcpClientManager
-from pulsara_agent.runtime.mcp.sdk import SdkMcpClientManager
-from pulsara_agent.runtime.mcp.stdio import StdioMcpClientManager
+from pulsara_agent.runtime.mcp.manager import McpClientManager, MockMcpClientManager
+from pulsara_agent.runtime.mcp.sdk import SdkMcpClientManager, SdkMcpConnection, discover_mcp_server
+from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
+    McpBindingIdentity,
     McpContentArtifact,
     McpDiscoveredTool,
     McpDiscoveredPrompt,
@@ -15,6 +15,7 @@ from pulsara_agent.runtime.mcp.types import (
     McpInputRequiredResolution,
     McpOriginalRequest,
     McpRequestSourceMethod,
+    McpRequiredStartupError,
     McpServerConfig,
     McpServerSnapshot,
     McpServerStatus,
@@ -23,11 +24,12 @@ from pulsara_agent.runtime.mcp.types import (
     McpStreamableHttpConfig,
     McpToolAnnotations,
     McpToolResult,
+    McpInstalledCapabilitySnapshot,
     mangle_mcp_tool_name,
 )
 
 __all__ = [
-    "CompositeMcpClientManager",
+    "McpBindingIdentity",
     "McpContentArtifact",
     "McpClientManager",
     "McpDiscoveredPrompt",
@@ -39,6 +41,7 @@ __all__ = [
     "McpInputRequiredResolution",
     "McpOriginalRequest",
     "McpRequestSourceMethod",
+    "McpRequiredStartupError",
     "McpServerConfig",
     "McpServerSnapshot",
     "McpServerStatus",
@@ -48,8 +51,10 @@ __all__ = [
     "McpToolAnnotations",
     "McpToolResult",
     "MockMcpClientManager",
-    "HttpMcpClientManager",
+    "McpInstalledCapabilitySnapshot",
+    "McpServerSupervisor",
     "SdkMcpClientManager",
-    "StdioMcpClientManager",
+    "SdkMcpConnection",
+    "discover_mcp_server",
     "mangle_mcp_tool_name",
 ]

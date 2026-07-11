@@ -198,13 +198,23 @@ def test_model_context_limits_validate_default_output() -> None:
         )
 
 
-def test_model_slot_limits_are_required_from_env(monkeypatch) -> None:
+def test_model_slot_limits_default_when_env_is_omitted(monkeypatch) -> None:
     prefix = "PULSARA_CONTRACT_MISSING"
     monkeypatch.setenv(f"{prefix}_API_KEY", "sk-test")
     monkeypatch.setenv(f"{prefix}_PRO_MODEL", "pro")
     monkeypatch.setenv(f"{prefix}_FLASH_MODEL", "flash")
-    with pytest.raises(ValueError, match="PRO_TOTAL_CONTEXT_TOKENS"):
-        LLMConfig.from_env(prefix)
+
+    config = LLMConfig.from_env(prefix)
+
+    expected = {
+        "total_context_tokens": 256_000,
+        "max_input_tokens": 256_000,
+        "max_output_tokens": 128_000,
+        "default_output_tokens": 8_192,
+        "input_safety_margin_tokens": 8_192,
+    }
+    assert config.pro.limits.model_dump() == expected
+    assert config.flash.limits.model_dump() == expected
 
 
 def test_model_identity_policy_defaults_to_accept_reported_and_allows_exact_env(

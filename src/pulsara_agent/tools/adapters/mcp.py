@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.runtime.mcp.manager import McpClientManager
+from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
+    McpBindingIdentity,
     McpContentArtifact,
     McpInputRequired,
     McpInputRequiredResolution,
@@ -37,7 +38,8 @@ class McpCapabilityTool:
     parameters: dict[str, Any]
     server_id: str
     original_tool_name: str
-    client_manager: McpClientManager
+    supervisor: McpServerSupervisor
+    binding_identity: McpBindingIdentity
     timeout_ms: int
     is_read_only: bool = False
     is_concurrency_safe: bool = False
@@ -49,14 +51,19 @@ class McpCapabilityTool:
         runtime_context: ToolRuntimeContext,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         del runtime_context
+        lease = None
         try:
-            result = await self.client_manager.call_tool(
+            lease = self.supervisor.acquire_binding_lease(self.binding_identity)
+            manager = self.supervisor.manager_for_lease(lease)
+            result = await manager.call_tool(
                 self.server_id,
                 self.original_tool_name,
                 dict(call.arguments),
                 timeout_ms=self.timeout_ms,
             )
         except Exception as exc:
+            if lease is not None:
+                self.supervisor.release_lease(lease)
             return ToolExecutionResult(
                 call_id=call.id,
                 tool_name=call.name,
@@ -65,22 +72,53 @@ class McpCapabilityTool:
             )
         if isinstance(result, McpInputRequired):
             payload = result.to_payload()
-            payload.update(
-                {
-                    "tool_call_id": call.id,
-                    "tool_name": call.name,
-                    "wrapper_tool_call_id": call.id,
-                    "wrapper_tool_name": call.name,
-                    "server_id": self.server_id,
-                    "original_tool_name": self.original_tool_name,
-                }
-            )
-            return ToolExecutionSuspended(
-                tool_call_id=call.id,
-                tool_name=call.name,
-                interaction_kind="mcp_input_required",
-                payload=payload,
-            )
+            interaction_id = str(payload["interaction_id"])
+            assert lease is not None
+            reservation = None
+            try:
+                reservation = self.supervisor.promote_lease_to_pending(
+                    lease,
+                    interaction_id,
+                )
+                payload.update(
+                    {
+                        "tool_call_id": call.id,
+                        "tool_name": call.name,
+                        "wrapper_tool_call_id": call.id,
+                        "wrapper_tool_name": call.name,
+                        "server_id": self.server_id,
+                        "original_tool_name": self.original_tool_name,
+                        "mcp_binding_identity": _binding_identity_payload(
+                            self.binding_identity
+                        ),
+                        "mcp_pending_lease_reservation_id": reservation.reservation_id,
+                    }
+                )
+                return ToolExecutionSuspended(
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    interaction_kind="mcp_input_required",
+                    payload=payload,
+                )
+            except Exception as exc:
+                if reservation is None:
+                    self.supervisor.release_lease(lease)
+                else:
+                    self.supervisor.abort_pending_lease(
+                        interaction_id,
+                        reservation.reservation_id,
+                    )
+                return ToolExecutionResult(
+                    call_id=call.id,
+                    tool_name=call.name,
+                    status=ToolResultState.ERROR,
+                    output=(
+                        "[MCP_ERROR] pending input ownership failed: "
+                        f"{type(exc).__name__}: {redact_mcp_error_message(exc)}"
+                    ),
+                )
+        assert lease is not None
+        self.supervisor.release_lease(lease)
         normalized = _normalize_mcp_result(result)
         return ToolExecutionResult(
             call_id=call.id,
@@ -105,23 +143,35 @@ class McpCapabilityTool:
         runtime_context: ToolRuntimeContext,
     ) -> ToolExecutionResult | ToolExecutionSuspended:
         del runtime_context
-        result = await self.client_manager.resume_suspended_request(
-            server_id=self.server_id,
-            original_request=_original_request_from_payload(original_request),
-            request_state=request_state,
-            resolution=resolution,
-            timeout_ms=self.timeout_ms,
+        lease = self.supervisor.borrow_pending_lease(
+            resolution.interaction_id,
+            self.binding_identity,
         )
+        try:
+            manager = self.supervisor.manager_for_lease(lease)
+            result = await manager.resume_suspended_request(
+                server_id=self.server_id,
+                original_request=_original_request_from_payload(original_request),
+                request_state=request_state,
+                resolution=resolution,
+                timeout_ms=self.timeout_ms,
+            )
+        finally:
+            self.supervisor.return_pending_borrow(resolution.interaction_id)
         if isinstance(result, McpInputRequired):
             payload = result.to_payload()
             payload.update(
                 {
+                    "interaction_id": resolution.interaction_id,
                     "tool_call_id": resolution.tool_call_id or "",
                     "tool_name": self.name,
                     "wrapper_tool_call_id": resolution.tool_call_id or "",
                     "wrapper_tool_name": self.name,
                     "server_id": self.server_id,
                     "original_tool_name": self.original_tool_name,
+                    "mcp_binding_identity": _binding_identity_payload(
+                        self.binding_identity
+                    ),
                 }
             )
             return ToolExecutionSuspended(
@@ -186,3 +236,12 @@ def _original_request_from_payload(payload: dict[str, Any]) -> McpOriginalReques
         prompt_name=str(payload["prompt_name"]) if payload.get("prompt_name") is not None else None,
         prompt_arguments=dict(prompt_arguments) if isinstance(prompt_arguments, dict) else None,
     )
+
+
+def _binding_identity_payload(identity: McpBindingIdentity) -> dict[str, object]:
+    return {
+        "server_id": identity.server_id,
+        "slot_id": identity.slot_id,
+        "snapshot_id": identity.snapshot_id,
+        "discovery_generation": identity.discovery_generation,
+    }

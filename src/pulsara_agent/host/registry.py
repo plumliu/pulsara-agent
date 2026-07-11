@@ -223,6 +223,63 @@ class HostSessionRegistry:
             ):
                 self._reserved_runtime_sessions.pop(reservation.runtime_session_id)
 
+    async def retain_failed_open_manifest_close(
+        self,
+        reservation: SessionReservation,
+        *,
+        runtime_session_id: str,
+    ) -> None:
+        """Replace an unpublished reservation with a manifest-close tombstone.
+
+        Durable open writes the manifest after required initialization but
+        before registry publication. If publication fails, this atomic move
+        prevents a concurrent resume from entering before the manifest is
+        durably marked closed.
+        """
+
+        async with self._lock:
+            if (
+                self._reserved_sessions.get(reservation.host_session_id)
+                != reservation.token
+                or self._reserved_conversations.get(reservation.conversation_id)
+                != reservation.token
+                or (
+                    reservation.runtime_session_id is not None
+                    and self._reserved_runtime_sessions.get(
+                        reservation.runtime_session_id
+                    )
+                    != reservation.token
+                )
+            ):
+                raise RuntimeError(
+                    "failed-open manifest finalization requires the current reservation"
+                )
+            if (
+                runtime_session_id in self._by_runtime_session
+                or any(
+                    item.runtime_session_id == runtime_session_id
+                    for item in self._manifest_close_tombstones.values()
+                )
+            ):
+                raise DuplicateHostSessionError(
+                    "runtime_session_id already live or pending manifest close: "
+                    f"{runtime_session_id}"
+                )
+            self._reserved_sessions.pop(reservation.host_session_id, None)
+            self._reserved_conversations.pop(reservation.conversation_id, None)
+            if reservation.runtime_session_id is not None:
+                self._reserved_runtime_sessions.pop(
+                    reservation.runtime_session_id,
+                    None,
+                )
+            self._manifest_close_tombstones[reservation.host_session_id] = (
+                ManifestCloseTombstone(
+                    host_session_id=reservation.host_session_id,
+                    runtime_session_id=runtime_session_id,
+                    conversation_id=reservation.conversation_id,
+                )
+            )
+
     async def get(self, host_session_id: str) -> HostSession:
         async with self._lock:
             try:

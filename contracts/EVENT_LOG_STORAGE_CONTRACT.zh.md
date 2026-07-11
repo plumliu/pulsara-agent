@@ -45,6 +45,28 @@ Canonical facts：
 
 `CUSTOM` 只用于轻量 diagnostic / compatibility 事件。已经契约化的业务 boundary（如 context compaction、plan mode、tool result、run end）必须使用 typed event。
 
+### 2.1 RunStart MCP installation attribution
+
+新schema下每个`RunStartEvent`必须携带非空`mcp_installation_id`与
+`mcp_installation_owner_runtime_session_id`。Parent run的owner指向自身runtime session；subagent child使用独立
+EventLog时，owner指向拥有MCP supervisor/installation audit的parent runtime session。Inspector只能用这两个字段
+跨ledger join，不得从当前live supervisor猜历史surface。
+
+当本run首次引用尚未durable的installation时，`RunStartEvent`与全部pending
+`McpCapabilitySnapshotInstalledEvent`必须通过一次`RuntimeSession.emit_many()`原子提交。commit acknowledgement前
+不得清除pending audit、不得启动model call；失败时整批不可见，不能留下引用悬空installation的半启动run。
+Canonical empty installation是schema内建sentinel，不需要另写installed event。
+
+`EventPublicationAfterCommitError`不是commit失败。RunStart/resume caller必须从其
+`result.committed_events` acknowledge已提交installation audit，然后再向上传播observer failure；不得把同一stable
+audit event id留在pending queue供下一run以不同context重复写入。
+
+已有run的approval/plan/MCP resume没有第二条`RunStartEvent`。若resume前safe point安装了新的MCP surface，HostSession
+必须使用原suspended run context单独`emit_many()` pending installed audit，并在commit acknowledgement后才把
+pending state切回active或继续model/tool loop。pre-commit失败保留原pending state、lease与audit供同一host action重试；
+post-commit publication failure清除committed audit ownership但仍向上传播；
+不得因为“没有新RunStart”而跳过durable installation attribution。
+
 ---
 
 ## 3. Sequence

@@ -37,13 +37,21 @@ from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.runtime import (
     ApprovalResolution,
+    McpInputRequiredInteractionResolution,
+    PendingMcpInputRequired,
     PendingPlanInteraction,
     PlanExitResolution,
     PlanQuestionResolution,
     ToolApprovalDecision,
     build_durable_runtime_wiring,
 )
-from pulsara_agent.runtime.mcp import McpServerConfig, McpStdioConfig, McpStreamableHttpConfig, SdkMcpClientManager
+from pulsara_agent.runtime.mcp import (
+    McpRequiredStartupError,
+    McpServerConfig,
+    McpServerSupervisor,
+    McpStdioConfig,
+    McpStreamableHttpConfig,
+)
 from pulsara_agent.runtime.mcp.store import (
     DEFAULT_USER_MCP_CONFIG,
     McpConfigStore,
@@ -126,7 +134,10 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_add.add_argument("--follow-redirects", action="store_true", help="Allow HTTP redirects for this server.")
     mcp_add.add_argument("--disabled", action="store_true", help="Add the server disabled.")
     mcp_add.add_argument("--required", action="store_true", help="Treat startup failure as an error diagnostic.")
-    mcp_add.add_argument("--startup-timeout-ms", type=int, default=10_000)
+    mcp_add.add_argument("--connect-timeout-ms", type=int, default=10_000)
+    mcp_add.add_argument("--discovery-timeout-ms", type=int, default=15_000)
+    mcp_add.add_argument("--startup-deadline-ms", type=int, default=30_000)
+    mcp_add.add_argument("--refresh-ttl-ms", type=int, default=300_000)
     mcp_add.add_argument("--tool-timeout-ms", type=int, default=30_000)
     mcp_add.add_argument("--parallel-tools", action="store_true", help="Mark server tools concurrency-safe.")
     mcp_add.add_argument("--enabled-tool", action="append", default=[], help="Allow only this original MCP tool. May be repeated.")
@@ -318,6 +329,8 @@ def main() -> None:
         if args.host_command == "repl":
             try:
                 asyncio.run(_host_repl(args))
+            except McpRequiredStartupError as exc:
+                parser.error(f"{exc} ({exc.reason_code})")
             except ValueError as exc:
                 parser.error(str(exc))
             except KeyError as exc:
@@ -515,12 +528,14 @@ def _format_pending_plan_interaction(pending: PendingPlanInteraction) -> str:
 def _host_session_status_payload(session) -> dict:
     default_mode = session.default_permission_mode
     effective_mode = session.effective_next_run_permission_mode
+    summary = session.summary() if callable(getattr(session, "summary", None)) else {}
     return {
         "default_mode": default_mode.value if default_mode is not None else None,
         "default_policy": session.default_permission_policy().to_dict(),
         "effective_next_run_mode": effective_mode.value if effective_mode is not None else None,
         "effective_next_run_policy": session.effective_next_run_permission_policy().to_dict(),
         "plan_active": session.plan_state.active,
+        "mcp": summary.get("mcp"),
     }
 
 
@@ -614,15 +629,23 @@ def _format_manual_compaction_result(result: dict[str, object]) -> str:
 def _format_repl_mcp_startup_notice(session) -> str | None:
     wiring = getattr(session, "wiring", None)
     runtime_wiring = getattr(wiring, "runtime_wiring", None)
-    manager = getattr(runtime_wiring, "mcp_manager", None)
-    if manager is None:
+    installation = getattr(runtime_wiring, "mcp_installation", None)
+    supervisor = getattr(session, "mcp_supervisor", None)
+    if installation is None and supervisor is None:
         return None
-    snapshots = getattr(manager, "snapshots", ())
+    snapshots_by_server = {
+        snapshot.server_id: snapshot
+        for snapshot in getattr(installation, "snapshots", ())
+    }
+    if supervisor is not None:
+        for snapshot in supervisor.current_starting_snapshots():
+            snapshots_by_server.setdefault(snapshot.server_id, snapshot)
+    snapshots = tuple(snapshots_by_server[key] for key in sorted(snapshots_by_server))
     if not snapshots:
         return None
     parts: list[str] = []
     for snapshot in snapshots:
-        server_id = snapshot.config.server_id
+        server_id = snapshot.server_id
         status = snapshot.status.value
         detail = f"{len(snapshot.tools)} tools" if snapshot.tools else (snapshot.message or "no tools")
         if snapshot.diagnostics:
@@ -742,6 +765,61 @@ async def _host_repl(args) -> None:
                     print(_format_pending_plan_interaction(pending))
                 else:
                     print(json.dumps(pending.to_dict() if pending is not None else None, indent=2))
+                continue
+            if command.startswith(":mcp-input"):
+                pending = session.get_pending_interaction()
+                if not isinstance(pending, PendingMcpInputRequired):
+                    print("No pending MCP input-required interaction.")
+                    continue
+                raw = command[len(":mcp-input"):].strip()
+                if not raw:
+                    print(
+                        "Usage: :mcp-input <JSON object mapping request keys to response objects>",
+                        file=sys.stderr,
+                    )
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                    if not isinstance(parsed, dict) or any(
+                        not isinstance(key, str) or not isinstance(value, dict)
+                        for key, value in parsed.items()
+                    ):
+                        raise ValueError("responses must be a JSON object of objects")
+                    result = await session.resolve_mcp_input_required(
+                        McpInputRequiredInteractionResolution(
+                            interaction_id=pending.interaction_id,
+                            responses=parsed,
+                        )
+                    )
+                except Exception as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    continue
+                _print_agent_run_result(result)
+                next_pending = session.get_pending_interaction()
+                if next_pending is not None:
+                    print(
+                        json.dumps(
+                            {"pending_interaction": next_pending.to_dict()},
+                            indent=2,
+                        )
+                    )
+                continue
+            if command == ":mcp-cancel":
+                pending = session.get_pending_interaction()
+                if not isinstance(pending, PendingMcpInputRequired):
+                    print("No pending MCP input-required interaction.")
+                    continue
+                try:
+                    result = await session.resolve_mcp_input_required(
+                        McpInputRequiredInteractionResolution(
+                            interaction_id=pending.interaction_id,
+                            cancelled=True,
+                        )
+                    )
+                except Exception as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    continue
+                _print_agent_run_result(result)
                 continue
             if command.startswith(":plan"):
                 reason = command[len(":plan"):].strip()
@@ -894,6 +972,13 @@ async def _host_repl(args) -> None:
                             file=sys.stderr,
                         )
                     continue
+            if isinstance(pending_interaction, PendingMcpInputRequired):
+                print(
+                    "Pending MCP input-required interaction. Use :interaction, "
+                    ":mcp-input <json>, or :mcp-cancel.",
+                    file=sys.stderr,
+                )
+                continue
             result = await session.run_turn(prompt, active_skill_names=_active_skill_names_from_args(args))
             _print_agent_run_result(result)
             pending = session.get_pending_approval()
@@ -943,6 +1028,8 @@ def _repl_prompt_message(session) -> str:
     pending = session.get_pending_interaction()
     if isinstance(pending, PendingPlanInteraction):
         return "plan> "
+    if isinstance(pending, PendingMcpInputRequired):
+        return "mcp> "
     if session.plan_state.active:
         return "plan> "
     return "pulsara> "
@@ -956,7 +1043,9 @@ _REPL_HELP = """Commands:
   :status                 Show stored default and effective next-run permission
   :mode <preset>          Switch permission mode
   :plan [reason]          Enter plan mode
-  :interaction            Show a pending plan interaction
+  :interaction            Show a pending plan or MCP interaction
+  :mcp-input <json>       Resolve pending MCP input-required with response objects
+  :mcp-cancel             Cancel pending MCP input-required
   :choose <n|label>       Choose a pending plan question option
   :answer <text>          Answer a pending plan question
   :approve-plan           Approve plan exit
@@ -1136,9 +1225,10 @@ async def _mcp_command(args) -> dict[str, object]:
             workspace_root=workspace_root,
             user_config_path=_mcp_user_config_path(args),
         )
-        manager = await SdkMcpClientManager.start(configs)
+        supervisor = McpServerSupervisor()
+        ticket = supervisor.prepare(configs, trigger="manual_refresh")
         try:
-            snapshots = manager.snapshots
+            snapshots = await supervisor.await_ticket_snapshots(ticket)
             return {
                 "mcp": command,
                 "workspace_root": str(workspace_root),
@@ -1156,7 +1246,7 @@ async def _mcp_command(args) -> dict[str, object]:
                 },
             }
         finally:
-            await manager.aclose()
+            await supervisor.aclose(timeout_seconds=5.0)
     raise ValueError(f"unsupported mcp command: {command}")
 
 
@@ -1197,7 +1287,10 @@ def _mcp_config_from_add_args(args) -> McpServerConfig:
         transport=transport,
         enabled=not args.disabled,
         required=bool(args.required),
-        startup_timeout_ms=int(args.startup_timeout_ms),
+        connect_timeout_ms=int(args.connect_timeout_ms),
+        discovery_timeout_ms=int(args.discovery_timeout_ms),
+        startup_deadline_ms=int(args.startup_deadline_ms),
+        refresh_ttl_ms=int(args.refresh_ttl_ms),
         tool_timeout_ms=int(args.tool_timeout_ms),
         supports_parallel_tool_calls=bool(args.parallel_tools),
         enabled_tools=tuple(args.enabled_tool) if args.enabled_tool else None,
@@ -1232,7 +1325,10 @@ def _mcp_config_to_dict(config: McpServerConfig) -> dict[str, object]:
         "enabled": config.enabled,
         "required": config.required,
         "transport_kind": config.transport_kind.value,
-        "startup_timeout_ms": config.startup_timeout_ms,
+        "connect_timeout_ms": config.connect_timeout_ms,
+        "discovery_timeout_ms": config.discovery_timeout_ms,
+        "startup_deadline_ms": config.startup_deadline_ms,
+        "refresh_ttl_ms": config.refresh_ttl_ms,
         "tool_timeout_ms": config.tool_timeout_ms,
         "supports_parallel_tool_calls": config.supports_parallel_tool_calls,
         "enabled_tools": list(config.enabled_tools or ()),
@@ -1259,10 +1355,16 @@ def _mcp_config_to_dict(config: McpServerConfig) -> dict[str, object]:
 
 def _mcp_snapshot_to_dict(snapshot) -> dict[str, object]:
     return {
-        "server": _mcp_config_to_dict(snapshot.config),
+        "server_id": snapshot.server_id,
+        "required": snapshot.required,
+        "config_epoch": snapshot.config_epoch,
+        "event_safe_config_fingerprint": snapshot.event_safe_config_fingerprint,
+        "snapshot_id": snapshot.snapshot_id,
+        "snapshot_semantic_fingerprint": snapshot.snapshot_semantic_fingerprint,
+        "reconcile_attempt_id": snapshot.reconcile_attempt_id,
         "status": snapshot.status.value,
         "message": snapshot.message,
-        "generation": snapshot.generation,
+        "discovery_generation": snapshot.discovery_generation,
         "protocol_version": snapshot.protocol_version,
         "server_info": dict(snapshot.server_info),
         "instructions": snapshot.instructions,

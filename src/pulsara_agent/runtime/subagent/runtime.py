@@ -40,6 +40,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.runtime.mcp.types import McpBindingIdentity
 from pulsara_agent.runtime.session import EventWriteConflict, RuntimeSession
 from pulsara_agent.runtime.subagent.projection import (
     EventLogLocator,
@@ -668,6 +669,10 @@ class SubagentRuntime:
                     child_runtime_session_id=child_runtime_session_id,
                     child_session=child_runtime,
                     reservation=reservation,
+                    mcp_binding_identities=_mcp_binding_identities(
+                        child_runtime,
+                        allowed_tool_names=info["capability_profile"].allowed_tool_names,
+                    ),
                 )
                 run = self._require_run(subagent_run_id)
                 run_view = HydratedSubagentRunView(
@@ -829,6 +834,10 @@ class SubagentRuntime:
                 child_runtime_session_id=child_runtime_session_id,
                 child_session=child_runtime,
                 reservation=reservation,
+                mcp_binding_identities=_mcp_binding_identities(
+                    child_runtime,
+                    allowed_tool_names=capability_profile.allowed_tool_names,
+                ),
             )
             run = self._require_run(subagent_run_id)
             run_view = HydratedSubagentRunView(
@@ -1001,6 +1010,10 @@ class SubagentRuntime:
                 child_runtime_session_id=child_runtime_session_id,
                 child_session=child_runtime,
                 reservation=reservation,
+                mcp_binding_identities=_mcp_binding_identities(
+                    child_runtime,
+                    allowed_tool_names=capability_profile.allowed_tool_names,
+                ),
             )
         except Exception as exc:
             self._execution_registry.release_reservation(reservation)
@@ -1522,6 +1535,27 @@ class SubagentRuntime:
                 cancelled_by="runtime",
             )
             cancelled.append(self._require_run(run.subagent_run_id))
+        return tuple(cancelled)
+
+    async def fail_children_for_mcp_binding_change(
+        self,
+        identities: frozenset[McpBindingIdentity],
+        *,
+        reason_message: str,
+    ) -> tuple[SubagentRunFact, ...]:
+        run_ids = self._execution_registry.child_ids_for_mcp_bindings(identities)
+        cancelled: list[SubagentRunFact] = []
+        for subagent_run_id in sorted(run_ids):
+            run = self._graph_store.state.runs.get(subagent_run_id)
+            if run is None or run.status not in _ACTIVE_STATUSES:
+                continue
+            await self.cancel(
+                subagent_run_id,
+                reason_code="subagent_mcp_binding_generation_changed",
+                reason_message=reason_message,
+                cancelled_by="runtime",
+            )
+            cancelled.append(self._require_run(subagent_run_id))
         return tuple(cancelled)
 
     def fail_active_children_for_safety_narrowing_now(
@@ -2291,7 +2325,7 @@ class SubagentRuntime:
         event_log = self._child_event_log_factory(child_runtime_session_id)
         if hasattr(self.event_log_locator, "register"):
             self.event_log_locator.register(child_runtime_session_id, event_log)  # type: ignore[attr-defined]
-        return RuntimeSession(
+        child = RuntimeSession(
             self.parent_runtime_session.workspace_root,
             event_log=event_log,
             archive=self.parent_runtime_session.archive,
@@ -2308,6 +2342,12 @@ class SubagentRuntime:
                 }
             },
         )
+        child.mcp_supervisor = self.parent_runtime_session.mcp_supervisor
+        child.set_mcp_installation_contract(
+            installation_id=self.parent_runtime_session.mcp_installation_id,
+            owner_runtime_session_id=self.parent_runtime_session.runtime_session_id,
+        )
+        return child
 
     async def _run_child(self, run_view: HydratedSubagentRunView) -> None:
         assert self._child_runner is not None
@@ -2698,6 +2738,23 @@ def _mcp_tool_names_from_profile(profile: SubagentCapabilityProfile) -> set[str]
         if isinstance(tool_names, list):
             names.update(str(item) for item in tool_names if isinstance(item, str))
     return names
+
+
+def _mcp_binding_identities(
+    runtime_session: RuntimeSession,
+    *,
+    allowed_tool_names: frozenset[str],
+) -> frozenset[McpBindingIdentity]:
+    identities = {
+        identity
+        for tool in runtime_session.extra_tool_bindings
+        if getattr(tool, "name", None) in allowed_tool_names
+        if isinstance(
+            (identity := getattr(tool, "binding_identity", None)),
+            McpBindingIdentity,
+        )
+    }
+    return frozenset(identities)
 
 
 def _descriptor_allowed_for_child(descriptor: Any) -> bool:

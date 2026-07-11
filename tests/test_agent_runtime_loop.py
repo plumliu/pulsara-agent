@@ -2,7 +2,7 @@ import asyncio
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import AsyncIterator
 
 import pytest
@@ -13,6 +13,7 @@ from pulsara_agent.event import (
     ContextCompiledEvent,
     EventContext,
     EventType,
+    McpCapabilitySnapshotInstalledEvent,
     ModelCallStartEvent,
     ModelCallRejectedEvent,
     RequireUserConfirmEvent,
@@ -31,6 +32,7 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
+from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.capability import (
     CapabilityResolveContext,
     LocalSkillCapabilityProvider,
@@ -48,6 +50,11 @@ from pulsara_agent.llm import LLMRuntime, MessageRole
 from pulsara_agent.llm.errors import ModelContextIdentityMismatch
 from tests.support import run_agent_task, stream_agent_task, test_llm_config
 from pulsara_agent.memory.scope import MemoryDomainContext
+from pulsara_agent.primitives.mcp import (
+    McpInstalledServerSnapshotFact,
+    McpReconcileAttemptSummaryFact,
+    McpServerLifecycleTimingFact,
+)
 from pulsara_agent.memory.recall.service import RecallResult, RecallStatus
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
@@ -76,6 +83,7 @@ from pulsara_agent.message import (
 from pulsara_agent.runtime import (
     ApprovalResolution,
     AgentRuntime,
+    EventPublicationAfterCommitError,
     InRunRecoveryCause,
     LoopBudget,
     LoopState,
@@ -96,6 +104,8 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
+from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
+from pulsara_agent.runtime.plan import McpInputRequiredInteractionResolution
 from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactRecord
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
@@ -301,6 +311,300 @@ def test_run_start_records_model_target(tmp_path) -> None:
     )
     assert transport.calls
     assert started.model_target == transport.calls[0].target.fact
+
+
+def _pending_mcp_installation_audit() -> McpPendingInstallationAudit:
+    timing = McpServerLifecycleTimingFact(
+        queued_at_utc="2026-01-01T00:00:00Z",
+        connect_started_at_utc="2026-01-01T00:00:00Z",
+        connect_ended_at_utc="2026-01-01T00:00:00.003000Z",
+        discovery_started_at_utc="2026-01-01T00:00:00.003000Z",
+        discovery_ended_at_utc="2026-01-01T00:00:00.010000Z",
+        completed_at_utc="2026-01-01T00:00:00.010000Z",
+        connect_duration_seconds=0.003,
+        discovery_duration_seconds=0.007,
+        total_duration_seconds=0.01,
+    )
+    attempt = McpReconcileAttemptSummaryFact(
+        server_id="docs",
+        reconcile_attempt_id="mcp_attempt:atomic",
+        reconcile_trigger="initial",
+        attempt_status="ready",
+        request_count=1,
+        page_count=1,
+        cache_outcome="miss",
+    )
+    snapshot = McpInstalledServerSnapshotFact(
+        server_id="docs",
+        status="ready",
+        required=False,
+        changed_in_this_installation=True,
+        attempt=attempt,
+        snapshot_id="mcp_snapshot:atomic",
+        discovery_generation=1,
+        event_safe_config_fingerprint="sha256:server",
+        snapshot_semantic_fingerprint="sha256:catalog",
+        tool_count=1,
+        lifecycle_timing=timing,
+        catalog_artifact_id=None,
+    )
+    return McpPendingInstallationAudit(
+        event_id="mcp_installation_event:atomic",
+        installation_id="mcp_installation:atomic",
+        previous_installation_id=None,
+        config_epoch=1,
+        event_safe_config_set_fingerprint="sha256:set",
+        installation_triggers=("initial",),
+        coalesced_installation_count=0,
+        coalesced_attempt_summaries=(),
+        coalesced_attempt_summaries_omitted=0,
+        server_snapshots=(snapshot,),
+        total_installed_tool_count=1,
+        added_tool_count=1,
+        revoked_tool_count=0,
+        changed_tool_names_bounded=("mcp__docs__lookup",),
+        changed_tool_names_omitted=0,
+        diagnostics=(),
+        baseline_tool_names=frozenset(),
+        current_tool_names=frozenset({"mcp__docs__lookup"}),
+    )
+
+
+def test_run_start_and_first_mcp_installation_audit_are_one_atomic_batch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = ScriptedTransport([{"text": "done"}])
+    runtime_session = in_memory_runtime_session(tmp_path)
+    runtime_session.set_mcp_installation_contract(
+        installation_id="mcp_installation:atomic",
+        pending_audit=_pending_mcp_installation_audit(),
+    )
+    recorded_batches: list[tuple[EventType, ...]] = []
+    original_extend = InMemoryEventLog.extend
+
+    def record_extend(self, events, *, expected_last_sequence=None):
+        batch = tuple(events)
+        recorded_batches.append(tuple(event.type for event in batch))
+        return original_extend(
+            self,
+            batch,
+            expected_last_sequence=expected_last_sequence,
+        )
+
+    monkeypatch.setattr(InMemoryEventLog, "extend", record_extend)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    asyncio.run(run_agent_task(agent, "atomic installation"))
+
+    assert recorded_batches[0] == (
+        EventType.RUN_START,
+        EventType.MCP_CAPABILITY_SNAPSHOT_INSTALLED,
+    )
+    stored = runtime_session.event_log.iter()
+    assert isinstance(stored[0], RunStartEvent)
+    assert isinstance(stored[1], McpCapabilitySnapshotInstalledEvent)
+    assert stored[0].mcp_installation_id == stored[1].installation_id
+    assert not runtime_session._pending_mcp_installation_audits
+
+
+def test_failed_run_start_audit_batch_keeps_audit_pending_and_writes_nothing(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = ScriptedTransport([{"text": "must not run"}])
+    runtime_session = in_memory_runtime_session(tmp_path)
+    runtime_session.set_mcp_installation_contract(
+        installation_id="mcp_installation:atomic",
+        pending_audit=_pending_mcp_installation_audit(),
+    )
+
+    def fail_before_commit(self, events, *, expected_last_sequence=None):
+        raise RuntimeError("synthetic pre-commit failure")
+
+    monkeypatch.setattr(InMemoryEventLog, "extend", fail_before_commit)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    with pytest.raises(Exception, match="Event batch commit failed"):
+        asyncio.run(run_agent_task(agent, "atomic failure"))
+
+    assert runtime_session.event_log.iter() == []
+    assert len(runtime_session._pending_mcp_installation_audits) == 1
+    assert transport.contexts == []
+
+
+def test_pending_mcp_installation_audits_coalesce_to_last_durable_parent(
+    tmp_path,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    first = _pending_mcp_installation_audit()
+    first_snapshot = first.server_snapshots[0]
+    second_attempt = first_snapshot.attempt.model_copy(
+        update={
+            "reconcile_attempt_id": "mcp_attempt:ttl",
+            "reconcile_trigger": "ttl_refresh",
+        }
+    )
+    second_snapshot = first_snapshot.model_copy(update={"attempt": second_attempt})
+    second = replace(
+        first,
+        event_id="mcp_installation_event:ttl",
+        installation_id="mcp_installation:ttl",
+        previous_installation_id=first.installation_id,
+        installation_triggers=("ttl_refresh",),
+        server_snapshots=(second_snapshot,),
+        added_tool_count=0,
+        baseline_tool_names=first.current_tool_names,
+        current_tool_names=first.current_tool_names,
+    )
+
+    runtime_session.set_mcp_installation_contract(
+        installation_id=first.installation_id,
+        pending_audit=first,
+    )
+    runtime_session.set_mcp_installation_contract(
+        installation_id=second.installation_id,
+        pending_audit=second,
+    )
+
+    pending = runtime_session._pending_mcp_installation_audits
+    assert len(pending) == 1
+    assert pending[0].installation_id == "mcp_installation:ttl"
+    assert pending[0].previous_installation_id is None
+    assert pending[0].coalesced_installation_count == 1
+    assert pending[0].installation_triggers == ("initial", "ttl_refresh")
+    assert pending[0].coalesced_attempt_summaries == (first_snapshot.attempt,)
+
+
+def test_run_start_post_commit_publication_failure_acknowledges_mcp_audit(
+    tmp_path,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+    runtime_session.set_mcp_installation_contract(
+        installation_id="mcp_installation:atomic",
+        pending_audit=_pending_mcp_installation_audit(),
+    )
+
+    class FailInstallationAudit:
+        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            if isinstance(
+                published.event,
+                McpCapabilitySnapshotInstalledEvent,
+            ):
+                raise RuntimeError("synthetic audit observer failure")
+
+    failing = FailInstallationAudit()
+    runtime_session.publisher.subscribe(failing)
+    transport = ScriptedTransport([{"text": "second run"}])
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(transport),
+    )
+
+    with pytest.raises(EventPublicationAfterCommitError):
+        asyncio.run(run_agent_task(agent, "committed first run"))
+
+    assert runtime_session._pending_mcp_installation_audits == []
+    assert len(
+        [
+            event
+            for event in runtime_session.event_log.iter()
+            if isinstance(event, McpCapabilitySnapshotInstalledEvent)
+        ]
+    ) == 1
+
+    runtime_session.publisher.unsubscribe(failing)
+    result = asyncio.run(run_agent_task(agent, "second run has no duplicate audit"))
+    assert result.final_text == "second run"
+
+
+def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+
+    class LeaseSupervisor:
+        def __init__(self) -> None:
+            self.completed: list[str] = []
+            self.close_calls = 0
+
+        def complete_pending_lease(self, interaction_id: str) -> None:
+            self.completed.append(interaction_id)
+
+        async def close_retiring_slots(self, **_kwargs) -> None:
+            self.close_calls += 1
+
+    supervisor = LeaseSupervisor()
+    runtime_session.mcp_supervisor = supervisor
+
+    class FailTerminalResult:
+        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            if isinstance(published.event, ToolResultEndEvent):
+                raise RuntimeError("synthetic terminal observer failure")
+
+    runtime_session.publisher.subscribe(FailTerminalResult())
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([])),
+    )
+    state = agent.new_state()
+    state.status = LoopStatus.WAITING_USER
+    state.stop_reason = "waiting_user"
+    state.pending_interaction_kind = "mcp_input_required"
+    state.pending_interaction_payload = {
+        "interaction_id": "mcp_input_required:post-commit",
+        "tool_call_id": "call:mcp-post-commit",
+        "tool_name": "mcp__docs__lookup",
+    }
+
+    async def terminal_result(self, current_state, _resolution):
+        current_state.pending_interaction_kind = None
+        current_state.pending_interaction_payload = {}
+        current_state.status = LoopStatus.RUNNING
+        current_state.stop_reason = None
+        async for event in self._emit_tool_result_and_record(
+            current_state,
+            tool_call_id="call:mcp-post-commit",
+            tool_call_name="mcp__docs__lookup",
+            output="terminal result committed",
+            result_state=ToolResultState.ERROR,
+        ):
+            yield event
+
+    monkeypatch.setattr(
+        AgentRuntime,
+        "_stream_mcp_input_required_resolution",
+        terminal_result,
+    )
+    resolution = McpInputRequiredInteractionResolution(
+        interaction_id="mcp_input_required:post-commit",
+        responses={},
+    )
+
+    async def run() -> None:
+        with pytest.raises(EventPublicationAfterCommitError):
+            async for _ in agent.stream_after_mcp_input_required(state, resolution):
+                pass
+
+    asyncio.run(run())
+
+    assert [result.id for result in state.tool_results] == [
+        "call:mcp-post-commit"
+    ]
+    assert state.pending_interaction_kind is None
+    assert supervisor.completed == ["mcp_input_required:post-commit"]
+    assert supervisor.close_calls == 1
 
 
 def test_model_call_rejected_event_is_inspectable(tmp_path) -> None:

@@ -83,7 +83,10 @@ Manifest 是 query/index 层，不是 transcript 真源。缺失或损坏 manife
 
 ## 4. Open / detach / close
 
-`HostCore.start_session()` 创建或打开一个 runtime conversation，并 upsert manifest。
+`HostCore.start_session()` 创建或打开一个 runtime conversation。新open的durable顺序固定为：required MCP initialization
+成功 → upsert open manifest → registry publish。required startup失败不得写manifest。manifest写入后、publish前失败时，
+当前reservation必须原子转换为manifest-close tombstone并执行幂等`mark_closed()`；finalization失败保留tombstone，
+list/resume必须排除或拒绝该runtime，后续explicit close/shutdown重试。
 
 `HostSession` detach 的语义：
 
@@ -101,6 +104,10 @@ Explicit close 的语义：
 并发 close intent 必须单调合并：`detach < explicit close`。同一物理 close attempt 中，只要任一仍在参与该 attempt 的 caller 请求 explicit close，最终 manifest 就必须写入 `closed_at`；detach/shutdown caller不能把它降级。attempt owner在registry线性化边界内seal合并后的intent，再执行manifest mutation。若更强intent在线性化seal之后才到达，它必须等待物理close并完成幂等manifest close，不能成功返回却遗漏`closed_at`。
 
 Manifest mutation失败不允许退化为“session已移除，所以后续close是no-op”。物理HostSession关闭后，registry必须保留bounded finalization tombstone，仅含`host_session_id/runtime_session_id/conversation_id/manifest_close_pending`及当前retry attempt；再次explicit close或下一次shutdown必须重试`mark_closed()`。成功后原子删除tombstone，失败则保留并把同一异常交给所有retry waiters。tombstone存在期间禁止复用同一host/conversation identity，也禁止resume对应runtime_session_id。
+
+`list_resumable_sessions(limit=N)`不得先按SQL `limit N`截断再过滤process-local tombstone，否则最新tombstone会遮住
+后续正常session。V1至少按`N + tombstone_count`有界over-fetch，过滤后再切回N；未来把exclude IDs下推SQL时必须保持
+相同排序与limit语义。
 
 `HostCore.shutdown()` 是 host process teardown，不等价于用户关闭 conversation。它必须按照 workspace terminal lifecycle 契约 finalization active/suspended runs，但不得擅自 archive durable conversation。
 
@@ -170,16 +177,40 @@ Workspace 规则：
 
 ## 9. Interaction boundaries
 
-Resume 不能恢复旧 pending approval / pending plan interaction / pending MCP elicitation 的 in-memory continuation，除非该 pending state 有 durable representation 且当前代码显式支持。
+Resume 不能恢复旧 pending approval / pending plan interaction / pending MCP input-required 的 in-memory continuation，除非该 pending state 有 durable representation 且当前代码显式支持。
 
 当前 V1 语义：
 
 - dangling active run 先被 repair 为 aborted；
 - 新 turn 从 repaired transcript 继续；
+- process-local MCP pending lease只在同一live HostSession内支持resume，不跨进程重建；
 - 用户需要重新发出需要执行的意图；
 - 不自动重放未完成工具调用。
 
 这条边界优先保证 correctness，而不是“自动续跑一半的工具批次”。
+
+### 9.1 Live MCP pending lease
+
+同一live HostSession收到`ToolExecutionSuspended(interaction_kind="mcp_input_required")`时，executor持有的exact slot
+lease必须先`promote_lease_to_pending(interaction_id)`，durable suspension event提交确认后再confirm reservation；若
+pending event在commit前失败则abort reservation并归还lease；若event已commit、仅ordered publisher/observer失败，
+canonical pending fact已经成立，必须confirm reservation并保留pending ownership，不得错误归还lease。Resume通过
+interaction id borrow原lease，不得按当前tool name重新
+acquire可能已变化的slot。
+
+Safe point required失败按原因分支：
+
+- pending所属binding被disable/remove/reconfigure：提交terminal deny/error tool result后释放lease；
+- 无关required server不可用：保留pending state与lease，本次host action失败但可重试；
+- 同配置TTL/retry暂时失败且leased binding仍有效：保留pending state与lease，不切换generation。
+
+Resume safe point产生的新installation audit必须在state恢复和model continuation前durable commit；失败保留原pending
+state/lease，成功后才清pending audit。该路径不伪造第二条RunStart。
+
+用户cancel、session close、round/deadline cap或最终resume result都必须在对应durable terminal fact提交后调用
+`complete_pending_lease()`。若fact已commit但observer publication失败，runtime先从committed slice折叠state并完成
+lease，再向上传播publication failure。Close drain失败必须保留HostSession/supervisor ownership供同一close retry，不能删除
+session后留下孤儿slot。
 
 ---
 

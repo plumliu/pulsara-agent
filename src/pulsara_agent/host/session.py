@@ -15,10 +15,18 @@ from pulsara_agent.event import (
     ContextCompactionFailedEvent,
     ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
+    EventContext,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
     RunStartEvent,
+)
+from pulsara_agent.primitives.mcp import (
+    MAX_MCP_DIAGNOSTIC_CODE_CHARS,
+    MAX_MCP_DIAGNOSTIC_MESSAGE_CHARS,
+    McpDiagnosticFact,
+    McpInstalledServerSnapshotFact,
+    McpReconcileAttemptSummaryFact,
 )
 from pulsara_agent.host.identity import ResolvedWorkspace
 from pulsara_agent.host.transcript import rebuild_prior_messages
@@ -40,34 +48,41 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.runtime.permission_snapshot import validate_preset_policy_payload
 from pulsara_agent.runtime.plan import (
-    McpElicitationResolution,
     McpInputRequiredInteractionResolution,
     PLAN_ACTIVE_INSTRUCTION,
     PLAN_ACTIVE_INSTRUCTION_NAME,
     PLAN_ENTRY_INSTRUCTION,
     PLAN_ENTRY_INSTRUCTION_NAME,
     PendingInteraction,
-    PendingMcpElicitation,
     PendingMcpInputRequired,
     PendingPlanInteraction,
     PlanInteractionResolution,
     PlanWorkflowState,
     pending_plan_interaction_from_state,
-    pending_mcp_elicitation_from_state,
     pending_mcp_input_required_from_state,
     reduce_plan_workflow_state,
 )
 from pulsara_agent.runtime.recovery import AbortKind, StopRequest
+from pulsara_agent.runtime.session import EventPublicationAfterCommitError
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
-from pulsara_agent.runtime.mcp.types import McpServerStatus
+from pulsara_agent.runtime.mcp.types import (
+    McpBindingIdentity,
+    McpInstalledCapabilitySnapshot,
+    McpManagerSlot,
+    McpPendingInstallationAudit,
+    McpReconcileTicket,
+    McpServerCandidate,
+    McpServerSnapshot,
+    McpServerStatus,
+    redact_mcp_error_message,
+)
 from pulsara_agent.runtime.terminal import WorkspaceTerminalLease
 from pulsara_agent.runtime.wiring import AgentRuntimeWiring
 from pulsara_agent.capability.providers.mcp import (
-    McpCapabilityBindingBundle,
     McpCapabilityProvider,
-    build_mcp_bundle,
+    build_mcp_installation,
 )
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
@@ -113,31 +128,165 @@ def _replace_mcp_tool_bindings(
 
 def _replace_mcp_capability_provider(
     current: CapabilityRuntime,
-    mcp_bundle: McpCapabilityBindingBundle | None,
+    mcp_installation: McpInstalledCapabilitySnapshot,
 ) -> CapabilityRuntime:
     providers = []
     inserted = False
     for provider in current.providers:
         if isinstance(provider, McpCapabilityProvider):
-            if mcp_bundle is not None and not inserted:
-                providers.append(McpCapabilityProvider(mcp_bundle))
+            if mcp_installation.snapshots and not inserted:
+                providers.append(McpCapabilityProvider(mcp_installation))
                 inserted = True
             continue
         providers.append(provider)
-    if mcp_bundle is not None and not inserted:
-        providers.append(McpCapabilityProvider(mcp_bundle))
+    if mcp_installation.snapshots and not inserted:
+        providers.append(McpCapabilityProvider(mcp_installation))
     return CapabilityRuntime(providers=tuple(providers))
 
 
-def _mcp_ready_server_ids(
-    mcp_bundle: McpCapabilityBindingBundle | None,
-) -> frozenset[str]:
-    if mcp_bundle is None:
-        return frozenset()
-    return frozenset(
-        snapshot.config.server_id
-        for snapshot in mcp_bundle.manager.snapshots
-        if snapshot.status is McpServerStatus.READY
+def _mcp_surface_semantic_key(
+    snapshots: tuple[McpServerSnapshot, ...],
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        sorted(
+            (
+                snapshot.server_id,
+                snapshot.status.value,
+                snapshot.required,
+                snapshot.event_safe_config_fingerprint,
+                snapshot.snapshot_semantic_fingerprint,
+            )
+            for snapshot in snapshots
+        )
+    )
+
+
+def _mcp_pending_audit(
+    *,
+    old: McpInstalledCapabilitySnapshot,
+    new: McpInstalledCapabilitySnapshot,
+    candidates: tuple[McpServerCandidate, ...],
+    changed_server_ids: set[str],
+    fallback_trigger: str,
+    stale_discard_counts: dict[str, int],
+) -> McpPendingInstallationAudit:
+    candidate_by_server = {
+        candidate.server_snapshot.server_id: candidate for candidate in candidates
+    }
+    server_facts: list[McpInstalledServerSnapshotFact] = []
+    triggers: set[str] = set()
+    for snapshot in new.snapshots:
+        candidate = candidate_by_server.get(snapshot.server_id)
+        trigger = candidate.trigger if candidate is not None else fallback_trigger
+        changed = snapshot.server_id in changed_server_ids
+        if changed:
+            triggers.add(trigger)
+        status = {
+            McpServerStatus.STARTING: "running",
+            McpServerStatus.READY: "ready",
+            McpServerStatus.DEGRADED: "degraded",
+            McpServerStatus.FAILED: "failed",
+            McpServerStatus.NEEDS_AUTH: "needs_auth",
+            McpServerStatus.DISABLED: "disabled",
+        }.get(snapshot.status, "failed")
+        attempt = McpReconcileAttemptSummaryFact(
+            server_id=snapshot.server_id,
+            reconcile_attempt_id=snapshot.reconcile_attempt_id,
+            reconcile_trigger=trigger,  # type: ignore[arg-type]
+            attempt_status=status,  # type: ignore[arg-type]
+            retry_attempt=candidate.retry_attempt if candidate is not None else 0,
+            request_count=candidate.request_count if candidate is not None else 0,
+            page_count=candidate.page_count if candidate is not None else 0,
+            cache_outcome=(candidate.cache_outcome if candidate is not None else "not_applicable"),  # type: ignore[arg-type]
+            stale_candidates_discarded_since_previous_install=(
+                stale_discard_counts.get(snapshot.server_id, 0)
+            ),
+        )
+        diagnostics = tuple(_mcp_diagnostic_fact(item) for item in snapshot.diagnostics[:16])
+        timing = snapshot.timing
+        if timing is None:
+            raise ValueError("MCP installed snapshot requires lifecycle timing")
+        server_facts.append(
+            McpInstalledServerSnapshotFact(
+                server_id=snapshot.server_id,
+                status=snapshot.status.value,  # type: ignore[arg-type]
+                required=snapshot.required,
+                changed_in_this_installation=changed,
+                attempt=attempt,
+                snapshot_id=snapshot.snapshot_id,
+                discovery_generation=snapshot.discovery_generation,
+                event_safe_config_fingerprint=snapshot.event_safe_config_fingerprint,
+                snapshot_semantic_fingerprint=snapshot.snapshot_semantic_fingerprint,
+                protocol_version=snapshot.protocol_version,
+                tool_count=len(snapshot.tools),
+                resource_count=len(snapshot.resources),
+                resource_template_count=len(snapshot.resource_templates),
+                prompt_count=len(snapshot.prompts),
+                instructions_chars=len(snapshot.instructions or ""),
+                lifecycle_timing=timing,
+                diagnostics=diagnostics,
+                catalog_artifact_id=None,
+            )
+        )
+    old_names = {str(getattr(item, "name", "")) for item in old.descriptors}
+    new_names = {str(getattr(item, "name", "")) for item in new.descriptors}
+    changed_names = tuple(sorted(old_names.symmetric_difference(new_names)))
+    bounded_names = changed_names[:64]
+    return McpPendingInstallationAudit(
+        event_id=f"mcp_installation_event:{uuid4().hex}",
+        installation_id=new.installation_id,
+        previous_installation_id=(
+            None if old.installation_id == "mcp_installation:empty" else old.installation_id
+        ),
+        config_epoch=new.config_epoch,
+        event_safe_config_set_fingerprint=new.event_safe_config_set_fingerprint,
+        installation_triggers=tuple(sorted(triggers)),  # type: ignore[arg-type]
+        coalesced_installation_count=0,
+        coalesced_attempt_summaries=(),
+        coalesced_attempt_summaries_omitted=0,
+        server_snapshots=tuple(server_facts),
+        total_installed_tool_count=len(new.tools),
+        added_tool_count=len(new_names.difference(old_names)),
+        revoked_tool_count=len(old_names.difference(new_names)),
+        changed_tool_names_bounded=bounded_names,
+        changed_tool_names_omitted=max(0, len(changed_names) - len(bounded_names)),
+        diagnostics=tuple(
+            McpDiagnosticFact(
+                severity=getattr(item, "severity", "warning"),
+                code=str(
+                    getattr(item, "code", "mcp_installation_diagnostic")
+                )[:MAX_MCP_DIAGNOSTIC_CODE_CHARS],
+                message=redact_mcp_error_message(
+                    getattr(item, "message", "MCP installation diagnostic")
+                )[:MAX_MCP_DIAGNOSTIC_MESSAGE_CHARS],
+            )
+            for item in new.diagnostics[:16]
+        ),
+        baseline_tool_names=frozenset(old_names),
+        current_tool_names=frozenset(new_names),
+    )
+
+
+def _mcp_diagnostic_fact(item: dict[str, Any]) -> McpDiagnosticFact:
+    metadata: dict[str, object] = {}
+    for key, value in list(item.items())[:16]:
+        if key in {"severity", "code", "message"}:
+            continue
+        if value is None or isinstance(value, (bool, int, float)):
+            metadata[str(key)[:128]] = value
+        else:
+            metadata[str(key)[:128]] = redact_mcp_error_message(value)[:256]
+    return McpDiagnosticFact(
+        severity=str(item.get("severity") or "warning"),  # type: ignore[arg-type]
+        code=str(item.get("code") or "mcp_server_diagnostic")[
+            :MAX_MCP_DIAGNOSTIC_CODE_CHARS
+        ],
+        message=redact_mcp_error_message(
+            item.get("message")
+            or item.get("error_type")
+            or "MCP server diagnostic"
+        )[:MAX_MCP_DIAGNOSTIC_MESSAGE_CHARS],
+        metadata=metadata,
     )
 
 
@@ -205,6 +354,12 @@ class HostSession:
     _stop_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, init=False, repr=False
     )
+    _mcp_installation_faulted: bool = field(default=False, init=False, repr=False)
+    _mcp_installation_diagnostics: list[dict[str, str]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         reduced = reduce_plan_workflow_state(
@@ -262,54 +417,248 @@ class HostSession:
             "processes": [process.to_payload() for process in processes],
         }
 
-    async def _sync_mcp_servers_for_turn(self) -> None:
-        """Refresh session-owned MCP descriptors and bindings at safe points.
+    async def _apply_mcp_safe_point(
+        self,
+        *,
+        trigger: str,
+        prepared_ticket: McpReconcileTicket | None = None,
+    ) -> None:
+        """Apply background MCP candidates at a Host-owned safe point."""
 
-        The supervisor owns reconnect/backoff state.  Each turn/resume uses the
-        latest supervisor snapshot and then atomically rebuilds both surfaces:
-        the model-facing capability provider and the ToolRegistry execution
-        bindings.  A failed/disabled server remains visible as diagnostics.
-        """
         supervisor = self.mcp_supervisor
         if supervisor is None:
             return
-        old_ready_server_ids = _mcp_ready_server_ids(
-            self.wiring.runtime_wiring.mcp_bundle
-        )
-        configs = load_mcp_server_configs(workspace_root=self.workspace.workspace_root)
-        manager = await supervisor.sync_servers(configs)
-        mcp_bundle = build_mcp_bundle(manager) if manager is not None else None
-        new_ready_server_ids = _mcp_ready_server_ids(mcp_bundle)
-        runtime_session = self.wiring.runtime_wiring.runtime_session
-        runtime_session.extra_tool_bindings = _replace_mcp_tool_bindings(
-            runtime_session.extra_tool_bindings,
-            mcp_bundle.tools if mcp_bundle is not None else (),
-        )
-        self.wiring = replace(
-            self.wiring,
-            runtime_wiring=replace(
-                self.wiring.runtime_wiring,
-                mcp_manager=manager,
-                mcp_bundle=mcp_bundle,
-            ),
-        )
-        self.wiring.agent_runtime.refresh_capability_runtime(
-            _replace_mcp_capability_provider(
-                self.wiring.agent_runtime.capability_runtime, mcp_bundle
+        if self._mcp_installation_faulted:
+            raise RuntimeError(
+                "MCP installation commit faulted; this HostSession must be closed and reopened"
             )
+        configs = load_mcp_server_configs(workspace_root=self.workspace.workspace_root)
+        ticket = prepared_ticket or supervisor.prepare(configs, trigger=trigger)
+        try:
+            await supervisor.await_required(ticket)
+        except Exception as exc:
+            reconfigured_server_id = self._pending_mcp_reconfigured_server_id(
+                supervisor
+            )
+            if reconfigured_server_id is None:
+                raise
+            supervisor.terminalize_attempt_for_pending_reconfiguration(
+                ticket,
+                exc,
+                server_id=reconfigured_server_id,
+            )
+        else:
+            reconfigured_server_id = self._pending_mcp_reconfigured_server_id(
+                supervisor
+            )
+            if reconfigured_server_id is not None:
+                supervisor.terminalize_attempt_for_pending_reconfiguration(
+                    ticket,
+                    RuntimeError(
+                        "pending MCP binding was reconfigured before its replacement "
+                        "generation became installable"
+                    ),
+                    server_id=reconfigured_server_id,
+                )
+        batch = supervisor.drain_installable_candidates(
+            expected_epoch=ticket.config_epoch
         )
+        starting = supervisor.current_starting_snapshots()
+        if not batch.candidates and not starting:
+            return
+
+        old_installation = self.wiring.runtime_wiring.mcp_installation
+        configs_by_server = {config.server_id: config for config in configs}
+        snapshots_by_server = {
+            snapshot.server_id: snapshot for snapshot in old_installation.snapshots
+        }
+        slots_by_server: dict[str, McpManagerSlot] = {}
+        retiring_slot_ids: list[str] = []
+        for server_id in snapshots_by_server:
+            slot = supervisor.installed_slot(server_id)
+            if slot is not None:
+                if slot.lifecycle == "installed":
+                    slots_by_server[server_id] = slot
+                elif slot.lifecycle == "retiring":
+                    retiring_slot_ids.append(slot.slot_id)
+
+        latest_candidates: dict[str, McpServerCandidate] = {}
+        for candidate in batch.candidates:
+            latest_candidates[candidate.server_snapshot.server_id] = candidate
+        changed_server_ids: set[str] = set()
+        for server_id, candidate in latest_candidates.items():
+            changed_server_ids.add(server_id)
+            old_slot = slots_by_server.pop(server_id, None)
+            if old_slot is not None:
+                retiring_slot_ids.append(old_slot.slot_id)
+            if server_id not in configs_by_server:
+                snapshots_by_server[server_id] = candidate.server_snapshot
+                continue
+            snapshots_by_server[server_id] = candidate.server_snapshot
+            if candidate.manager_slot is not None:
+                slots_by_server[server_id] = candidate.manager_slot
+        for snapshot in starting:
+            current_slot = supervisor.installed_slot(snapshot.server_id)
+            if (
+                snapshot.server_id not in snapshots_by_server
+                or current_slot is None
+                or current_slot.lifecycle == "retiring"
+                or not supervisor.binding_matches_current_desired_runtime(
+                    current_slot.binding_identity
+                )
+            ):
+                old_slot = slots_by_server.pop(snapshot.server_id, None)
+                if old_slot is not None:
+                    retiring_slot_ids.append(old_slot.slot_id)
+                snapshots_by_server[snapshot.server_id] = snapshot
+                changed_server_ids.add(snapshot.server_id)
+
+        new_snapshots = tuple(
+            snapshots_by_server[server_id]
+            for server_id in sorted(snapshots_by_server)
+        )
+        semantic_changed = _mcp_surface_semantic_key(old_installation.snapshots) != (
+            _mcp_surface_semantic_key(new_snapshots)
+        )
+        old_slot_identities = frozenset(old_installation.binding_identities)
+        new_slot_identities = frozenset(
+            slot.binding_identity for slot in slots_by_server.values()
+        )
+        slot_changed = old_slot_identities != new_slot_identities
+        if not semantic_changed and not slot_changed:
+            supervisor.reject_candidates(tuple(latest_candidates.values()))
+            return
+
+        installation_id = f"mcp_installation:{uuid4().hex}"
+        stale_discard_counts = supervisor.stale_discard_counts()
+        try:
+            new_installation = build_mcp_installation(
+                supervisor=supervisor,
+                config_epoch=ticket.config_epoch,
+                event_safe_config_set_fingerprint=ticket.event_safe_config_set_fingerprint,
+                snapshots=new_snapshots,
+                configs_by_server=configs_by_server,
+                slots_by_server=slots_by_server,
+                installation_id=installation_id,
+                previous_installation=old_installation,
+            )
+            new_capability_runtime = _replace_mcp_capability_provider(
+                self.wiring.agent_runtime.capability_runtime,
+                new_installation,
+            )
+            runtime_session = self.wiring.runtime_wiring.runtime_session
+            new_extra_bindings = _replace_mcp_tool_bindings(
+                runtime_session.extra_tool_bindings,
+                tuple(new_installation.tools),
+            )
+            pending_audit = _mcp_pending_audit(
+                old=old_installation,
+                new=new_installation,
+                candidates=tuple(latest_candidates.values()),
+                changed_server_ids=changed_server_ids,
+                fallback_trigger=trigger,
+                stale_discard_counts=stale_discard_counts,
+            )
+        except Exception as exc:
+            supervisor.reject_candidates(tuple(latest_candidates.values()))
+            has_required_change = any(
+                candidate.runtime_spec.config.required
+                for candidate in latest_candidates.values()
+            ) or any(
+                snapshot.required
+                for snapshot in starting
+                if snapshot.server_id in changed_server_ids
+            )
+            if not has_required_change:
+                supervisor.restore_retiring_slots(tuple(retiring_slot_ids))
+                self._mcp_installation_diagnostics.append(
+                    {
+                        "code": "mcp_optional_installation_rejected",
+                        "error_type": type(exc).__name__,
+                        "message": redact_mcp_error_message(exc),
+                    }
+                )
+                del self._mcp_installation_diagnostics[:-16]
+                return
+            raise
+        except BaseException:
+            supervisor.reject_candidates(tuple(latest_candidates.values()))
+            raise
+        try:
+            supervisor.commit_slot_transition(
+                candidates=tuple(latest_candidates.values()),
+                retiring_slot_ids=tuple(retiring_slot_ids),
+            )
+            runtime_session.extra_tool_bindings = new_extra_bindings
+            self.wiring = replace(
+                self.wiring,
+                runtime_wiring=replace(
+                    self.wiring.runtime_wiring,
+                    mcp_installation=new_installation,
+                ),
+            )
+            self.wiring.agent_runtime.refresh_capability_runtime(
+                new_capability_runtime
+            )
+            runtime_session.set_mcp_installation_contract(
+                installation_id=new_installation.installation_id,
+                pending_audit=pending_audit,
+            )
+            supervisor.acknowledge_stale_discard_counts(stale_discard_counts)
+        except BaseException:
+            self._mcp_installation_faulted = True
+            raise
+
+        runtime_session = self.wiring.runtime_wiring.runtime_session
         if self._suspended_state is not None:
             self._suspended_state.scratchpad.pop("capability_exposure", None)
         if self._active_state is not None:
             self._active_state.scratchpad.pop("capability_exposure", None)
-        revoked_servers = sorted(old_ready_server_ids.difference(new_ready_server_ids))
-        subagent_runtime = getattr(runtime_session, "subagent_runtime", None)
-        if revoked_servers and subagent_runtime is not None:
-            await subagent_runtime.fail_active_children_for_safety_narrowing(
-                reason_code="subagent_mcp_server_unavailable",
-                reason_message="Parent MCP safe-point sync removed or disabled a previously ready server.",
-                diagnostics=[{"revoked_mcp_server_ids": revoked_servers}],
+        revoked_servers = sorted(
+            old_installation.ready_server_ids.difference(
+                new_installation.ready_server_ids
             )
+        )
+        subagent_runtime = getattr(runtime_session, "subagent_runtime", None)
+        if (revoked_servers or retiring_slot_ids) and subagent_runtime is not None:
+            retiring_identity_set = frozenset(
+                identity
+                for identity in old_installation.binding_identities
+                if identity.slot_id in set(retiring_slot_ids)
+            )
+            await subagent_runtime.fail_children_for_mcp_binding_change(
+                retiring_identity_set,
+                reason_message=(
+                    "Parent MCP installation changed a child-visible binding generation."
+                ),
+            )
+        await supervisor.close_retiring_slots(
+            timeout_seconds=5.0,
+            wait_for_borrowers=False,
+        )
+
+    def _pending_mcp_reconfigured_server_id(
+        self,
+        supervisor: McpServerSupervisor,
+    ) -> str | None:
+        state = self._suspended_state
+        if state is None or state.pending_interaction_kind != "mcp_input_required":
+            return None
+        identity = state.pending_interaction_payload.get("mcp_binding_identity")
+        if not isinstance(identity, dict):
+            return None
+        try:
+            binding_identity = McpBindingIdentity(
+                server_id=str(identity["server_id"]),
+                slot_id=str(identity["slot_id"]),
+                snapshot_id=str(identity["snapshot_id"]),
+                discovery_generation=int(identity["discovery_generation"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if supervisor.binding_matches_current_desired_runtime(binding_identity):
+            return None
+        return binding_identity.server_id
 
     # -- Run entry points -----------------------------------------------------
     # run_turn / stream_turn / approval resume / plan resume all flow through one
@@ -317,6 +666,13 @@ class HostSession:
     # the task and cancel scope; whether the caller consumes a result or an event
     # stream is only an observation difference and never changes stop/drain/close
     # semantics (contract §6.1).
+
+    async def initialize_mcp(self, ticket: McpReconcileTicket) -> None:
+        async with self._run_lock:
+            await self._apply_mcp_safe_point(
+                trigger="initial",
+                prepared_ticket=ticket,
+            )
 
     async def run_turn(
         self,
@@ -330,7 +686,7 @@ class HostSession:
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
         async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
+            await self._apply_mcp_safe_point(trigger="config_change")
             run_model_target = self.wiring.agent_runtime.resolve_run_model_target()
             prior_messages = await self._prepare_prior_messages_for_turn(
                 user_input,
@@ -361,7 +717,7 @@ class HostSession:
         self._raise_if_pending_interaction("starting a new turn")
         self._raise_if_active_run()
         async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
+            await self._apply_mcp_safe_point(trigger="config_change")
             run_model_target = self.wiring.agent_runtime.resolve_run_model_target()
             prior_messages = await self._prepare_prior_messages_for_turn(
                 user_input,
@@ -448,7 +804,9 @@ class HostSession:
         pending = self._require_pending_approval(resolution.approval_id)
         self._raise_if_active_run()
         async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
+            await self._apply_mcp_safe_point(trigger="config_change")
+            suspended_state = self._require_suspended_state(pending)
+            await self._commit_pending_mcp_audits_for_resume(suspended_state)
             state = self._resume_active_state(pending)
             return await self._run_owned(
                 state,
@@ -467,8 +825,14 @@ class HostSession:
         pending = self._require_pending_approval(resolution.approval_id)
         self._raise_if_active_run()
         async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
+            await self._apply_mcp_safe_point(trigger="config_change")
+            suspended_state = self._require_suspended_state(pending)
+            audit_events = await self._commit_pending_mcp_audits_for_resume(
+                suspended_state
+            )
             state = self._resume_active_state(pending)
+            for event in audit_events:
+                yield event
             async for event in self._stream_owned(
                 state,
                 lambda: self.wiring.agent_runtime.stream_after_approval(
@@ -487,31 +851,14 @@ class HostSession:
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
         self._raise_if_active_run()
         async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
+            await self._apply_mcp_safe_point(trigger="config_change")
+            suspended_state = self._require_suspended_state(pending)
+            await self._commit_pending_mcp_audits_for_resume(suspended_state)
             state = self._resume_active_state(pending)
             self._prepare_state_for_plan(state)
             return await self._run_owned(
                 state,
                 lambda: self.wiring.agent_runtime.resume_after_plan_interaction(
-                    state, resolution
-                ),
-            )
-
-    async def resolve_mcp_elicitation(
-        self,
-        resolution: McpElicitationResolution,
-    ) -> AgentRunResult:
-        self._raise_if_not_open("resolving an MCP elicitation")
-        if self.stopping_run_id is not None:
-            raise HostSessionBusyError("host session is stopping an active run")
-        pending = self._require_pending_mcp_elicitation(resolution.interaction_id)
-        self._raise_if_active_run()
-        async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
-            state = self._resume_active_state(pending)
-            return await self._run_owned(
-                state,
-                lambda: self.wiring.agent_runtime.resume_after_mcp_elicitation(
                     state, resolution
                 ),
             )
@@ -526,14 +873,20 @@ class HostSession:
         pending = self._require_pending_mcp_input_required(resolution.interaction_id)
         self._raise_if_active_run()
         async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
+            await self._apply_mcp_safe_point(trigger="config_change")
+            suspended_state = self._require_suspended_state(pending)
+            await self._commit_pending_mcp_audits_for_resume(suspended_state)
             state = self._resume_active_state(pending)
-            return await self._run_owned(
-                state,
-                lambda: self.wiring.agent_runtime.resume_after_mcp_input_required(
-                    state, resolution
-                ),
-            )
+            try:
+                return await self._run_owned(
+                    state,
+                    lambda: self.wiring.agent_runtime.resume_after_mcp_input_required(
+                        state, resolution
+                    ),
+                )
+            except EventPublicationAfterCommitError:
+                self._capture_pending_interaction(state)
+                raise
 
     async def exit_plan_workflow(
         self,
@@ -606,9 +959,15 @@ class HostSession:
         pending = self._require_pending_plan_interaction(resolution.interaction_id)
         self._raise_if_active_run()
         async with self._run_lock:
-            await self._sync_mcp_servers_for_turn()
+            await self._apply_mcp_safe_point(trigger="config_change")
+            suspended_state = self._require_suspended_state(pending)
+            audit_events = await self._commit_pending_mcp_audits_for_resume(
+                suspended_state
+            )
             state = self._resume_active_state(pending)
             self._prepare_state_for_plan(state)
+            for event in audit_events:
+                yield event
             async for event in self._stream_owned(
                 state,
                 lambda: self.wiring.agent_runtime.stream_after_plan_interaction(
@@ -764,16 +1123,10 @@ class HostSession:
                 cancelled_by="host_shutdown",
                 timeout_seconds=drain_timeout_seconds,
             )
-        mcp_manager = self.wiring.runtime_wiring.mcp_manager
-        if mcp_manager is not None:
-            try:
-                await mcp_manager.aclose(timeout_seconds=drain_timeout_seconds)
-            except asyncio.CancelledError:
-                # MCP SDK transports can use cancellation as an internal close
-                # signal.  HostSession close owns teardown and should remain
-                # idempotent; do not let a transport cancel scope poison the
-                # caller task or make ``:close`` crash.
-                _clear_current_task_cancellation()
+        if self.mcp_supervisor is not None:
+            await self.mcp_supervisor.aclose(
+                timeout_seconds=drain_timeout_seconds
+            )
         self.close()
 
     async def drain_active_run(
@@ -807,15 +1160,26 @@ class HostSession:
         state = self._suspended_state
         if state is None:
             return
-        try:
-            await self.wiring.agent_runtime.abort_run(state, reason=reason)
-        except Exception:
-            pass
+        interaction_id = (
+            str(state.pending_interaction_payload.get("interaction_id"))
+            if state.pending_interaction_kind == "mcp_input_required"
+            and state.pending_interaction_payload.get("interaction_id") is not None
+            else None
+        )
+        await self.wiring.agent_runtime.abort_run(state, reason=reason)
+        if interaction_id is not None and self.mcp_supervisor is not None:
+            self.mcp_supervisor.complete_pending_lease(interaction_id)
         self._suspended_state = None
         self.pending_interaction = None
         self.suspended_run_id = None
 
     def summary(self) -> dict[str, object]:
+        installation = self.wiring.runtime_wiring.mcp_installation
+        starting = (
+            self.mcp_supervisor.current_starting_snapshots()
+            if self.mcp_supervisor is not None
+            else ()
+        )
         return {
             "host_session_id": self.host_session_id,
             "conversation_id": self.conversation_id,
@@ -840,6 +1204,31 @@ class HostSession:
             "plan": self.plan_state.to_dict(),
             "has_live_processes": self.has_live_processes,
             "terminal": self.terminal_summary,
+            "mcp": {
+                "installation_id": installation.installation_id,
+                "config_epoch": installation.config_epoch,
+                "faulted": self._mcp_installation_faulted,
+                "diagnostics": list(self._mcp_installation_diagnostics),
+                "servers": [
+                    {
+                        "server_id": snapshot.server_id,
+                        "status": snapshot.status.value,
+                        "required": snapshot.required,
+                        "snapshot_id": snapshot.snapshot_id,
+                        "discovery_generation": snapshot.discovery_generation,
+                        "tool_count": len(snapshot.tools),
+                    }
+                    for snapshot in (
+                        *installation.snapshots,
+                        *(
+                            item
+                            for item in starting
+                            if item.server_id
+                            not in {value.server_id for value in installation.snapshots}
+                        ),
+                    )
+                ],
+            },
         }
 
     # -- Internal execution primitive -----------------------------------------
@@ -870,6 +1259,36 @@ class HostSession:
         self._active_state = state
         self.last_active_at = time.monotonic()
         return state
+
+    async def _commit_pending_mcp_audits_for_resume(
+        self,
+        state: LoopState,
+    ) -> tuple[AgentEvent, ...]:
+        """Durably publish safe-point installation facts before run continuation.
+
+        A resume has no second RunStart carrier.  The original suspended state
+        remains authoritative until this batch is acknowledged, so an EventLog
+        failure leaves the pending interaction and its MCP lease retryable.
+        """
+
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        context = EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        )
+        pending = runtime_session.pending_mcp_installation_audit_events(context)
+        if not pending:
+            return ()
+        try:
+            stored = await runtime_session.emit_many(pending, state=state)
+        except EventPublicationAfterCommitError as exc:
+            runtime_session.acknowledge_committed_mcp_installation_audits(
+                exc.result.committed_events
+            )
+            raise
+        runtime_session.acknowledge_committed_mcp_installation_audits(stored)
+        return tuple(stored)
 
     async def _run_owned(
         self,
@@ -1055,10 +1474,6 @@ class HostSession:
                 self.pending_interaction = pending_plan_interaction_from_state(
                     state, self.host_session_id
                 )
-            elif state.pending_interaction_kind == "mcp_elicitation":
-                self.pending_interaction = pending_mcp_elicitation_from_state(
-                    state, self.host_session_id
-                )
             elif state.pending_interaction_kind == "mcp_input_required":
                 self.pending_interaction = pending_mcp_input_required_from_state(
                     state, self.host_session_id
@@ -1097,18 +1512,6 @@ class HostSession:
         if pending.interaction_id != interaction_id:
             raise ValueError(
                 "plan interaction id does not match the pending interaction"
-            )
-        return pending
-
-    def _require_pending_mcp_elicitation(
-        self, interaction_id: str
-    ) -> PendingMcpElicitation:
-        pending = self.pending_interaction
-        if not isinstance(pending, PendingMcpElicitation):
-            raise ValueError("host session has no pending MCP elicitation")
-        if pending.interaction_id != interaction_id:
-            raise ValueError(
-                "MCP elicitation id does not match the pending interaction"
             )
         return pending
 
@@ -1255,6 +1658,10 @@ class HostSession:
     def _raise_if_not_open(self, action: str) -> None:
         if self._lifecycle is not HostSessionLifecycle.OPEN:
             raise RuntimeError(f"host session is closed; cannot {action}")
+        if self._mcp_installation_faulted:
+            raise RuntimeError(
+                "MCP installation commit faulted; only inspect/status/close are allowed"
+            )
 
     def _raise_if_pending_interaction(self, action: str) -> None:
         pending = self.pending_interaction

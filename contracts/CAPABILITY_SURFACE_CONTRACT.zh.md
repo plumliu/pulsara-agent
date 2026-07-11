@@ -81,7 +81,8 @@ V1 合法 provider：
 
 - `BuiltinToolCapabilityProvider`：内置工具 descriptor。
 - `LocalSkillCapabilityProvider`：本地/bundled skill 的 catalog 与 active injection。
-- `McpCapabilityProvider`：由 MCP binding bundle 产生的 MCP descriptor。
+- `McpCapabilityProvider`：只消费同一份 immutable `McpInstalledCapabilitySnapshot`，由其中 frozen server snapshots
+  与 exact `McpBindingIdentity` bindings 产出 MCP descriptor；不得从 live manager 或另一份 snapshot 重建。
 
 `CapabilityRuntime.resolve_for_turn()` 必须聚合所有 provider output，并构建单个 `CapabilityExposurePlan`。
 
@@ -97,6 +98,11 @@ V1 合法 provider：
 - execution binding 有、descriptor 无：必须产生 `capability_missing_descriptor` diagnostic，并且该 tool 不得进入 model tools。
 - binding validation 必须发生在 exposure plan 构建时，而不是等工具执行时才发现。
 - future CLI/MCP/插件工具必须同时提供 descriptor provider output 与 Tool/AsyncTool binding；只提供其中之一是契约错误。
+
+MCP execution surface 的 installation ID 只做整体 attribution；具体执行身份是
+`server_id + slot_id + snapshot_id + discovery_generation`。无关 server refresh 可以产生新 installation，但不得改变
+未变化 binding 的执行身份。Host safe-point installation 必须先冻结 affected old slots，再同步交换完整 surface；
+worker completion 不得直接改变 capability exposure。
 
 这条规则同样适用于非 direct descriptor：即便 descriptor 被标记为 hidden/deferred/unavailable，只要它是 model-callable，就必须能被诊断“是否缺 execution binding”，避免 provider snapshot 与 adapter 安装悄悄漂移。
 

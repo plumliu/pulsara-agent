@@ -58,6 +58,8 @@ from pulsara_agent.runtime.subagent import (
     SubagentLimitExceeded,
     SubagentRuntime,
 )
+from pulsara_agent.runtime.mcp.types import McpBindingIdentity
+from pulsara_agent.runtime.subagent.execution import ChildExecutionRegistry
 from pulsara_agent.runtime import (
     AgentRuntime,
     EventWriteConflict,
@@ -125,6 +127,48 @@ def _resumed_runtime(parent, locator, child_logs):
         event_log_locator=locator,
     )
     return resumed_parent, resumed
+
+
+def test_child_registry_indexes_exact_mcp_binding_identities() -> None:
+    registry = ChildExecutionRegistry()
+    identity = McpBindingIdentity(
+        server_id="docs",
+        slot_id="mcp_slot:1",
+        snapshot_id="mcp_snapshot:1",
+        discovery_generation=1,
+    )
+    registry.register_prepared(
+        subagent_run_id="subagent_run:mcp",
+        child_runtime_session_id="runtime:child:mcp",
+        child_session=None,
+        reservation=None,
+        mcp_binding_identities=frozenset({identity}),
+    )
+
+    assert registry.child_ids_for_mcp_bindings(frozenset({identity})) == frozenset(
+        {"subagent_run:mcp"}
+    )
+    registry.release_handle("subagent_run:mcp")
+    assert registry.child_ids_for_mcp_bindings(frozenset({identity})) == frozenset()
+
+
+def test_child_runtime_mcp_installation_owner_points_to_parent_session(
+    tmp_path,
+) -> None:
+    parent, _locator, _child_logs, runtime = _runtime(tmp_path)
+    parent.set_mcp_installation_contract(
+        installation_id="mcp_installation:parent"
+    )
+
+    child = runtime._create_child_runtime_session(  # noqa: SLF001
+        child_runtime_session_id="runtime:child:mcp-owner",
+        subagent_run_id="subagent_run:mcp-owner",
+        parent_run_id="run:parent",
+        capability_profile_id="subagent_capability_profile:test",
+    )
+
+    assert child.mcp_installation_id == "mcp_installation:parent"
+    assert child.mcp_installation_owner_runtime_session_id == parent.runtime_session_id
 
 
 def test_subagent_graph_events_are_parent_stream_and_task_is_artifact_backed(

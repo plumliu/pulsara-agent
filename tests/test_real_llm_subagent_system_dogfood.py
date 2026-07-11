@@ -1001,7 +1001,8 @@ def _failed_dependency_parent_user_prompt(
 
 
 async def _write_seed_run_start(wiring, context: EventContext, user_input: str) -> None:
-    await wiring.runtime_wiring.runtime_session.write_event(
+    runtime_session = wiring.runtime_wiring.runtime_session
+    await runtime_session.write_event(
         RunStartEvent(
             **context.event_fields(),
             user_input_chars=len(user_input),
@@ -1011,6 +1012,11 @@ async def _write_seed_run_start(wiring, context: EventContext, user_input: str) 
                 PermissionMode.BYPASS_PERMISSIONS
             ).to_dict(),
             permission_snapshot_source="session_default",
+            model_target=wiring.agent_runtime.resolve_run_model_target().fact,
+            mcp_installation_id=runtime_session.mcp_installation_id,
+            mcp_installation_owner_runtime_session_id=(
+                runtime_session.mcp_installation_owner_runtime_session_id
+            ),
             metadata={"user_input": user_input},
         )
     )

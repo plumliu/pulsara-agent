@@ -28,7 +28,11 @@ from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.runtime.approval import ApprovalResolution, PendingApproval
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
-from pulsara_agent.runtime.plan import PendingInteraction, PlanInteractionResolution
+from pulsara_agent.runtime.plan import (
+    McpInputRequiredInteractionResolution,
+    PendingInteraction,
+    PlanInteractionResolution,
+)
 from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
@@ -38,6 +42,7 @@ from pulsara_agent.runtime.terminal import (
 )
 from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.types import McpReconcileTicket
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources, build_retrieval_runtime_resources
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
@@ -73,6 +78,16 @@ class HostCore:
     _lifecycle: HostCoreLifecycle = field(default=HostCoreLifecycle.OPEN, init=False, repr=False)
     _lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _shutdown_attempt: _HostShutdownAttempt | None = field(default=None, init=False, repr=False)
+    _failed_open_mcp_supervisors: dict[int, McpServerSupervisor] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _failed_open_mcp_cleanup_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+    )
 
     # -- Lifecycle gate -------------------------------------------------------
 
@@ -190,12 +205,23 @@ class HostCore:
         if not self.durable:
             return []
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root) if workspace_input is not None else None
-        return self._manifest_store().list_resumable(
+        pending_runtime_ids = {
+            runtime_session_id
+            for _host_session_id, runtime_session_id in (
+                await self.registry.list_manifest_close_tombstones()
+            )
+        }
+        summaries = self._manifest_store().list_resumable(
             workspace_root=workspace.workspace_root if workspace is not None else None,
             memory_domain_id=workspace.memory_domain.memory_domain_id if workspace is not None else None,
             include_closed=include_closed,
-            limit=limit,
+            limit=limit + len(pending_runtime_ids),
         )
+        return [
+            summary
+            for summary in summaries
+            if summary.runtime_session_id not in pending_runtime_ids
+        ][:limit]
 
     async def repair_session_for_resume(self, runtime_session_id: str) -> DanglingRunRepairResult:
         if not self.durable:
@@ -225,6 +251,7 @@ class HostCore:
         repair_dangling_on_resume: bool,
     ) -> HostSession:
         self._raise_if_not_accepting("open a session")
+        await self._drain_failed_open_mcp_supervisors()
         workspace = resolve_workspace(workspace_input, scratch_root=self.scratch_root)
         host_session_id = host_session_id or f"host:{uuid4().hex}"
         conversation_id = conversation_id or f"conversation:{uuid4().hex}"
@@ -238,6 +265,9 @@ class HostCore:
         lease: WorkspaceTerminalLease | None = None
         wiring = None
         mcp_supervisor: McpServerSupervisor | None = None
+        mcp_ticket: McpReconcileTicket | None = None
+        manifest_runtime_session_id: str | None = None
+        close_manifest_if_publish_fails = runtime_session_id is None
         try:
             if repair_dangling_on_resume:
                 if runtime_session_id is None:
@@ -248,7 +278,7 @@ class HostCore:
                     workspace_root=str(workspace.workspace_root),
                 )
             lease = await self._attach_supervisor(workspace, host_session_id, conversation_id)
-            mcp_supervisor = await self._build_mcp_supervisor(workspace)
+            mcp_supervisor, mcp_ticket = await self._build_mcp_supervisor(workspace)
             wiring = build_agent_runtime_wiring(
                 self.settings,
                 workspace.workspace_root,
@@ -269,17 +299,8 @@ class HostCore:
                 permission_policy=permission_policy,
                 retrieval_resources=await self._get_retrieval_resources() if self.durable else None,
                 governance_coordinator=self._governance_coordinator if self.durable else None,
-                mcp_managers=(mcp_supervisor,),
+                mcp_supervisor=mcp_supervisor,
             )
-            if self.durable:
-                self._manifest_store().upsert_open_manifest(
-                    runtime_session_id=wiring.runtime_wiring.runtime_session.runtime_session_id,
-                    conversation_id=conversation_id,
-                    workspace=workspace,
-                    model_role=model_role,
-                    permission_policy=wiring.agent_runtime.permission_policy,
-                    created_by=created_by,
-                )
             session = HostSession(
                 host_session_id=host_session_id,
                 conversation_id=conversation_id,
@@ -288,6 +309,19 @@ class HostCore:
                 terminal_lease=lease,
                 mcp_supervisor=mcp_supervisor,
             )
+            wiring.runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
+            if mcp_ticket is not None:
+                await session.initialize_mcp(mcp_ticket)
+            if self.durable:
+                manifest_runtime_session_id = session.runtime_session_id
+                self._manifest_store().upsert_open_manifest(
+                    runtime_session_id=manifest_runtime_session_id,
+                    conversation_id=conversation_id,
+                    workspace=workspace,
+                    model_role=model_role,
+                    permission_policy=wiring.agent_runtime.permission_policy,
+                    created_by=created_by,
+                )
             # Publish under the lifecycle lock and re-check state: this is the
             # linearization point against shutdown/close. If shutdown won the
             # race, we roll back instead of leaking a session into a closed
@@ -304,19 +338,43 @@ class HostCore:
                     await self.registry.publish(reservation, session)
                     self._session_leases[host_session_id] = lease
             return session
-        except BaseException:
+        except BaseException as open_error:
             # Rollback exactly once: release the reservation, release the lease
             # (kills/prunes any owner state), and close partially-built runtime
             # resources so a failed open leaks nothing (contract §0, audit P0-4).
+            if (
+                manifest_runtime_session_id is not None
+                and close_manifest_if_publish_fails
+            ):
+                await self.registry.retain_failed_open_manifest_close(
+                    reservation,
+                    runtime_session_id=manifest_runtime_session_id,
+                )
+                try:
+                    self._manifest_store().mark_closed(manifest_runtime_session_id)
+                except BaseException as manifest_error:
+                    open_error.add_note(
+                        "durable manifest close remains pending after failed open: "
+                        f"{type(manifest_error).__name__}: {manifest_error}"
+                    )
+                else:
+                    await self.registry.complete_manifest_close(
+                        host_session_id=reservation.host_session_id,
+                        runtime_session_id=manifest_runtime_session_id,
+                    )
+            if mcp_supervisor is not None:
+                try:
+                    await mcp_supervisor.aclose(timeout_seconds=5.0)
+                except BaseException:
+                    async with self._failed_open_mcp_cleanup_lock:
+                        self._failed_open_mcp_supervisors[id(mcp_supervisor)] = (
+                            mcp_supervisor
+                        )
             await self.registry.release_reservation(reservation)
             if lease is not None:
                 await self._release_supervisor_lease(lease)
             if wiring is not None:
                 wiring.agent_runtime.close()
-                if wiring.runtime_wiring.mcp_manager is not None:
-                    await wiring.runtime_wiring.mcp_manager.aclose()
-            elif mcp_supervisor is not None:
-                await mcp_supervisor.aclose()
             raise
 
     # -- Read facades (allowed during CLOSING for diagnostics) ----------------
@@ -369,6 +427,15 @@ class HostCore:
         self._raise_if_not_accepting("resolve a plan interaction")
         session = await self.get_session(host_session_id)
         return await session.resolve_plan_interaction(resolution)
+
+    async def resolve_mcp_input_required(
+        self,
+        host_session_id: str,
+        resolution: McpInputRequiredInteractionResolution,
+    ) -> AgentRunResult:
+        self._raise_if_not_accepting("resolve MCP input-required")
+        session = await self.get_session(host_session_id)
+        return await session.resolve_mcp_input_required(resolution)
 
     async def exit_plan_workflow(
         self,
@@ -598,9 +665,14 @@ class HostCore:
                     await self.close_session(summary.host_session_id)
                 except BaseException as exc:
                     errors.append(exc)
+            try:
+                await self._drain_failed_open_mcp_supervisors()
+            except BaseException as exc:
+                errors.append(exc)
             blocked_by_close_work = bool(
                 await self.registry.list_sessions()
                 or await self.registry.list_manifest_close_tombstones()
+                or self._failed_open_mcp_supervisors
             )
             if blocked_by_close_work and not errors:
                 errors.append(
@@ -649,6 +721,24 @@ class HostCore:
 
     # -- Internal helpers -----------------------------------------------------
 
+    async def _drain_failed_open_mcp_supervisors(self) -> None:
+        """Retry bounded MCP cleanup retained by an unpublished open rollback."""
+
+        async with self._failed_open_mcp_cleanup_lock:
+            pending = tuple(self._failed_open_mcp_supervisors.items())
+            first_error: BaseException | None = None
+            for identity, supervisor in pending:
+                try:
+                    await supervisor.aclose(timeout_seconds=5.0)
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    if self._failed_open_mcp_supervisors.get(identity) is supervisor:
+                        self._failed_open_mcp_supervisors.pop(identity, None)
+            if first_error is not None:
+                raise first_error
+
     async def _get_retrieval_resources(self) -> RetrievalRuntimeResources:
         async with self._retrieval_lock:
             if self._lifecycle is not HostCoreLifecycle.OPEN:
@@ -670,11 +760,13 @@ class HostCore:
                 self._retrieval_resources.start()
             return self._retrieval_resources
 
-    async def _build_mcp_supervisor(self, workspace: ResolvedWorkspace) -> McpServerSupervisor:
+    async def _build_mcp_supervisor(
+        self, workspace: ResolvedWorkspace
+    ) -> tuple[McpServerSupervisor, McpReconcileTicket]:
         configs = load_mcp_server_configs(workspace_root=workspace.workspace_root)
         supervisor = McpServerSupervisor()
-        await supervisor.sync_servers(configs)
-        return supervisor
+        ticket = supervisor.prepare(configs, trigger="initial")
+        return supervisor, ticket
 
     async def _attach_supervisor(
         self,

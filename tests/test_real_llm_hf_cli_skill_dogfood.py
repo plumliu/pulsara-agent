@@ -55,7 +55,12 @@ def test_real_llm_hf_cli_skill_downloads_and_deletes_model_repo(tmp_path: Path) 
     assert result["status"] == "finished", result
     assert result["download_dir_exists_after"] is False, result
     assert result["tool_names"].count("terminal") >= 1, result
-    assert set(result["tool_names"]).issubset({"terminal", "terminal_process"}), result
+    # Terminal output may be archived before the follow-up model call. Reading
+    # that Pulsara-owned artifact is part of the normal terminal observation
+    # path, not an unrelated way to perform the Hugging Face operation.
+    assert set(result["tool_names"]).issubset(
+        {"terminal", "terminal_process", "artifact_read"}
+    ), result
     assert (
         sum(command.count("hf download") for command in result["terminal_commands"])
         == 1

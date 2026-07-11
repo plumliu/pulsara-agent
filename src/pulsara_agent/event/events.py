@@ -36,6 +36,13 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelCallFact,
     ResolvedModelTargetFact,
 )
+from pulsara_agent.primitives.mcp import (
+    MAX_MCP_DIAGNOSTICS_PER_FACT,
+    McpDiagnosticFact,
+    McpInstalledServerSnapshotFact,
+    McpReconcileAttemptSummaryFact,
+    McpReconcileTriggerValue,
+)
 
 _PRESET_PERMISSION_MODES = frozenset(
     {
@@ -147,6 +154,7 @@ class EventType(StrEnum):
     MODEL_CALL_REJECTED = "MODEL_CALL_REJECTED"
     CONTEXT_COMPILED = "CONTEXT_COMPILED"
     CAPABILITY_GATE_DECISION = "CAPABILITY_GATE_DECISION"
+    MCP_CAPABILITY_SNAPSHOT_INSTALLED = "MCP_CAPABILITY_SNAPSHOT_INSTALLED"
 
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
     TEXT_BLOCK_DELTA = "TEXT_BLOCK_DELTA"
@@ -351,6 +359,8 @@ class RunStartEvent(EventBase):
     permission_policy: dict[str, Any]
     permission_snapshot_source: Literal["session_default", "plan_mode", "child_profile"]
     model_target: ResolvedModelTargetFact
+    mcp_installation_id: str
+    mcp_installation_owner_runtime_session_id: str
 
     @model_validator(mode="after")
     def _validate_permission_snapshot(self) -> "RunStartEvent":
@@ -361,6 +371,62 @@ class RunStartEvent(EventBase):
             policy=self.permission_policy,
             context="RunStartEvent",
         )
+        return self
+
+
+class McpCapabilitySnapshotInstalledEvent(EventBase):
+    type: Literal[EventType.MCP_CAPABILITY_SNAPSHOT_INSTALLED] = (
+        EventType.MCP_CAPABILITY_SNAPSHOT_INSTALLED
+    )
+    installation_id: str
+    previous_installation_id: str | None = None
+    config_epoch: int
+    event_safe_config_set_fingerprint: str
+    installation_triggers: tuple[McpReconcileTriggerValue, ...]
+    coalesced_installation_count: int = 0
+    coalesced_attempt_summaries: tuple[McpReconcileAttemptSummaryFact, ...] = ()
+    coalesced_attempt_summaries_omitted: int = 0
+    server_snapshots: tuple[McpInstalledServerSnapshotFact, ...]
+    total_installed_tool_count: int
+    added_tool_count: int
+    revoked_tool_count: int
+    changed_tool_names_bounded: tuple[str, ...] = ()
+    changed_tool_names_omitted: int = 0
+    diagnostics: tuple[McpDiagnosticFact, ...] = ()
+
+    @model_validator(mode="after")
+    def _installation_contract(self) -> "McpCapabilitySnapshotInstalledEvent":
+        if self.installation_id == self.previous_installation_id:
+            raise ValueError("MCP installation cannot point to itself as previous")
+        counts = (
+            self.config_epoch,
+            self.coalesced_installation_count,
+            self.coalesced_attempt_summaries_omitted,
+            self.total_installed_tool_count,
+            self.added_tool_count,
+            self.revoked_tool_count,
+            self.changed_tool_names_omitted,
+        )
+        if any(value < 0 for value in counts):
+            raise ValueError("MCP installation counts must be non-negative")
+        if len(self.changed_tool_names_bounded) > 64:
+            raise ValueError("MCP changed tool names exceed bounded cap")
+        if len(self.coalesced_attempt_summaries) > 64:
+            raise ValueError("MCP coalesced attempt summaries exceed bounded cap")
+        if len(self.server_snapshots) > 64:
+            raise ValueError("MCP installed server snapshots exceed bounded cap")
+        if len(self.diagnostics) > MAX_MCP_DIAGNOSTICS_PER_FACT:
+            raise ValueError("MCP installation diagnostics exceed bounded cap")
+        triggers = {
+            snapshot.attempt.reconcile_trigger
+            for snapshot in self.server_snapshots
+            if snapshot.changed_in_this_installation
+        }
+        triggers.update(
+            summary.reconcile_trigger for summary in self.coalesced_attempt_summaries
+        )
+        if not triggers or tuple(sorted(triggers)) != tuple(self.installation_triggers):
+            raise ValueError("MCP installation triggers must match changed attempt facts")
         return self
 
 
@@ -2019,6 +2085,7 @@ class CustomEvent(EventBase):
 
 AgentEvent: TypeAlias = (
     RunStartEvent
+    | McpCapabilitySnapshotInstalledEvent
     | RunEndEvent
     | ReplyStartEvent
     | ReplyEndEvent

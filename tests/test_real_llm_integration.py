@@ -5268,7 +5268,8 @@ def _cleanup_real_durable_wiring(wiring) -> None:
 async def _cleanup_real_durable_wiring_async(wiring) -> None:
     wiring.agent_runtime.close()
     runtime_wiring = wiring.runtime_wiring
-    await _best_effort_aclose(runtime_wiring.mcp_manager, timeout_seconds=5.0)
+    # MCP managers are owned and closed by HostSession.mcp_supervisor after the
+    # startup-latency hard cut; RuntimeWiring carries only the frozen installation.
     await _best_effort_aclose(runtime_wiring.retrieval_resources)
     await _best_effort_aclose(runtime_wiring.governance_coordinator)
     await _best_effort_aclose(runtime_wiring.governance_relatedness)

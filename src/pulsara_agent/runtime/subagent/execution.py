@@ -10,6 +10,7 @@ from typing import Literal
 from uuid import uuid4
 
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.mcp.types import McpBindingIdentity
 from pulsara_agent.runtime.subagent.facts import SubagentGraphState
 
 
@@ -47,6 +48,7 @@ class ChildExecutionHandle:
     started_in_process_at: datetime
     phase: Literal["prepared", "started", "closing", "released"] = "prepared"
     release_requested: bool = False
+    mcp_binding_identities: frozenset[McpBindingIdentity] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,9 @@ class ChildExecutionRegistry:
         self._lock = RLock()
         self._handles: dict[str, ChildExecutionHandle] = {}
         self._reservations: dict[str, ChildCapacityReservation] = {}
+        self._child_ids_by_mcp_binding_identity: dict[
+            McpBindingIdentity, set[str]
+        ] = {}
 
     def reserve(self, *, parent_run_id: str, count: int) -> ChildCapacityReservation:
         if count < 1:
@@ -84,6 +89,7 @@ class ChildExecutionRegistry:
         child_runtime_session_id: str,
         child_session: RuntimeSession | None,
         reservation: ChildCapacityReservation | None,
+        mcp_binding_identities: frozenset[McpBindingIdentity] = frozenset(),
     ) -> ChildExecutionHandle:
         with self._lock:
             if subagent_run_id in self._handles:
@@ -102,9 +108,26 @@ class ChildExecutionRegistry:
                 capacity_reservation=reservation,
                 cancellation_requested=False,
                 started_in_process_at=datetime.now(timezone.utc),
+                mcp_binding_identities=mcp_binding_identities,
             )
             self._handles[subagent_run_id] = handle
+            for identity in mcp_binding_identities:
+                self._child_ids_by_mcp_binding_identity.setdefault(
+                    identity, set()
+                ).add(subagent_run_id)
             return handle
+
+    def child_ids_for_mcp_bindings(
+        self,
+        identities: frozenset[McpBindingIdentity],
+    ) -> frozenset[str]:
+        with self._lock:
+            result: set[str] = set()
+            for identity in identities:
+                result.update(
+                    self._child_ids_by_mcp_binding_identity.get(identity, ())
+                )
+            return frozenset(result)
 
     def attach_session(self, subagent_run_id: str, session: RuntimeSession) -> None:
         with self._lock:
@@ -289,6 +312,13 @@ class ChildExecutionRegistry:
                 handle.phase = "closing"
                 return
             self._handles.pop(subagent_run_id, None)
+            for identity in handle.mcp_binding_identities:
+                run_ids = self._child_ids_by_mcp_binding_identity.get(identity)
+                if run_ids is None:
+                    continue
+                run_ids.discard(subagent_run_id)
+                if not run_ids:
+                    self._child_ids_by_mcp_binding_identity.pop(identity, None)
             handle.phase = "released"
             child_session = handle.child_session
             handle.child_session = None

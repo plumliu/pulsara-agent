@@ -10,7 +10,7 @@ from pulsara_agent.event.events import AgentEvent
 # Hard-cut schema generation.  Existing rows from earlier development schemas
 # must be reset/migrated; runtime deserialization does not synthesize missing
 # required event facts.
-AGENT_EVENT_SCHEMA_VERSION = 3
+AGENT_EVENT_SCHEMA_VERSION = 4
 
 
 _EVENT_CLASS_BY_TYPE = {

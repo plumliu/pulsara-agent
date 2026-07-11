@@ -62,7 +62,6 @@ class MockMcpClientManager:
     close_count: int = 0
     cancel_count: int = 0
     calls: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
-    elicitation_responses: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
     _closed: bool = False
     _active_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
 
@@ -99,12 +98,6 @@ class MockMcpClientManager:
         self.cancel_count += 1
         for task in tuple(self._active_tasks):
             task.cancel()
-
-    async def respond_elicitation(self, server_id: str, request_id: str, answer: dict[str, Any]) -> Any:
-        if self._closed:
-            raise RuntimeError("MCP manager is closed")
-        self.elicitation_responses.append((server_id, request_id, dict(answer)))
-        return {"elicitation_response": answer, "request_id": request_id}
 
     async def resume_suspended_request(
         self,
@@ -148,57 +141,3 @@ async def _await_handler(handler: McpToolHandler, arguments: dict[str, Any]) -> 
     if hasattr(result, "__await__"):
         return await result  # type: ignore[misc]
     return result
-
-
-@dataclass(slots=True)
-class CompositeMcpClientManager:
-    """Fan-out manager for multiple session-owned MCP managers."""
-
-    managers: tuple[McpClientManager, ...] = ()
-
-    @property
-    def snapshots(self) -> tuple[McpServerSnapshot, ...]:
-        return tuple(snapshot for manager in self.managers for snapshot in manager.snapshots)
-
-    async def call_tool(
-        self,
-        server_id: str,
-        tool_name: str,
-        arguments: dict[str, Any],
-        *,
-        timeout_ms: int,
-    ) -> Any:
-        for manager in self.managers:
-            if any(snapshot.config.server_id == server_id for snapshot in manager.snapshots):
-                return await manager.call_tool(server_id, tool_name, arguments, timeout_ms=timeout_ms)
-        raise KeyError(f"Unknown MCP server: {server_id}")
-
-    def cancel_active(self) -> None:
-        for manager in self.managers:
-            manager.cancel_active()
-
-    async def resume_suspended_request(
-        self,
-        *,
-        server_id: str,
-        original_request: McpOriginalRequest,
-        request_state: str | None,
-        resolution: McpInputRequiredResolution,
-        timeout_ms: int,
-    ) -> Any:
-        for manager in self.managers:
-            if any(snapshot.config.server_id == server_id for snapshot in manager.snapshots):
-                return await manager.resume_suspended_request(
-                    server_id=server_id,
-                    original_request=original_request,
-                    request_state=request_state,
-                    resolution=resolution,
-                    timeout_ms=timeout_ms,
-                )
-        raise KeyError(f"Unknown MCP server: {server_id}")
-
-    async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
-        await asyncio.gather(
-            *(manager.aclose(timeout_seconds=timeout_seconds) for manager in self.managers),
-            return_exceptions=True,
-        )

@@ -13,6 +13,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 from uuid import uuid4
@@ -24,8 +25,10 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from pulsara_agent.runtime.mcp.manager import McpClientManager
+from pulsara_agent.primitives.mcp import McpServerLifecycleTimingFact
 from pulsara_agent.runtime.mcp.types import (
     McpContentArtifact,
+    McpDrainError,
     McpDiscoveredPrompt,
     McpDiscoveredResource,
     McpDiscoveredResourceTemplate,
@@ -42,6 +45,9 @@ from pulsara_agent.runtime.mcp.types import (
     McpStreamableHttpConfig,
     McpToolAnnotations,
     McpToolResult,
+    event_safe_mcp_config_fingerprint,
+    filter_mcp_tools,
+    snapshot_semantic_fingerprint,
 )
 
 
@@ -72,6 +78,94 @@ class _SdkServerConnection:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+class _SdkOwnerStartError(RuntimeError):
+    def __init__(
+        self,
+        cause: BaseException,
+        *,
+        close_requested: asyncio.Event,
+        owner_task: asyncio.Task[None],
+    ) -> None:
+        self.cause = cause
+        self.close_requested = close_requested
+        self.owner_task = owner_task
+        super().__init__(str(cause))
+
+
+class SdkMcpConnectError(RuntimeError):
+    """Connect failure whose partially started SDK owner still needs drain."""
+
+    def __init__(self, connection: "SdkMcpConnection", cause: BaseException) -> None:
+        self.connection = connection
+        self.cause = cause
+        super().__init__(f"{type(cause).__name__}: {cause}")
+
+
+class SdkMcpConnectCancelled(asyncio.CancelledError):
+    """Caller cancellation carrying the partial SDK connection cleanup owner."""
+
+    def __init__(self, connection: "SdkMcpConnection") -> None:
+        self.connection = connection
+        super().__init__("MCP SDK connect cancelled")
+
+
+@dataclass(slots=True)
+class SdkMcpConnection:
+    """Connected, not-yet-discovered per-server SDK owner."""
+
+    _connection: _SdkServerConnection
+    _closed: bool = False
+
+    @classmethod
+    async def connect(
+        cls,
+        config: McpServerConfig,
+        *,
+        timeout_seconds: float,
+    ) -> "SdkMcpConnection":
+        client, http_client = _build_sdk_client(config)
+        try:
+            close_requested, owner_task = await _start_sdk_client_owner(
+                client,
+                timeout_seconds=timeout_seconds,
+            )
+        except _SdkOwnerStartError as exc:
+            connection = cls(
+                _SdkServerConnection(
+                    config=config,
+                    client=client,
+                    http_client=http_client,
+                    close_requested=exc.close_requested,
+                    owner_task=exc.owner_task,
+                )
+            )
+            if isinstance(exc.cause, asyncio.CancelledError):
+                raise SdkMcpConnectCancelled(connection) from exc.cause
+            raise SdkMcpConnectError(connection, exc.cause) from exc.cause
+        except BaseException:
+            if http_client is not None:
+                await _best_effort_sdk_close_step(http_client.aclose())
+            raise
+        return cls(
+            _SdkServerConnection(
+                config=config,
+                client=client,
+                http_client=http_client,
+                close_requested=close_requested,
+                owner_task=owner_task,
+            )
+        )
+
+    async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
+        if self._closed:
+            return
+        await _close_sdk_connection(
+            self._connection,
+            timeout_seconds=timeout_seconds,
+        )
+        self._closed = True
+
+
 @dataclass(slots=True)
 class SdkMcpClientManager(McpClientManager):
     """Session-owned official Python MCP SDK v2 manager."""
@@ -82,124 +176,172 @@ class SdkMcpClientManager(McpClientManager):
     max_items: int = DEFAULT_MCP_MAX_ITEMS
     _closed: bool = False
     _active_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
+    _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     @classmethod
-    async def start(
+    def from_connected_server(
         cls,
-        configs: tuple[McpServerConfig, ...],
         *,
+        connection: SdkMcpConnection,
+        snapshot: McpServerSnapshot,
         max_pages: int = DEFAULT_MCP_MAX_PAGES,
         max_items: int = DEFAULT_MCP_MAX_ITEMS,
     ) -> "SdkMcpClientManager":
-        manager = cls(_snapshots=(), _connections={}, max_pages=max_pages, max_items=max_items)
-        snapshots: list[McpServerSnapshot] = []
-        for config in configs:
-            snapshots.append(await manager._connect_one(config))
-        manager._snapshots = tuple(snapshots)
-        return manager
+        raw = connection._connection
+        connection._closed = True  # ownership moves into the manager
+        return cls(
+            _snapshots=(snapshot,),
+            _connections={snapshot.server_id: raw},
+            max_pages=max_pages,
+            max_items=max_items,
+        )
 
     @property
     def snapshots(self) -> tuple[McpServerSnapshot, ...]:
         return self._snapshots
 
-    async def refresh(self) -> tuple[McpServerSnapshot, ...]:
-        snapshots: list[McpServerSnapshot] = []
-        for connection in tuple(self._connections.values()):
-            snapshots.append(await self._discover_connected(connection))
-        self._snapshots = tuple(snapshots)
-        return self._snapshots
-
-    async def _connect_one(self, config: McpServerConfig) -> McpServerSnapshot:
-        if not config.enabled:
-            return McpServerSnapshot(config=config, status=McpServerStatus.DISABLED)
-        try:
-            client, http_client = _build_sdk_client(config)
-            close_requested, owner_task = await _start_sdk_client_owner(
-                client,
-                timeout_seconds=config.startup_timeout_ms / 1000,
-            )
-            connection = _SdkServerConnection(
-                config=config,
-                client=client,
-                http_client=http_client,
-                close_requested=close_requested,
-                owner_task=owner_task,
-            )
-            self._connections[config.server_id] = connection
-            return await self._discover_connected(connection)
-        except Exception as exc:
-            await self._close_connection(config.server_id)
-            status = McpServerStatus.NEEDS_AUTH if _is_missing_auth(config, exc) else McpServerStatus.FAILED
-            return McpServerSnapshot(
-                config=config,
-                status=status,
-                message=_redact_diagnostic(f"{type(exc).__name__}: {exc}", config),
-            )
-
-    async def _discover_connected(self, connection: _SdkServerConnection) -> McpServerSnapshot:
+    async def _discover_connected(
+        self,
+        connection: _SdkServerConnection,
+        *,
+        config_epoch: int,
+        reconcile_attempt_id: str,
+        discovery_generation: int,
+        queued_at_utc: str,
+        queued_monotonic: float,
+        connect_started_at_utc: str,
+        connect_ended_at_utc: str,
+        connect_duration_seconds: float,
+        discovery_started_at_utc: str,
+        discovery_started_monotonic: float,
+    ) -> tuple[McpServerSnapshot, int, int]:
         config = connection.config
         diagnostics: list[dict[str, Any]] = []
-        try:
-            tools = await self._list_all(
-                "tools/list",
-                lambda cursor: connection.client.session.list_tools(
-                    params=types.PaginatedRequestParams(cursor=cursor)
-                ),
-                diagnostics,
-                item_attr="tools",
-            )
-            resources = await self._list_optional(
-                "resources/list",
-                lambda cursor: connection.client.session.list_resources(
-                    params=types.PaginatedRequestParams(cursor=cursor)
-                ),
-                diagnostics,
-                config=config,
-                item_attr="resources",
-            )
-            resource_templates = await self._list_optional(
-                "resources/templates/list",
-                lambda cursor: connection.client.session.list_resource_templates(
-                    params=types.PaginatedRequestParams(cursor=cursor)
-                ),
-                diagnostics,
-                config=config,
-                item_attr="resource_templates",
-            )
-            prompts = await self._list_optional(
-                "prompts/list",
-                lambda cursor: connection.client.session.list_prompts(
-                    params=types.PaginatedRequestParams(cursor=cursor)
-                ),
-                diagnostics,
-                config=config,
-                item_attr="prompts",
-            )
-            return McpServerSnapshot(
-                config=config,
+        metrics = {"request_count": 0, "page_count": 0}
+        capabilities = getattr(connection.client, "server_capabilities", None)
+        tools: list[Any] = []
+        resources: list[Any] = []
+        resource_templates: list[Any] = []
+        prompts: list[Any] = []
+        discovery_tasks: dict[str, asyncio.Task[list[Any]]] = {}
+        async with asyncio.TaskGroup() as task_group:
+            if capabilities is not None and getattr(capabilities, "tools", None) is not None:
+                discovery_tasks["tools"] = task_group.create_task(
+                    self._list_all(
+                        "tools/list",
+                        lambda cursor: connection.client.session.list_tools(
+                            params=types.PaginatedRequestParams(cursor=cursor)
+                        ),
+                        diagnostics,
+                        item_attr="tools",
+                        metrics=metrics,
+                    )
+                )
+            if capabilities is not None and getattr(capabilities, "resources", None) is not None:
+                discovery_tasks["resources"] = task_group.create_task(
+                    self._list_all(
+                        "resources/list",
+                        lambda cursor: connection.client.session.list_resources(
+                            params=types.PaginatedRequestParams(cursor=cursor)
+                        ),
+                        diagnostics,
+                        item_attr="resources",
+                        metrics=metrics,
+                    )
+                )
+                discovery_tasks["resource_templates"] = task_group.create_task(
+                    self._list_all(
+                        "resources/templates/list",
+                        lambda cursor: connection.client.session.list_resource_templates(
+                            params=types.PaginatedRequestParams(cursor=cursor)
+                        ),
+                        diagnostics,
+                        item_attr="resource_templates",
+                        metrics=metrics,
+                    )
+                )
+            if capabilities is not None and getattr(capabilities, "prompts", None) is not None:
+                discovery_tasks["prompts"] = task_group.create_task(
+                    self._list_all(
+                        "prompts/list",
+                        lambda cursor: connection.client.session.list_prompts(
+                            params=types.PaginatedRequestParams(cursor=cursor)
+                        ),
+                        diagnostics,
+                        item_attr="prompts",
+                        metrics=metrics,
+                    )
+                )
+        tools = discovery_tasks.get("tools").result() if "tools" in discovery_tasks else []
+        resources = (
+            discovery_tasks.get("resources").result()
+            if "resources" in discovery_tasks
+            else []
+        )
+        resource_templates = (
+            discovery_tasks.get("resource_templates").result()
+            if "resource_templates" in discovery_tasks
+            else []
+        )
+        prompts = (
+            discovery_tasks.get("prompts").result()
+            if "prompts" in discovery_tasks
+            else []
+        )
+        ended_monotonic = time.monotonic()
+        ended_at_utc = _utc_now()
+        tool_facts = filter_mcp_tools(
+            config,
+            tuple(_tool_from_sdk(config.server_id, tool) for tool in tools),
+        )
+        resource_facts = tuple(_resource_from_sdk(config.server_id, resource) for resource in resources)
+        template_facts = tuple(
+            _resource_template_from_sdk(config.server_id, template)
+            for template in resource_templates
+        )
+        prompt_facts = tuple(_prompt_from_sdk(config.server_id, prompt) for prompt in prompts)
+        server_info = connection.client.server_info.model_dump(mode="json", by_alias=True)
+        snapshot = McpServerSnapshot(
+            snapshot_id=f"mcp_snapshot:{uuid4().hex}",
+            server_id=config.server_id,
+            config_epoch=config_epoch,
+            event_safe_config_fingerprint=event_safe_mcp_config_fingerprint(config),
+            snapshot_semantic_fingerprint=snapshot_semantic_fingerprint(
+                server_id=config.server_id,
                 status=McpServerStatus.READY,
-                tools=tuple(_tool_from_sdk(config.server_id, tool) for tool in tools),
-                resources=tuple(_resource_from_sdk(config.server_id, resource) for resource in resources),
-                resource_templates=tuple(
-                    _resource_template_from_sdk(config.server_id, template)
-                    for template in resource_templates
-                ),
-                prompts=tuple(_prompt_from_sdk(config.server_id, prompt) for prompt in prompts),
-                generation=_generation(),
+                tools=tool_facts,
+                resources=resource_facts,
+                resource_templates=template_facts,
+                prompts=prompt_facts,
                 protocol_version=connection.client.protocol_version,
-                server_info=connection.client.server_info.model_dump(mode="json", by_alias=True),
+                server_info=server_info,
                 instructions=connection.client.instructions,
-                diagnostics=tuple(diagnostics),
-            )
-        except Exception as exc:
-            return McpServerSnapshot(
-                config=config,
-                status=McpServerStatus.DEGRADED,
-                message=_redact_diagnostic(f"{type(exc).__name__}: {exc}", config),
-                generation=_generation(),
-                protocol_version=_safe_protocol_version(connection.client),
-                diagnostics=tuple(diagnostics),
-            )
+            ),
+            reconcile_attempt_id=reconcile_attempt_id,
+            discovery_generation=discovery_generation,
+            status=McpServerStatus.READY,
+            required=config.required,
+            tools=tool_facts,
+            resources=resource_facts,
+            resource_templates=template_facts,
+            prompts=prompt_facts,
+            protocol_version=connection.client.protocol_version,
+            server_info=server_info,
+            instructions=connection.client.instructions,
+            diagnostics=tuple(diagnostics),
+            timing=McpServerLifecycleTimingFact(
+                queued_at_utc=queued_at_utc,
+                connect_started_at_utc=connect_started_at_utc,
+                connect_ended_at_utc=connect_ended_at_utc,
+                discovery_started_at_utc=discovery_started_at_utc,
+                discovery_ended_at_utc=ended_at_utc,
+                completed_at_utc=ended_at_utc,
+                connect_duration_seconds=connect_duration_seconds,
+                discovery_duration_seconds=max(0.0, ended_monotonic - discovery_started_monotonic),
+                total_duration_seconds=max(0.0, ended_monotonic - queued_monotonic),
+            ),
+        )
+        return snapshot, metrics["request_count"], metrics["page_count"]
 
     async def _list_all(
         self,
@@ -208,11 +350,14 @@ class SdkMcpClientManager(McpClientManager):
         diagnostics: list[dict[str, Any]],
         *,
         item_attr: str,
+        metrics: dict[str, int],
     ) -> list[Any]:
         items: list[Any] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
         for page in range(1, self.max_pages + 1):
+            metrics["request_count"] += 1
+            metrics["page_count"] += 1
             result = await fetch(cursor)
             items.extend(list(getattr(result, item_attr)))
             next_cursor = getattr(result, "next_cursor", None)
@@ -232,28 +377,6 @@ class SdkMcpClientManager(McpClientManager):
             seen_cursors.add(next_cursor)
             cursor = next_cursor
         raise RuntimeError(f"MCP pagination exceeded max pages for {method}: {self.max_pages}")
-
-    async def _list_optional(
-        self,
-        method: str,
-        fetch: Callable[[str | None], Any],
-        diagnostics: list[dict[str, Any]],
-        *,
-        config: McpServerConfig,
-        item_attr: str,
-    ) -> list[Any]:
-        try:
-            return await self._list_all(method, fetch, diagnostics, item_attr=item_attr)
-        except Exception as exc:
-            diagnostics.append(
-                {
-                    "code": "mcp_optional_method_unavailable",
-                    "method": method,
-                    "error_type": type(exc).__name__,
-                    "message": _redact_diagnostic(str(exc), config),
-                }
-            )
-            return []
 
     async def call_tool(
         self,
@@ -453,37 +576,52 @@ class SdkMcpClientManager(McpClientManager):
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
         if self._closed:
             return
-        self._closed = True
-        self.cancel_active()
-        if self._active_tasks:
-            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-                await asyncio.wait_for(
-                    asyncio.gather(*tuple(self._active_tasks), return_exceptions=True),
-                    timeout=timeout_seconds,
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            await asyncio.wait_for(
+                self._close_lock.acquire(),
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+        except TimeoutError as exc:
+            raise McpDrainError("timed out waiting for MCP SDK close ownership") from exc
+        try:
+            if self._closed:
+                return
+            self.cancel_active()
+            if self._active_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(
+                            *tuple(self._active_tasks),
+                            return_exceptions=True,
+                        ),
+                        timeout=max(0.001, deadline - time.monotonic()),
+                    )
+                except TimeoutError as exc:
+                    raise McpDrainError("timed out draining active MCP SDK calls") from exc
+            for server_id in tuple(self._connections):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise McpDrainError("MCP SDK close deadline expired")
+                await self._close_connection(
+                    server_id,
+                    timeout_seconds=remaining,
                 )
-            _clear_current_task_cancellation()
-        close_tasks = tuple(self._close_connection(server_id) for server_id in tuple(self._connections))
-        if close_tasks:
-            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-                await asyncio.wait_for(
-                    asyncio.gather(*close_tasks, return_exceptions=True),
-                    timeout=timeout_seconds,
-                )
-            _clear_current_task_cancellation()
+            self._closed = True
+        finally:
+            self._close_lock.release()
 
-    async def _close_connection(self, server_id: str) -> None:
-        connection = self._connections.pop(server_id, None)
+    async def _close_connection(
+        self,
+        server_id: str,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        connection = self._connections.get(server_id)
         if connection is None:
             return
-        await _best_effort_sdk_close_step(_terminate_sdk_stdio_process(connection.client))
-        if connection.close_requested is not None:
-            connection.close_requested.set()
-        if connection.owner_task is not None:
-            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-                await asyncio.wait_for(connection.owner_task, timeout=1.0)
-            _clear_current_task_cancellation()
-        if connection.http_client is not None:
-            await _best_effort_sdk_close_step(connection.http_client.aclose())
+        await _close_sdk_connection(connection, timeout_seconds=timeout_seconds)
+        self._connections.pop(server_id, None)
 
     def _require_connection(self, server_id: str) -> _SdkServerConnection:
         if self._closed:
@@ -492,6 +630,49 @@ class SdkMcpClientManager(McpClientManager):
             return self._connections[server_id]
         except KeyError as exc:
             raise KeyError(f"Unknown MCP server: {server_id}") from exc
+
+
+async def discover_mcp_server(
+    connection: SdkMcpConnection,
+    *,
+    config_epoch: int,
+    reconcile_attempt_id: str,
+    discovery_generation: int,
+    queued_at_utc: str,
+    queued_monotonic: float,
+    connect_started_at_utc: str,
+    connect_ended_at_utc: str,
+    connect_duration_seconds: float,
+    discovery_started_at_utc: str,
+    discovery_started_monotonic: float,
+    timeout_seconds: float,
+    max_pages: int = DEFAULT_MCP_MAX_PAGES,
+    max_items: int = DEFAULT_MCP_MAX_ITEMS,
+) -> tuple[McpServerSnapshot, int, int]:
+    """Discover one already-connected server under one absolute caller budget."""
+
+    probe = SdkMcpClientManager(
+        _snapshots=(),
+        _connections={},
+        max_pages=max_pages,
+        max_items=max_items,
+    )
+    return await asyncio.wait_for(
+        probe._discover_connected(
+            connection._connection,
+            config_epoch=config_epoch,
+            reconcile_attempt_id=reconcile_attempt_id,
+            discovery_generation=discovery_generation,
+            queued_at_utc=queued_at_utc,
+            queued_monotonic=queued_monotonic,
+            connect_started_at_utc=connect_started_at_utc,
+            connect_ended_at_utc=connect_ended_at_utc,
+            connect_duration_seconds=connect_duration_seconds,
+            discovery_started_at_utc=discovery_started_at_utc,
+            discovery_started_monotonic=discovery_started_monotonic,
+        ),
+        timeout=max(0.001, timeout_seconds),
+    )
 
 
 def _build_sdk_client(config: McpServerConfig) -> tuple[Client, httpx.AsyncClient | None]:
@@ -523,6 +704,48 @@ def _build_sdk_client(config: McpServerConfig) -> tuple[Client, httpx.AsyncClien
             read_timeout_seconds=config.tool_timeout_ms / 1000,
         ), http_client
     raise TypeError(f"unsupported MCP transport: {type(transport).__name__}")
+
+
+async def _close_sdk_connection(
+    connection: _SdkServerConnection,
+    *,
+    timeout_seconds: float,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    await _best_effort_sdk_close_step(
+        asyncio.wait_for(
+            _terminate_sdk_stdio_process(connection.client),
+            timeout=max(0.001, min(1.0, deadline - time.monotonic())),
+        )
+    )
+    if connection.close_requested is not None:
+        connection.close_requested.set()
+    if connection.owner_task is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise McpDrainError("MCP SDK owner close deadline expired")
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(connection.owner_task),
+                timeout=remaining,
+            )
+        except TimeoutError as exc:
+            raise McpDrainError("timed out draining MCP SDK owner task") from exc
+        except asyncio.CancelledError:
+            if not connection.owner_task.cancelled():
+                raise
+    if connection.http_client is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise McpDrainError("MCP HTTP client close deadline expired")
+        try:
+            await asyncio.wait_for(connection.http_client.aclose(), timeout=remaining)
+        except TimeoutError as exc:
+            raise McpDrainError("timed out closing MCP HTTP client") from exc
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 async def _start_sdk_client_owner(
@@ -559,11 +782,14 @@ async def _start_sdk_client_owner(
     task = asyncio.create_task(owner(), name="pulsara-mcp-sdk-client-owner")
     try:
         await asyncio.wait_for(ready.wait(), timeout=timeout_seconds)
-    except BaseException:
+    except BaseException as exc:
+        close_requested.set()
         task.cancel()
-        with contextlib.suppress(BaseException):
-            await task
-        raise
+        raise _SdkOwnerStartError(
+            exc,
+            close_requested=close_requested,
+            owner_task=task,
+        ) from exc
     if enter_error is not None:
         with contextlib.suppress(BaseException):
             await task
@@ -624,6 +850,9 @@ async def _best_effort_sdk_close_step(awaitable: Any) -> None:
     try:
         await awaitable
     except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
         _clear_current_task_cancellation()
     except Exception:
         pass

@@ -43,7 +43,9 @@ from pulsara_agent.event import (
     RunErrorEvent,
     RunStartEvent,
     ToolResultEndEvent,
+    ToolResultDataDeltaEvent,
     ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
 from pulsara_agent.event.events import utc_now
@@ -124,7 +126,6 @@ from pulsara_agent.runtime.permission_snapshot import (
     validate_preset_policy_payload,
 )
 from pulsara_agent.runtime.plan import (
-    McpElicitationResolution,
     McpInputRequiredInteractionResolution,
     PlanExitResolution,
     PlanInteractionResolution,
@@ -134,6 +135,7 @@ from pulsara_agent.runtime.plan import (
 )
 from pulsara_agent.runtime.mcp.types import (
     MAX_MCP_INPUT_REQUIRED_ROUNDS,
+    McpBindingIdentity,
     McpInputRequestDTO,
     McpInputRequiredResolution,
     redact_mcp_error_message,
@@ -143,7 +145,10 @@ from pulsara_agent.runtime.recovery import (
     InRunRecoveryCause,
     InRunRecoveryState,
 )
-from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.session import (
+    EventPublicationAfterCommitError,
+    RuntimeSession,
+)
 from pulsara_agent.runtime.state import (
     LoopBudget,
     LoopState,
@@ -458,6 +463,26 @@ def _mcp_input_requests_from_payload(value: object) -> tuple[McpInputRequestDTO,
     return tuple(requests)
 
 
+def _mcp_resume_binding_changed(payload: dict[str, Any], tool: object) -> bool:
+    raw_identity = payload.get("mcp_binding_identity")
+    current_identity = getattr(tool, "binding_identity", None)
+    if not isinstance(raw_identity, dict) or not isinstance(
+        current_identity,
+        McpBindingIdentity,
+    ):
+        return True
+    try:
+        pending_identity = McpBindingIdentity(
+            server_id=str(raw_identity["server_id"]),
+            slot_id=str(raw_identity["slot_id"]),
+            snapshot_id=str(raw_identity["snapshot_id"]),
+            discovery_generation=int(raw_identity["discovery_generation"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return True
+    return pending_identity != current_identity
+
+
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
@@ -739,15 +764,6 @@ class AgentRuntime:
             pass
         return self._run_result(state)
 
-    async def resume_after_mcp_elicitation(
-        self,
-        state: LoopState,
-        resolution: McpElicitationResolution,
-    ) -> AgentRunResult:
-        async for _event in self.stream_after_mcp_elicitation(state, resolution):
-            pass
-        return self._run_result(state)
-
     async def resume_after_mcp_input_required(
         self,
         state: LoopState,
@@ -765,23 +781,40 @@ class AgentRuntime:
         async for event in self._stream_plan_interaction_resolution(state, resolution):
             yield event
 
-    async def stream_after_mcp_elicitation(
-        self,
-        state: LoopState,
-        resolution: McpElicitationResolution,
-    ) -> AsyncIterator[AgentEvent]:
-        async for event in self._stream_mcp_elicitation_resolution(state, resolution):
-            yield event
-
     async def stream_after_mcp_input_required(
         self,
         state: LoopState,
         resolution: McpInputRequiredInteractionResolution,
     ) -> AsyncIterator[AgentEvent]:
-        async for event in self._stream_mcp_input_required_resolution(
-            state, resolution
-        ):
-            yield event
+        tool_call_id = _required_str(
+            state.pending_interaction_payload.get("tool_call_id"),
+            "pending MCP tool_call_id",
+        )
+        tool_name = _required_str(
+            state.pending_interaction_payload.get("tool_name"),
+            "pending MCP tool_name",
+        )
+        try:
+            async for event in self._stream_mcp_input_required_resolution(
+                state, resolution
+            ):
+                yield event
+        except EventPublicationAfterCommitError:
+            committed_result_events = self._committed_tool_result_events(
+                state,
+                tool_call_id=tool_call_id,
+            )
+            if committed_result_events:
+                self._record_tool_result_events(
+                    state,
+                    stored_events=committed_result_events,
+                    tool_call_id=tool_call_id,
+                    tool_call_name=tool_name,
+                )
+                await self._complete_mcp_pending_lease(
+                    resolution.interaction_id
+                )
+            raise
 
     async def abort_run(
         self,
@@ -1052,17 +1085,37 @@ class AgentRuntime:
                 created_at=user_observed_at_utc,
             )
         )
-        yield await self.runtime_session.emit(
-            RunStartEvent(
-                **self._event_context(state).event_fields(),
-                created_at=user_observed_at_utc,
-                user_input_chars=len(user_input),
-                **permission_snapshot.to_event_fields(),
-                model_target=run_model_target.fact,
-                metadata={"user_input": user_input},
+        event_context = self._event_context(state)
+        run_start = RunStartEvent(
+            **event_context.event_fields(),
+            created_at=user_observed_at_utc,
+            user_input_chars=len(user_input),
+            **permission_snapshot.to_event_fields(),
+            model_target=run_model_target.fact,
+            mcp_installation_id=self.runtime_session.mcp_installation_id,
+            mcp_installation_owner_runtime_session_id=(
+                self.runtime_session.mcp_installation_owner_runtime_session_id
             ),
-            state=state,
+            metadata={"user_input": user_input},
         )
+        pending_mcp_audits = self.runtime_session.pending_mcp_installation_audit_events(
+            event_context
+        )
+        try:
+            stored_run_start_batch = await self.runtime_session.emit_many(
+                (run_start, *pending_mcp_audits),
+                state=state,
+            )
+        except EventPublicationAfterCommitError as exc:
+            self.runtime_session.acknowledge_committed_mcp_installation_audits(
+                exc.result.committed_events
+            )
+            raise
+        self.runtime_session.acknowledge_committed_mcp_installation_audits(
+            stored_run_start_batch
+        )
+        for stored_event in stored_run_start_batch:
+            yield stored_event
         async for event in self._emit_pending_plan_entry_audit(state):
             yield event
         ok, _result, error_event = await self._run_memory_hook(
@@ -1858,84 +1911,6 @@ class AgentRuntime:
         async for event in self._stream_model_loop(state, exposure):
             yield event
 
-    async def _stream_mcp_elicitation_resolution(
-        self,
-        state: LoopState,
-        resolution: McpElicitationResolution,
-    ) -> AsyncIterator[AgentEvent]:
-        if state.status is not LoopStatus.WAITING_USER:
-            raise ValueError("MCP elicitation resolution requires a waiting state")
-        if state.pending_interaction_kind != "mcp_elicitation":
-            raise ValueError("waiting state does not contain an MCP elicitation")
-        payload = dict(state.pending_interaction_payload)
-        if resolution.interaction_id != payload.get("interaction_id"):
-            raise ValueError(
-                "MCP elicitation interaction id does not match the pending interaction"
-            )
-
-        tool_call_id = str(payload["tool_call_id"])
-        tool_name = str(payload["tool_name"])
-        server_id = str(payload["server_id"])
-        request_id = str(payload["request_id"])
-        yield await self.runtime_session.emit(
-            CustomEvent(
-                **self._event_context(state).event_fields(),
-                name="mcp_elicitation_resolved",
-                value={
-                    "interaction_id": resolution.interaction_id,
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                    "server_id": server_id,
-                    "request_id": request_id,
-                },
-            ),
-            state=state,
-        )
-        state.pending_interaction_kind = None
-        state.pending_interaction_payload = {}
-        state.status = LoopStatus.RUNNING
-        state.stop_reason = None
-
-        tool = self.tool_executor.registry.get(tool_name)
-        resume = getattr(tool, "resume_elicitation", None)
-        if resume is None:
-            async for event in self._emit_tool_result_and_record(
-                state,
-                tool_call_id=tool_call_id,
-                tool_call_name=tool_name,
-                output=f"tool {tool_name!r} cannot resume MCP elicitation",
-                result_state=ToolResultState.ERROR,
-            ):
-                yield event
-        else:
-            answer = dict(resolution.answer)
-            answer["tool_call_id"] = tool_call_id
-            result = await resume(
-                request_id=request_id,
-                answer=answer,
-                runtime_context=self._tool_runtime_context(state),
-            )
-            async for event in self._emit_tool_result_and_record(
-                state,
-                tool_call_id=tool_call_id,
-                tool_call_name=tool_name,
-                output=result.output,
-                result_state=result.status,
-            ):
-                yield event
-
-        async for event in self._after_tool_results(state):
-            yield event
-        if state.status is not LoopStatus.RUNNING:
-            async for event in self._finalize_run(state):
-                yield event
-            return
-        async for event in self._continue_after_tool_before_followup(state):
-            yield event
-        exposure = self._exposure_from_state_or_resolve(state)
-        async for event in self._stream_model_loop(state, exposure):
-            yield event
-
     async def _stream_mcp_input_required_resolution(
         self,
         state: LoopState,
@@ -1996,7 +1971,10 @@ class AgentRuntime:
                 else None,
             ):
                 yield event
-            async for event in self._after_mcp_resume_terminal_result(state):
+            async for event in self._after_mcp_resume_terminal_result(
+                state,
+                interaction_id=resolution.interaction_id,
+            ):
                 yield event
             return
 
@@ -2022,6 +2000,54 @@ class AgentRuntime:
             name=tool_name,
             arguments=dict(original_request.get("arguments") or {}),
         )
+        try:
+            current_tool = self.tool_executor.registry.get(tool_name)
+        except KeyError:
+            current_tool = None
+        if current_tool is not None and _mcp_resume_binding_changed(
+            payload,
+            current_tool,
+        ):
+            state.pending_interaction_kind = None
+            state.pending_interaction_payload = {}
+            state.status = LoopStatus.RUNNING
+            state.stop_reason = None
+            yield await self.runtime_session.emit(
+                CustomEvent(
+                    **self._event_context(state).event_fields(),
+                    name="mcp_input_required_binding_changed",
+                    value={
+                        "interaction_id": resolution.interaction_id,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "server_id": server_id,
+                        "reason_code": "mcp_binding_generation_changed",
+                    },
+                ),
+                state=state,
+            )
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+                output=(
+                    "MCP input-required resume denied because the original "
+                    "binding generation changed."
+                ),
+                result_state=ToolResultState.ERROR,
+                tool_observation_timing_seed=(
+                    {**timing_seed, "resumed_at": utc_now()}
+                    if timing_seed
+                    else None
+                ),
+            ):
+                yield event
+            async for event in self._after_mcp_resume_terminal_result(
+                state,
+                interaction_id=resolution.interaction_id,
+            ):
+                yield event
+            return
         exposure = self._exposure_from_state_or_resolve(state)
         exposure_decision = evaluate_capability_exposure_access(gate_call, exposure)
         resume_timing_seed = (
@@ -2162,7 +2188,8 @@ class AgentRuntime:
                             ):
                                 yield event
                             async for event in self._after_mcp_resume_terminal_result(
-                                state
+                                state,
+                                interaction_id=resolution.interaction_id,
                             ):
                                 yield event
                             return
@@ -2184,13 +2211,19 @@ class AgentRuntime:
                     ):
                         yield event
 
-        async for event in self._after_mcp_resume_terminal_result(state):
+        async for event in self._after_mcp_resume_terminal_result(
+            state,
+            interaction_id=resolution.interaction_id,
+        ):
             yield event
 
     async def _after_mcp_resume_terminal_result(
         self,
         state: LoopState,
+        *,
+        interaction_id: str,
     ) -> AsyncIterator[AgentEvent]:
+        await self._complete_mcp_pending_lease(interaction_id)
         async for event in self._after_tool_results(state):
             yield event
         if state.status is not LoopStatus.RUNNING:
@@ -3164,12 +3197,66 @@ class AgentRuntime:
         )
         for event in stored_events:
             yield event
+        self._record_tool_result_events(
+            state,
+            stored_events=stored_events,
+            tool_call_id=tool_call_id,
+            tool_call_name=tool_call_name,
+        )
+
+    async def _complete_mcp_pending_lease(self, interaction_id: str) -> None:
+        supervisor = self.runtime_session.mcp_supervisor
+        if supervisor is None:
+            return
+        supervisor.complete_pending_lease(interaction_id)
+        await supervisor.close_retiring_slots(
+            timeout_seconds=5.0,
+            wait_for_borrowers=False,
+        )
+
+    def _committed_tool_result_events(
+        self,
+        state: LoopState,
+        *,
+        tool_call_id: str,
+    ) -> list[AgentEvent]:
+        events = [
+            event
+            for event in self.runtime_session.event_log.iter()
+            if event.run_id == state.run_id
+            and getattr(event, "tool_call_id", None) == tool_call_id
+            and isinstance(
+                event,
+                (
+                    ToolResultStartEvent,
+                    ToolResultTextDeltaEvent,
+                    ToolResultDataDeltaEvent,
+                    ToolResultEndEvent,
+                ),
+            )
+        ]
+        if not any(isinstance(event, ToolResultEndEvent) for event in events):
+            return []
+        return events
+
+    def _record_tool_result_events(
+        self,
+        state: LoopState,
+        *,
+        stored_events: list[AgentEvent],
+        tool_call_id: str,
+        tool_call_name: str,
+    ) -> None:
+        if any(result.id == tool_call_id for result in state.tool_results):
+            return
         result_block = _tool_result_from_event_slice(stored_events, tool_call_id)
         _remember_tool_result_event_span(state, stored_events, tool_call_id)
         state.tool_results.append(result_block)
         state.messages.append(
             _tool_result_message_from_events(
-                stored_events, tool_call_name, result_block
+                stored_events,
+                tool_call_name,
+                result_block,
             )
         )
 
@@ -3478,25 +3565,48 @@ class AgentRuntime:
         )
         payload.setdefault("tool_call_id", suspended.tool_call_id)
         payload.setdefault("tool_name", suspended.tool_name)
+        if suspended.interaction_kind == "mcp_input_required":
+            payload.setdefault(
+                "mcp_installation_id",
+                self.runtime_session.mcp_installation_id,
+            )
         state.pending_tool_calls = []
         state.pending_interaction_kind = suspended.interaction_kind
         state.pending_interaction_payload = payload
         state.status = LoopStatus.WAITING_USER
         state.stop_reason = "waiting_user"
         state.transition(LoopTransition.WAIT_FOR_USER)
-        yield await self.runtime_session.emit(
-            CustomEvent(
-                **self._event_context(state).event_fields(),
-                name="tool_execution_suspended",
-                value={
-                    "interaction_kind": suspended.interaction_kind,
-                    "tool_call_id": suspended.tool_call_id,
-                    "tool_name": suspended.tool_name,
-                    "payload": payload,
-                },
-            ),
-            state=state,
+        suspension_event = CustomEvent(
+            **self._event_context(state).event_fields(),
+            name="tool_execution_suspended",
+            value={
+                "interaction_kind": suspended.interaction_kind,
+                "tool_call_id": suspended.tool_call_id,
+                "tool_name": suspended.tool_name,
+                "payload": payload,
+            },
         )
+        supervisor = self.runtime_session.mcp_supervisor
+        reservation_id = payload.get("mcp_pending_lease_reservation_id")
+        interaction_id = str(payload["interaction_id"])
+        try:
+            stored = await self.runtime_session.emit(suspension_event, state=state)
+        except EventPublicationAfterCommitError as exc:
+            # The suspension fact is already canonical.  Preserve/confirm its
+            # process-local lease owner and surface the committed event rather
+            # than turning a hook failure into an unrecoverable pending record.
+            stored = next(
+                event
+                for event in exc.result.committed_events
+                if event.id == suspension_event.id
+            )
+        except BaseException:
+            if supervisor is not None and isinstance(reservation_id, str):
+                supervisor.abort_pending_lease(interaction_id, reservation_id)
+            raise
+        if supervisor is not None and isinstance(reservation_id, str):
+            supervisor.confirm_pending_lease(interaction_id, reservation_id)
+        yield stored
 
     def _recover_or_fail_model(self, state: LoopState) -> bool:
         state.consecutive_model_failures += 1

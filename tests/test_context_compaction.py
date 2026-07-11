@@ -98,8 +98,8 @@ from pulsara_agent.runtime.compaction.service import (
 )
 import pulsara_agent.runtime.compaction.service as compaction_service_module
 from pulsara_agent.runtime.plan import (
-    McpElicitationResolution,
-    PendingMcpElicitation,
+    McpInputRequiredInteractionResolution,
+    PendingMcpInputRequired,
     PendingPlanInteraction,
     PlanQuestionResolution,
 )
@@ -2937,7 +2937,7 @@ def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
     assert fake.calls == []
 
 
-def test_mcp_elicitation_resume_does_not_auto_compact(tmp_path) -> None:
+def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     fake = _FakeHostCompactionService()
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
@@ -2957,17 +2957,24 @@ def test_mcp_elicitation_resume_does_not_auto_compact(tmp_path) -> None:
     state = agent.new_state()
     _seed_suspended_run_model_contract(agent, runtime_wiring, state)
     state.status = LoopStatus.WAITING_USER
-    state.pending_interaction_kind = "mcp_elicitation"
+    state.pending_interaction_kind = "mcp_input_required"
     state.pending_interaction_payload = {
         "interaction_id": "mcp:test",
         "tool_call_id": "call:mcp",
         "tool_name": "mcp__docs__lookup",
         "server_id": "docs",
-        "request_id": "request:test",
+        "protocol_version": "2026-07-28",
+        "request_state": "request:test",
+        "input_requests": [],
+        "original_request": {
+            "source_method": "tools/call",
+            "tool_name": "lookup",
+            "arguments": {},
+        },
     }
-    pending = PendingMcpElicitation(
+    pending = PendingMcpInputRequired(
         interaction_id="mcp:test",
-        kind="mcp_elicitation",
+        kind="mcp_input_required",
         host_session_id=session.host_session_id,
         runtime_session_id=session.runtime_session_id,
         run_id=state.run_id,
@@ -2976,8 +2983,14 @@ def test_mcp_elicitation_resume_does_not_auto_compact(tmp_path) -> None:
         tool_call_id="call:mcp",
         tool_name="mcp__docs__lookup",
         server_id="docs",
-        request_id="request:test",
-        prompt="secret?",
+        protocol_version="2026-07-28",
+        request_state="request:test",
+        input_requests=(),
+        original_request={
+            "source_method": "tools/call",
+            "tool_name": "lookup",
+            "arguments": {},
+        },
     )
     session.pending_interaction = pending
     session._suspended_state = state
@@ -2994,13 +3007,14 @@ def test_mcp_elicitation_resume_does_not_auto_compact(tmp_path) -> None:
             final_text="resumed",
         )
 
-    agent.resume_after_mcp_elicitation = fake_resume
+    agent.resume_after_mcp_input_required = fake_resume
 
     async def run() -> None:
         try:
-            await session.resolve_mcp_elicitation(
-                McpElicitationResolution(
-                    interaction_id="mcp:test", answer={"value": "secret"}
+            await session.resolve_mcp_input_required(
+                McpInputRequiredInteractionResolution(
+                    interaction_id="mcp:test",
+                    responses={"value": {"value": "secret"}},
                 )
             )
         finally:

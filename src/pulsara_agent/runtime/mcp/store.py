@@ -117,6 +117,12 @@ def _write_raw(path: Path, raw: dict[str, dict[str, Any]]) -> None:
 
 
 def _config_from_entry(server_id: str, entry: dict[str, Any]) -> McpServerConfig:
+    legacy_timeout_field = "startup_" + "timeout_ms"
+    if legacy_timeout_field in entry:
+        raise ValueError(
+            f"MCP server {server_id!r} uses removed field {legacy_timeout_field}; "
+            "use connect_timeout_ms/discovery_timeout_ms/startup_deadline_ms"
+        )
     transport_kind = str(entry.get("transport") or entry.get("type") or "").strip()
     if transport_kind in {"stdio", ""} and "command" in entry:
         transport = McpStdioConfig(
@@ -140,7 +146,10 @@ def _config_from_entry(server_id: str, entry: dict[str, Any]) -> McpServerConfig
         transport=transport,
         enabled=bool(entry.get("enabled", True)),
         required=bool(entry.get("required", False)),
-        startup_timeout_ms=int(entry.get("startup_timeout_ms", 10_000)),
+        connect_timeout_ms=int(entry.get("connect_timeout_ms", 10_000)),
+        discovery_timeout_ms=int(entry.get("discovery_timeout_ms", 15_000)),
+        startup_deadline_ms=int(entry.get("startup_deadline_ms", 30_000)),
+        refresh_ttl_ms=int(entry.get("refresh_ttl_ms", 300_000)),
         tool_timeout_ms=int(entry.get("tool_timeout_ms", 30_000)),
         supports_parallel_tool_calls=bool(entry.get("supports_parallel_tool_calls", False)),
         enabled_tools=tuple(entry["enabled_tools"]) if entry.get("enabled_tools") else None,
@@ -153,7 +162,10 @@ def _entry_from_config(config: McpServerConfig) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "enabled": config.enabled,
         "required": config.required,
-        "startup_timeout_ms": config.startup_timeout_ms,
+        "connect_timeout_ms": config.connect_timeout_ms,
+        "discovery_timeout_ms": config.discovery_timeout_ms,
+        "startup_deadline_ms": config.startup_deadline_ms,
+        "refresh_ttl_ms": config.refresh_ttl_ms,
         "tool_timeout_ms": config.tool_timeout_ms,
         "supports_parallel_tool_calls": config.supports_parallel_tool_calls,
     }

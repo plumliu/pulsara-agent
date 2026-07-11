@@ -25,6 +25,7 @@ from pulsara_agent.event import (
     ContextCompactionStartedEvent,
     CustomEvent,
     EventContext,
+    McpCapabilitySnapshotInstalledEvent,
     ModelCallStartEvent,
     ModelCallEndEvent,
     ModelCallRejectedEvent,
@@ -62,6 +63,11 @@ from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStor
 from pulsara_agent.primitives.model_call import (
     CompactionTargetEstimateFact,
     ModelCallPurpose,
+)
+from pulsara_agent.primitives.mcp import (
+    McpInstalledServerSnapshotFact,
+    McpReconcileAttemptSummaryFact,
+    McpServerLifecycleTimingFact,
 )
 from pulsara_agent.memory.candidates.pool import CANDIDATE_POOL_SCHEMA_SQL
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
@@ -459,6 +465,57 @@ def _simple_run_events(ctx: EventContext, *, user_input: str, text: str):
         ReplyEndEvent(**ctx.event_fields()),
         RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
     ]
+
+
+def _mcp_installed_event(ctx: EventContext) -> McpCapabilitySnapshotInstalledEvent:
+    timing = McpServerLifecycleTimingFact(
+        queued_at_utc="2026-01-01T00:00:00Z",
+        connect_started_at_utc="2026-01-01T00:00:00Z",
+        connect_ended_at_utc="2026-01-01T00:00:00.003000Z",
+        discovery_started_at_utc="2026-01-01T00:00:00.003000Z",
+        discovery_ended_at_utc="2026-01-01T00:00:00.010000Z",
+        completed_at_utc="2026-01-01T00:00:00.010000Z",
+        connect_duration_seconds=0.003,
+        discovery_duration_seconds=0.007,
+        total_duration_seconds=0.01,
+    )
+    attempt = McpReconcileAttemptSummaryFact(
+        server_id="docs",
+        reconcile_attempt_id="mcp_attempt:inspect",
+        reconcile_trigger="initial",
+        attempt_status="ready",
+        retry_attempt=1,
+        request_count=2,
+        page_count=2,
+        cache_outcome="miss",
+        stale_candidates_discarded_since_previous_install=1,
+    )
+    snapshot = McpInstalledServerSnapshotFact(
+        server_id="docs",
+        status="ready",
+        required=False,
+        changed_in_this_installation=True,
+        attempt=attempt,
+        snapshot_id="mcp_snapshot:inspect",
+        discovery_generation=2,
+        event_safe_config_fingerprint="sha256:server",
+        snapshot_semantic_fingerprint="sha256:catalog",
+        tool_count=3,
+        lifecycle_timing=timing,
+        catalog_artifact_id=None,
+    )
+    return McpCapabilitySnapshotInstalledEvent(
+        **ctx.event_fields(),
+        installation_id="mcp_installation:inspect",
+        config_epoch=1,
+        event_safe_config_set_fingerprint="sha256:set",
+        installation_triggers=("initial",),
+        server_snapshots=(snapshot,),
+        total_installed_tool_count=3,
+        added_tool_count=3,
+        revoked_tool_count=0,
+        changed_tool_names_bounded=("mcp__docs__a", "mcp__docs__b"),
+    )
 
 
 def test_inspect_run_rebuilds_timeline_and_assistant_reply(tmp_path: Path) -> None:
@@ -1195,6 +1252,178 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                 "capability_context": {},
             }
         ]
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspector_projects_bounded_mcp_installation_facts(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(
+            dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+        )
+        ctx = _ctx("mcp-installation")
+        permission = run_start_permission_fields(ctx.run_id)
+        permission.update(
+            {
+                "mcp_installation_id": "mcp_installation:inspect",
+                "mcp_installation_owner_runtime_session_id": runtime_session_id,
+            }
+        )
+        log.extend(
+            [
+                RunStartEvent(
+                    **ctx.event_fields(),
+                    **permission,
+                    user_input_chars=3,
+                    metadata={"user_input": "mcp"},
+                ),
+                _mcp_installed_event(ctx),
+                RunEndEvent(
+                    **ctx.event_fields(), status="finished", stop_reason="final"
+                ),
+            ]
+        )
+
+        session_report = _service(dsn).inspect_session(runtime_session_id)
+        installation = session_report["mcp_installations"][0]
+        assert installation["installation_id"] == "mcp_installation:inspect"
+        assert installation["server_snapshots"][0]["attempt"] == {
+            "server_id": "docs",
+            "reconcile_attempt_id": "mcp_attempt:inspect",
+            "reconcile_trigger": "initial",
+            "attempt_status": "ready",
+            "retry_attempt": 1,
+            "request_count": 2,
+            "page_count": 2,
+            "cache_outcome": "miss",
+            "stale_candidates_discarded_since_previous_install": 1,
+        }
+        assert installation["server_snapshots"][0]["catalog_artifact_id"] is None
+
+        run_report = _service(dsn).inspect_run(ctx.run_id)
+        run_installation = run_report["canonical"]["mcp_installation"]
+        assert run_installation["status"] == "durable"
+        assert run_installation["owner_is_current_session"] is True
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspector_joins_child_mcp_installation_through_owner_session(
+    tmp_path: Path,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    parent_session_id = _runtime_session_id()
+    child_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        parent_log = PostgresEventLog(
+            dsn=dsn,
+            runtime_session_id=parent_session_id,
+            workspace_root=tmp_path,
+        )
+        parent_ctx = _ctx("mcp-parent-owner")
+        parent_fields = run_start_permission_fields(parent_ctx.run_id)
+        parent_fields.update(
+            {
+                "mcp_installation_id": "mcp_installation:inspect",
+                "mcp_installation_owner_runtime_session_id": parent_session_id,
+            }
+        )
+        parent_log.extend(
+            [
+                RunStartEvent(
+                    **parent_ctx.event_fields(),
+                    **parent_fields,
+                    user_input_chars=6,
+                ),
+                _mcp_installed_event(parent_ctx),
+                RunEndEvent(
+                    **parent_ctx.event_fields(),
+                    status="finished",
+                    stop_reason="final",
+                ),
+            ]
+        )
+
+        child_log = PostgresEventLog(
+            dsn=dsn,
+            runtime_session_id=child_session_id,
+            workspace_root=tmp_path,
+        )
+        child_ctx = _ctx("mcp-child-owner")
+        child_fields = run_start_permission_fields(child_ctx.run_id)
+        child_fields.update(
+            {
+                "mcp_installation_id": "mcp_installation:inspect",
+                "mcp_installation_owner_runtime_session_id": parent_session_id,
+            }
+        )
+        child_log.extend(
+            [
+                RunStartEvent(
+                    **child_ctx.event_fields(),
+                    **child_fields,
+                    user_input_chars=5,
+                ),
+                RunEndEvent(
+                    **child_ctx.event_fields(),
+                    status="finished",
+                    stop_reason="final",
+                ),
+            ]
+        )
+
+        report = _service(dsn).inspect_run(child_ctx.run_id)
+        installation = report["canonical"]["mcp_installation"]
+        assert installation["status"] == "durable"
+        assert installation["owner_runtime_session_id"] == parent_session_id
+        assert installation["owner_is_current_session"] is False
+        assert installation["audit"]["installation_id"] == "mcp_installation:inspect"
+    finally:
+        _cleanup_session(dsn, child_session_id)
+        _cleanup_session(dsn, parent_session_id)
+
+
+def test_inspector_reports_missing_mcp_installation_audit(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        ctx = _ctx("mcp-missing-audit")
+        fields = run_start_permission_fields(ctx.run_id)
+        fields.update(
+            {
+                "mcp_installation_id": "mcp_installation:missing",
+                "mcp_installation_owner_runtime_session_id": runtime_session_id,
+            }
+        )
+        log.extend(
+            [
+                RunStartEvent(
+                    **ctx.event_fields(),
+                    **fields,
+                    user_input_chars=1,
+                ),
+                RunEndEvent(
+                    **ctx.event_fields(), status="finished", stop_reason="final"
+                ),
+            ]
+        )
+
+        report = _service(dsn).inspect_run(ctx.run_id)
+        assert report["canonical"]["mcp_installation"]["status"] == "missing"
+        assert any(
+            diagnostic["code"] == "mcp_installation_audit_missing"
+            for diagnostic in report["diagnostics"]
+        )
     finally:
         _cleanup_session(dsn, runtime_session_id)
 

@@ -19,6 +19,7 @@ from pulsara_agent.event_log import (
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.runtime.hooks import RuntimeHookManager
+from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
 from pulsara_agent.runtime.permission import PermissionState
 from pulsara_agent.runtime.publisher import (
     PublisherEnqueueResult,
@@ -157,6 +158,7 @@ class RuntimeSession:
     terminal_binding: TerminalRuntimeBinding | None = None
     extra_tool_bindings: tuple[Tool | AsyncTool, ...] = ()
     subagent_runtime: Any | None = None
+    mcp_supervisor: Any | None = None
     default_event_metadata: dict[str, Any] = field(default_factory=dict)
     publisher: RuntimeEventPublisher = field(init=False)
     write_coordinator: SessionWriteCoordinator = field(
@@ -174,9 +176,19 @@ class RuntimeSession:
     )
     _reconciliation_required: bool = field(default=False, init=False, repr=False)
     _ledger_reconciliation_required: bool = field(default=False, init=False, repr=False)
+    mcp_installation_id: str = field(
+        default="mcp_installation:empty", init=False
+    )
+    mcp_installation_owner_runtime_session_id: str = field(init=False)
+    _pending_mcp_installation_audits: list[McpPendingInstallationAudit] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
+        self.mcp_installation_owner_runtime_session_id = self.runtime_session_id
         self.artifact_service = ToolResultArtifactService(
             archive=self.archive,
             index=self.tool_result_artifacts,
@@ -188,6 +200,122 @@ class RuntimeSession:
         )
         self.publisher.subscribe(self.hook_manager)
         self._bind_terminal(self.terminal_binding)
+
+    def set_mcp_installation_contract(
+        self,
+        *,
+        installation_id: str,
+        owner_runtime_session_id: str | None = None,
+        pending_audit: McpPendingInstallationAudit | None = None,
+    ) -> None:
+        self.mcp_installation_id = installation_id
+        self.mcp_installation_owner_runtime_session_id = (
+            owner_runtime_session_id or self.runtime_session_id
+        )
+        if pending_audit is not None:
+            self._queue_mcp_installation_audit(pending_audit)
+
+    def pending_mcp_installation_audit_events(self, context) -> tuple[AgentEvent, ...]:
+        if not self._pending_mcp_installation_audits:
+            return ()
+        from pulsara_agent.event import McpCapabilitySnapshotInstalledEvent
+
+        return tuple(
+            McpCapabilitySnapshotInstalledEvent(
+                **context.event_fields(),
+                id=audit.event_id,
+                installation_id=audit.installation_id,
+                previous_installation_id=audit.previous_installation_id,
+                config_epoch=audit.config_epoch,
+                event_safe_config_set_fingerprint=audit.event_safe_config_set_fingerprint,
+                installation_triggers=audit.installation_triggers,
+                coalesced_installation_count=audit.coalesced_installation_count,
+                coalesced_attempt_summaries=audit.coalesced_attempt_summaries,
+                coalesced_attempt_summaries_omitted=audit.coalesced_attempt_summaries_omitted,
+                server_snapshots=audit.server_snapshots,
+                total_installed_tool_count=audit.total_installed_tool_count,
+                added_tool_count=audit.added_tool_count,
+                revoked_tool_count=audit.revoked_tool_count,
+                changed_tool_names_bounded=audit.changed_tool_names_bounded,
+                changed_tool_names_omitted=audit.changed_tool_names_omitted,
+                diagnostics=audit.diagnostics,
+            )
+            for audit in self._pending_mcp_installation_audits
+        )
+
+    def acknowledge_mcp_installation_audits(self, event_ids: set[str]) -> None:
+        self._pending_mcp_installation_audits = [
+            audit
+            for audit in self._pending_mcp_installation_audits
+            if audit.event_id not in event_ids
+        ]
+
+    def acknowledge_committed_mcp_installation_audits(
+        self,
+        events: Iterable[AgentEvent],
+    ) -> None:
+        """Drop pending audit ownership using canonical committed events only."""
+
+        from pulsara_agent.event import McpCapabilitySnapshotInstalledEvent
+
+        self.acknowledge_mcp_installation_audits(
+            {
+                event.id
+                for event in events
+                if isinstance(event, McpCapabilitySnapshotInstalledEvent)
+            }
+        )
+
+    def _queue_mcp_installation_audit(self, audit: McpPendingInstallationAudit) -> None:
+        if not self._pending_mcp_installation_audits:
+            self._pending_mcp_installation_audits.append(audit)
+            return
+        previous = self._pending_mcp_installation_audits[0]
+        summaries = list(previous.coalesced_attempt_summaries)
+        summaries.extend(
+            snapshot.attempt
+            for snapshot in previous.server_snapshots
+            if snapshot.changed_in_this_installation
+        )
+        summaries.extend(audit.coalesced_attempt_summaries)
+        bounded = tuple(summaries[:64])
+        omitted = (
+            previous.coalesced_attempt_summaries_omitted
+            + audit.coalesced_attempt_summaries_omitted
+            + max(0, len(summaries) - len(bounded))
+        )
+        triggers = sorted(
+            {
+                *(audit.installation_triggers),
+                *(summary.reconcile_trigger for summary in bounded),
+            }
+        )
+        baseline_names = previous.baseline_tool_names
+        current_names = audit.current_tool_names
+        changed_names = tuple(sorted(baseline_names.symmetric_difference(current_names)))
+        bounded_changed_names = changed_names[:64]
+        rebuilt = replace(
+            audit,
+            event_id=f"mcp_installation_event:{uuid4().hex}",
+            previous_installation_id=previous.previous_installation_id,
+            installation_triggers=tuple(triggers),
+            coalesced_installation_count=(
+                previous.coalesced_installation_count
+                + audit.coalesced_installation_count
+                + 1
+            ),
+            coalesced_attempt_summaries=bounded,
+            coalesced_attempt_summaries_omitted=omitted,
+            added_tool_count=len(current_names.difference(baseline_names)),
+            revoked_tool_count=len(baseline_names.difference(current_names)),
+            changed_tool_names_bounded=bounded_changed_names,
+            changed_tool_names_omitted=max(
+                0, len(changed_names) - len(bounded_changed_names)
+            ),
+            baseline_tool_names=baseline_names,
+            current_tool_names=current_names,
+        )
+        self._pending_mcp_installation_audits = [rebuilt]
 
     def _bind_terminal(self, binding: TerminalRuntimeBinding | None) -> None:
         # Default is owned-local: a bare RuntimeSession(workspace_root) keeps a

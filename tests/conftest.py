@@ -25,6 +25,8 @@ def run_start_permission_fields(
         "permission_policy": preset_to_policy(parsed).to_dict(),
         "permission_snapshot_source": source,
         "model_target": test_resolved_target_fact(),
+        "mcp_installation_id": "mcp_installation:empty",
+        "mcp_installation_owner_runtime_session_id": "runtime:test",
     }
 
 

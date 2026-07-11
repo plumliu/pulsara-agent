@@ -18,10 +18,12 @@ from pulsara_agent.event import (
 from pulsara_agent.message import ToolCallBlock, ToolCallState
 from pulsara_agent.runtime import (
     PendingApproval,
+    PendingMcpInputRequired,
     PendingPlanInteraction,
     PlanQuestionOption,
 )
 from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.runtime.mcp.types import McpRequiredStartupError
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus
 from tests.support.runtime_session import in_memory_runtime_session
@@ -585,6 +587,99 @@ def test_repl_prompt_message_stays_in_plan_mode_without_pending_interaction() ->
     )
 
     assert cli._repl_prompt_message(session) == "plan> "
+
+
+def test_repl_prompt_message_marks_pending_mcp_input_required() -> None:
+    session = FakeSession()
+    pending = PendingMcpInputRequired(
+        interaction_id="mcp_input_required:test",
+        kind="mcp_input_required",
+        host_session_id=session.host_session_id,
+        runtime_session_id=session.runtime_session_id,
+        run_id="run:test",
+        turn_id="turn:test",
+        reply_id="reply:test",
+        tool_call_id="call:test",
+        tool_name="mcp__docs__lookup",
+        server_id="docs",
+        protocol_version="2026-07-28",
+        request_state=None,
+        input_requests=(),
+        original_request={"source_method": "tools/call"},
+    )
+    session.get_pending_interaction = lambda: pending
+
+    assert cli._repl_prompt_message(session) == "mcp> "
+    assert ":mcp-input <json>" in cli._REPL_HELP
+    assert ":mcp-cancel" in cli._REPL_HELP
+
+
+def test_cli_repl_formats_required_mcp_startup_failure_without_traceback(
+    monkeypatch,
+    capsys,
+    tmp_path,
+) -> None:
+    async def fail_required(_args):
+        raise McpRequiredStartupError(
+            server_ids=("required-docs",),
+            reason_code="mcp_required_generation_unavailable",
+        )
+
+    monkeypatch.setattr(cli, "_host_repl", fail_required)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["pulsara", "host", "repl", "--workspace", str(tmp_path)],
+    )
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main()
+
+    assert caught.value.code == 2
+    error = capsys.readouterr().err
+    assert "required MCP servers unavailable: required-docs" in error
+    assert "mcp_required_generation_unavailable" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize("command", ["doctor", "reconnect"])
+def test_direct_mcp_cli_uses_supervisor_ticket_and_bounded_close(
+    command,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls: list[object] = []
+
+    class FakeSupervisor:
+        def prepare(self, configs, *, trigger):
+            calls.append(("prepare", configs, trigger))
+            return "ticket:manual"
+
+        async def await_ticket_snapshots(self, ticket):
+            calls.append(("await", ticket))
+            return ()
+
+        async def aclose(self, *, timeout_seconds):
+            calls.append(("close", timeout_seconds))
+
+    monkeypatch.setattr(cli, "McpServerSupervisor", FakeSupervisor)
+    monkeypatch.setattr(cli, "load_mcp_server_configs", lambda **_kwargs: ())
+    monkeypatch.setattr(cli, "mcp_config_sources", lambda **_kwargs: ())
+    args = SimpleNamespace(
+        mcp_command=command,
+        workspace=str(tmp_path),
+        config=None,
+        env_file=None,
+        override_env=False,
+    )
+
+    result = asyncio.run(cli._mcp_command(args))
+
+    assert result["mcp"] == command
+    assert calls == [
+        ("prepare", (), "manual_refresh"),
+        ("await", "ticket:manual"),
+        ("close", 5.0),
+    ]
 
 
 def test_cli_host_repl_revise_plan_prints_new_pending_exit(
