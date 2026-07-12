@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pulsara_agent.capability import (
-    CapabilityResolveContext,
+    CapabilityProjectionResolveContext,
     LocalSkillCapabilityProvider,
     LocalSkillProvider,
     SkillBinaryLookupPath,
@@ -13,6 +13,47 @@ from pulsara_agent.capability import (
 )
 from pulsara_agent.capability.types import ActiveSkillInjection, ResolvedSkillCatalogEntry
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
+from pulsara_agent.primitives.capability import (
+    CapabilityDescriptorBindingIdentityFact,
+    build_capability_execution_surface_identity,
+)
+
+
+def _projection_context(
+    tmp_path: Path,
+    *,
+    user_input: str,
+    memory_domain: MemoryDomainContext | None = None,
+    workspace_kind: str = "transient",
+    active_skill_names: frozenset[str] = frozenset(),
+) -> CapabilityProjectionResolveContext:
+    return CapabilityProjectionResolveContext(
+        workspace_root=tmp_path,
+        workspace_kind=workspace_kind,  # type: ignore[arg-type]
+        memory_domain=memory_domain,
+        user_input=user_input,
+        active_skill_names=active_skill_names,
+    )
+
+
+def _execution_surface(*tool_names: str):
+    return build_capability_execution_surface_identity(
+        surface_contract_version="test:v1",
+        entries=tuple(
+            CapabilityDescriptorBindingIdentityFact(
+                capability_name=name,
+                provider_id="test",
+                descriptor_id=f"test:{name}",
+                descriptor_fingerprint=f"sha256:{name}",
+                descriptor_artifact_id=f"artifact:{name}",
+                binding_fingerprint=None,
+                binding_contract_id=None,
+                binding_contract_version=None,
+            )
+            for name in sorted(tool_names)
+        ),
+        mcp_installation_id="mcp_installation:empty",
+    )
 
 
 def test_local_skill_provider_discovers_workspace_skill_and_filters_tool_refs(tmp_path) -> None:
@@ -680,17 +721,16 @@ provides_tools: [read_file]
         workspace_kind="project",
         stable_project_key=str(tmp_path),
     )
-    context = CapabilityResolveContext(
-        workspace_root=tmp_path,
+    context = _projection_context(
+        tmp_path,
         workspace_kind="project",
         memory_domain=domain,
-        available_tool_names=frozenset({"read_file", "terminal"}),
         user_input="$review-pr please inspect this",
     )
 
-    resolved = _workspace_only_capability_provider().resolve(
+    resolved = _workspace_only_capability_provider().resolve_projection(
         context,
-        bound_tool_names=context.available_tool_names,
+        execution_surface=_execution_surface("read_file", "terminal"),
     )
 
     assert [entry.name for entry in resolved.catalog_entries] == ["review-pr"]
@@ -715,17 +755,17 @@ external_services: [firecrawl]
 # Firecrawl
 """,
     )
-    context = CapabilityResolveContext(
-        workspace_root=tmp_path,
-        workspace_kind="transient",
-        memory_domain=None,
-        available_tool_names=frozenset({"terminal"}),
+    context = _projection_context(
+        tmp_path,
         user_input="$firecrawl-search",
     )
 
-    resolved = _workspace_only_capability_provider().resolve(context, bound_tool_names=frozenset({"terminal"}))
+    resolved = _workspace_only_capability_provider().resolve_projection(
+        context,
+        execution_surface=_execution_surface("terminal"),
+    )
 
-    assert resolved.descriptors == ()
+    assert not hasattr(resolved, "descriptors")
     assert [entry.name for entry in resolved.catalog_entries] == ["firecrawl-search"]
     assert [injection.name for injection in resolved.active_injections] == ["firecrawl-search"]
 
@@ -757,15 +797,9 @@ auth_required: optional
         skill_health_resolver=SkillHealthResolver(which=fake_which),
     )
 
-    resolved = provider.resolve(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="transient",
-            memory_domain=None,
-            available_tool_names=frozenset(),
-            user_input="$hf-cli",
-        ),
-        bound_tool_names=frozenset(),
+    resolved = provider.resolve_projection(
+        _projection_context(tmp_path, user_input="$hf-cli"),
+        execution_surface=_execution_surface(),
     )
 
     assert seen == ["hf", "git"]
@@ -814,16 +848,14 @@ required_binaries: [catalog-bin]
         provider=_workspace_only_provider(),
         skill_health_resolver=SkillHealthResolver(ttl_seconds=60.0, which=fake_which, monotonic=fake_monotonic),
     )
-    context = CapabilityResolveContext(
-        workspace_root=tmp_path,
-        workspace_kind="transient",
-        memory_domain=None,
-        available_tool_names=frozenset(),
-        user_input="$active-skill",
-    )
+    context = _projection_context(tmp_path, user_input="$active-skill")
 
-    first = provider.resolve(context, bound_tool_names=frozenset())
-    second = provider.resolve(context, bound_tool_names=frozenset())
+    first = provider.resolve_projection(
+        context, execution_surface=_execution_surface()
+    )
+    second = provider.resolve_projection(
+        context, execution_surface=_execution_surface()
+    )
 
     assert seen == ["missing-bin"]
     assert "catalog-bin" not in seen
@@ -868,16 +900,16 @@ disable_model_invocation: true
 # Private Skill
 """,
     )
-    context = CapabilityResolveContext(
-        workspace_root=tmp_path,
-        workspace_kind="transient",
-        memory_domain=None,
-        available_tool_names=frozenset(),
+    context = _projection_context(
+        tmp_path,
         user_input="",
         active_skill_names=frozenset({"private-skill"}),
     )
 
-    resolved = _workspace_only_capability_provider().resolve(context, bound_tool_names=frozenset())
+    resolved = _workspace_only_capability_provider().resolve_projection(
+        context,
+        execution_surface=_execution_surface(),
+    )
 
     assert resolved.catalog_entries == ()
     assert [injection.name for injection in resolved.active_injections] == ["private-skill"]
@@ -899,15 +931,9 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
         provider=LocalSkillProvider(max_skill_file_bytes=40, include_user_skills=False)
     )
 
-    resolved = provider.resolve(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="transient",
-            memory_domain=None,
-            available_tool_names=frozenset(),
-            user_input="$big",
-        ),
-        bound_tool_names=frozenset(),
+    resolved = provider.resolve_projection(
+        _projection_context(tmp_path, user_input="$big"),
+        execution_surface=_execution_surface(),
     )
 
     assert resolved.active_injections == ()

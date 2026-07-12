@@ -30,6 +30,20 @@ class ArtifactWriteResult:
         }
 
 
+class ArtifactContentConflict(RuntimeError):
+    """A deterministic artifact id already names different semantic content."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactPutConfirmation:
+    status: str
+    result: ArtifactWriteResult
+
+    def __post_init__(self) -> None:
+        if self.status not in {"inserted", "confirmed_identical"}:
+            raise ValueError("invalid artifact put confirmation status")
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactRecord:
     id: str

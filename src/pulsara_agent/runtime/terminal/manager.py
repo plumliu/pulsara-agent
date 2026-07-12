@@ -24,6 +24,7 @@ class TerminalSessionManager:
     max_sessions: int = 4
     max_live_processes: int = 8
     max_finished_processes: int = 32
+    max_pending_completion_records: int = 8
     finished_ttl_seconds: float = 3600.0
     shell: TerminalShellConfig | None = None
     env_builder: TerminalEnvBuilder | None = None
@@ -36,6 +37,8 @@ class TerminalSessionManager:
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
+        if self.max_pending_completion_records < 0:
+            raise ValueError("max_pending_completion_records must be >= 0")
         if self.shell is None:
             self.shell = detect_terminal_shell()
         if self.env_builder is None:
@@ -43,6 +46,7 @@ class TerminalSessionManager:
         self.process_registry = ProcessRegistry(
             max_live_processes=self.max_live_processes,
             max_finished_processes=self.max_finished_processes,
+            max_pending_completion_records=self.max_pending_completion_records,
             finished_ttl_seconds=self.finished_ttl_seconds,
         )
 
@@ -227,7 +231,12 @@ class TerminalSessionManager:
     def kill_owned(self, owner_host_session_id: str):
         return self.process_registry.kill_owned(owner_host_session_id)
 
-    def release_owner(self, owner_host_session_id: str):
+    def release_owner(
+        self,
+        owner_host_session_id: str,
+        *,
+        completion_drain_timeout_seconds: float = 1.0,
+    ):
         """Release everything a single owner holds in this shared manager.
 
         This kills/drains the owner's yielded processes AND drops the owner's
@@ -241,12 +250,16 @@ class TerminalSessionManager:
         threads, so callers on an event loop must run this via asyncio.to_thread
         and outside any held async lock.
         """
+        results = self.process_registry.release_owner(
+            owner_host_session_id,
+            completion_drain_timeout_seconds=completion_drain_timeout_seconds,
+        )
         with self._lock:
             self._released_owners.add(owner_host_session_id)
             stale_keys = [key for key in self._sessions if key[0] == owner_host_session_id]
             for key in stale_keys:
                 self._sessions.pop(key, None)
-        return self.process_registry.release_owner(owner_host_session_id)
+        return results
 
     def list_owned(self, owner_host_session_id: str):
         return self.process_registry.list_owned(owner_host_session_id)
@@ -259,6 +272,11 @@ class TerminalSessionManager:
 
     def finished_process_count(self, *, owner_host_session_id: str | None = None) -> int:
         return self.process_registry.finished_count(owner_host_session_id=owner_host_session_id)
+
+    def pending_completion_count(self, *, owner_host_session_id: str | None = None) -> int:
+        return self.process_registry.pending_completion_count(
+            owner_host_session_id=owner_host_session_id
+        )
 
     def shutdown(self) -> None:
         with self._lock:

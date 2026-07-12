@@ -1,17 +1,25 @@
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import pytest
+import pulsara_agent.runtime.terminal.process as process_mod
 
 from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent
+from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
 from pulsara_agent.runtime.terminal.env import TerminalEnvBuilder, TerminalEnvConfig
 from pulsara_agent.runtime.terminal.output import OutputAccumulator
 from pulsara_agent.runtime.terminal.process import (
+    PendingTerminalCompletionError,
     ProcessInputError,
+    TerminalCompletionRecordState,
+    TerminalKillReason,
+    _maybe_record_completion_event,
+    kill_process,
     read_captured_cwd,
     spawn_local_process,
     snapshot_process,
@@ -862,6 +870,507 @@ def test_terminal_runtime_user_kill_records_completion_event_but_shutdown_suppre
     assert user_events[0].completion_reason == "user_tool_kill"
     assert "completion_reason" not in user_events[0].metadata
     assert teardown_events == []
+
+
+def test_terminal_user_kill_does_not_relabel_existing_natural_terminal_fact(
+    tmp_path,
+) -> None:
+    process = spawn_local_process(
+        terminal_session_id="default",
+        command="printf NATURAL_DONE",
+        cwd=tmp_path,
+        max_output_chars=1000,
+        stdin_pipe=True,
+        capture_cwd=False,
+    )
+    assert wait_for_process(process, timeout_seconds=2, kill_on_timeout=False)
+    assert process.status is TerminalStatus.SUCCESS
+
+    acquired = kill_process(process, reason=TerminalKillReason.USER)
+
+    assert acquired is False
+    assert process.status is TerminalStatus.SUCCESS
+    assert process.exit_code == 0
+    assert process.completion_reason is None
+
+
+def test_terminal_completion_record_failure_returns_pending_and_retries_stable_event(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-retry",
+        turn_id="turn:completion-retry",
+        reply_id="reply:completion-retry",
+    )
+    attempts: list[str] = []
+    recorded: list[TerminalProcessCompletedEvent] = []
+    allow_success = False
+
+    def recorder(event):
+        attempts.append(event.id)
+        if not allow_success:
+            raise RuntimeError("synthetic pre-commit failure")
+        recorded.append(event)
+        return event
+
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    result = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-retry",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert result.process_id is not None
+
+    manager.kill_process(result.process_id)
+    state = session.process_registry._processes[result.process_id]  # noqa: SLF001
+    assert attempts
+    assert recorded == []
+    assert state.completion_record_state is TerminalCompletionRecordState.PENDING
+    assert state.completion_event_recorded is False
+
+    allow_success = True
+    _maybe_record_completion_event(state)
+
+    assert len(recorded) == 1
+    assert len(set(attempts)) == 1
+    assert recorded[0].id == state.completion_event_id
+    assert state.completion_record_state is TerminalCompletionRecordState.RECORDED
+    assert state.completion_event_recorded is True
+
+
+def test_terminal_completion_uncertain_commit_is_confirmed_by_bounded_retry(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-uncertain",
+        turn_id="turn:completion-uncertain",
+        reply_id="reply:completion-uncertain",
+    )
+    event_log = InMemoryEventLog()
+    calls = 0
+
+    def recorder(event):
+        nonlocal calls
+        calls += 1
+        stored = event_log.append(event)
+        if calls == 1:
+            raise RuntimeError("simulated lost commit acknowledgement")
+        return stored
+
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    result = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-uncertain",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert result.process_id is not None
+
+    manager.kill_process(result.process_id, owner_host_session_id="host:a")
+    state = session.process_registry._processes[result.process_id]  # noqa: SLF001
+    deadline = time.monotonic() + 2
+    while not state.completion_event_recorded and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert calls == 2
+    assert len(event_log.iter()) == 1
+    assert event_log.iter()[0].id == state.completion_event_id
+    assert state.completion_record_state is TerminalCompletionRecordState.RECORDED
+
+
+def test_terminal_pending_completion_is_not_pruned_by_ttl_or_capacity(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-pending-retention",
+        turn_id="turn:completion-pending-retention",
+        reply_id="reply:completion-pending-retention",
+    )
+
+    def recorder(_event):
+        raise RuntimeError("persistent synthetic commit failure")
+
+    manager = make_manager(
+        tmp_path,
+        finished_ttl_seconds=0,
+        max_finished_processes=0,
+    )
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    result = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-pending-retention",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert result.process_id is not None
+
+    manager.kill_process(result.process_id, owner_host_session_id="host:a")
+    processes = manager.list_processes(owner_host_session_id="host:a")
+
+    assert [process.process_id for process in processes] == [result.process_id]
+    state = session.process_registry._processes[result.process_id]  # noqa: SLF001
+    assert state.completion_event_recorded is False
+
+
+def test_terminal_pending_completion_cap_blocks_new_yielded_process(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-pending-cap",
+        turn_id="turn:completion-pending-cap",
+        reply_id="reply:completion-pending-cap",
+    )
+
+    def recorder(_event):
+        raise RuntimeError("persistent synthetic commit failure")
+
+    manager = make_manager(
+        tmp_path,
+        max_live_processes=1,
+        max_finished_processes=0,
+        max_pending_completion_records=1,
+        finished_ttl_seconds=0,
+    )
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    first = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-pending-cap:first",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert first.process_id is not None
+    manager.kill_process(first.process_id, owner_host_session_id="host:a")
+    assert manager.process_registry.pending_completion_count() == 1
+
+    blocked = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-pending-cap:blocked",
+                "record_event": recorder,
+            },
+        )
+    )
+
+    assert blocked.status is TerminalStatus.BLOCKED
+    assert blocked.process_id is None
+    assert blocked.error == "max pending terminal completion records reached: 1"
+    assert manager.process_registry.pending_completion_count() == 1
+    assert len(manager.process_registry._processes) == 1  # noqa: SLF001
+
+
+def test_terminal_owner_release_drains_pending_completion_or_remains_retryable(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-owner-release",
+        turn_id="turn:completion-owner-release",
+        reply_id="reply:completion-owner-release",
+    )
+    available = False
+
+    def recorder(event):
+        if not available:
+            raise RuntimeError("persistent synthetic commit failure")
+        return event
+
+    manager = make_manager(tmp_path, max_pending_completion_records=1)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    first = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-owner-release",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert first.process_id is not None
+    manager.kill_process(first.process_id, owner_host_session_id="host:a")
+
+    with pytest.raises(PendingTerminalCompletionError):
+        manager.release_owner(
+            "host:a",
+            completion_drain_timeout_seconds=0.05,
+        )
+
+    assert manager.pending_completion_count(owner_host_session_id="host:a") == 1
+    assert manager.session_count() == 1
+
+    available = True
+    manager.release_owner(
+        "host:a",
+        completion_drain_timeout_seconds=0.5,
+    )
+
+    assert manager.pending_completion_count(owner_host_session_id="host:a") == 0
+    assert manager.session_count() == 0
+    replacement = manager.get_or_create(owner_host_session_id="host:b")
+    second = replacement.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": EventContext(
+                    run_id="run:completion-new-owner",
+                    turn_id="turn:completion-new-owner",
+                    reply_id="reply:completion-new-owner",
+                ),
+                "tool_call_id": "call:completion-new-owner",
+                "record_event": lambda event: event,
+            },
+        )
+    )
+    assert second.status is TerminalStatus.RUNNING
+    assert second.process_id is not None
+    manager.kill_process(second.process_id, owner_host_session_id="host:b")
+
+
+def test_terminal_owner_release_deadline_is_not_blocked_by_stuck_recorder(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-blocked-recorder",
+        turn_id="turn:completion-blocked-recorder",
+        reply_id="reply:completion-blocked-recorder",
+    )
+    allow = threading.Event()
+    entered = threading.Event()
+    block_recorder = False
+
+    def recorder(event):
+        if not block_recorder:
+            raise RuntimeError("initial synthetic commit failure")
+        entered.set()
+        allow.wait()
+        return event
+
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    started = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-blocked-recorder",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert started.process_id is not None
+    manager.kill_process(started.process_id, owner_host_session_id="host:a")
+    state = session.process_registry._processes[started.process_id]  # noqa: SLF001
+    with state.lock:
+        timer = state.completion_retry_timer
+        state.completion_retry_timer = None
+        state.completion_record_attempts = 99
+    if timer is not None:
+        timer.cancel()
+    block_recorder = True
+
+    release_started_at = time.monotonic()
+    with pytest.raises(PendingTerminalCompletionError):
+        manager.release_owner(
+            "host:a",
+            completion_drain_timeout_seconds=0.05,
+        )
+    release_elapsed = time.monotonic() - release_started_at
+
+    assert entered.wait(timeout=1)
+    assert release_elapsed < 0.2
+    assert manager.pending_completion_count(owner_host_session_id="host:a") == 1
+
+    allow.set()
+    deadline = time.monotonic() + 1
+    while not state.completion_event_recorded and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert state.completion_event_recorded is True
+
+    manager.release_owner(
+        "host:a",
+        completion_drain_timeout_seconds=0.05,
+    )
+    assert manager.pending_completion_count(owner_host_session_id="host:a") == 0
+
+
+def test_terminal_recording_worker_start_failure_restores_pending_and_close_blocker(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-worker-start-failure",
+        turn_id="turn:completion-worker-start-failure",
+        reply_id="reply:completion-worker-start-failure",
+    )
+
+    def recorder(_event):
+        raise RuntimeError("synthetic event store outage")
+
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    started = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-worker-start-failure",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert started.process_id is not None
+    manager.kill_process(started.process_id, owner_host_session_id="host:a")
+    state = session.process_registry._processes[started.process_id]  # noqa: SLF001
+    with state.lock:
+        timer = state.completion_retry_timer
+        state.completion_retry_timer = None
+        state.completion_record_attempts = 99
+    if timer is not None:
+        timer.cancel()
+
+    class FailingThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("cannot start worker")
+
+    monkeypatch.setattr(process_mod, "Thread", FailingThread)
+
+    with pytest.raises(PendingTerminalCompletionError):
+        manager.release_owner(
+            "host:a",
+            completion_drain_timeout_seconds=0.01,
+        )
+
+    assert state.completion_record_state is TerminalCompletionRecordState.PENDING
+    assert manager.pending_completion_count(owner_host_session_id="host:a") == 1
+    assert manager.session_count() == 1
+
+
+def test_terminal_retry_timer_start_failure_does_not_leave_fake_schedule(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-timer-start-failure",
+        turn_id="turn:completion-timer-start-failure",
+        reply_id="reply:completion-timer-start-failure",
+    )
+
+    class FailingTimer:
+        daemon = False
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("cannot start retry timer")
+
+        def cancel(self) -> None:
+            pass
+
+    monkeypatch.setattr(process_mod, "Timer", FailingTimer)
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    started = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-timer-start-failure",
+                "record_event": lambda _event: (_ for _ in ()).throw(
+                    RuntimeError("synthetic event store outage")
+                ),
+            },
+        )
+    )
+    assert started.process_id is not None
+
+    manager.kill_process(started.process_id, owner_host_session_id="host:a")
+    state = session.process_registry._processes[started.process_id]  # noqa: SLF001
+
+    assert state.completion_record_state is TerminalCompletionRecordState.PENDING
+    assert state.completion_retry_timer is None
+
+
+def test_terminal_recording_worker_base_exception_returns_ownership_to_pending(
+    tmp_path,
+) -> None:
+    ctx = EventContext(
+        run_id="run:completion-worker-base-exception",
+        turn_id="turn:completion-worker-base-exception",
+        reply_id="reply:completion-worker-base-exception",
+    )
+    raise_base_exception = False
+
+    def recorder(_event):
+        if raise_base_exception:
+            raise KeyboardInterrupt
+        raise RuntimeError("initial synthetic event store outage")
+
+    manager = make_manager(tmp_path)
+    session = manager.get_or_create(owner_host_session_id="host:a")
+    started = session.execute(
+        TerminalRequest(
+            command="sleep 5",
+            yield_time_ms=0,
+            metadata={
+                "origin_event_context": ctx,
+                "tool_call_id": "call:completion-worker-base-exception",
+                "record_event": recorder,
+            },
+        )
+    )
+    assert started.process_id is not None
+    manager.kill_process(started.process_id, owner_host_session_id="host:a")
+    state = session.process_registry._processes[started.process_id]  # noqa: SLF001
+    with state.lock:
+        timer = state.completion_retry_timer
+        state.completion_retry_timer = None
+        state.completion_record_attempts = 99
+    if timer is not None:
+        timer.cancel()
+    raise_base_exception = True
+
+    with pytest.raises(PendingTerminalCompletionError):
+        manager.release_owner(
+            "host:a",
+            completion_drain_timeout_seconds=0.02,
+        )
+
+    assert state.completion_record_state is TerminalCompletionRecordState.PENDING
+    assert manager.pending_completion_count(owner_host_session_id="host:a") == 1
 
 
 def test_terminal_runtime_lifetime_watchdog_suppresses_completion_event(tmp_path) -> None:

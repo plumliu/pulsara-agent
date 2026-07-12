@@ -17,8 +17,6 @@ from pulsara_agent.event import (
     AgentEvent,
     EventContext,
     EventType,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -34,9 +32,10 @@ from pulsara_agent.event.candidates import (
     ValidCandidatePayload,
 )
 from pulsara_agent.graph import InMemoryGraphStore
-from pulsara_agent.llm import LLMConfig, LLMRuntime, ModelProfile
+from pulsara_agent.llm import LLMRuntime
+from tests.support import stream_agent_task, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
 from pulsara_agent.memory.candidates.pool import (
@@ -107,9 +106,15 @@ def test_sink_drain_returns_and_clears() -> None:
 def test_sink_stages_invalid_attempts_until_finalization() -> None:
     sink = MemoryProposalSink()
 
-    first = sink.record_invalid(_invalid_proposal("call:1", statement="x"), "intent:one")
-    second = sink.record_invalid(_invalid_proposal("call:2", statement="x revised"), "intent:one")
-    third = sink.record_invalid(_invalid_proposal("call:3", statement="x final"), "intent:one")
+    first = sink.record_invalid(
+        _invalid_proposal("call:1", statement="x"), "intent:one"
+    )
+    second = sink.record_invalid(
+        _invalid_proposal("call:2", statement="x revised"), "intent:one"
+    )
+    third = sink.record_invalid(
+        _invalid_proposal("call:3", statement="x final"), "intent:one"
+    )
 
     assert first.retry_allowed is True
     assert second.retry_allowed is True
@@ -128,7 +133,10 @@ def test_sink_stages_invalid_attempts_until_finalization() -> None:
 
 def test_sink_valid_candidate_clears_staged_invalid_for_same_intent() -> None:
     sink = MemoryProposalSink()
-    sink.record_invalid(_invalid_proposal("call:bad", statement="Prefer concise summaries."), "intent:pref")
+    sink.record_invalid(
+        _invalid_proposal("call:bad", statement="Prefer concise summaries."),
+        "intent:pref",
+    )
 
     sink.deposit_valid(_proposal(_preference("candidate:good")), "intent:pref")
 
@@ -143,16 +151,25 @@ def test_sink_valid_candidate_clears_staged_invalid_for_same_intent() -> None:
 def test_sink_counts_different_invalid_intents_independently() -> None:
     sink = MemoryProposalSink()
 
-    first_a = sink.record_invalid(_invalid_proposal("call:a1", statement="a"), "intent:a")
-    first_b = sink.record_invalid(_invalid_proposal("call:b1", statement="b"), "intent:b")
-    second_a = sink.record_invalid(_invalid_proposal("call:a2", statement="a again"), "intent:a")
+    first_a = sink.record_invalid(
+        _invalid_proposal("call:a1", statement="a"), "intent:a"
+    )
+    first_b = sink.record_invalid(
+        _invalid_proposal("call:b1", statement="b"), "intent:b"
+    )
+    second_a = sink.record_invalid(
+        _invalid_proposal("call:a2", statement="a again"), "intent:a"
+    )
 
     assert first_a.retry_count == 1
     assert first_b.retry_count == 1
     assert second_a.retry_count == 2
     assert first_b.remaining_retries == 2
     finalized = sink.finalize_invalid_attempts()
-    assert {proposal.source_tool_call_id for proposal in finalized} == {"call:a2", "call:b1"}
+    assert {proposal.source_tool_call_id for proposal in finalized} == {
+        "call:a2",
+        "call:b1",
+    }
 
 
 # --- DurableMemoryHooks ---------------------------------------------------
@@ -200,7 +217,9 @@ def test_durable_hooks_delays_invalid_attempts_until_session_end() -> None:
 
 
 def test_durable_hooks_empty_sink_returns_no_events() -> None:
-    hooks = DurableMemoryHooks(candidate_pool=InMemoryCandidatePool(), sink=MemoryProposalSink())
+    hooks = DurableMemoryHooks(
+        candidate_pool=InMemoryCandidatePool(), sink=MemoryProposalSink()
+    )
     state = LoopState(session_id="runtime:test")
 
     assert asyncio.run(hooks.after_model_reply(state, None)) == []
@@ -257,7 +276,9 @@ def test_remember_preference_tool_valid_deposits_candidate() -> None:
     assert json.loads(result.output)["status"] == "proposed"
 
 
-def test_remember_preference_tool_extra_field_errors_and_stages_invalid_attempt() -> None:
+def test_remember_preference_tool_extra_field_errors_and_stages_invalid_attempt() -> (
+    None
+):
     sink = MemoryProposalSink()
     tool = RememberPreferenceTool(sink=sink)
 
@@ -288,7 +309,10 @@ def test_remember_preference_tool_extra_field_errors_and_stages_invalid_attempt(
     assert isinstance(proposal.payload, InvalidAttemptPayload)
     assert proposal.payload.attempted_tool_name == "remember_preference"
     assert proposal.payload.attempted_kind == "Preference"
-    assert proposal.payload.raw_arguments["applies_when"] == "misplaced action-boundary field"
+    assert (
+        proposal.payload.raw_arguments["applies_when"]
+        == "misplaced action-boundary field"
+    )
 
 
 def test_remember_preference_tool_invalid_retry_limit_returns_do_not_retry() -> None:
@@ -363,7 +387,9 @@ def test_remember_preference_tool_valid_after_invalid_clears_staged_invalid() ->
     assert sink.finalize_invalid_attempts() == []
 
 
-def test_remember_preference_tool_valid_after_retry_limit_still_clears_invalid() -> None:
+def test_remember_preference_tool_valid_after_retry_limit_still_clears_invalid() -> (
+    None
+):
     sink = MemoryProposalSink()
     tool = RememberPreferenceTool(sink=sink)
     invalid_arguments = {
@@ -489,6 +515,8 @@ def test_remember_decision_tool_supports_based_on_ids() -> None:
 
 class _ScriptedTransport:
     api = "scripted"
+    binding_id = "test.scripted"
+    contract_version = "v1"
 
     def __init__(self, replies: list[dict]) -> None:
         self.replies = replies
@@ -496,21 +524,17 @@ class _ScriptedTransport:
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        del call
         reply = self.replies.pop(0)
-        yield ModelCallStartEvent(
-            **event_context.event_fields(),
-            model_name=model.id,
-            model_role=model.role.value,
-            provider=model.provider,
-        )
         if "text" in reply:
             yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(**event_context.event_fields(), block_id="text:1", delta=reply["text"])
+            yield TextBlockDeltaEvent(
+                **event_context.event_fields(), block_id="text:1", delta=reply["text"]
+            )
             yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
             yield ToolCallStartEvent(
@@ -523,12 +547,13 @@ class _ScriptedTransport:
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=call["id"])
-        yield ModelCallEndEvent(**event_context.event_fields())
+            yield ToolCallEndEvent(
+                **event_context.event_fields(), tool_call_id=call["id"]
+            )
 
 
 def _make_llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
-    config = LLMConfig(
+    config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
@@ -569,7 +594,8 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
         memory_hooks=hooks,
@@ -600,7 +626,11 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
         ),
     )
     governance_results = governance.submit_pending_as_is()
-    result = next(e for e in governance_results[0].events if e.type is EventType.MEMORY_WRITE_RESULT)
+    result = next(
+        e
+        for e in governance_results[0].events
+        if e.type is EventType.MEMORY_WRITE_RESULT
+    )
     assert result.memory_type == "Preference"
     assert result.status is memory.NodeStatus.ACTIVE
     assert graph.has_jsonld(result.memory_id)
@@ -610,7 +640,9 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
     assert result.sequence is not None
 
 
-def test_default_agent_runtime_does_not_expose_memory_write_tools(tmp_path: Path) -> None:
+def test_default_agent_runtime_does_not_expose_memory_write_tools(
+    tmp_path: Path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     transport = _ScriptedTransport(
         [
@@ -634,7 +666,8 @@ def test_default_agent_runtime_does_not_expose_memory_write_tools(tmp_path: Path
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
     )
@@ -678,7 +711,8 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
         memory_hooks=hooks,
@@ -697,7 +731,9 @@ def test_agent_runtime_invalid_proposal_emits_no_memory_events(tmp_path: Path) -
     assert graph.find_by_type(memory.PREFERENCE) == []
 
 
-def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(tmp_path: Path) -> None:
+def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(
+    tmp_path: Path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
@@ -743,7 +779,8 @@ def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(tmp_pa
             {"text": "done"},
         ]
     )
-    agent = AgentRuntime(capability_runtime=CapabilityRuntime(), 
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
         llm_runtime=_make_llm_runtime(transport),
         memory_hooks=hooks,
@@ -765,7 +802,7 @@ def test_agent_runtime_invalid_then_valid_same_intent_only_persists_valid(tmp_pa
 
 
 async def _collect(agent: AgentRuntime, user_input: str) -> list[AgentEvent]:
-    return [event async for event in agent.stream_task(user_input)]
+    return [event async for event in stream_agent_task(agent, user_input)]
 
 
 def _proposal(candidate: PreferenceCandidate) -> CandidatePoolProposal:

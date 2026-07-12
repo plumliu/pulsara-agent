@@ -39,14 +39,26 @@ class CapabilityDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityResolveContext:
+class CapabilityExecutionSurfaceSnapshotContext:
+    """Pre-RunStart context: static declarations and frozen bindings only."""
+
+    workspace_root: Path
+    workspace_kind: WorkspaceKind
+    available_tool_names: frozenset[str]
+    mcp_installation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityProjectionResolveContext:
+    """Post-RunStart context used only for model-visible projections."""
+
     workspace_root: Path
     workspace_kind: WorkspaceKind
     memory_domain: "MemoryDomainContext | None"
-    available_tool_names: frozenset[str]
     user_input: str
     prior_messages: tuple[Msg, ...] = ()
     active_skill_names: frozenset[str] = frozenset()
+    plan_active: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +98,7 @@ class ResolvedSkillCatalogEntry:
     auth_required: SkillAuthRequired = "none"
     cli_usage_kind: SkillCliUsageKind = "none"
     when_to_use: str | None = None
+    source: SkillSource = "workspace"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +116,21 @@ class ActiveSkillInjection:
     network_required: bool = False
     auth_required: SkillAuthRequired = "none"
     cli_usage_kind: SkillCliUsageKind = "none"
+    source: SkillSource = "workspace"
 
 
 @dataclass(frozen=True, slots=True)
 class RenderedCapabilityPrompt:
     text: str | None
     diagnostics: tuple[CapabilityDiagnostic, ...] = ()
+    fragments: tuple["RenderedCapabilityPromptFragment", ...] = ()
+    source_entry_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedCapabilityPromptFragment:
+    container_id: str
+    fragment_role: Literal["prefix", "entry", "suffix", "static"]
+    static_scope: Literal["container_wrapper", "projection_wrapper"] | None
+    source_stable_name: str | None
+    text: str

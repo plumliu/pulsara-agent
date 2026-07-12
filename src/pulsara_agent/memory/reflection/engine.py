@@ -16,19 +16,30 @@ from pulsara_agent.event import (
     MemoryCandidate,
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
-    RunErrorEvent,
-    TextBlockDeltaEvent,
 )
 from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.graph import GraphStore
 from pulsara_agent.llm import LLMRuntime, ModelRole
+from pulsara_agent.llm.direct import DirectModelCallResult, collect_direct_model_call
+from pulsara_agent.llm.errors import (
+    ModelContextIdentityMismatch,
+    ModelInputBudgetExceeded,
+    ModelInputEstimateMismatch,
+    ModelTargetBindingMismatch,
+    ModelTargetCapabilityMismatch,
+)
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool, CandidatePoolProposal
+from pulsara_agent.memory.candidates.pool import (
+    CandidateOrigin,
+    CandidatePool,
+    CandidatePoolProposal,
+)
 from pulsara_agent.memory.scope import format_scope_list
 from pulsara_agent.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.ontology import runtime as rt
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.state import LoopState
@@ -112,8 +123,10 @@ _EXPLICIT_MEMORY_SIGNALS = (
     "prefer",
     "preference",
     "do not",
-    "don't"
+    "don't",
 )
+
+
 class MemoryToolAttempt(BaseModel):
     tool_call_id: str | None = None
     tool_name: str | None = None
@@ -165,7 +178,7 @@ class MemoryReflectionOutput(BaseModel):
 class MemoryReflectionOptions:
     model_role: ModelRole = ModelRole.FLASH
     llm_options: LLMOptions = field(
-        default_factory=lambda: LLMOptions(temperature=0, max_output_tokens=768)
+        default_factory=LLMOptions
     )
     max_summary_chars: int = 4_000
     tool_call_threshold: int = 3
@@ -199,6 +212,9 @@ class MemoryReflectionEngine:
         cheap_hints = cheap_hints or []
         if not trigger_reasons:
             return []
+        failure_stage = "input_build"
+        resolved_call = None
+        call_result: DirectModelCallResult | None = None
         try:
             source_events = event_store.iter(run_id=state.run_id) + pending_events
             reflection_input = self._build_input(
@@ -208,8 +224,28 @@ class MemoryReflectionEngine:
                 cheap_hints=cheap_hints,
             )
 
-            response = await self._call_flash(reflection_id, reflection_input)
-            output = _parse_reflection_output(response)
+            failure_stage = "target_resolution"
+            target = self.llm_runtime.resolve_target(
+                role=self.options.model_role,
+                requested_options=self.options.llm_options,
+            )
+            failure_stage = "call_resolution"
+            resolved_call = self.llm_runtime.resolve_call(
+                target=target,
+                purpose=ModelCallPurpose.MEMORY_REFLECTION,
+            )
+            failure_stage = "model_stream"
+            call_result = await self._call_flash(
+                reflection_id,
+                reflection_input,
+                call=resolved_call,
+            )
+            if call_result.outcome != "completed":
+                raise RuntimeError(
+                    call_result.error.message if call_result.error else "provider error"
+                )
+            failure_stage = "output_parse"
+            output = _parse_reflection_output(call_result.text)
             skipped = list(output.skipped_candidates)
             raw_candidates = output.candidates if output.should_reflect else []
             queued_count = 0
@@ -220,6 +256,7 @@ class MemoryReflectionEngine:
                     for candidate in output.candidates
                 )
 
+            failure_stage = "candidate_append"
             for raw_candidate in raw_candidates:
                 normalized = _candidate_with_id(raw_candidate)
                 proposal = CandidatePoolProposal(
@@ -246,16 +283,34 @@ class MemoryReflectionEngine:
                 should_reflect=output.should_reflect,
                 decision_reason=output.reason,
                 quoted_evidence=output.quoted_evidence,
-                candidate_kinds=output.candidate_kinds or _candidate_kinds(raw_candidates),
+                candidate_kinds=output.candidate_kinds
+                or _candidate_kinds(raw_candidates),
                 proposed_count=queued_count,
                 skipped_count=len(skipped),
                 written_count=0,
                 failed_count=0,
                 summary=output.summary,
+                resolved_call=call_result.resolved_call,
+                usage_status=call_result.usage_status,
+                usage=call_result.usage,
+                estimated_input_tokens=call_result.estimated_input_tokens,
+                reported_model_id=call_result.reported_model_id,
                 metadata={"skipped_candidates": skipped},
             )
             return [completed]
         except Exception as exc:
+            if failure_stage == "model_stream" and isinstance(
+                exc,
+                (
+                    ModelInputBudgetExceeded,
+                    ModelInputEstimateMismatch,
+                    ModelContextIdentityMismatch,
+                    ModelTargetCapabilityMismatch,
+                    ModelTargetBindingMismatch,
+                ),
+            ):
+                failure_stage = "model_validation"
+            estimate = getattr(exc, "estimate", None)
             return [
                 MemoryReflectionFailedEvent(
                     **_event_context(state).event_fields(),
@@ -265,6 +320,32 @@ class MemoryReflectionEngine:
                     safe_point=safe_point,
                     error_type=type(exc).__name__,
                     message=str(exc),
+                    failure_stage=failure_stage,
+                    resolved_call=(
+                        call_result.resolved_call
+                        if call_result is not None
+                        else resolved_call.fact
+                        if resolved_call is not None
+                        else None
+                    ),
+                    usage_status=(
+                        call_result.usage_status
+                        if call_result is not None
+                        else "missing"
+                    ),
+                    usage=call_result.usage if call_result is not None else None,
+                    estimated_input_tokens=(
+                        call_result.estimated_input_tokens
+                        if call_result is not None
+                        else estimate.total_input_tokens
+                        if estimate is not None
+                        else None
+                    ),
+                    reported_model_id=(
+                        call_result.reported_model_id
+                        if call_result is not None
+                        else None
+                    ),
                 )
             ]
 
@@ -302,32 +383,38 @@ class MemoryReflectionEngine:
             allowed_scopes=sorted(self.allowed_scopes or ()),
         )
 
-    async def _call_flash(self, reflection_id: str, reflection_input: MemoryReflectionInput) -> str:
-        text_parts: list[str] = []
-        async for event in self.llm_runtime.stream(
-            role=self.options.model_role,
+    async def _call_flash(
+        self,
+        reflection_id: str,
+        reflection_input: MemoryReflectionInput,
+        *,
+        call,
+    ) -> DirectModelCallResult:
+        stream = self.llm_runtime.stream(
+            call=call,
             context=LLMContext(
                 system_prompt=_reflection_system_prompt(self.allowed_scopes),
                 messages=(
                     LLMMessage.user(
                         "Reflect on this run and output JSON only:\n"
-                        + json.dumps(reflection_input.model_dump(mode="json"), ensure_ascii=False)
+                        + json.dumps(
+                            reflection_input.model_dump(mode="json"), ensure_ascii=False
+                        )
                     ),
                 ),
                 tools=(),
+                context_id=f"context:reflection:{reflection_id}",
+                resolved_model_call_id=call.fact.resolved_model_call_id,
+                target_fingerprint=call.target.fact.target_fingerprint,
+                model_call_index=None,
             ),
             event_context=EventContext(
                 run_id=reflection_input.run_id,
                 turn_id=reflection_input.turn_id,
                 reply_id=f"{reflection_input.reply_id}:{reflection_id}",
             ),
-            options=self.options.llm_options,
-        ):
-            if isinstance(event, TextBlockDeltaEvent):
-                text_parts.append(event.delta)
-            elif isinstance(event, RunErrorEvent):
-                raise RuntimeError(event.message)
-        return "".join(text_parts)
+        )
+        return await collect_direct_model_call(stream, expected_call=call)
 
 
 def _parse_reflection_output(text: str) -> MemoryReflectionOutput:
@@ -344,7 +431,10 @@ def cheap_memory_hints(text: str) -> list[MemoryReflectionHint]:
         if index < 0:
             continue
         end = index + len(signal)
-        if any(index < matched_end and end > matched_start for matched_start, matched_end in matched_spans):
+        if any(
+            index < matched_end and end > matched_start
+            for matched_start, matched_end in matched_spans
+        ):
             continue
         matched_spans.append((index, end))
         matches.append(
@@ -380,7 +470,11 @@ def _json_object_text(text: str) -> str:
 
 
 def _candidate_kinds(candidates: list[dict[str, Any]]) -> list[str]:
-    return _unique_strings(candidate.get("kind") for candidate in candidates if isinstance(candidate.get("kind"), str))
+    return _unique_strings(
+        candidate.get("kind")
+        for candidate in candidates
+        if isinstance(candidate.get("kind"), str)
+    )
 
 
 def _prior_reflections(events: list[AgentEvent]) -> list[dict[str, Any]]:
@@ -423,14 +517,23 @@ def _memory_tool_attempts(events: list[AgentEvent]) -> list[MemoryToolAttempt]:
 
     for event in events:
         event_type = getattr(event, "type", None)
-        if event_type == "TOOL_CALL_START" and getattr(event, "tool_call_name", None) in _REMEMBER_TOOL_NAMES:
+        if (
+            event_type == "TOOL_CALL_START"
+            and getattr(event, "tool_call_name", None) in _REMEMBER_TOOL_NAMES
+        ):
             attempts_by_tool_call[event.tool_call_id] = MemoryToolAttempt(
                 tool_call_id=event.tool_call_id,
                 tool_name=event.tool_call_name,
             )
-        elif event_type == "TOOL_RESULT_TEXT_DELTA" and getattr(event, "tool_call_id", None) in attempts_by_tool_call:
+        elif (
+            event_type == "TOOL_RESULT_TEXT_DELTA"
+            and getattr(event, "tool_call_id", None) in attempts_by_tool_call
+        ):
             result_text_by_call.setdefault(event.tool_call_id, []).append(event.delta)
-        elif event_type == "TOOL_RESULT_END" and getattr(event, "tool_call_id", None) in attempts_by_tool_call:
+        elif (
+            event_type == "TOOL_RESULT_END"
+            and getattr(event, "tool_call_id", None) in attempts_by_tool_call
+        ):
             attempt = attempts_by_tool_call[event.tool_call_id]
             attempt.status = str(event.state.value)
             output = "".join(result_text_by_call.get(event.tool_call_id, []))
@@ -472,14 +575,23 @@ def _message_text(message: Msg) -> str:
         elif isinstance(block, ToolCallBlock):
             parts.append(f"[tool_call:{block.name}:{block.id}] {block.input}")
         elif isinstance(block, ToolResultBlock):
-            output = "\n".join(part.text for part in block.output if isinstance(part, TextBlock))
-            parts.append(f"[tool_result:{block.name}:{block.state.value}:{block.id}] {output}")
+            output = "\n".join(
+                part.text for part in block.output if isinstance(part, TextBlock)
+            )
+            parts.append(
+                f"[tool_result:{block.name}:{block.state.value}:{block.id}] {output}"
+            )
     return "\n".join(parts)
 
 
 def _tool_traces(state: "LoopState") -> list[dict[str, Any]]:
     traces: list[dict[str, Any]] = []
-    calls = {call.id: call for message in state.messages for call in message.content if isinstance(call, ToolCallBlock)}
+    calls = {
+        call.id: call
+        for message in state.messages
+        for call in message.content
+        if isinstance(call, ToolCallBlock)
+    }
     results = [
         result
         for message in state.messages
@@ -516,11 +628,15 @@ def _available_evidence_ids(graph: GraphStore, graph_id: str | None) -> list[str
         records = graph.find_by_type(rt.EVIDENCE, graph_id=graph_id)
     except Exception:
         return []
-    return [str(record["@id"]) for record in records if isinstance(record.get("@id"), str)]
+    return [
+        str(record["@id"]) for record in records if isinstance(record.get("@id"), str)
+    ]
 
 
 def _event_context(state: "LoopState") -> EventContext:
-    return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+    return EventContext(
+        run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
+    )
 
 
 def _first_quote(quotes: list[str]) -> str | None:

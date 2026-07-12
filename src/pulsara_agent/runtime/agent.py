@@ -5,25 +5,44 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator, Callable, Literal
 from uuid import uuid4
 
 from pulsara_agent.capability.call_classifier import DefaultCapabilityCallClassifier
 from pulsara_agent.capability.descriptor import CapabilityAvailability
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
-from pulsara_agent.capability.provider import CapabilityProviderOutput
-from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityResolveContext
+from pulsara_agent.capability.provider import (
+    CapabilityDescriptorSnapshotOutput,
+    CapabilityProjectionOutput,
+)
+from pulsara_agent.capability.render import (
+    render_active_skill_prompt,
+    render_catalog_prompt,
+)
+from pulsara_agent.capability.runtime import (
+    CapabilityRuntime,
+)
+from pulsara_agent.capability.types import (
+    ActiveSkillInjection,
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
+)
+from pulsara_agent.primitives.capability import (
+    CapabilityExecutionSurfaceIdentityFact,
+    build_capability_resolve_basis,
+)
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityExposureResolvedEvent,
     CapabilityGateDecisionEvent,
     ConfirmResult,
     ContextCompiledEvent,
     CustomEvent,
     EventContext,
     ExceedMaxItersEvent,
+    ModelCallRejectedEvent,
     ModelCallStartEvent,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
@@ -37,15 +56,25 @@ from pulsara_agent.event import (
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
-    RunStartEvent,
     ToolResultEndEvent,
+    ToolResultDataDeltaEvent,
     ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
 from pulsara_agent.event.events import utc_now
 from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.llm import LLMRuntime, ModelRole
+from pulsara_agent.llm.errors import (
+    ModelContextIdentityMismatch,
+    ModelInputBudgetExceeded,
+    ModelInputEstimateMismatch,
+    ModelTargetBindingMismatch,
+    ModelTargetCapabilityMismatch,
+)
+from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.llm.resolution import ResolvedModelTarget
 from pulsara_agent.memory.scope import MemoryDomainContext
 from pulsara_agent.message import (
     Msg,
@@ -53,17 +82,34 @@ from pulsara_agent.message import (
     ToolCallBlock,
     ToolCallState,
     ToolResultState,
-    UserMsg,
 )
+from pulsara_agent.primitives.model_call import (
+    ModelCallDiagnosticFact,
+    ModelCallPurpose,
+    ResolvedModelTargetFact,
+    sha256_fingerprint,
+)
+from pulsara_agent.primitives.mcp import McpInstallationReferenceFact
 from pulsara_agent.runtime.context import build_compiled_context
-from pulsara_agent.runtime.context_engine import ContextBudgetExceeded, ContextLifecycleCoordinator
+from pulsara_agent.runtime.context_engine import (
+    ContextBudgetExceeded,
+    ContextLifecycleCoordinator,
+)
 from pulsara_agent.runtime.context_engine.tool_results import (
     ToolResultRenderDecisionCache,
     make_tool_result_render_decision_cache,
+    render_segmented_llm_messages,
 )
 from pulsara_agent.runtime.approval import ApprovalResolution
-from pulsara_agent.runtime.compaction.inline import NoopRuntimeContextCompactor, RuntimeContextCompactorProtocol
-from pulsara_agent.runtime.hooks import MemoryHooks, NoopMemoryHooks, ToolResultPersistenceHook
+from pulsara_agent.runtime.compaction.inline import (
+    NoopRuntimeContextCompactor,
+    RuntimeContextCompactorProtocol,
+)
+from pulsara_agent.runtime.hooks import (
+    MemoryHooks,
+    NoopMemoryHooks,
+    ToolResultPersistenceHook,
+)
 from pulsara_agent.runtime.loop_helpers import (
     _accumulate_usage,
     _final_text,
@@ -74,7 +120,6 @@ from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     ApprovalPolicy,
     EffectivePermissionPolicy,
-    PermissionMode,
     PermissionProfile,
     PermissionState,
     PolicyPermissionGate,
@@ -85,9 +130,22 @@ from pulsara_agent.runtime.permission import (
     default_permission_policy,
     evaluate_capability_exposure_access,
     mode_for_policy,
-    parse_permission_mode,
     preset_to_policy,
 )
+from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
+from pulsara_agent.primitives.permission import PermissionMode, parse_permission_mode
+from pulsara_agent.primitives.run_entry import (
+    CapabilityExposureOwnerFact,
+    CurrentUserMessageFact,
+    SubagentRunEntryFact,
+    text_sha256,
+)
+from pulsara_agent.primitives.subagent import (
+    build_child_result_render_policy,
+    validate_child_render_policy_against_budget,
+)
+from pulsara_agent.primitives.run_lifecycle import RunStopReason
+from pulsara_agent.primitives.run_lifecycle import RunTerminalizationKind
 from pulsara_agent.runtime.permission_snapshot import (
     RunPermissionSnapshot,
     require_preset_permission_mode_for_policy,
@@ -95,7 +153,6 @@ from pulsara_agent.runtime.permission_snapshot import (
     validate_preset_policy_payload,
 )
 from pulsara_agent.runtime.plan import (
-    McpElicitationResolution,
     McpInputRequiredInteractionResolution,
     PlanExitResolution,
     PlanInteractionResolution,
@@ -105,6 +162,7 @@ from pulsara_agent.runtime.plan import (
 )
 from pulsara_agent.runtime.mcp.types import (
     MAX_MCP_INPUT_REQUIRED_ROUNDS,
+    McpBindingIdentity,
     McpInputRequestDTO,
     McpInputRequiredResolution,
     redact_mcp_error_message,
@@ -114,9 +172,30 @@ from pulsara_agent.runtime.recovery import (
     InRunRecoveryCause,
     InRunRecoveryState,
 )
-from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopStatus, LoopTransition
-from pulsara_agent.runtime.subagent import InMemoryEventLogLocator, SubagentRun, SubagentRuntime
+from pulsara_agent.runtime.session import (
+    EventPublicationAfterCommitError,
+    RuntimeSession,
+)
+from pulsara_agent.runtime.run_entry import (
+    AgentRunDraft,
+    CapabilityResolveBasis,
+    CommittedRunEntry,
+    PreparedSubagentRunEntry,
+    RunWorkingSet,
+)
+from pulsara_agent.runtime.state import (
+    LoopBudget,
+    LoopState,
+    LoopStatus,
+    LoopTransition,
+)
+from pulsara_agent.runtime.subagent import (
+    HydratedSubagentRunView,
+    InMemoryEventLogLocator,
+    PostgresEventLogLocator,
+    SubagentRuntime,
+)
+from pulsara_agent.runtime.subagent.run_entry import SubagentRunEntryDriver
 from pulsara_agent.runtime.tool_taxonomy import PLAN_WORKFLOW_TOOL_NAMES
 from pulsara_agent.runtime.tool_loop import (
     _ToolBatchTap,
@@ -128,9 +207,63 @@ from pulsara_agent.runtime.tool_loop import (
     _tool_result_from_event_slice,
     build_tool_result_error_events,
 )
-from pulsara_agent.tools import ToolCall, ToolExecutionResult, ToolExecutionSuspended, ToolExecutor, ToolRuntimeContext
+from pulsara_agent.tools import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolExecutionSuspended,
+    ToolExecutor,
+    ToolRuntimeContext,
+)
 
 WorkspaceKind = Literal["project", "transient"]
+
+
+async def _await_sync_tool_thread(
+    operation: Callable[[], ToolExecutionResult | ToolExecutionSuspended],
+    *,
+    release_borrow: Callable[[], None],
+) -> ToolExecutionResult | ToolExecutionSuspended:
+    """Keep execution ownership until the real worker thread has returned."""
+
+    thread_coroutine = asyncio.to_thread(operation)
+    try:
+        thread_task = asyncio.create_task(thread_coroutine)
+    except BaseException:
+        thread_coroutine.close()
+        release_borrow()
+        raise
+    deferred_release = False
+    try:
+        return await asyncio.shield(thread_task)
+    except asyncio.CancelledError as cancelled:
+        deferred_release = True
+
+        def release_after_real_thread_completion(
+            completed: asyncio.Task[ToolExecutionResult | ToolExecutionSuspended],
+        ) -> None:
+            try:
+                completed.exception()
+            except BaseException:
+                pass
+            finally:
+                release_borrow()
+
+        thread_task.add_done_callback(release_after_real_thread_completion)
+        # The tool thread may still emit result events or mutate external
+        # state.  Keep the run task alive until that real execution boundary
+        # closes; Host stop/close applies its own bounded deadline around this
+        # task and therefore blocks teardown without writing RunEnd early.
+        while not thread_task.done():
+            try:
+                await asyncio.shield(thread_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        raise cancelled
+    finally:
+        if not deferred_release:
+            release_borrow()
 
 _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME = "plan_revision_required_instruction"
 _SUBAGENT_RESULTS_SECTION_ID = "subagent:results"
@@ -152,36 +285,8 @@ _KNOWN_CAPABILITY_GATE_REASON_CODES = frozenset(
     }
 )
 
-StopReason = Literal[
-    "final",
-    "max_turns",
-    "model_error",
-    "tool_error_budget",
-    "plan_interaction_budget",
-    "memory_hook_error",
-    "waiting_user",
-    "aborted",
-]
-
-
-class _CachingEventLogLocator:
-    def __init__(self, factory):
-        self._factory = factory
-        self._cache: dict[str, EventLog] = {}
-
-    def register(self, runtime_session_id: str, event_log: EventLog) -> None:
-        self._cache[runtime_session_id] = event_log
-
-    def event_log_for_runtime_session(self, runtime_session_id: str) -> EventLog:
-        event_log = self._cache.get(runtime_session_id)
-        if event_log is None:
-            event_log = self._factory(runtime_session_id)
-            self._cache[runtime_session_id] = event_log
-        return event_log
-
-
 @dataclass(frozen=True, slots=True)
-class _ProfileFilteredCapabilityProvider:
+class _ProfileFilteredExecutionSurfaceProvider:
     provider: Any
     allowed_tool_names: frozenset[str]
     allowed_descriptor_ids: frozenset[str]
@@ -190,15 +295,64 @@ class _ProfileFilteredCapabilityProvider:
     def provider_id(self) -> str:
         return str(getattr(self.provider, "provider_id", "profile-filtered"))
 
-    def resolve(self, context: CapabilityResolveContext, *, bound_tool_names: frozenset[str]) -> CapabilityProviderOutput:
-        output = self.provider.resolve(context, bound_tool_names=bound_tool_names)
-        return CapabilityProviderOutput(
+    def snapshot_descriptors(
+        self,
+        context: CapabilityExecutionSurfaceSnapshotContext,
+    ) -> CapabilityDescriptorSnapshotOutput:
+        snapshot = self.provider.snapshot_descriptors
+        output = snapshot(context)
+        return CapabilityDescriptorSnapshotOutput(
             descriptors=tuple(
                 descriptor
                 for descriptor in output.descriptors
-                if descriptor.name in self.allowed_tool_names or descriptor.id in self.allowed_descriptor_ids
+                if descriptor.name in self.allowed_tool_names
+                or descriptor.id in self.allowed_descriptor_ids
             ),
             diagnostics=output.diagnostics,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ProfileFilteredProjectionProvider:
+    provider: Any
+    allowed_skill_names: frozenset[str]
+
+    @property
+    def provider_id(self) -> str:
+        return str(getattr(self.provider, "provider_id", "profile-filtered"))
+
+    def resolve_projection(
+        self,
+        context: CapabilityProjectionResolveContext,
+        *,
+        execution_surface: CapabilityExecutionSurfaceIdentityFact,
+    ) -> CapabilityProjectionOutput:
+        resolve_projection = self.provider.resolve_projection
+        output = resolve_projection(context, execution_surface=execution_surface)
+        catalog_entries = tuple(
+            entry
+            for entry in output.catalog_entries
+            if entry.name in self.allowed_skill_names
+        )
+        active_injections = tuple(
+            injection
+            for injection in output.active_injections
+            if injection.name in self.allowed_skill_names
+        )
+        catalog_rendered = render_catalog_prompt(catalog_entries)
+        active_rendered = render_active_skill_prompt(active_injections)
+        return CapabilityProjectionOutput(
+            catalog_entries=catalog_entries,
+            active_injections=active_injections,
+            diagnostics=(
+                *output.diagnostics,
+                *catalog_rendered.diagnostics,
+                *active_rendered.diagnostics,
+            ),
+            catalog_prompt=catalog_rendered.text,
+            active_skill_prompt=active_rendered.text,
+            catalog_rendered=catalog_rendered,
+            active_skill_rendered=active_rendered,
         )
 
 
@@ -214,12 +368,9 @@ def _subagent_event_log_backend(runtime_session: RuntimeSession):
 
         return factory, locator
     if isinstance(parent_log, PostgresEventLog):
-        locator = _CachingEventLogLocator(
-            lambda runtime_session_id: PostgresEventLog(
-                dsn=parent_log.dsn,
-                runtime_session_id=runtime_session_id,
-                workspace_root=runtime_session.workspace_root,
-            )
+        locator = PostgresEventLogLocator(
+            dsn=parent_log.dsn,
+            workspace_root=runtime_session.workspace_root,
         )
         return locator.event_log_for_runtime_session, locator
     raise TypeError(
@@ -228,21 +379,36 @@ def _subagent_event_log_backend(runtime_session: RuntimeSession):
     )
 
 
-def _profile_filtered_capability_runtime(parent: CapabilityRuntime, profile: Any) -> CapabilityRuntime:
+def _profile_filtered_capability_runtime(
+    parent: CapabilityRuntime, profile: Any
+) -> CapabilityRuntime:
     allowed_tool_names = frozenset(getattr(profile, "allowed_tool_names", ()) or ())
-    allowed_descriptor_ids = frozenset(getattr(profile, "allowed_descriptor_ids", ()) or ())
-    if not allowed_tool_names and not allowed_descriptor_ids:
-        return CapabilityRuntime(providers=())
-    return CapabilityRuntime(
-        providers=tuple(
-            _ProfileFilteredCapabilityProvider(
-                provider=provider,
-                allowed_tool_names=allowed_tool_names,
-                allowed_descriptor_ids=allowed_descriptor_ids,
-            )
-            for provider in parent.providers
-        )
+    allowed_descriptor_ids = frozenset(
+        getattr(profile, "allowed_descriptor_ids", ()) or ()
     )
+    allowed_skill_names = frozenset(
+        getattr(profile, "allowed_skill_names", ()) or ()
+    )
+    if not allowed_tool_names and not allowed_descriptor_ids and not allowed_skill_names:
+        return CapabilityRuntime(providers=())
+    filtered: list[Any] = []
+    for provider in parent.providers:
+        if hasattr(provider, "snapshot_descriptors"):
+            filtered.append(
+                _ProfileFilteredExecutionSurfaceProvider(
+                    provider=provider,
+                    allowed_tool_names=allowed_tool_names,
+                    allowed_descriptor_ids=allowed_descriptor_ids,
+                )
+            )
+        if hasattr(provider, "resolve_projection"):
+            filtered.append(
+                _ProfileFilteredProjectionProvider(
+                    provider=provider,
+                    allowed_skill_names=allowed_skill_names,
+                )
+            )
+    return CapabilityRuntime(providers=tuple(filtered))
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,25 +439,39 @@ def _terminal_capability_context(
         return None
     if not exposure.active_injections:
         return None
-    active_skill_names = tuple(injection.name for injection in exposure.active_injections)
+    active_skill_names = tuple(
+        injection.name for injection in exposure.active_injections
+    )
     context: dict[str, object] = {
         "active_skill_names": list(active_skill_names),
         "context_kind": "active_skill_present",
     }
-    suggested_tools = _merged_skill_values(exposure.active_injections, "suggested_tools")
+    suggested_tools = _merged_skill_values(
+        exposure.active_injections, "suggested_tools"
+    )
     if suggested_tools:
         context["skill_suggested_tools"] = suggested_tools
-    required_binaries = _merged_skill_values(exposure.active_injections, "required_binaries")
+    required_binaries = _merged_skill_values(
+        exposure.active_injections, "required_binaries"
+    )
     if required_binaries:
         context["cli_required_binaries"] = required_binaries
-    optional_binaries = _merged_skill_values(exposure.active_injections, "optional_binaries")
+    optional_binaries = _merged_skill_values(
+        exposure.active_injections, "optional_binaries"
+    )
     if optional_binaries:
         context["cli_optional_binaries"] = optional_binaries
-    external_services = _merged_skill_values(exposure.active_injections, "external_services")
+    external_services = _merged_skill_values(
+        exposure.active_injections, "external_services"
+    )
     if external_services:
         context["cli_external_services"] = external_services
     cli_usage_kinds = sorted(
-        {injection.cli_usage_kind for injection in exposure.active_injections if injection.cli_usage_kind != "none"}
+        {
+            injection.cli_usage_kind
+            for injection in exposure.active_injections
+            if injection.cli_usage_kind != "none"
+        }
     )
     if cli_usage_kinds:
         context["cli_usage_kinds"] = cli_usage_kinds
@@ -303,7 +483,9 @@ def _terminal_capability_context(
     return context
 
 
-def _merged_skill_values(injections: tuple[ActiveSkillInjection, ...], field_name: str) -> list[str]:
+def _merged_skill_values(
+    injections: tuple[ActiveSkillInjection, ...], field_name: str
+) -> list[str]:
     values: set[str] = set()
     for injection in injections:
         values.update(getattr(injection, field_name))
@@ -312,7 +494,11 @@ def _merged_skill_values(injections: tuple[ActiveSkillInjection, ...], field_nam
 
 def _max_auth_required(injections: tuple[ActiveSkillInjection, ...]) -> str:
     rank = {"none": 0, "optional": 1, "required": 2}
-    return max((injection.auth_required for injection in injections), key=lambda value: rank[value], default="none")
+    return max(
+        (injection.auth_required for injection in injections),
+        key=lambda value: rank[value],
+        default="none",
+    )
 
 
 def _normalize_capability_gate_reason(
@@ -329,11 +515,20 @@ def _normalize_capability_gate_reason(
         return reason, reason
     if "capability_descriptor_missing" in reason:
         return "capability_descriptor_missing", reason
-    if reason.startswith("capability_hidden") or "capability_hidden_in_current_exposure" in reason:
+    if (
+        reason.startswith("capability_hidden")
+        or "capability_hidden_in_current_exposure" in reason
+    ):
         return "capability_hidden", reason
-    if reason.startswith("capability_unavailable") or "capability_unavailable_in_current_exposure" in reason:
+    if (
+        reason.startswith("capability_unavailable")
+        or "capability_unavailable_in_current_exposure" in reason
+    ):
         return "capability_unavailable", reason
-    if reason.startswith("capability_not_callable") or "capability_not_callable_in_current_exposure" in reason:
+    if (
+        reason.startswith("capability_not_callable")
+        or "capability_not_callable_in_current_exposure" in reason
+    ):
         return "capability_not_callable", reason
     if reason.startswith("tool call suppressed because workflow control tool"):
         return "workflow_control_batch_suppressed", reason
@@ -345,19 +540,26 @@ def _normalize_capability_gate_reason(
         return "hardline_terminal_process_input_blocked", reason
     if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
         return "permission_wait_for_user", reason
-    if decision.kind is PermissionDecisionKind.DENY and "not allowed by permission policy" in reason:
+    if (
+        decision.kind is PermissionDecisionKind.DENY
+        and "not allowed by permission policy" in reason
+    ):
         return "permission_denied", reason
     return None, reason
 
 
-def _call_matches_suggested_rule(call: ToolCall, suggested_rules: list[dict] | tuple[dict[str, Any], ...]) -> bool:
+def _call_matches_suggested_rule(
+    call: ToolCall, suggested_rules: list[dict] | tuple[dict[str, Any], ...]
+) -> bool:
     for rule in suggested_rules:
         if rule.get("tool") == call.name:
             return True
     return False
 
 
-def _suppressed_by_workflow_control_decision(workflow_call: ToolCall) -> PermissionDecision:
+def _suppressed_by_workflow_control_decision(
+    workflow_call: ToolCall,
+) -> PermissionDecision:
     return PermissionDecision(
         kind=PermissionDecisionKind.DENY,
         reason=(
@@ -389,6 +591,26 @@ def _mcp_input_requests_from_payload(value: object) -> tuple[McpInputRequestDTO,
     return tuple(requests)
 
 
+def _mcp_resume_binding_changed(payload: dict[str, Any], tool: object) -> bool:
+    raw_identity = payload.get("mcp_binding_identity")
+    current_identity = getattr(tool, "binding_identity", None)
+    if not isinstance(raw_identity, dict) or not isinstance(
+        current_identity,
+        McpBindingIdentity,
+    ):
+        return True
+    try:
+        pending_identity = McpBindingIdentity(
+            server_id=str(raw_identity["server_id"]),
+            slot_id=str(raw_identity["slot_id"]),
+            snapshot_id=str(raw_identity["snapshot_id"]),
+            discovery_generation=int(raw_identity["discovery_generation"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return True
+    return pending_identity != current_identity
+
+
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
@@ -406,13 +628,25 @@ def compose_system_prompt(
     capability_prompt: str | None = None,
     active_skill_prompt: str | None = None,
 ) -> str | None:
-    parts = [part for part in (base, runtime_context_prompt, memory_prompt, capability_prompt, active_skill_prompt) if part]
+    parts = [
+        part
+        for part in (
+            base,
+            runtime_context_prompt,
+            memory_prompt,
+            capability_prompt,
+            active_skill_prompt,
+        )
+        if part
+    ]
     if not parts:
         return None
     return "\n\n".join(parts)
 
 
-def _with_memory_context_prompt(system_prompt: str | None, memory_prompt: str | None) -> str | None:
+def _with_memory_context_prompt(
+    system_prompt: str | None, memory_prompt: str | None
+) -> str | None:
     return compose_system_prompt(system_prompt, memory_prompt=memory_prompt)
 
 
@@ -450,7 +684,7 @@ def render_runtime_context_prompt(
 @dataclass(slots=True)
 class AgentRunResult:
     status: LoopStatus
-    stop_reason: StopReason | None
+    stop_reason: RunStopReason | None
     state: LoopState
     messages: list[Msg]
     final_text: str
@@ -509,21 +743,37 @@ class AgentRuntime:
         )
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
-        self._is_subagent_child = isinstance(runtime_session.default_event_metadata.get("subagent"), dict)
-        self._subagent_parent_features_enabled = enable_subagents and not self._is_subagent_child
+        self._is_subagent_child = isinstance(
+            runtime_session.default_event_metadata.get("subagent"), dict
+        )
+        self._subagent_parent_features_enabled = (
+            enable_subagents and not self._is_subagent_child
+        )
         self.subagent_runtime = subagent_runtime
         if self._subagent_parent_features_enabled and self.subagent_runtime is None:
-            child_event_log_factory, event_log_locator = _subagent_event_log_backend(runtime_session)
-            self.subagent_runtime = SubagentRuntime(
-                parent_runtime_session=runtime_session,
-                child_event_log_factory=child_event_log_factory,
-                event_log_locator=event_log_locator,
-                child_runner=self._run_child_agent,
-            )
+            existing_subagent_runtime = runtime_session.subagent_runtime
+            if isinstance(existing_subagent_runtime, SubagentRuntime):
+                self.subagent_runtime = existing_subagent_runtime
+                self.subagent_runtime.bind_child_runner(self._run_child_agent)
+            else:
+                child_event_log_factory, event_log_locator = (
+                    _subagent_event_log_backend(runtime_session)
+                )
+                self.subagent_runtime = SubagentRuntime(
+                    parent_runtime_session=runtime_session,
+                    child_event_log_factory=child_event_log_factory,
+                    event_log_locator=event_log_locator,
+                    child_runner=self._run_child_agent,
+                )
         self.runtime_session.subagent_runtime = self.subagent_runtime
         self._subagent_dangling_repair_done = False
+        self._mcp_terminal_commit_outcomes: dict[
+            tuple[str, str], Literal["not_attempted", "attempting", "none", "full", "untrusted"]
+        ] = {}
         self.tool_executor = runtime_session.create_tool_executor(
-            memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
+            memory_proposal_sink=getattr(
+                self.memory_hooks, "memory_proposal_sink", None
+            ),
             memory_recall_service=getattr(self.memory_hooks, "recall", None),
             memory_query=getattr(self.memory_hooks, "memory_query", None),
             graph_id=getattr(self.memory_hooks, "graph_id", None),
@@ -542,7 +792,9 @@ class AgentRuntime:
             raise ValueError("AgentRuntime requires an explicit CapabilityRuntime")
         self.capability_runtime = capability_runtime
         self.tool_executor = self.runtime_session.create_tool_executor(
-            memory_proposal_sink=getattr(self.memory_hooks, "memory_proposal_sink", None),
+            memory_proposal_sink=getattr(
+                self.memory_hooks, "memory_proposal_sink", None
+            ),
             memory_recall_service=getattr(self.memory_hooks, "recall", None),
             memory_query=getattr(self.memory_hooks, "memory_query", None),
             graph_id=getattr(self.memory_hooks, "graph_id", None),
@@ -567,7 +819,9 @@ class AgentRuntime:
         """Set the session default permission policy for future runs."""
         resolved_mode = mode if mode is not None else mode_for_policy(policy)
         if resolved_mode is None:
-            raise ValueError("AgentRuntime session default requires a preset permission mode")
+            raise ValueError(
+                "AgentRuntime session default requires a preset permission mode"
+            )
         validate_preset_policy_payload(
             resolved_mode,
             policy.to_dict(),
@@ -575,41 +829,6 @@ class AgentRuntime:
         )
         self._permission_state.policy = policy
         self._permission_state.mode = resolved_mode
-
-    async def run_task(
-        self,
-        user_input: str,
-        *,
-        prior_messages: list[Msg] | None = None,
-        state: LoopState | None = None,
-        active_skill_names: frozenset[str] | None = None,
-    ) -> AgentRunResult:
-        state = state or self.new_state()
-        async for _event in self._stream_task(
-            user_input,
-            state,
-            prior_messages=prior_messages,
-            active_skill_names=active_skill_names,
-        ):
-            pass
-        return self._run_result(state)
-
-    async def stream_task(
-        self,
-        user_input: str,
-        *,
-        prior_messages: list[Msg] | None = None,
-        state: LoopState | None = None,
-        active_skill_names: frozenset[str] | None = None,
-    ) -> AsyncIterator[AgentEvent]:
-        state = state or self.new_state()
-        async for event in self._stream_task(
-            user_input,
-            state,
-            prior_messages=prior_messages,
-            active_skill_names=active_skill_names,
-        ):
-            yield event
 
     async def resume_after_approval(
         self,
@@ -637,15 +856,6 @@ class AgentRuntime:
             pass
         return self._run_result(state)
 
-    async def resume_after_mcp_elicitation(
-        self,
-        state: LoopState,
-        resolution: McpElicitationResolution,
-    ) -> AgentRunResult:
-        async for _event in self.stream_after_mcp_elicitation(state, resolution):
-            pass
-        return self._run_result(state)
-
     async def resume_after_mcp_input_required(
         self,
         state: LoopState,
@@ -663,21 +873,79 @@ class AgentRuntime:
         async for event in self._stream_plan_interaction_resolution(state, resolution):
             yield event
 
-    async def stream_after_mcp_elicitation(
-        self,
-        state: LoopState,
-        resolution: McpElicitationResolution,
-    ) -> AsyncIterator[AgentEvent]:
-        async for event in self._stream_mcp_elicitation_resolution(state, resolution):
-            yield event
-
     async def stream_after_mcp_input_required(
         self,
         state: LoopState,
         resolution: McpInputRequiredInteractionResolution,
     ) -> AsyncIterator[AgentEvent]:
-        async for event in self._stream_mcp_input_required_resolution(state, resolution):
-            yield event
+        original_pending_tool_calls = list(state.pending_tool_calls)
+        original_pending_kind = state.pending_interaction_kind
+        original_pending_payload = dict(state.pending_interaction_payload)
+        original_status = state.status
+        original_stop_reason = state.stop_reason
+        original_transition = state.last_transition
+        tool_call_id = _required_str(
+            state.pending_interaction_payload.get("tool_call_id"),
+            "pending MCP tool_call_id",
+        )
+        tool_name = _required_str(
+            state.pending_interaction_payload.get("tool_name"),
+            "pending MCP tool_name",
+        )
+        commit_outcome_key = (state.run_id, tool_call_id)
+        if commit_outcome_key in self._mcp_terminal_commit_outcomes:
+            raise RuntimeError("MCP terminal result commit is already active")
+        self._mcp_terminal_commit_outcomes[commit_outcome_key] = "not_attempted"
+        try:
+            async for event in self._stream_mcp_input_required_resolution(
+                state, resolution
+            ):
+                yield event
+        except BaseException:
+            commit_outcome = self._mcp_terminal_commit_outcomes.pop(
+                commit_outcome_key,
+                "untrusted",
+            )
+            if commit_outcome == "full":
+                committed_result_events = self._committed_tool_result_events(
+                    state,
+                    tool_call_id=tool_call_id,
+                )
+                if not committed_result_events:
+                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    state.pending_tool_calls = original_pending_tool_calls
+                    state.pending_interaction_kind = original_pending_kind
+                    state.pending_interaction_payload = original_pending_payload
+                    state.status = original_status
+                    state.stop_reason = original_stop_reason
+                    state.last_transition = original_transition
+                    raise
+                state.pending_tool_calls = []
+                state.pending_interaction_kind = None
+                state.pending_interaction_payload = {}
+                state.status = LoopStatus.RUNNING
+                state.stop_reason = None
+                try:
+                    self._record_tool_result_events(
+                        state,
+                        stored_events=committed_result_events,
+                        tool_call_id=tool_call_id,
+                        tool_call_name=tool_name,
+                    )
+                finally:
+                    await self._complete_mcp_pending_lease(
+                        resolution.interaction_id
+                    )
+            else:
+                state.pending_tool_calls = original_pending_tool_calls
+                state.pending_interaction_kind = original_pending_kind
+                state.pending_interaction_payload = original_pending_payload
+                state.status = original_status
+                state.stop_reason = original_stop_reason
+                state.last_transition = original_transition
+            raise
+        else:
+            self._mcp_terminal_commit_outcomes.pop(commit_outcome_key, None)
 
     async def abort_run(
         self,
@@ -689,6 +957,39 @@ class AgentRuntime:
             pass
         return self._run_result(state)
 
+    async def fail_committed_run(
+        self,
+        state: LoopState,
+        *,
+        stop_reason: RunStopReason,
+        error_message: str,
+    ) -> AgentRunResult:
+        """Terminalize a committed run with one stable execution-failure fact."""
+
+        if state.finalized:
+            return self._run_result(state)
+        state.status = LoopStatus.FAILED
+        state.stop_reason = stop_reason
+        state.error_message = error_message
+        state.pending_tool_calls = []
+        state.pending_interaction_kind = None
+        state.pending_interaction_payload = {}
+        state.transition(LoopTransition.FAIL)
+        async for _event in self._finalize_run(state, run_session_end_hook=False):
+            pass
+        return self._run_result(state)
+
+    async def retry_run_terminalization(self, state: LoopState) -> AgentRunResult:
+        """Retry one frozen RunEnd candidate without changing its run outcome."""
+
+        if not state.finalized:
+            async for _event in self._finalize_run(
+                state,
+                run_session_end_hook=False,
+            ):
+                pass
+        return self._run_result(state)
+
     async def stream_abort_run(
         self,
         state: LoopState,
@@ -698,9 +999,14 @@ class AgentRuntime:
         if state.finalized:
             return
         if state.status in {LoopStatus.FINISHED, LoopStatus.FAILED, LoopStatus.ABORTED}:
+            async for event in self._finalize_run(
+                state,
+                run_session_end_hook=False,
+            ):
+                yield event
             return
         state.status = LoopStatus.ABORTED
-        state.stop_reason = "aborted"
+        state.stop_reason = RunStopReason.ABORTED
         state.error_message = None
         state.pending_tool_calls = []
         state.pending_interaction_kind = None
@@ -713,11 +1019,21 @@ class AgentRuntime:
     def close(self) -> None:
         self.runtime_session.close()
 
-    async def _run_child_agent(self, subagent_runtime: SubagentRuntime, run: SubagentRun) -> None:
+    async def _run_child_agent(
+        self,
+        subagent_runtime: SubagentRuntime,
+        run_view: HydratedSubagentRunView,
+    ) -> None:
+        run = run_view.fact
+        capability_profile = run.capability_profile_value
         child_session = subagent_runtime.child_runtime_session(run.subagent_run_id)
-        if run.capability_profile.permission_mode is None:
-            raise ValueError("child subagent run requires a preset child_profile permission mode")
-        child_permission_mode = parse_permission_mode(run.capability_profile.permission_mode)
+        if capability_profile.permission_mode is None:
+            raise ValueError(
+                "child subagent run requires a preset child_profile permission mode"
+            )
+        child_permission_mode = parse_permission_mode(
+            capability_profile.permission_mode
+        )
         child_agent = AgentRuntime(
             runtime_session=child_session,
             llm_runtime=self.llm_runtime,
@@ -727,7 +1043,10 @@ class AgentRuntime:
             options=self.options,
             budget=self.budget,
             system_prompt=self.system_prompt,
-            capability_runtime=_profile_filtered_capability_runtime(self.capability_runtime, run.capability_profile),
+            capability_runtime=_profile_filtered_capability_runtime(
+                self.capability_runtime,
+                capability_profile,
+            ),
             memory_domain=None,
             workspace_kind=self.workspace_kind,
             permission_policy=preset_to_policy(child_permission_mode),
@@ -735,8 +1054,183 @@ class AgentRuntime:
             subagent_runtime=subagent_runtime,
             enable_subagents=False,
         )
-        result = await child_agent.run_task(run.task, prior_messages=[])
-        subagent_runtime.set_child_run_id(run.subagent_run_id, result.state.run_id)
+        # A child profile is an execution-surface boundary, not merely a
+        # model-visible projection.  Keep descriptor and binding sets exact so
+        # disallowed parent tools cannot remain as unowned executable bindings.
+        child_agent.tool_executor.registry = child_agent.tool_executor.registry.restricted_to(
+            frozenset(capability_profile.allowed_tool_names)
+        )
+        if not run_view.task_text_complete or run_view.task_text is None:
+            raise ValueError(
+                "child subagent run requires a fully hydrated task artifact"
+            )
+        if run.task_artifact_id is None:
+            raise ValueError("child subagent run requires a durable task artifact")
+        child_state = child_agent.new_state()
+        child_target = child_agent.resolve_run_model_target()
+        child_permission = child_agent._capture_run_permission_snapshot(child_state)
+        child_run_start_id = f"run_start:subagent:{uuid4().hex}"
+        task_observed_at = run.created_at.isoformat()
+        render_policy = build_child_result_render_policy(
+            renderer_version="subagent-result:v1",
+            max_summary_chars=run.budget_snapshot.max_result_summary_chars_per_child,
+            max_artifact_refs=run.budget_snapshot.max_result_artifact_refs_per_child,
+        )
+        validate_child_render_policy_against_budget(
+            render_policy, run.budget_snapshot
+        )
+        frozen_surface = child_agent.capability_runtime.freeze_execution_surface(
+            CapabilityExecutionSurfaceSnapshotContext(
+                workspace_root=child_session.workspace_root,
+                workspace_kind=self.workspace_kind,
+                available_tool_names=frozenset(
+                    child_agent.tool_executor.registry.names()
+                ),
+                mcp_installation_id=child_session.mcp_installation_id,
+            ),
+            tool_registry=child_agent.tool_executor.registry,
+            archive=child_session.archive,
+            runtime_session_id=child_session.runtime_session_id,
+            owner_id=child_run_start_id,
+        )
+        child_execution_handles = BoundaryExecutionHandles(
+            handle_id=f"child_execution_handles:{uuid4().hex}",
+            handle_generation=1,
+            owner_id=run.subagent_run_id,
+            state="run_owned",
+            mcp_installation=child_session.mcp_installation_id,
+            capability_runtime=child_agent.capability_runtime,
+            tool_registry=child_agent.tool_executor.registry,
+            frozen_execution_surface=frozen_surface,
+        )
+        subagent_runtime.attach_child_execution_handles(
+            run.subagent_run_id,
+            child_execution_handles,
+        )
+        child_state.scratchpad["capability_execution_borrow_authority"] = (
+            child_execution_handles.borrow_authority
+        )
+        child_state.scratchpad["capability_execution_borrow_kind"] = "child"
+        exposure_owner = CapabilityExposureOwnerFact(
+            owner_kind="subagent_run_start",
+            owner_id=child_run_start_id,
+            host_boundary_kind=None,
+            runtime_session_id=child_session.runtime_session_id,
+            run_id=child_state.run_id,
+        )
+        capability_basis = build_capability_resolve_basis(
+            basis_id=f"capability_basis:subagent:{uuid4().hex}",
+            basis_kind="initial",
+            source_basis_id=None,
+            source_basis_fingerprint=None,
+            owner=exposure_owner,
+            workspace_identity_fingerprint=sha256_fingerprint(
+                "subagent-workspace-identity:v1",
+                [str(child_session.workspace_root), self.workspace_kind],
+            ),
+            memory_domain_id="memory_domain:subagent-disabled",
+            permission_snapshot_id=child_permission.snapshot_id,
+            plan_active=False,
+            active_skill_names=(),
+            user_intent_fingerprint=sha256_fingerprint(
+                "subagent-task-intent:v1", run_view.task_text
+            ),
+            prior_transcript_fingerprint=sha256_fingerprint(
+                "subagent-prior-transcript:v1", []
+            ),
+            mcp_installation_id=child_session.mcp_installation_id,
+            execution_surface_identity=frozen_surface.identity,
+        )
+        current_user = CurrentUserMessageFact(
+            message_id=f"user-message:{child_state.run_id}",
+            source_kind=(
+                "subagent_task"
+                if run.task_id is not None
+                else "subagent_primitive_objective"
+            ),
+            text=run_view.task_text,
+            observed_at_utc=task_observed_at,
+            content_sha256=text_sha256(run_view.task_text),
+            source_artifact_id=run.task_artifact_id,
+        )
+        child_entry = SubagentRunEntryFact(
+            subagent_run_id=run.subagent_run_id,
+            subagent_task_id=run.task_id,
+            parent_runtime_session_id=run.parent_runtime_session_id,
+            parent_run_id=run.parent_run_id,
+            spawn_edge_id=run.edge_id,
+            capability_profile_fingerprint=sha256_fingerprint(
+                "subagent-capability-profile:v1",
+                capability_profile.to_event_value(),
+            ),
+            task_artifact_id=run.task_artifact_id,
+            task_observed_at_utc=task_observed_at,
+            child_result_render_policy=render_policy,
+            permission_snapshot_id=child_permission.snapshot_id,
+            model_target_fingerprint=child_target.fact.target_fingerprint,
+            mcp_installation_id=child_session.mcp_installation_id,
+            mcp_installation_owner_runtime_session_id=(
+                child_session.mcp_installation_owner_runtime_session_id
+            ),
+        )
+        child_state.run_model_target = child_target
+        child_state.permission_snapshot = child_permission
+        child_state.scratchpad.update(
+            {
+                "run_start_event_id": child_run_start_id,
+                "current_user_message_fact": current_user,
+                "terminal_run_end_event_id": f"run_end:subagent:{uuid4().hex}",
+                "subagent_run_entry_fact": child_entry,
+                "capability_resolve_basis_fact": capability_basis,
+                "capability_resolve_basis": CapabilityResolveBasis(
+                    fact=capability_basis,
+                    user_input=run_view.task_text,
+                    prior_messages=(),
+                    active_skill_names=frozenset(),
+                    workspace_root=child_session.workspace_root,
+                    memory_domain_id="memory_domain:subagent-disabled",
+                ),
+                "frozen_capability_execution_surface": frozen_surface,
+            }
+        )
+        prepared_child_entry = PreparedSubagentRunEntry(
+            entry_fact=child_entry,
+            current_user_message=current_user,
+            run_model_target=child_target,
+            permission_snapshot=child_permission,
+            mcp_installation_fact=McpInstallationReferenceFact(
+                installation_id=child_session.mcp_installation_id,
+                owner_runtime_session_id=(
+                    child_session.mcp_installation_owner_runtime_session_id
+                ),
+                config_epoch=0,
+                event_safe_config_set_fingerprint=sha256_fingerprint(
+                    "subagent-mcp-installation-reference:v1",
+                    [
+                        child_session.mcp_installation_id,
+                        child_session.mcp_installation_owner_runtime_session_id,
+                    ],
+                ),
+                server_snapshot_semantic_fingerprints=(),
+                binding_identities=(),
+            ),
+            capability_basis=child_state.scratchpad["capability_resolve_basis"],
+            frozen_execution_surface=frozen_surface,
+            run_start_event_id=child_run_start_id,
+            terminal_run_end_event_id=child_state.scratchpad[
+                "terminal_run_end_event_id"
+            ],
+        )
+        entry_bundle = await SubagentRunEntryDriver().prepare_and_commit(
+            child_agent=child_agent,
+            state=child_state,
+            prepared=prepared_child_entry,
+            prior_messages=[],
+        )
+        result = await child_agent.run_committed_entry(
+            entry_bundle.draft,
+            entry_bundle.committed,
+        )
         if result.status is LoopStatus.FINISHED:
             submitted = subagent_runtime.submitted_result(run.subagent_run_id)
             if submitted is not None:
@@ -744,18 +1238,25 @@ class AgentRuntime:
                     run.subagent_run_id,
                     token_usage=result.state.token_usage.model_dump(),
                     tool_call_count=result.state.tool_call_count,
+                    child_run_id=result.state.run_id,
                 )
                 return
-            summary = result.final_text.strip() or "(child agent finished without final text)"
-            await subagent_runtime.complete(
+            await subagent_runtime.complete_native_result(
                 run.subagent_run_id,
-                summary=summary,
-                output_preview=result.final_text,
+                child_run_id=result.state.run_id,
             )
             return
         if result.status is LoopStatus.WAITING_USER:
-            await subagent_runtime.fail(
+            await child_agent.fail_committed_run(
+                result.state,
+                stop_reason=RunStopReason.SUBAGENT_PENDING_UNSUPPORTED,
+                error_message=(
+                    "Child agent entered a pending interaction that V1 cannot route."
+                ),
+            )
+            await subagent_runtime.fail_from_native_child_terminal(
                 run.subagent_run_id,
+                child_run_id=result.state.run_id,
                 reason_code="subagent_pending_unsupported",
                 reason_message="Child agent entered a pending interaction that V1 subagent runtime cannot route.",
                 diagnostics=[
@@ -770,26 +1271,53 @@ class AgentRuntime:
         await subagent_runtime.fail(
             run.subagent_run_id,
             reason_code=f"subagent_{result.status.value}",
-            reason_message=result.error_message or result.stop_reason or result.status.value,
+            reason_message=(
+                f"Child agent ended with status {result.status.value} without a usable result."
+            ),
             diagnostics=[
                 {
                     "status": result.status.value,
                     "stop_reason": result.stop_reason,
-                    "error_message": result.error_message,
+                    "child_error_present": result.error_message is not None,
                 }
             ],
         )
 
     def new_state(self) -> LoopState:
-        return LoopState(session_id=self.runtime_session.runtime_session_id, budget=self.budget)
+        return LoopState(
+            session_id=self.runtime_session.runtime_session_id, budget=self.budget
+        )
 
-    def _capture_run_permission_snapshot(self, state: LoopState) -> RunPermissionSnapshot:
+    def resolve_run_model_target(self) -> ResolvedModelTarget:
+        return self.llm_runtime.resolve_target(
+            role=self.model_role,
+            requested_options=self.options,
+        )
+
+    def rebind_run_model_target(
+        self, fact: ResolvedModelTargetFact
+    ) -> ResolvedModelTarget:
+        """Rebind an existing run only from its durable RunStart contract."""
+
+        return self.llm_runtime.rebind_target(fact)
+
+    @staticmethod
+    def _require_run_model_target(state: LoopState) -> ResolvedModelTarget:
+        if state.run_model_target is None:
+            raise RuntimeError("active run is missing its ResolvedModelTarget")
+        return state.run_model_target
+
+    def _capture_run_permission_snapshot(
+        self, state: LoopState
+    ) -> RunPermissionSnapshot:
         if state.permission_snapshot is not None:
             return state.permission_snapshot
         if self._is_subagent_child:
             mode = self._permission_state.mode
             if mode is None:
-                raise ValueError("child AgentRuntime requires a preset child_profile permission mode")
+                raise ValueError(
+                    "child AgentRuntime requires a preset child_profile permission mode"
+                )
             source = "child_profile"
         elif self._plan_state(state).active:
             mode = PermissionMode.READ_ONLY
@@ -797,7 +1325,9 @@ class AgentRuntime:
         else:
             mode = self._permission_state.mode
             if mode is None:
-                raise ValueError("AgentRuntime session default requires a preset permission mode")
+                raise ValueError(
+                    "AgentRuntime session default requires a preset permission mode"
+                )
             source = "session_default"
         snapshot = snapshot_from_mode(
             runtime_session_id=self.runtime_session.runtime_session_id,
@@ -808,7 +1338,9 @@ class AgentRuntime:
         state.permission_snapshot = snapshot
         return snapshot
 
-    def _require_run_permission_snapshot(self, state: LoopState) -> RunPermissionSnapshot:
+    def _require_run_permission_snapshot(
+        self, state: LoopState
+    ) -> RunPermissionSnapshot:
         if state.permission_snapshot is None:
             raise RuntimeError(
                 "missing RunPermissionSnapshot for active run; RunStartEvent permission fields are required"
@@ -816,7 +1348,9 @@ class AgentRuntime:
         return state.permission_snapshot
 
     def _run_permission_policy(self, state: LoopState) -> EffectivePermissionPolicy:
-        return preset_to_policy(self._require_run_permission_snapshot(state).permission_mode)
+        return preset_to_policy(
+            self._require_run_permission_snapshot(state).permission_mode
+        )
 
     def _run_permission_mode(self, state: LoopState) -> PermissionMode:
         return self._require_run_permission_snapshot(state).permission_mode
@@ -853,43 +1387,72 @@ class AgentRuntime:
             "permission_policy": dict(snapshot.permission_policy),
         }
 
-    async def _stream_task(
+    async def run_committed_entry(
         self,
-        user_input: str,
-        state: LoopState,
+        draft: AgentRunDraft,
+        committed: CommittedRunEntry,
         *,
-        prior_messages: list[Msg] | None = None,
+        active_skill_names: frozenset[str] | None = None,
+    ) -> AgentRunResult:
+        async for _event in self.stream_committed_entry(
+            draft, committed, active_skill_names=active_skill_names
+        ):
+            pass
+        return self._run_result(draft.state)
+
+    async def stream_committed_entry(
+        self,
+        draft: AgentRunDraft,
+        committed: CommittedRunEntry,
+        *,
         active_skill_names: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        state = draft.state
+        try:
+            async for event in self._stream_committed_entry_inner(
+                draft,
+                committed,
+                active_skill_names=active_skill_names,
+            ):
+                yield event
+        except BaseException as exc:
+            if not state.finalized:
+                if isinstance(exc, asyncio.CancelledError) and state.stop_request is not None:
+                    raise
+                if not isinstance(
+                    state.scratchpad.get("pending_run_end_candidate"), RunEndEvent
+                ):
+                    state.status = LoopStatus.FAILED
+                    state.stop_reason = RunStopReason.RUNTIME_EXECUTION_ERROR
+                    state.error_message = (
+                        "committed run execution failed: " + type(exc).__name__
+                    )
+                    if state.last_transition not in {
+                        LoopTransition.FAIL,
+                        LoopTransition.FINISH,
+                    }:
+                        state.transition(LoopTransition.FAIL)
+                async for terminal in self._finalize_run(
+                    state,
+                    run_session_end_hook=False,
+                ):
+                    yield terminal
+            raise
+
+    async def _stream_committed_entry_inner(
+        self,
+        draft: AgentRunDraft,
+        committed: CommittedRunEntry,
+        *,
+        active_skill_names: frozenset[str] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        state = draft.state
         if (
-            self._subagent_parent_features_enabled
-            and self.subagent_runtime is not None
-            and not self._subagent_dangling_repair_done
+            committed.run_start_event.id != draft.run_start_event.id
+            or committed.run_start_event.sequence != committed.run_start_sequence
         ):
-            await self.subagent_runtime.repair_dangling_children()
-            self._subagent_dangling_repair_done = True
-        permission_snapshot = self._capture_run_permission_snapshot(state)
-        user_observed_at_utc = utc_now()
-        state.messages.extend(message.model_copy(deep=True) for message in (prior_messages or []))
-        state.messages.append(
-            UserMsg(
-                name="user",
-                content=user_input,
-                id=f"user-message:{state.run_id}",
-                metadata={"run_id": state.run_id},
-                created_at=user_observed_at_utc,
-            )
-        )
-        yield await self.runtime_session.emit(
-            RunStartEvent(
-                **self._event_context(state).event_fields(),
-                created_at=user_observed_at_utc,
-                user_input_chars=len(user_input),
-                **permission_snapshot.to_event_fields(),
-                metadata={"user_input": user_input},
-            ),
-            state=state,
-        )
+            raise RuntimeError("committed run entry does not match AgentRunDraft")
+        user_input = draft.current_user_message.text
         async for event in self._emit_pending_plan_entry_audit(state):
             yield event
         ok, _result, error_event = await self._run_memory_hook(
@@ -903,66 +1466,94 @@ class AgentRuntime:
             async for event in self._finalize_run(state, run_session_end_hook=False):
                 yield event
             return
-        exposure = self._resolve_capability_exposure(
-            state,
-            user_input=user_input,
-            prior_messages=prior_messages,
-            active_skill_names=active_skill_names,
+        frozen_surface = draft.frozen_execution_surface
+        resolved_exposure = self.capability_runtime.resolve_exposure_projection(
+            CapabilityProjectionResolveContext(
+                workspace_root=self.runtime_session.workspace_root,
+                workspace_kind=self.workspace_kind,
+                memory_domain=self.memory_domain,
+                user_input=user_input,
+                prior_messages=draft.prior_messages,
+                active_skill_names=(
+                    active_skill_names
+                    if active_skill_names is not None
+                    else frozenset(draft.capability_basis.active_skill_names)
+                ),
+                plan_active=self._plan_state(state).active,
+            ),
+            frozen_surface=frozen_surface,
+            archive=self.runtime_session.archive,
+            runtime_session_id=self.runtime_session.runtime_session_id,
+            owner=draft.capability_basis.owner,
+            resolve_basis=draft.capability_basis,
+            exposure_id=f"capability_exposure:{uuid4().hex}",
+            resolution_kind="initial",
         )
-        state.scratchpad["capability_exposure"] = exposure
+        exposure = resolved_exposure.plan
+        exposure_event = CapabilityExposureResolvedEvent(
+            **self._event_context(state).event_fields(),
+            exposure=resolved_exposure.fact,
+            exposure_revision=1,
+        )
+        try:
+            stored_exposure = await self.runtime_session.emit(
+                exposure_event,
+                state=state,
+            )
+        except BaseException as exc:
+            if isinstance(exc, EventPublicationAfterCommitError):
+                confirmed = tuple(exc.result.committed_events)
+            else:
+                confirmation = self.runtime_session.confirm_event_batch(
+                    (exposure_event,)
+                )
+                if confirmation.missing_event_ids:
+                    raise
+                confirmed = tuple(confirmation.committed_events)
+            if len(confirmed) != 1 or not isinstance(
+                confirmed[0], CapabilityExposureResolvedEvent
+            ):
+                raise RuntimeError(
+                    "initial capability exposure confirmation was not exact"
+                ) from exc
+            self._require_run_working_set(state).install_initial_exposure(
+                plan=exposure,
+                fact=resolved_exposure.fact,
+            )
+            raise
+        if not isinstance(stored_exposure, CapabilityExposureResolvedEvent):
+            raise RuntimeError("capability exposure commit returned wrong event type")
+        self._require_run_working_set(state).install_initial_exposure(
+            plan=exposure,
+            fact=resolved_exposure.fact,
+        )
         if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
+            permission_snapshot = self._require_run_permission_snapshot(state)
             self.subagent_runtime.refresh_parent_capability_snapshot(
                 exposure=exposure,
                 permission_mode=permission_snapshot.permission_mode.value,
                 permission_policy=dict(permission_snapshot.permission_policy),
             )
-        yield await self.runtime_session.emit(
-            CustomEvent(
-                **self._event_context(state).event_fields(),
-                name="capability_exposure_resolved",
-                value=exposure.to_event_value(),
-            ),
-            state=state,
-        )
+        yield stored_exposure
 
         async for event in self._stream_model_loop(state, exposure):
             yield event
 
-    def _resolve_capability_exposure(
-        self,
-        state: LoopState,
-        *,
-        user_input: str,
-        prior_messages: list[Msg] | None = None,
-        active_skill_names: frozenset[str] | None = None,
-    ) -> CapabilityExposurePlan:
-        return self.capability_runtime.resolve_for_turn(
-            CapabilityResolveContext(
-                workspace_root=self.runtime_session.workspace_root,
-                workspace_kind=self.workspace_kind,
-                memory_domain=self.memory_domain,
-                available_tool_names=frozenset(self.tool_executor.registry.names()),
-                user_input=user_input,
-                prior_messages=tuple(prior_messages or ()),
-                active_skill_names=active_skill_names or frozenset(),
-            ),
-            tool_registry=self.tool_executor.registry,
-            permission_policy=self._run_permission_policy(state),
-            plan_active=self._plan_state(state).active,
-        )
-
-    def _exposure_from_state_or_resolve(self, state: LoopState) -> CapabilityExposurePlan:
-        exposure = state.scratchpad.get("capability_exposure")
-        if isinstance(exposure, CapabilityExposurePlan):
-            return exposure
-        exposure = self._resolve_capability_exposure(
-            state,
-            user_input="",
-            prior_messages=[],
-            active_skill_names=frozenset(),
-        )
-        state.scratchpad["capability_exposure"] = exposure
+    def _require_capability_exposure(self, state: LoopState) -> CapabilityExposurePlan:
+        working_set = self._require_run_working_set(state)
+        exposure = working_set.effective_exposure_plan
+        if not isinstance(exposure, CapabilityExposurePlan):
+            raise RuntimeError(
+                "model/tool continuation requires a committed capability exposure"
+            )
         return exposure
+
+    @staticmethod
+    def _require_run_working_set(state: LoopState) -> RunWorkingSet:
+        working_set = state.run_working_set
+        if working_set is None:
+            raise RuntimeError("committed run requires a typed RunWorkingSet")
+        return working_set
 
     def _capability_gate_decision_fact(
         self,
@@ -978,7 +1569,9 @@ class AgentRuntime:
         classification = None
         if descriptor is not None:
             try:
-                classification = DefaultCapabilityCallClassifier().classify(call, descriptor)
+                classification = DefaultCapabilityCallClassifier().classify(
+                    call, descriptor
+                )
             except Exception:
                 classification = None
         reason_code, reason_message = _normalize_capability_gate_reason(
@@ -1000,14 +1593,22 @@ class AgentRuntime:
             suggested_rules=tuple(dict(rule) for rule in decision.suggested_rules),
             result_state=result_state,
             policy_mode=self._run_permission_mode(state).value,
-            permission_policy=dict(self._require_run_permission_snapshot(state).permission_policy),
+            permission_policy=dict(
+                self._require_run_permission_snapshot(state).permission_policy
+            ),
             exposure_generation=exposure.registry_generation,
             availability=descriptor.availability if descriptor is not None else None,
-            permission_category=descriptor.permission_category if descriptor is not None else None,
+            permission_category=descriptor.permission_category
+            if descriptor is not None
+            else None,
             effective_permission_category=(
-                classification.effective_permission_category if classification is not None else None
+                classification.effective_permission_category
+                if classification is not None
+                else None
             ),
-            effective_read_only=classification.effective_read_only if classification is not None else None,
+            effective_read_only=classification.effective_read_only
+            if classification is not None
+            else None,
             capability_context=capability_context or {},
         )
 
@@ -1030,7 +1631,9 @@ class AgentRuntime:
                 policy_mode=fact.policy_mode,
                 permission_policy=fact.permission_policy,
                 exposure_generation=fact.exposure_generation,
-                availability=fact.availability.value if fact.availability is not None else None,
+                availability=fact.availability.value
+                if fact.availability is not None
+                else None,
                 permission_category=fact.permission_category,
                 effective_permission_category=fact.effective_permission_category,
                 effective_read_only=fact.effective_read_only,
@@ -1111,7 +1714,9 @@ class AgentRuntime:
         result_block = _tool_result_from_event_slice(stored_events, call.id)
         _remember_tool_result_event_span(state, stored_events, call.id)
         state.tool_results.append(result_block)
-        state.messages.append(_tool_result_message_from_events(stored_events, call.name, result_block))
+        state.messages.append(
+            _tool_result_message_from_events(stored_events, call.name, result_block)
+        )
 
     async def _stream_capability_access_filtered_calls(
         self,
@@ -1135,7 +1740,9 @@ class AgentRuntime:
                 yield event
         yield (executable_calls,)
 
-    async def _emit_pending_plan_entry_audit(self, state: LoopState) -> AsyncIterator[AgentEvent]:
+    async def _emit_pending_plan_entry_audit(
+        self, state: LoopState
+    ) -> AsyncIterator[AgentEvent]:
         payload = state.scratchpad.get("plan_entry_audit")
         if not isinstance(payload, dict):
             return
@@ -1146,7 +1753,9 @@ class AgentRuntime:
                 **self._event_context(state).event_fields(),
                 source="user",
                 previous_permission_mode=payload.get("previous_permission_mode"),
-                previous_permission_policy=dict(payload.get("previous_permission_policy") or {}),
+                previous_permission_policy=dict(
+                    payload.get("previous_permission_policy") or {}
+                ),
                 reason=str(payload.get("reason") or ""),
             ),
             state=state,
@@ -1164,7 +1773,10 @@ class AgentRuntime:
                 break
             if state.turn_index >= self.budget.max_turns:
                 state.status = LoopStatus.FAILED
-                state.stop_reason = "max_turns"
+                state.stop_reason = RunStopReason.MAX_TURNS
+                state.error_message = (
+                    f"agent turn budget exceeded: max_turns={self.budget.max_turns}"
+                )
                 state.transition(LoopTransition.EXCEED_MAX_ITERS)
                 event = await self.runtime_session.emit(
                     ExceedMaxItersEvent(
@@ -1181,6 +1793,10 @@ class AgentRuntime:
                 yield event
 
             model_call_index = _next_model_call_index(state)
+            resolved_call = self.llm_runtime.resolve_call(
+                target=self._require_run_model_target(state),
+                purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+            )
             runtime_context_prompt = render_runtime_context_prompt(
                 workspace_root=str(self.runtime_session.workspace_root),
                 workspace_kind=self.workspace_kind,
@@ -1190,12 +1806,19 @@ class AgentRuntime:
                     )
                 ),
             )
-            memory_prompt = getattr(self.memory_hooks, "memory_context_prompt", lambda: None)()
+            memory_prompt = getattr(
+                self.memory_hooks, "memory_context_prompt", lambda: None
+            )()
             subagent_results_prompt: str | None = None
             pending_subagent_results = ()
-            if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
-                subagent_results_prompt, pending_subagent_results = self.subagent_runtime.render_pending_results_section(
-                    max_results=self.budget.max_subagent_results_per_parent_compile,
+            if (
+                self._subagent_parent_features_enabled
+                and self.subagent_runtime is not None
+            ):
+                subagent_results_prompt, pending_subagent_results = (
+                    self.subagent_runtime.render_pending_results_section(
+                        max_results=self.budget.max_subagent_results_per_parent_compile,
+                    )
                 )
             compiled_context = None
             compile_attempt_index = 0
@@ -1210,7 +1833,7 @@ class AgentRuntime:
                         budget=self.budget,
                         context_id=f"context:{uuid4().hex}",
                         model_call_index=model_call_index,
-                        model_role=self.model_role,
+                        resolved_call=resolved_call,
                         exposure=exposure,
                         current_user_anchor=f"user-message:{state.run_id}",
                         runtime_session_id=self.runtime_session.runtime_session_id,
@@ -1220,7 +1843,10 @@ class AgentRuntime:
                                 ("runtime_context", runtime_context_prompt),
                                 ("memory:hook_prompt", memory_prompt),
                                 ("capability:catalog", exposure.catalog_prompt),
-                                ("capability:active_skill", exposure.active_skill_prompt),
+                                (
+                                    "capability:active_skill",
+                                    exposure.active_skill_prompt,
+                                ),
                                 (_SUBAGENT_RESULTS_SECTION_ID, subagent_results_prompt),
                             )
                             if text
@@ -1230,7 +1856,9 @@ class AgentRuntime:
                     )
                     break
                 except ContextBudgetExceeded as exc:
-                    failed_context_id = exc.context_id or f"context:failed:{uuid4().hex}"
+                    failed_context_id = (
+                        exc.context_id or f"context:failed:{uuid4().hex}"
+                    )
                     failed_model_call_index = exc.model_call_index or model_call_index
                     pressure_diagnostics = [
                         diagnostic.to_event_value() for diagnostic in exc.diagnostics
@@ -1238,20 +1866,23 @@ class AgentRuntime:
                     pressure_tool_result_render_decisions = [
                         dict(decision) for decision in exc.tool_result_render_decisions
                     ]
-                    pressure_tool_result_budget_report = dict(exc.tool_result_budget_report)
+                    pressure_tool_result_budget_report = dict(
+                        exc.tool_result_budget_report
+                    )
+                    if exc.budget_report is None:
+                        raise RuntimeError(
+                            "ContextBudgetExceeded is missing its resolved budget report"
+                        ) from exc
                     yield await self.runtime_session.emit(
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="pressure",
                             context_id=failed_context_id,
-                            model_role=self.model_role.value,
                             model_call_index=failed_model_call_index,
                             compile_attempt_index=compile_attempt_index,
                             context_retry_index=context_retry_index,
-                            estimated_tokens=0,
-                            context_window_tokens=256_000,
-                            reserved_output_tokens=8_000,
-                            tools_estimated_tokens=0,
+                            resolved_call=resolved_call.fact,
+                            budget=exc.budget_report.to_event_value(),
                             sections=[],
                             tool_specs=[],
                             diagnostics=pressure_diagnostics,
@@ -1265,14 +1896,21 @@ class AgentRuntime:
                         context_retry_index == 0
                         and _context_budget_pressure_is_recoverable(exc)
                     ):
-                        previous_mid_turn_compaction = state.scratchpad.get("mid_turn_compaction")
-                        async for event in self._maybe_compact_mid_turn_before_followup(state):
+                        previous_mid_turn_compaction = state.scratchpad.get(
+                            "mid_turn_compaction"
+                        )
+                        async for event in self._maybe_compact_mid_turn_before_followup(
+                            state
+                        ):
                             yield event
-                        if state.scratchpad.get("mid_turn_compaction") != previous_mid_turn_compaction:
+                        if (
+                            state.scratchpad.get("mid_turn_compaction")
+                            != previous_mid_turn_compaction
+                        ):
                             context_retry_index += 1
                             continue
                     state.status = LoopStatus.FAILED
-                    state.stop_reason = "model_error"
+                    state.stop_reason = RunStopReason.MODEL_ERROR
                     state.error_message = str(exc)
                     state.transition(LoopTransition.FAIL)
                     yield await self.runtime_session.emit(
@@ -1280,14 +1918,11 @@ class AgentRuntime:
                             **self._event_context(state).event_fields(),
                             status="failed",
                             context_id=failed_context_id,
-                            model_role=self.model_role.value,
                             model_call_index=failed_model_call_index,
                             compile_attempt_index=compile_attempt_index,
                             context_retry_index=context_retry_index,
-                            estimated_tokens=0,
-                            context_window_tokens=256_000,
-                            reserved_output_tokens=8_000,
-                            tools_estimated_tokens=0,
+                            resolved_call=resolved_call.fact,
+                            budget=exc.budget_report.to_event_value(),
                             sections=[],
                             tool_specs=[],
                             diagnostics=pressure_diagnostics,
@@ -1314,18 +1949,21 @@ class AgentRuntime:
                 ContextCompiledEvent(
                     **self._event_context(state).event_fields(),
                     context_id=compiled_context.context_id,
-                    model_role=self.model_role.value,
                     model_call_index=model_call_index,
                     compile_attempt_index=compile_attempt_index,
                     context_retry_index=context_retry_index,
-                    estimated_tokens=compiled_context.estimated_tokens,
-                    context_window_tokens=compiled_context.budget.context_window_tokens,
-                    reserved_output_tokens=compiled_context.budget.reserved_output_tokens,
-                    tools_estimated_tokens=compiled_context.budget.tools_estimated_tokens,
-                    sections=[section.to_event_value() for section in compiled_context.sections],
-                    tool_specs=[tool.to_event_value() for tool in compiled_context.tool_specs],
+                    resolved_call=resolved_call.fact,
+                    budget=compiled_context.budget.to_event_value(),
+                    sections=[
+                        section.to_event_value()
+                        for section in compiled_context.sections
+                    ],
+                    tool_specs=[
+                        tool.to_event_value() for tool in compiled_context.tool_specs
+                    ],
                     diagnostics=[
-                        diagnostic.to_event_value() for diagnostic in compiled_context.diagnostics
+                        diagnostic.to_event_value()
+                        for diagnostic in compiled_context.diagnostics
                     ],
                     lifecycle_decisions=[
                         decision.to_event_value()
@@ -1335,14 +1973,22 @@ class AgentRuntime:
                         dict(decision)
                         for decision in compiled_context.tool_result_render_decisions
                     ],
-                    tool_result_budget_report=dict(compiled_context.tool_result_budget_report),
+                    tool_result_budget_report=dict(
+                        compiled_context.tool_result_budget_report
+                    ),
                 ),
                 state=state,
             )
-            context = compiled_context.llm_context
+            context = replace(
+                compiled_context.llm_context,
+                resolved_model_call_id=resolved_call.fact.resolved_model_call_id,
+                target_fingerprint=resolved_call.target.fact.target_fingerprint,
+            )
             deliverable_subagent_results = (
                 pending_subagent_results
-                if _compiled_section_included(compiled_context, _SUBAGENT_RESULTS_SECTION_ID)
+                if _compiled_section_included(
+                    compiled_context, _SUBAGENT_RESULTS_SECTION_ID
+                )
                 else ()
             )
             delivered_subagent_results = False
@@ -1350,10 +1996,9 @@ class AgentRuntime:
             reply_had_run_error = False
             try:
                 async for event in self.llm_runtime.stream(
-                    role=self.model_role,
+                    call=resolved_call,
                     context=context,
                     event_context=self._event_context(state),
-                    options=self.options,
                 ):
                     stored = await self.runtime_session.emit(event, state=state)
                     if isinstance(stored, RunErrorEvent):
@@ -1369,21 +2014,67 @@ class AgentRuntime:
                         and stored.model_call_index == model_call_index
                     ):
                         delivered_subagent_results = True
-                        delivered_events = await self.subagent_runtime.mark_results_delivered(
-                            deliverable_subagent_results,
-                            event_context=self._event_context(state),
-                            context_id=compiled_context.context_id,
-                            model_call_index=model_call_index,
-                            section_id=_SUBAGENT_RESULTS_SECTION_ID,
+                        delivered_events = (
+                            await self.subagent_runtime.mark_results_delivered(
+                                deliverable_subagent_results,
+                                event_context=self._event_context(state),
+                                context_id=compiled_context.context_id,
+                                model_call_index=model_call_index,
+                                section_id=_SUBAGENT_RESULTS_SECTION_ID,
+                            )
                         )
                         for delivered_event in delivered_events:
                             yield delivered_event
+            except (
+                ModelInputBudgetExceeded,
+                ModelInputEstimateMismatch,
+                ModelContextIdentityMismatch,
+                ModelTargetCapabilityMismatch,
+                ModelTargetBindingMismatch,
+            ) as exc:
+                estimate = getattr(exc, "estimate", None)
+                estimated_input_tokens = (
+                    estimate.total_input_tokens if estimate is not None else None
+                )
+                yield await self.runtime_session.emit(
+                    ModelCallRejectedEvent(
+                        **self._event_context(state).event_fields(),
+                        resolved_call=resolved_call.fact,
+                        context_id=compiled_context.context_id,
+                        model_call_index=model_call_index,
+                        reason_code=exc.reason_code,
+                        estimated_input_tokens=estimated_input_tokens,
+                        input_budget_tokens=(
+                            resolved_call.target.fact.context_budget.input_budget_tokens
+                        ),
+                        diagnostics=(
+                            ModelCallDiagnosticFact(
+                                code=exc.reason_code,
+                                message=str(exc)[:512],
+                            ),
+                        ),
+                    ),
+                    state=state,
+                )
+                state.status = LoopStatus.FAILED
+                state.stop_reason = RunStopReason.MODEL_ERROR
+                state.error_message = str(exc)
+                state.transition(LoopTransition.FAIL)
+                reply_had_run_error = True
+                yield await self.runtime_session.emit(
+                    RunErrorEvent(
+                        **self._event_context(state).event_fields(),
+                        message=f"{type(exc).__name__}: {exc}",
+                        code=exc.reason_code,
+                    ),
+                    state=state,
+                )
             except Exception as exc:
                 event = await self.runtime_session.emit(
                     RunErrorEvent(
                         **self._event_context(state).event_fields(),
                         message=f"{type(exc).__name__}: {exc}",
-                        code="model_stream_error",
+                        code=str(getattr(exc, "reason_code", "model_stream_error")),
                     ),
                     state=state,
                 )
@@ -1391,6 +2082,8 @@ class AgentRuntime:
                 yield event
 
             if self._apply_stop_request(state):
+                break
+            if state.status is not LoopStatus.RUNNING:
                 break
             if reply_had_run_error:
                 if not self._recover_or_fail_model(state):
@@ -1420,7 +2113,9 @@ class AgentRuntime:
                         SystemMsg(
                             _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME,
                             _plan_revision_required_instruction(
-                                str(state.scratchpad.get("plan_revision_feedback") or "")
+                                str(
+                                    state.scratchpad.get("plan_revision_feedback") or ""
+                                )
                             ),
                             metadata={"runtime_instruction": "plan_revision_required"},
                         )
@@ -1429,7 +2124,7 @@ class AgentRuntime:
                     state.begin_next_turn()
                     continue
                 state.status = LoopStatus.FINISHED
-                state.stop_reason = "final"
+                state.stop_reason = RunStopReason.FINAL
                 state.transition(LoopTransition.FINISH)
                 break
 
@@ -1464,7 +2159,7 @@ class AgentRuntime:
         if state.status is not LoopStatus.RUNNING:
             return state.status is LoopStatus.ABORTED
         state.status = LoopStatus.ABORTED
-        state.stop_reason = "aborted"
+        state.stop_reason = RunStopReason.ABORTED
         state.error_message = None
         state.pending_tool_calls = []
         state.pending_interaction_kind = None
@@ -1482,13 +2177,19 @@ class AgentRuntime:
         pending_by_id = {call.id: call for call in state.pending_tool_calls}
         if not pending_by_id:
             raise ValueError("approval resolution requires pending tool calls")
-        decisions_by_id = {decision.tool_call_id: decision for decision in resolution.decisions}
+        decisions_by_id = {
+            decision.tool_call_id: decision for decision in resolution.decisions
+        }
         unknown_ids = set(decisions_by_id).difference(pending_by_id)
         if unknown_ids:
-            raise ValueError(f"approval resolution referenced unknown tool calls: {sorted(unknown_ids)}")
+            raise ValueError(
+                f"approval resolution referenced unknown tool calls: {sorted(unknown_ids)}"
+            )
         missing_ids = set(pending_by_id).difference(decisions_by_id)
         if missing_ids:
-            raise ValueError(f"approval resolution missing decisions for tool calls: {sorted(missing_ids)}")
+            raise ValueError(
+                f"approval resolution missing decisions for tool calls: {sorted(missing_ids)}"
+            )
 
         confirm_results = [
             ConfirmResult(
@@ -1499,7 +2200,10 @@ class AgentRuntime:
             for call in state.pending_tool_calls
         ]
         event = await self.runtime_session.emit(
-            UserConfirmResultEvent(**self._event_context(state).event_fields(), confirm_results=confirm_results),
+            UserConfirmResultEvent(
+                **self._event_context(state).event_fields(),
+                confirm_results=confirm_results,
+            ),
             state=state,
         )
         yield event
@@ -1521,7 +2225,7 @@ class AgentRuntime:
             return
         async for event in self._continue_after_tool_before_followup(state):
             yield event
-        exposure = self._exposure_from_state_or_resolve(state)
+        exposure = self._require_capability_exposure(state)
         async for event in self._stream_model_loop(state, exposure):
             yield event
 
@@ -1533,10 +2237,14 @@ class AgentRuntime:
         if state.status is not LoopStatus.WAITING_USER:
             raise ValueError("plan interaction resolution requires a waiting state")
         if state.pending_interaction_kind != "plan":
-            raise ValueError("waiting state does not contain a pending plan interaction")
+            raise ValueError(
+                "waiting state does not contain a pending plan interaction"
+            )
         payload = dict(state.pending_interaction_payload)
         if resolution.interaction_id != payload.get("interaction_id"):
-            raise ValueError("plan interaction id does not match the pending interaction")
+            raise ValueError(
+                "plan interaction id does not match the pending interaction"
+            )
         kind = payload.get("kind")
         if kind == "question":
             if not isinstance(resolution, PlanQuestionResolution):
@@ -1565,83 +2273,7 @@ class AgentRuntime:
             return
         async for event in self._continue_after_tool_before_followup(state):
             yield event
-        exposure = self._exposure_from_state_or_resolve(state)
-        async for event in self._stream_model_loop(state, exposure):
-            yield event
-
-    async def _stream_mcp_elicitation_resolution(
-        self,
-        state: LoopState,
-        resolution: McpElicitationResolution,
-    ) -> AsyncIterator[AgentEvent]:
-        if state.status is not LoopStatus.WAITING_USER:
-            raise ValueError("MCP elicitation resolution requires a waiting state")
-        if state.pending_interaction_kind != "mcp_elicitation":
-            raise ValueError("waiting state does not contain an MCP elicitation")
-        payload = dict(state.pending_interaction_payload)
-        if resolution.interaction_id != payload.get("interaction_id"):
-            raise ValueError("MCP elicitation interaction id does not match the pending interaction")
-
-        tool_call_id = str(payload["tool_call_id"])
-        tool_name = str(payload["tool_name"])
-        server_id = str(payload["server_id"])
-        request_id = str(payload["request_id"])
-        yield await self.runtime_session.emit(
-            CustomEvent(
-                **self._event_context(state).event_fields(),
-                name="mcp_elicitation_resolved",
-                value={
-                    "interaction_id": resolution.interaction_id,
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                    "server_id": server_id,
-                    "request_id": request_id,
-                },
-            ),
-            state=state,
-        )
-        state.pending_interaction_kind = None
-        state.pending_interaction_payload = {}
-        state.status = LoopStatus.RUNNING
-        state.stop_reason = None
-
-        tool = self.tool_executor.registry.get(tool_name)
-        resume = getattr(tool, "resume_elicitation", None)
-        if resume is None:
-            async for event in self._emit_tool_result_and_record(
-                state,
-                tool_call_id=tool_call_id,
-                tool_call_name=tool_name,
-                output=f"tool {tool_name!r} cannot resume MCP elicitation",
-                result_state=ToolResultState.ERROR,
-            ):
-                yield event
-        else:
-            answer = dict(resolution.answer)
-            answer["tool_call_id"] = tool_call_id
-            result = await resume(
-                request_id=request_id,
-                answer=answer,
-                runtime_context=self._tool_runtime_context(state),
-            )
-            async for event in self._emit_tool_result_and_record(
-                state,
-                tool_call_id=tool_call_id,
-                tool_call_name=tool_name,
-                output=result.output,
-                result_state=result.status,
-            ):
-                yield event
-
-        async for event in self._after_tool_results(state):
-            yield event
-        if state.status is not LoopStatus.RUNNING:
-            async for event in self._finalize_run(state):
-                yield event
-            return
-        async for event in self._continue_after_tool_before_followup(state):
-            yield event
-        exposure = self._exposure_from_state_or_resolve(state)
+        exposure = self._require_capability_exposure(state)
         async for event in self._stream_model_loop(state, exposure):
             yield event
 
@@ -1656,13 +2288,19 @@ class AgentRuntime:
             raise ValueError("waiting state does not contain MCP input-required")
         payload = dict(state.pending_interaction_payload)
         if resolution.interaction_id != payload.get("interaction_id"):
-            raise ValueError("MCP input-required interaction id does not match the pending interaction")
+            raise ValueError(
+                "MCP input-required interaction id does not match the pending interaction"
+            )
 
         tool_call_id = str(payload["tool_call_id"])
         tool_name = str(payload["tool_name"])
         server_id = str(payload["server_id"])
         original_request = dict(payload.get("original_request") or {})
-        request_state = str(payload["request_state"]) if payload.get("request_state") is not None else None
+        request_state = (
+            str(payload["request_state"])
+            if payload.get("request_state") is not None
+            else None
+        )
         input_requests = _mcp_input_requests_from_payload(payload.get("input_requests"))
         round_count = int(payload.get("round_count") or 1)
         deadline_monotonic = _optional_float(payload.get("deadline_monotonic"))
@@ -1694,10 +2332,15 @@ class AgentRuntime:
                 tool_call_name=tool_name,
                 output="MCP input-required interaction expired before it was resumed.",
                 result_state=ToolResultState.ERROR,
-                tool_observation_timing_seed={**timing_seed, "resumed_at": utc_now()} if timing_seed else None,
+                tool_observation_timing_seed={**timing_seed, "resumed_at": utc_now()}
+                if timing_seed
+                else None,
             ):
                 yield event
-            async for event in self._after_mcp_resume_terminal_result(state):
+            async for event in self._after_mcp_resume_terminal_result(
+                state,
+                interaction_id=resolution.interaction_id,
+            ):
                 yield event
             return
 
@@ -1723,9 +2366,59 @@ class AgentRuntime:
             name=tool_name,
             arguments=dict(original_request.get("arguments") or {}),
         )
-        exposure = self._exposure_from_state_or_resolve(state)
+        try:
+            current_tool = self.tool_executor.registry.get(tool_name)
+        except KeyError:
+            current_tool = None
+        if current_tool is not None and _mcp_resume_binding_changed(
+            payload,
+            current_tool,
+        ):
+            state.pending_interaction_kind = None
+            state.pending_interaction_payload = {}
+            state.status = LoopStatus.RUNNING
+            state.stop_reason = None
+            yield await self.runtime_session.emit(
+                CustomEvent(
+                    **self._event_context(state).event_fields(),
+                    name="mcp_input_required_binding_changed",
+                    value={
+                        "interaction_id": resolution.interaction_id,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "server_id": server_id,
+                        "reason_code": "mcp_binding_generation_changed",
+                    },
+                ),
+                state=state,
+            )
+            async for event in self._emit_tool_result_and_record(
+                state,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_name,
+                output=(
+                    "MCP input-required resume denied because the original "
+                    "binding generation changed."
+                ),
+                result_state=ToolResultState.ERROR,
+                tool_observation_timing_seed=(
+                    {**timing_seed, "resumed_at": utc_now()}
+                    if timing_seed
+                    else None
+                ),
+            ):
+                yield event
+            async for event in self._after_mcp_resume_terminal_result(
+                state,
+                interaction_id=resolution.interaction_id,
+            ):
+                yield event
+            return
+        exposure = self._require_capability_exposure(state)
         exposure_decision = evaluate_capability_exposure_access(gate_call, exposure)
-        resume_timing_seed = {**timing_seed, "resumed_at": utc_now()} if timing_seed else None
+        resume_timing_seed = (
+            {**timing_seed, "resumed_at": utc_now()} if timing_seed else None
+        )
         if exposure_decision is not None:
             state.pending_interaction_kind = None
             state.pending_interaction_payload = {}
@@ -1740,7 +2433,9 @@ class AgentRuntime:
             ):
                 yield event
         else:
-            permission_decision = await self._permission_gate_for_state(state).evaluate([gate_call], exposure=exposure)
+            permission_decision = await self._permission_gate_for_state(state).evaluate(
+                [gate_call], exposure=exposure
+            )
             if permission_decision.kind is PermissionDecisionKind.DENY:
                 state.pending_interaction_kind = None
                 state.pending_interaction_payload = {}
@@ -1803,7 +2498,10 @@ class AgentRuntime:
                             request_state=request_state,
                             resolution=McpInputRequiredResolution(
                                 interaction_id=resolution.interaction_id,
-                                responses={key: dict(value) for key, value in resolution.responses.items()},
+                                responses={
+                                    key: dict(value)
+                                    for key, value in resolution.responses.items()
+                                },
                                 cancelled=resolution.cancelled,
                                 tool_call_id=tool_call_id,
                                 input_requests=input_requests,
@@ -1816,7 +2514,7 @@ class AgentRuntime:
                         state.pending_interaction_kind = "mcp_input_required"
                         state.pending_interaction_payload = original_pending_payload
                         state.status = LoopStatus.WAITING_USER
-                        state.stop_reason = "waiting_user"
+                        state.stop_reason = RunStopReason.WAITING_USER
                         yield await self.runtime_session.emit(
                             CustomEvent(
                                 **self._event_context(state).event_fields(),
@@ -1838,7 +2536,9 @@ class AgentRuntime:
                     state.status = LoopStatus.RUNNING
                     state.stop_reason = None
                     if isinstance(result, ToolExecutionSuspended):
-                        next_round = int(result.payload.get("round_count") or (round_count + 1))
+                        next_round = int(
+                            result.payload.get("round_count") or (round_count + 1)
+                        )
                         if next_round > MAX_MCP_INPUT_REQUIRED_ROUNDS:
                             async for event in self._emit_tool_result_and_record(
                                 state,
@@ -1847,11 +2547,16 @@ class AgentRuntime:
                                 output="MCP input-required interaction exceeded the maximum round count.",
                                 result_state=ToolResultState.ERROR,
                                 tool_observation_timing_seed=(
-                                    {**timing_seed, "resumed_at": utc_now()} if timing_seed else None
+                                    {**timing_seed, "resumed_at": utc_now()}
+                                    if timing_seed
+                                    else None
                                 ),
                             ):
                                 yield event
-                            async for event in self._after_mcp_resume_terminal_result(state):
+                            async for event in self._after_mcp_resume_terminal_result(
+                                state,
+                                interaction_id=resolution.interaction_id,
+                            ):
                                 yield event
                             return
                         async for event in self._suspend_tool_execution(state, result):
@@ -1863,17 +2568,28 @@ class AgentRuntime:
                         tool_call_name=tool_name,
                         output=result.output,
                         result_state=result.status,
-                        tool_observation_timing_seed={**timing_seed, "resumed_at": utc_now()} if timing_seed else None,
+                        tool_observation_timing_seed={
+                            **timing_seed,
+                            "resumed_at": utc_now(),
+                        }
+                        if timing_seed
+                        else None,
                     ):
                         yield event
 
-        async for event in self._after_mcp_resume_terminal_result(state):
+        async for event in self._after_mcp_resume_terminal_result(
+            state,
+            interaction_id=resolution.interaction_id,
+        ):
             yield event
 
     async def _after_mcp_resume_terminal_result(
         self,
         state: LoopState,
+        *,
+        interaction_id: str,
     ) -> AsyncIterator[AgentEvent]:
+        await self._complete_mcp_pending_lease(interaction_id)
         async for event in self._after_tool_results(state):
             yield event
         if state.status is not LoopStatus.RUNNING:
@@ -1882,7 +2598,7 @@ class AgentRuntime:
             return
         async for event in self._continue_after_tool_before_followup(state):
             yield event
-        exposure = self._exposure_from_state_or_resolve(state)
+        exposure = self._require_capability_exposure(state)
         async for event in self._stream_model_loop(state, exposure):
             yield event
 
@@ -1890,13 +2606,34 @@ class AgentRuntime:
         self,
         state: LoopState,
     ) -> AsyncIterator[AgentEvent]:
-        model_visible_messages = [message.model_copy(deep=True) for message in state.messages]
+        model_visible_messages = [
+            message.model_copy(deep=True) for message in state.messages
+        ]
+        protected_model_visible_messages_after: tuple[LLMMessage, ...] = ()
+        if state.run_model_target is not None:
+            current_user_anchor = f"user-message:{state.run_id}"
+            segmented = render_segmented_llm_messages(
+                model_visible_messages,
+                self.budget,
+                current_user_anchor,
+                token_estimator=state.run_model_target.token_estimator,
+                decision_cache=self.tool_result_render_decision_cache,
+            )
+            protected_model_visible_messages_after = (
+                *(segmented.current_user_messages or ()),
+                *(segmented.current_run_tail_messages or ()),
+            )
         result = await self.context_compactor.maybe_compact_before_followup(
             state=state,
             model_visible_messages=model_visible_messages,
+            protected_model_visible_messages_after=(
+                protected_model_visible_messages_after
+            ),
         )
         if result.rewritten_messages is not None:
-            state.messages = [message.model_copy(deep=True) for message in result.rewritten_messages]
+            state.messages = [
+                message.model_copy(deep=True) for message in result.rewritten_messages
+            ]
         for event in result.events:
             yield event
 
@@ -1999,12 +2736,18 @@ class AgentRuntime:
             yield await self.runtime_session.emit(
                 PlanModeExitedEvent(
                     **event_context.event_fields(),
-                    source="approved_exit_plan" if resolution.decision == "approve" else "user_cancel",
+                    source="approved_exit_plan"
+                    if resolution.decision == "approve"
+                    else "user_cancel",
                     exit_request_id=exit_request_id,
                     restored_permission_mode=restored_mode_value,
                     restored_permission_policy=restored_policy.to_dict(),
-                    accepted_plan_summary=accepted_summary if resolution.decision == "approve" else "",
+                    accepted_plan_summary=accepted_summary
+                    if resolution.decision == "approve"
+                    else "",
                     accepted_plan_artifact_id=accepted_artifact_id,
+                    transition_owner="agent_run",
+                    host_workflow_operation_id=None,
                 ),
                 state=state,
             )
@@ -2014,7 +2757,7 @@ class AgentRuntime:
             )
             _remove_plan_runtime_instructions(state)
             state.status = LoopStatus.FINISHED
-            state.stop_reason = "final"
+            state.stop_reason = RunStopReason.FINAL
             state.transition(LoopTransition.FINISH)
         output = json.dumps(
             _plan_exit_resolution_output(resolution),
@@ -2033,16 +2776,23 @@ class AgentRuntime:
         if self._finish_child_run_after_report_result(state):
             return
 
-        tool_error_count = sum(1 for result in state.tool_results if result.state is not ToolResultState.SUCCESS)
+        tool_error_count = sum(
+            1
+            for result in state.tool_results
+            if result.state is not ToolResultState.SUCCESS
+        )
         if tool_error_count:
             state.consecutive_tool_failures += tool_error_count
             state.in_run_recovery = InRunRecoveryState(
                 cause=InRunRecoveryCause.TOOL_FAILURE,
                 consecutive_failures=state.consecutive_tool_failures,
             )
-            if state.consecutive_tool_failures > self.budget.max_consecutive_tool_failures:
+            if (
+                state.consecutive_tool_failures
+                > self.budget.max_consecutive_tool_failures
+            ):
                 state.status = LoopStatus.FAILED
-                state.stop_reason = "tool_error_budget"
+                state.stop_reason = RunStopReason.TOOL_ERROR_BUDGET
                 state.error_message = "tool error budget exceeded"
                 state.transition(LoopTransition.FAIL)
                 return
@@ -2095,7 +2845,7 @@ class AgentRuntime:
         if self.subagent_runtime.submitted_result(subagent_run_id) is None:
             return False
         state.status = LoopStatus.FINISHED
-        state.stop_reason = "final"
+        state.stop_reason = RunStopReason.FINAL
         state.transition(LoopTransition.FINISH)
         return True
 
@@ -2107,8 +2857,8 @@ class AgentRuntime:
     ) -> AsyncIterator[AgentEvent]:
         if state.finalized:
             return
-        state.finalized = True
-        if run_session_end_hook:
+        hook_done = bool(state.scratchpad.get("run_finalization_hook_done"))
+        if run_session_end_hook and not hook_done:
             _ok, hook_events = await self._run_memory_hook_and_emit_events(
                 state,
                 "on_turn_end",
@@ -2116,16 +2866,113 @@ class AgentRuntime:
             )
             for event in hook_events:
                 yield event
-        yield await self.runtime_session.emit(
-            RunEndEvent(
+        state.scratchpad["run_finalization_hook_done"] = True
+        terminal_event_id = state.scratchpad.get("terminal_run_end_event_id")
+        if not isinstance(terminal_event_id, str):
+            raise RuntimeError("run finalization requires stable RunEnd event id")
+        if state.status is LoopStatus.FINISHED:
+            terminalization_kind = RunTerminalizationKind.NORMAL
+        elif state.status is LoopStatus.ABORTED:
+            terminalization_kind = (
+                RunTerminalizationKind.HOST_TEARDOWN
+                if state.abort_kind is AbortKind.HOST_TEARDOWN
+                else RunTerminalizationKind.USER_STOP
+            )
+        else:
+            terminalization_kind = RunTerminalizationKind.EXECUTION_FAILURE
+        pending = state.scratchpad.get("pending_run_end_candidate")
+        if isinstance(pending, RunEndEvent):
+            candidate = pending
+        elif pending is not None:
+            raise RuntimeError("pending RunEnd candidate has invalid type")
+        else:
+            candidate = RunEndEvent(
+                id=terminal_event_id,
                 **self._event_context(state).event_fields(),
                 status=state.status.value,
                 stop_reason=state.stop_reason,
-                abort_kind=state.abort_kind.value if state.abort_kind is not None else None,
+                terminalization_kind=terminalization_kind,
+                abort_kind=state.abort_kind.value
+                if state.abort_kind is not None
+                else None,
                 error_message=state.error_message,
-            ),
-            state=state,
-        )
+            )
+        state.scratchpad["pending_run_end_candidate"] = candidate
+        try:
+            stored = await self.runtime_session.emit(candidate, state=state)
+        except BaseException as exc:
+            if isinstance(exc, EventPublicationAfterCommitError):
+                confirmed = tuple(exc.result.committed_events)
+            else:
+                try:
+                    confirmation = self.runtime_session.confirm_event_batch(
+                        (candidate,)
+                    )
+                except BaseException:
+                    self.runtime_session.latch_event_commit_outcome_unknown()
+                    raise
+                if confirmation.missing_event_ids:
+                    state.scratchpad["run_end_commit_state"] = "pending"
+                    try:
+                        stored_retry = await self.runtime_session.emit(
+                            candidate, state=state
+                        )
+                    except BaseException as retry_error:
+                        if isinstance(
+                            retry_error, EventPublicationAfterCommitError
+                        ):
+                            retry_confirmed = tuple(
+                                retry_error.result.committed_events
+                            )
+                        else:
+                            try:
+                                retry_confirmation = (
+                                    self.runtime_session.confirm_event_batch(
+                                        (candidate,)
+                                    )
+                                )
+                            except BaseException:
+                                self.runtime_session.latch_event_commit_outcome_unknown()
+                                raise
+                            if retry_confirmation.missing_event_ids:
+                                raise
+                            retry_confirmed = tuple(
+                                retry_confirmation.committed_events
+                            )
+                        if len(retry_confirmed) != 1 or not isinstance(
+                            retry_confirmed[0], RunEndEvent
+                        ):
+                            self.runtime_session.latch_event_commit_outcome_unknown()
+                            raise RuntimeError(
+                                "RunEnd retry confirmation was not exact"
+                            ) from retry_error
+                        state.finalized = True
+                        state.scratchpad["run_end_commit_state"] = "committed"
+                        state.scratchpad.pop("pending_run_end_candidate", None)
+                        raise
+                    if not isinstance(stored_retry, RunEndEvent):
+                        raise RuntimeError(
+                            "RunEnd bounded retry returned wrong event type"
+                        )
+                    state.finalized = True
+                    state.scratchpad["run_end_commit_state"] = "committed"
+                    state.scratchpad.pop("pending_run_end_candidate", None)
+                    yield stored_retry
+                    return
+                confirmed = tuple(confirmation.committed_events)
+            if len(confirmed) != 1 or not isinstance(confirmed[0], RunEndEvent):
+                self.runtime_session.latch_event_commit_outcome_unknown()
+                raise RuntimeError("RunEnd confirmation was not exact") from exc
+            state.finalized = True
+            state.scratchpad["run_end_commit_state"] = "committed"
+            state.scratchpad.pop("pending_run_end_candidate", None)
+            raise
+        if not isinstance(stored, RunEndEvent):
+            raise RuntimeError("RunEnd commit returned wrong event type")
+        state.finalized = True
+        state.scratchpad["run_end_commit_state"] = "committed"
+        state.scratchpad.pop("pending_run_end_candidate", None)
+        yield stored
 
     def _run_result(self, state: LoopState) -> AgentRunResult:
         return AgentRunResult(
@@ -2146,13 +2993,17 @@ class AgentRuntime:
 
     async def _call_turn_start_hook(self, state: LoopState, user_input: str):
         hook = getattr(self.memory_hooks, "on_turn_start", None)
-        if hook is not None and _is_overridden_hook(self.memory_hooks, "on_turn_start", NoopMemoryHooks):
+        if hook is not None and _is_overridden_hook(
+            self.memory_hooks, "on_turn_start", NoopMemoryHooks
+        ):
             return await hook(state, user_input)
         return await self.memory_hooks.on_session_start(state, user_input)
 
     async def _call_turn_end_hook(self, state: LoopState):
         hook = getattr(self.memory_hooks, "on_turn_end", None)
-        if hook is not None and _is_overridden_hook(self.memory_hooks, "on_turn_end", NoopMemoryHooks):
+        if hook is not None and _is_overridden_hook(
+            self.memory_hooks, "on_turn_end", NoopMemoryHooks
+        ):
             return await hook(state)
         return await self.memory_hooks.on_session_end(state)
 
@@ -2162,23 +3013,33 @@ class AgentRuntime:
         hook_name: str,
         call,
     ) -> tuple[bool, list[AgentEvent]]:
-        ok, produced_events, error_event = await self._run_memory_hook(state, hook_name, call)
+        ok, produced_events, error_event = await self._run_memory_hook(
+            state, hook_name, call
+        )
         if not ok:
             assert error_event is not None
             return False, [error_event]
         emitted_events: list[AgentEvent] = []
         try:
             for event in produced_events or ():
-                emitted_events.append(await self.runtime_session.emit(event, state=state))
+                emitted_events.append(
+                    await self.runtime_session.emit(event, state=state)
+                )
         except Exception as exc:
-            emitted_events.append(await self._mark_memory_hook_failed(state, hook_name, exc))
+            emitted_events.append(
+                await self._mark_memory_hook_failed(state, hook_name, exc)
+            )
             return False, emitted_events
         return True, emitted_events
 
-    async def _run_tool_result_persistence_hook(self, state: LoopState) -> AgentEvent | None:
+    async def _run_tool_result_persistence_hook(
+        self, state: LoopState
+    ) -> AgentEvent | None:
         assert self.tool_result_persistence_hook is not None
         try:
-            await self.tool_result_persistence_hook.after_tool_results(state, state.tool_results)
+            await self.tool_result_persistence_hook.after_tool_results(
+                state, state.tool_results
+            )
             return None
         except Exception as exc:
             return await self.runtime_session.emit(
@@ -2193,10 +3054,12 @@ class AgentRuntime:
                 state=state,
             )
 
-    async def _mark_memory_hook_failed(self, state: LoopState, hook_name: str, exc: Exception) -> AgentEvent:
+    async def _mark_memory_hook_failed(
+        self, state: LoopState, hook_name: str, exc: Exception
+    ) -> AgentEvent:
         message = f"memory hook {hook_name} failed: {type(exc).__name__}: {exc}"
         state.status = LoopStatus.FAILED
-        state.stop_reason = "memory_hook_error"
+        state.stop_reason = RunStopReason.MEMORY_HOOK_ERROR
         state.error_message = message
         state.transition(LoopTransition.FAIL)
         return await self.runtime_session.emit(
@@ -2209,13 +3072,15 @@ class AgentRuntime:
             state=state,
         )
 
-    async def _mark_tool_budget_exceeded(self, state: LoopState, *, attempted_count: int) -> AgentEvent:
+    async def _mark_tool_budget_exceeded(
+        self, state: LoopState, *, attempted_count: int
+    ) -> AgentEvent:
         message = (
             "tool call budget exceeded before execution: "
             f"current={state.tool_call_count}, attempted={attempted_count}, max={self.budget.max_tool_calls}"
         )
         state.status = LoopStatus.FAILED
-        state.stop_reason = "tool_error_budget"
+        state.stop_reason = RunStopReason.TOOL_ERROR_BUDGET
         state.error_message = message
         state.transition(LoopTransition.FAIL)
         return await self.runtime_session.emit(
@@ -2343,7 +3208,11 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
                 _remember_tool_result_event_span(state, stored_events, block.id)
                 state.tool_results.append(result_block)
-                state.messages.append(_tool_result_message_from_events(stored_events, block.name, result_block))
+                state.messages.append(
+                    _tool_result_message_from_events(
+                        stored_events, block.name, result_block
+                    )
+                )
 
         if not parsed_calls:
             return
@@ -2369,12 +3238,16 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, call.id)
                 _remember_tool_result_event_span(state, stored_events, call.id)
                 state.tool_results.append(result_block)
-                state.messages.append(_tool_result_message_from_events(stored_events, call.name, result_block))
+                state.messages.append(
+                    _tool_result_message_from_events(
+                        stored_events, call.name, result_block
+                    )
+                )
             parsed_calls = unique_calls
             if not parsed_calls:
                 return
 
-        exposure = self._exposure_from_state_or_resolve(state)
+        exposure = self._require_capability_exposure(state)
         executable_calls: list[ToolCall] = []
         async for event_or_calls in self._stream_capability_access_filtered_calls(
             state,
@@ -2390,16 +3263,22 @@ class AgentRuntime:
             return
 
         if any(call.name in PLAN_WORKFLOW_TOOL_NAMES for call in executable_calls):
-            async for event in self._emit_workflow_gate_decisions(state, executable_calls, exposure=exposure):
+            async for event in self._emit_workflow_gate_decisions(
+                state, executable_calls, exposure=exposure
+            ):
                 yield event
-            async for event in self._handle_workflow_tool_batch(state, executable_calls):
+            async for event in self._handle_workflow_tool_batch(
+                state, executable_calls
+            ):
                 yield event
             return
 
         permission_executable_calls: list[ToolCall] = []
         local_permission_decisions: dict[str, PermissionDecision] = {}
         for call in executable_calls:
-            local_permission_decision = self._permission_gate_for_state(state).evaluate_local_capability_call(
+            local_permission_decision = self._permission_gate_for_state(
+                state
+            ).evaluate_local_capability_call(
                 call,
                 exposure=exposure,
             )
@@ -2418,11 +3297,16 @@ class AgentRuntime:
         if not executable_calls:
             return
 
-        decision = await self._permission_gate_for_state(state).evaluate(executable_calls, exposure=exposure)
+        decision = await self._permission_gate_for_state(state).evaluate(
+            executable_calls, exposure=exposure
+        )
         if decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
             for call in executable_calls:
                 local_decision = local_permission_decisions.get(call.id)
-                if local_decision is not None and local_decision.kind is PermissionDecisionKind.WAIT_FOR_USER:
+                if (
+                    local_decision is not None
+                    and local_decision.kind is PermissionDecisionKind.WAIT_FOR_USER
+                ):
                     fact_decision = local_decision
                     reason_code_override = "permission_wait_for_user"
                 elif any(
@@ -2438,7 +3322,8 @@ class AgentRuntime:
                     fact_decision = decision
                     reason_code_override = (
                         "permission_wait_for_user"
-                        if _call_matches_suggested_rule(call, decision.suggested_rules) or len(executable_calls) == 1
+                        if _call_matches_suggested_rule(call, decision.suggested_rules)
+                        or len(executable_calls) == 1
                         else "permission_wait_for_user_batch_suspension"
                     )
                 fact = self._capability_gate_decision_fact(
@@ -2459,7 +3344,8 @@ class AgentRuntime:
                     suggested_rules=(
                         local_permission_decisions[call.id].suggested_rules
                         if local_permission_decisions.get(call.id) is not None
-                        and local_permission_decisions[call.id].kind is PermissionDecisionKind.WAIT_FOR_USER
+                        and local_permission_decisions[call.id].kind
+                        is PermissionDecisionKind.WAIT_FOR_USER
                         else decision.suggested_rules
                     ),
                 )
@@ -2467,10 +3353,12 @@ class AgentRuntime:
             ]
             state.pending_tool_calls = blocks
             state.status = LoopStatus.WAITING_USER
-            state.stop_reason = "waiting_user"
+            state.stop_reason = RunStopReason.WAITING_USER
             state.transition(LoopTransition.WAIT_FOR_USER)
             event = await self.runtime_session.emit(
-                RequireUserConfirmEvent(**self._event_context(state).event_fields(), tool_calls=blocks),
+                RequireUserConfirmEvent(
+                    **self._event_context(state).event_fields(), tool_calls=blocks
+                ),
                 state=state,
             )
             yield event
@@ -2507,7 +3395,9 @@ class AgentRuntime:
         exposure: CapabilityExposurePlan,
     ) -> AsyncIterator[AgentEvent]:
         workflow_index = next(
-            index for index, call in enumerate(parsed_calls) if call.name in PLAN_WORKFLOW_TOOL_NAMES
+            index
+            for index, call in enumerate(parsed_calls)
+            if call.name in PLAN_WORKFLOW_TOOL_NAMES
         )
         workflow_call = parsed_calls[workflow_index]
         allow_fact = self._capability_gate_decision_fact(
@@ -2528,7 +3418,9 @@ class AgentRuntime:
                 decision=_suppressed_by_workflow_control_decision(workflow_call),
                 result_state=ToolResultState.DENIED,
             )
-            async for event in self._emit_capability_gate_decision(state, suppress_fact):
+            async for event in self._emit_capability_gate_decision(
+                state, suppress_fact
+            ):
                 yield event
 
     async def _handle_workflow_tool_batch(
@@ -2537,7 +3429,9 @@ class AgentRuntime:
         parsed_calls: list[ToolCall],
     ) -> AsyncIterator[AgentEvent]:
         workflow_index = next(
-            index for index, call in enumerate(parsed_calls) if call.name in PLAN_WORKFLOW_TOOL_NAMES
+            index
+            for index, call in enumerate(parsed_calls)
+            if call.name in PLAN_WORKFLOW_TOOL_NAMES
         )
         workflow_call = parsed_calls[workflow_index]
         try:
@@ -2545,7 +3439,9 @@ class AgentRuntime:
                 async for event in self._execute_enter_plan(state, workflow_call):
                     yield event
             elif workflow_call.name == "ask_plan_question":
-                async for event in self._execute_ask_plan_question(state, workflow_call):
+                async for event in self._execute_ask_plan_question(
+                    state, workflow_call
+                ):
                     yield event
             elif workflow_call.name == "exit_plan":
                 async for event in self._execute_exit_plan(state, workflow_call):
@@ -2584,7 +3480,9 @@ class AgentRuntime:
             ):
                 yield event
 
-    async def _execute_enter_plan(self, state: LoopState, call: ToolCall) -> AsyncIterator[AgentEvent]:
+    async def _execute_enter_plan(
+        self, state: LoopState, call: ToolCall
+    ) -> AsyncIterator[AgentEvent]:
         plan_state = self._plan_state(state)
         if plan_state.active:
             output = json.dumps({"status": "already_active"}, ensure_ascii=False)
@@ -2601,7 +3499,9 @@ class AgentRuntime:
         previous_mode = self.permission_mode
         previous_policy = self.permission_policy
         if previous_mode is None:
-            raise ValueError("enter_plan requires a preset session default permission mode")
+            raise ValueError(
+                "enter_plan requires a preset session default permission mode"
+            )
         plan_state.begin(
             source="agent",
             previous_mode=previous_mode,
@@ -2619,7 +3519,10 @@ class AgentRuntime:
             ),
             state=state,
         )
-        output = json.dumps({"status": "entered", "permission_mode": PermissionMode.READ_ONLY.value}, ensure_ascii=False)
+        output = json.dumps(
+            {"status": "entered", "permission_mode": PermissionMode.READ_ONLY.value},
+            ensure_ascii=False,
+        )
         async for event in self._emit_tool_result_and_record(
             state,
             tool_call_id=call.id,
@@ -2629,10 +3532,12 @@ class AgentRuntime:
         ):
             yield event
         state.status = LoopStatus.FINISHED
-        state.stop_reason = "final"
+        state.stop_reason = RunStopReason.FINAL
         state.transition(LoopTransition.FINISH)
 
-    async def _execute_ask_plan_question(self, state: LoopState, call: ToolCall) -> AsyncIterator[AgentEvent]:
+    async def _execute_ask_plan_question(
+        self, state: LoopState, call: ToolCall
+    ) -> AsyncIterator[AgentEvent]:
         if not self._plan_state(state).active:
             async for event in self._emit_tool_result_and_record(
                 state,
@@ -2644,7 +3549,9 @@ class AgentRuntime:
                 yield event
             return
         if not self._consume_plan_interaction_budget(state):
-            async for event in self._emit_plan_budget_error_result(state, call, kind="interaction"):
+            async for event in self._emit_plan_budget_error_result(
+                state, call, kind="interaction"
+            ):
                 yield event
             return
         question = _required_str(call.arguments.get("question"), "question")
@@ -2678,10 +3585,12 @@ class AgentRuntime:
             "allow_free_text": allow_free_text,
         }
         state.status = LoopStatus.WAITING_USER
-        state.stop_reason = "waiting_user"
+        state.stop_reason = RunStopReason.WAITING_USER
         state.transition(LoopTransition.WAIT_FOR_USER)
 
-    async def _execute_exit_plan(self, state: LoopState, call: ToolCall) -> AsyncIterator[AgentEvent]:
+    async def _execute_exit_plan(
+        self, state: LoopState, call: ToolCall
+    ) -> AsyncIterator[AgentEvent]:
         if not self._plan_state(state).active:
             async for event in self._emit_tool_result_and_record(
                 state,
@@ -2693,7 +3602,9 @@ class AgentRuntime:
                 yield event
             return
         if not self._consume_plan_interaction_budget(state):
-            async for event in self._emit_plan_budget_error_result(state, call, kind="interaction"):
+            async for event in self._emit_plan_budget_error_result(
+                state, call, kind="interaction"
+            ):
                 yield event
             return
         plan_text = _required_str(call.arguments.get("plan"), "plan")
@@ -2723,7 +3634,7 @@ class AgentRuntime:
             "summary": summary,
         }
         state.status = LoopStatus.WAITING_USER
-        state.stop_reason = "waiting_user"
+        state.stop_reason = RunStopReason.WAITING_USER
         state.transition(LoopTransition.WAIT_FOR_USER)
 
     async def _emit_tool_result_and_record(
@@ -2736,7 +3647,7 @@ class AgentRuntime:
         result_state: ToolResultState,
         tool_observation_timing_seed: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        stored_events = await self.runtime_session.emit_many(
+        candidates = tuple(
             build_tool_result_error_events(
                 self._event_context(state),
                 tool_call_id=tool_call_id,
@@ -2744,15 +3655,124 @@ class AgentRuntime:
                 message=output,
                 state=result_state,
                 tool_observation_timing_seed=tool_observation_timing_seed,
-            ),
-            state=state,
+            )
         )
+        commit_outcome_key = (state.run_id, tool_call_id)
+        track_mcp_terminal = (
+            commit_outcome_key in self._mcp_terminal_commit_outcomes
+        )
+        if track_mcp_terminal:
+            self._mcp_terminal_commit_outcomes[commit_outcome_key] = "attempting"
+        try:
+            stored_events = await self.runtime_session.emit_many(
+                candidates,
+                state=state,
+            )
+        except EventPublicationAfterCommitError as exc:
+            if track_mcp_terminal:
+                self._mcp_terminal_commit_outcomes[commit_outcome_key] = "full"
+            stored_events = list(exc.result.committed_events)
+            self._record_tool_result_events(
+                state,
+                stored_events=stored_events,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_call_name,
+            )
+            raise
+        except BaseException:
+            try:
+                confirmation = self.runtime_session.confirm_event_batch(candidates)
+            except BaseException:
+                # A failed confirmation is UNKNOWN, never NONE.  Preserve any
+                # external resource owner and block further mutation/teardown.
+                if track_mcp_terminal:
+                    self._mcp_terminal_commit_outcomes[commit_outcome_key] = (
+                        "untrusted"
+                    )
+                self.runtime_session.latch_event_commit_outcome_unknown()
+                raise
+            if confirmation.missing_event_ids:
+                # The complete stable batch is absent, so the caller may safely
+                # restore its pre-write process-local state and retry.
+                if track_mcp_terminal:
+                    self._mcp_terminal_commit_outcomes[commit_outcome_key] = "none"
+                raise
+            if track_mcp_terminal:
+                self._mcp_terminal_commit_outcomes[commit_outcome_key] = "full"
+            stored_events = list(confirmation.committed_events)
+            self._record_tool_result_events(
+                state,
+                stored_events=stored_events,
+                tool_call_id=tool_call_id,
+                tool_call_name=tool_call_name,
+            )
+            raise
+        if track_mcp_terminal:
+            self._mcp_terminal_commit_outcomes[commit_outcome_key] = "full"
         for event in stored_events:
             yield event
+        self._record_tool_result_events(
+            state,
+            stored_events=stored_events,
+            tool_call_id=tool_call_id,
+            tool_call_name=tool_call_name,
+        )
+
+    async def _complete_mcp_pending_lease(self, interaction_id: str) -> None:
+        supervisor = self.runtime_session.mcp_supervisor
+        if supervisor is None:
+            return
+        supervisor.complete_pending_lease(interaction_id)
+        await supervisor.close_retiring_slots(
+            timeout_seconds=5.0,
+            wait_for_borrowers=False,
+        )
+
+    def _committed_tool_result_events(
+        self,
+        state: LoopState,
+        *,
+        tool_call_id: str,
+    ) -> list[AgentEvent]:
+        events = [
+            event
+            for event in self.runtime_session.event_log.iter()
+            if event.run_id == state.run_id
+            and getattr(event, "tool_call_id", None) == tool_call_id
+            and isinstance(
+                event,
+                (
+                    ToolResultStartEvent,
+                    ToolResultTextDeltaEvent,
+                    ToolResultDataDeltaEvent,
+                    ToolResultEndEvent,
+                ),
+            )
+        ]
+        if not any(isinstance(event, ToolResultEndEvent) for event in events):
+            return []
+        return events
+
+    def _record_tool_result_events(
+        self,
+        state: LoopState,
+        *,
+        stored_events: list[AgentEvent],
+        tool_call_id: str,
+        tool_call_name: str,
+    ) -> None:
+        if any(result.id == tool_call_id for result in state.tool_results):
+            return
         result_block = _tool_result_from_event_slice(stored_events, tool_call_id)
         _remember_tool_result_event_span(state, stored_events, tool_call_id)
         state.tool_results.append(result_block)
-        state.messages.append(_tool_result_message_from_events(stored_events, tool_call_name, result_block))
+        state.messages.append(
+            _tool_result_message_from_events(
+                stored_events,
+                tool_call_name,
+                result_block,
+            )
+        )
 
     def _plan_state(self, state: LoopState) -> PlanWorkflowState:
         plan_state = state.scratchpad.get("plan_state")
@@ -2763,13 +3783,16 @@ class AgentRuntime:
         return plan_state
 
     def _plan_revision_required(self, state: LoopState) -> bool:
-        return bool(state.scratchpad.get("plan_revision_required")) and self._plan_state(state).active
+        return (
+            bool(state.scratchpad.get("plan_revision_required"))
+            and self._plan_state(state).active
+        )
 
     def _consume_plan_interaction_budget(self, state: LoopState) -> bool:
         consumed = int(state.scratchpad.get("plan_interactions", 0))
         if consumed >= state.budget.max_plan_interactions_per_run:
             state.status = LoopStatus.FAILED
-            state.stop_reason = "plan_interaction_budget"
+            state.stop_reason = RunStopReason.PLAN_INTERACTION_BUDGET
             state.error_message = "plan interaction budget exceeded"
             state.transition(LoopTransition.FAIL)
             return False
@@ -2801,10 +3824,12 @@ class AgentRuntime:
             state=state,
         )
 
-    async def _mark_plan_budget_exceeded(self, state: LoopState, *, kind: str) -> AgentEvent:
+    async def _mark_plan_budget_exceeded(
+        self, state: LoopState, *, kind: str
+    ) -> AgentEvent:
         message = f"plan {kind} budget exceeded"
         state.status = LoopStatus.FAILED
-        state.stop_reason = "plan_interaction_budget"
+        state.stop_reason = RunStopReason.PLAN_INTERACTION_BUDGET
         state.error_message = message
         state.transition(LoopTransition.FAIL)
         return await self.runtime_session.emit(
@@ -2816,10 +3841,14 @@ class AgentRuntime:
             state=state,
         )
 
-    def _policy_from_plan_state(self, plan_state: PlanWorkflowState) -> EffectivePermissionPolicy:
+    def _policy_from_plan_state(
+        self, plan_state: PlanWorkflowState
+    ) -> EffectivePermissionPolicy:
         payload = plan_state.pre_plan_permission_policy or {}
         if not payload or plan_state.pre_plan_permission_mode is None:
-            raise ValueError("plan workflow is missing preset previous permission facts")
+            raise ValueError(
+                "plan workflow is missing preset previous permission facts"
+            )
         validate_preset_policy_payload(
             plan_state.pre_plan_permission_mode,
             dict(payload),
@@ -2839,13 +3868,14 @@ class AgentRuntime:
         decisions_by_id,
     ) -> AsyncIterator[AgentEvent]:
         parsed_calls: list[ToolCall] = []
+
         async def flush_parsed_calls() -> AsyncIterator[AgentEvent]:
             nonlocal parsed_calls
             if not parsed_calls:
                 return
             calls = parsed_calls
             parsed_calls = []
-            exposure = self._exposure_from_state_or_resolve(state)
+            exposure = self._require_capability_exposure(state)
             executable_calls: list[ToolCall] = []
             async for event_or_calls in self._stream_capability_access_filtered_calls(
                 state,
@@ -2859,7 +3889,9 @@ class AgentRuntime:
             if not executable_calls:
                 return
             if any(call.name in PLAN_WORKFLOW_TOOL_NAMES for call in executable_calls):
-                async for event in self._handle_workflow_tool_batch(state, executable_calls):
+                async for event in self._handle_workflow_tool_batch(
+                    state, executable_calls
+                ):
                     yield event
                 return
             async for event in self._stream_parsed_tool_calls(state, executable_calls):
@@ -2885,7 +3917,11 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
                 _remember_tool_result_event_span(state, stored_events, block.id)
                 state.tool_results.append(result_block)
-                state.messages.append(_tool_result_message_from_events(stored_events, block.name, result_block))
+                state.messages.append(
+                    _tool_result_message_from_events(
+                        stored_events, block.name, result_block
+                    )
+                )
                 continue
             try:
                 parsed_calls.append(_parse_tool_call(block))
@@ -2906,7 +3942,11 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(stored_events, block.id)
                 _remember_tool_result_event_span(state, stored_events, block.id)
                 state.tool_results.append(result_block)
-                state.messages.append(_tool_result_message_from_events(stored_events, block.name, result_block))
+                state.messages.append(
+                    _tool_result_message_from_events(
+                        stored_events, block.name, result_block
+                    )
+                )
         async for event in flush_parsed_calls():
             yield event
 
@@ -2915,13 +3955,17 @@ class AgentRuntime:
         state: LoopState,
         parsed_calls: list[ToolCall],
     ) -> AsyncIterator[AgentEvent]:
-        exposure = self._exposure_from_state_or_resolve(state)
+        exposure = self._require_capability_exposure(state)
         for batch in _tool_batches(parsed_calls, self.tool_executor, exposure=exposure):
             if state.tool_call_count + len(batch) > self.budget.max_tool_calls:
-                yield await self._mark_tool_budget_exceeded(state, attempted_count=len(batch))
+                yield await self._mark_tool_budget_exceeded(
+                    state, attempted_count=len(batch)
+                )
                 return
             batch_events: list[AgentEvent] = []
-            async for event in self._stream_tool_batch_events(state, batch, batch_events, exposure=exposure):
+            async for event in self._stream_tool_batch_events(
+                state, batch, batch_events, exposure=exposure
+            ):
                 yield event
             if state.status is LoopStatus.WAITING_USER:
                 return
@@ -2929,7 +3973,11 @@ class AgentRuntime:
                 result_block = _tool_result_from_event_slice(batch_events, call.id)
                 _remember_tool_result_event_span(state, batch_events, call.id)
                 state.tool_results.append(result_block)
-                state.messages.append(_tool_result_message_from_events(batch_events, call.name, result_block))
+                state.messages.append(
+                    _tool_result_message_from_events(
+                        batch_events, call.name, result_block
+                    )
+                )
                 state.tool_call_count += 1
 
     async def _stream_tool_batch_events(
@@ -2948,25 +3996,67 @@ class AgentRuntime:
             artifact_service=self.tool_executor.artifact_service,
             runtime_session_id=self.runtime_session.runtime_session_id,
         )
-        async def execute_call(call: ToolCall) -> ToolExecutionResult | ToolExecutionSuspended:
+
+        async def execute_call(
+            call: ToolCall,
+        ) -> ToolExecutionResult | ToolExecutionSuspended:
             descriptor = exposure.descriptors_by_name.get(call.name)
-            if executor.is_async(call):
-                return await executor.execute_async(
+            borrow_authority = state.scratchpad.get(
+                "capability_execution_borrow_authority"
+            )
+            borrow_kind = str(
+                state.scratchpad.get("capability_execution_borrow_kind", "parent")
+            )
+            is_async = executor.is_async(call)
+
+            def acquire_borrow() -> None:
+                if borrow_authority is None:
+                    return
+                if borrow_kind == "child":
+                    borrow_authority.borrow_child_tool_call()
+                else:
+                    borrow_authority.borrow_parent_tool_call()
+
+            def release_borrow() -> None:
+                if borrow_authority is None:
+                    return
+                if borrow_kind == "child":
+                    borrow_authority.release_child_tool_call()
+                else:
+                    borrow_authority.release_parent_tool_call()
+
+            acquire_borrow()
+            if is_async:
+                try:
+                    return await executor.execute_async(
+                        call,
+                        event_context=self._event_context(state),
+                        descriptor=descriptor,
+                        context_id=_optional_scratchpad_str(
+                            state, "current_context_id"
+                        ),
+                        model_call_index=_optional_scratchpad_int(
+                            state, "current_model_call_index"
+                        ),
+                        **self._tool_permission_kwargs(state),
+                    )
+                finally:
+                    release_borrow()
+
+            return await _await_sync_tool_thread(
+                lambda: executor.execute(
                     call,
                     event_context=self._event_context(state),
                     descriptor=descriptor,
-                    context_id=_optional_scratchpad_str(state, "current_context_id"),
-                    model_call_index=_optional_scratchpad_int(state, "current_model_call_index"),
+                    context_id=_optional_scratchpad_str(
+                        state, "current_context_id"
+                    ),
+                    model_call_index=_optional_scratchpad_int(
+                        state, "current_model_call_index"
+                    ),
                     **self._tool_permission_kwargs(state),
-                )
-            return await asyncio.to_thread(
-                executor.execute,
-                call,
-                event_context=self._event_context(state),
-                descriptor=descriptor,
-                context_id=_optional_scratchpad_str(state, "current_context_id"),
-                model_call_index=_optional_scratchpad_int(state, "current_model_call_index"),
-                **self._tool_permission_kwargs(state),
+                ),
+                release_borrow=release_borrow,
             )
 
         tasks = [asyncio.create_task(execute_call(call)) for call in batch]
@@ -2974,7 +4064,11 @@ class AgentRuntime:
         completed_tool_calls: set[str] = set()
 
         try:
-            while pending or len(completed_tool_calls) < len(batch) or not tap.queue.empty():
+            while (
+                pending
+                or len(completed_tool_calls) < len(batch)
+                or not tap.queue.empty()
+            ):
                 while not tap.queue.empty():
                     event = tap.queue.get_nowait()
                     batch_events.append(event)
@@ -2982,14 +4076,23 @@ class AgentRuntime:
                         completed_tool_calls.add(event.tool_call_id)
                     yield event
                 if pending:
-                    done, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
+                    done, pending = await asyncio.wait(
+                        pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED
+                    )
                     for task in done:
                         outcome = task.result()
                         if isinstance(outcome, ToolExecutionSuspended):
-                            async for event in self._suspend_tool_execution(state, outcome):
+                            async for event in self._suspend_tool_execution(
+                                state, outcome
+                            ):
                                 yield event
                             for pending_task in pending:
                                 pending_task.cancel()
+                            if pending:
+                                await asyncio.gather(
+                                    *pending,
+                                    return_exceptions=True,
+                                )
                             pending = set()
                             return
                     continue
@@ -3004,6 +4107,8 @@ class AgentRuntime:
             for task in pending:
                 if not task.done():
                     task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     async def _suspend_tool_execution(
         self,
@@ -3011,28 +4116,83 @@ class AgentRuntime:
         suspended: ToolExecutionSuspended,
     ) -> AsyncIterator[AgentEvent]:
         payload = dict(suspended.payload)
-        payload.setdefault("interaction_id", f"{suspended.interaction_kind}:{uuid4().hex}")
+        payload.setdefault(
+            "interaction_id", f"{suspended.interaction_kind}:{uuid4().hex}"
+        )
         payload.setdefault("tool_call_id", suspended.tool_call_id)
         payload.setdefault("tool_name", suspended.tool_name)
+        if suspended.interaction_kind == "mcp_input_required":
+            payload.setdefault(
+                "mcp_installation_id",
+                self.runtime_session.mcp_installation_id,
+            )
+        original_pending_tool_calls = list(state.pending_tool_calls)
+        original_pending_kind = state.pending_interaction_kind
+        original_pending_payload = dict(state.pending_interaction_payload)
+        original_status = state.status
+        original_stop_reason = state.stop_reason
+        original_transition = state.last_transition
         state.pending_tool_calls = []
         state.pending_interaction_kind = suspended.interaction_kind
         state.pending_interaction_payload = payload
         state.status = LoopStatus.WAITING_USER
-        state.stop_reason = "waiting_user"
+        state.stop_reason = RunStopReason.WAITING_USER
         state.transition(LoopTransition.WAIT_FOR_USER)
-        yield await self.runtime_session.emit(
-            CustomEvent(
-                **self._event_context(state).event_fields(),
-                name="tool_execution_suspended",
-                value={
-                    "interaction_kind": suspended.interaction_kind,
-                    "tool_call_id": suspended.tool_call_id,
-                    "tool_name": suspended.tool_name,
-                    "payload": payload,
-                },
-            ),
-            state=state,
+        suspension_event = CustomEvent(
+            **self._event_context(state).event_fields(),
+            name="tool_execution_suspended",
+            value={
+                "interaction_kind": suspended.interaction_kind,
+                "tool_call_id": suspended.tool_call_id,
+                "tool_name": suspended.tool_name,
+                "payload": payload,
+            },
         )
+        supervisor = self.runtime_session.mcp_supervisor
+        reservation_id = payload.get("mcp_pending_lease_reservation_id")
+        interaction_id = str(payload["interaction_id"])
+        try:
+            stored = await self.runtime_session.emit(suspension_event, state=state)
+        except EventPublicationAfterCommitError as exc:
+            # The suspension fact is already canonical.  Preserve/confirm its
+            # process-local lease owner and surface the committed event rather
+            # than turning a hook failure into an unrecoverable pending record.
+            stored = next(
+                event
+                for event in exc.result.committed_events
+                if event.id == suspension_event.id
+            )
+        except BaseException:
+            try:
+                confirmation = self.runtime_session.confirm_event_batch(
+                    (suspension_event,)
+                )
+            except BaseException:
+                # Confirmation failure is UNKNOWN.  Keep both the WAITING_USER
+                # carrier and the sole Supervisor reservation, then fail closed.
+                self.runtime_session.latch_event_commit_outcome_unknown()
+                raise
+            if confirmation.missing_event_ids:
+                state.pending_tool_calls = original_pending_tool_calls
+                state.pending_interaction_kind = original_pending_kind
+                state.pending_interaction_payload = original_pending_payload
+                state.status = original_status
+                state.stop_reason = original_stop_reason
+                state.last_transition = original_transition
+                if supervisor is not None and isinstance(reservation_id, str):
+                    supervisor.abort_pending_lease(interaction_id, reservation_id)
+                raise
+            stored = next(
+                event
+                for event in confirmation.committed_events
+                if event.id == suspension_event.id
+            )
+            if supervisor is not None and isinstance(reservation_id, str):
+                supervisor.confirm_pending_lease(interaction_id, reservation_id)
+            raise
+        if supervisor is not None and isinstance(reservation_id, str):
+            supervisor.confirm_pending_lease(interaction_id, reservation_id)
+        yield stored
 
     def _recover_or_fail_model(self, state: LoopState) -> bool:
         state.consecutive_model_failures += 1
@@ -3040,9 +4200,12 @@ class AgentRuntime:
             cause=InRunRecoveryCause.MODEL_FAILURE,
             consecutive_failures=state.consecutive_model_failures,
         )
-        if state.consecutive_model_failures > self.budget.max_consecutive_model_failures:
+        if (
+            state.consecutive_model_failures
+            > self.budget.max_consecutive_model_failures
+        ):
             state.status = LoopStatus.FAILED
-            state.stop_reason = "model_error"
+            state.stop_reason = RunStopReason.MODEL_ERROR
             state.error_message = "model error budget exceeded"
             state.transition(LoopTransition.FAIL)
             return False
@@ -3050,7 +4213,9 @@ class AgentRuntime:
         return True
 
     def _event_context(self, state: LoopState) -> EventContext:
-        return EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+        return EventContext(
+            run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
+        )
 
 
 def _next_model_call_index(state: LoopState) -> int:
@@ -3079,7 +4244,10 @@ def _context_budget_pressure_is_recoverable(exc: ContextBudgetExceeded) -> bool:
 
 
 def _compiled_section_included(compiled_context, section_id: str) -> bool:
-    return any(section.id == section_id and section.included for section in compiled_context.sections)
+    return any(
+        section.id == section_id and section.included
+        for section in compiled_context.sections
+    )
 
 
 def _optional_scratchpad_str(state: LoopState, key: str) -> str | None:
@@ -3129,7 +4297,8 @@ def _tool_result_message_from_events(
         (
             event
             for event in events
-            if isinstance(event, ToolResultStartEvent) and event.tool_call_id == result_block.id
+            if isinstance(event, ToolResultStartEvent)
+            and event.tool_call_id == result_block.id
         ),
         None,
     )
@@ -3137,20 +4306,25 @@ def _tool_result_message_from_events(
         (
             event
             for event in reversed(events)
-            if isinstance(event, ToolResultEndEvent) and event.tool_call_id == result_block.id
+            if isinstance(event, ToolResultEndEvent)
+            and event.tool_call_id == result_block.id
         ),
         None,
     )
     metadata: dict[str, object] = {}
     if start is not None or end is not None:
         metadata["source_timing"] = {
-            "observed_at": end.created_at if end is not None else (start.created_at if start is not None else None),
+            "observed_at": end.created_at
+            if end is not None
+            else (start.created_at if start is not None else None),
             "source_started_at": start.created_at if start is not None else None,
             "source_ended_at": end.created_at if end is not None else None,
             "freshness": "current_tool_observation",
             "clock_source": "event_created_at",
         }
-    if end is not None and isinstance(end.metadata.get("tool_observation_timing"), dict):
+    if end is not None and isinstance(
+        end.metadata.get("tool_observation_timing"), dict
+    ):
         timing = dict(end.metadata["tool_observation_timing"])
         metadata["tool_observation_timing_by_call_id"] = {result_block.id: timing}
         metadata["tool_observation_timing"] = timing
@@ -3195,4 +4369,7 @@ def _accepted_plan_artifact_id(run_id: str, exit_request_id: str) -> str:
 
 
 def _sanitize_artifact_part(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip()) or "unknown"
+    return (
+        "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip())
+        or "unknown"
+    )

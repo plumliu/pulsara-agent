@@ -38,7 +38,7 @@ from pulsara_agent.tools import (
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
-from pulsara_agent.tools.registry import ToolRegistry
+from pulsara_agent.tools.registry import ToolRegistry, build_tool_binding_contract
 
 
 CTX = EventContext(run_id="run:tools", turn_id="turn:tools", reply_id="reply:tools")
@@ -187,6 +187,30 @@ def test_core_tool_registry_exposes_minimal_builtin_tools(tmp_path) -> None:
     assert all(spec.parameters["type"] == "object" for spec in registry.tool_specs())
     assert not any(name.startswith("remember_") for name in registry.names())
     assert "propose_memory" not in registry.names()
+
+
+def test_tool_registry_restricted_surface_preserves_exact_binding_contract() -> None:
+    allowed = _AsyncContextProbeTool()
+    denied = _AsyncSuspendingTool()
+    registry = ToolRegistry()
+    allowed_contract = build_tool_binding_contract(
+        tool_name=allowed.name,
+        origin="builtin",
+        contract_id="test.allowed",
+        contract_version="v1",
+    )
+    registry.register(allowed, binding_contract=allowed_contract)
+    registry.register(denied)
+
+    restricted = registry.restricted_to(frozenset({allowed.name}))
+
+    assert restricted.names() == [allowed.name]
+    assert restricted.get(allowed.name) is allowed
+    assert restricted.binding_contract(allowed.name) == allowed_contract
+    with pytest.raises(KeyError, match="Unknown tool"):
+        restricted.get(denied.name)
+    with pytest.raises(ValueError, match="unknown tools"):
+        registry.restricted_to(frozenset({"missing"}))
 
 
 def test_core_tool_registry_can_enable_memory_write_tools(tmp_path) -> None:

@@ -1,0 +1,273 @@
+"""Process-local committed run-entry carriers shared by Host and child drivers."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+
+from pulsara_agent.event import RunStartEvent
+from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
+from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.event.events import utc_now
+from pulsara_agent.llm.resolution import ResolvedModelTarget
+from pulsara_agent.message import Msg, UserMsg
+from pulsara_agent.primitives.capability import (
+    CapabilityExposureSnapshotFact,
+    CapabilityResolveBasisFact,
+)
+from pulsara_agent.primitives.run_boundary import (
+    InteractionResumeBoundaryFact,
+    NewRunBoundaryFact,
+    PlanWorkflowStateFact,
+)
+from pulsara_agent.primitives.run_entry import (
+    CurrentUserMessageFact,
+    RunEntryKind,
+    SubagentRunEntryFact,
+)
+from pulsara_agent.primitives.mcp import McpInstallationReferenceFact
+from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
+
+if TYPE_CHECKING:
+    from pulsara_agent.runtime.agent import AgentRuntime
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResolveBasis:
+    fact: CapabilityResolveBasisFact
+    user_input: str
+    prior_messages: tuple[Msg, ...]
+    active_skill_names: frozenset[str]
+    workspace_root: Path
+    memory_domain_id: str
+
+
+@dataclass(slots=True)
+class RunWorkingSet:
+    """Process-local owner of one committed run's rebound execution inputs."""
+
+    run_start_event_id: str
+    run_start_sequence: int
+    run_model_target: ResolvedModelTarget
+    permission_snapshot: RunPermissionSnapshot
+    plan_snapshot: PlanWorkflowStateFact
+    capability_resolve_basis: CapabilityResolveBasis
+    frozen_execution_surface: FrozenCapabilityExecutionSurface
+    original_exposure_plan: CapabilityExposurePlan | None
+    original_exposure_fact: CapabilityExposureSnapshotFact | None
+    effective_exposure_plan: CapabilityExposurePlan | None
+    effective_exposure_fact: CapabilityExposureSnapshotFact | None
+    latest_committed_resume_boundary: InteractionResumeBoundaryFact | None
+
+    def install_initial_exposure(
+        self,
+        *,
+        plan: CapabilityExposurePlan,
+        fact: CapabilityExposureSnapshotFact,
+    ) -> None:
+        if self.original_exposure_fact is not None:
+            if self.original_exposure_fact != fact:
+                raise RuntimeError("initial capability exposure already differs")
+            return
+        self.original_exposure_plan = plan
+        self.original_exposure_fact = fact
+        self.effective_exposure_plan = plan
+        self.effective_exposure_fact = fact
+
+    def install_continuation(
+        self,
+        *,
+        run_model_target: ResolvedModelTarget,
+        permission_snapshot: RunPermissionSnapshot,
+        plan: CapabilityExposurePlan,
+        fact: CapabilityExposureSnapshotFact,
+        boundary: InteractionResumeBoundaryFact,
+        frozen_execution_surface: FrozenCapabilityExecutionSurface,
+    ) -> None:
+        if self.original_exposure_fact is None:
+            raise RuntimeError("continuation requires an initial capability exposure")
+        self.run_model_target = run_model_target
+        self.permission_snapshot = permission_snapshot
+        self.effective_exposure_plan = plan
+        self.effective_exposure_fact = fact
+        self.latest_committed_resume_boundary = boundary
+        self.frozen_execution_surface = frozen_execution_surface
+
+
+@dataclass(slots=True)
+class AgentRunDraft:
+    state: Any
+    run_start_event: RunStartEvent
+    current_user_message: CurrentUserMessageFact
+    terminal_run_end_event_id: str
+    capability_basis: CapabilityResolveBasisFact
+    frozen_execution_surface: FrozenCapabilityExecutionSurface
+    prior_messages: tuple[Msg, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedHostRunEntry:
+    run_start_event: RunStartEvent
+    run_start_sequence: int
+    committed_through_sequence: int
+    publication_status: Literal["completed", "failed_after_commit", "unavailable"]
+    boundary_id: str
+    committed_audit_event_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedSubagentRunEntry:
+    run_start_event: RunStartEvent
+    run_start_sequence: int
+    committed_through_sequence: int
+    publication_status: Literal["completed", "failed_after_commit", "unavailable"]
+    subagent_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSubagentRunEntry:
+    entry_fact: SubagentRunEntryFact
+    current_user_message: CurrentUserMessageFact
+    run_model_target: ResolvedModelTarget
+    permission_snapshot: RunPermissionSnapshot
+    mcp_installation_fact: McpInstallationReferenceFact
+    capability_basis: CapabilityResolveBasis
+    frozen_execution_surface: FrozenCapabilityExecutionSurface
+    run_start_event_id: str
+    terminal_run_end_event_id: str
+
+
+CommittedRunEntry: TypeAlias = CommittedHostRunEntry | CommittedSubagentRunEntry
+
+
+def install_run_working_set(
+    state: LoopState,
+    committed: CommittedRunEntry,
+    *,
+    plan_snapshot: PlanWorkflowStateFact,
+    capability_resolve_basis: CapabilityResolveBasis,
+    frozen_execution_surface: FrozenCapabilityExecutionSurface,
+) -> RunWorkingSet:
+    if state.run_model_target is None or state.permission_snapshot is None:
+        raise RuntimeError("committed run lost target or permission snapshot")
+    if committed.run_start_event.run_id != state.run_id:
+        raise RuntimeError("committed run entry/state identity mismatch")
+    working_set = RunWorkingSet(
+        run_start_event_id=committed.run_start_event.id,
+        run_start_sequence=committed.run_start_sequence,
+        run_model_target=state.run_model_target,
+        permission_snapshot=state.permission_snapshot,
+        plan_snapshot=plan_snapshot,
+        capability_resolve_basis=capability_resolve_basis,
+        frozen_execution_surface=frozen_execution_surface,
+        original_exposure_plan=None,
+        original_exposure_fact=None,
+        effective_exposure_plan=None,
+        effective_exposure_fact=None,
+        latest_committed_resume_boundary=None,
+    )
+    state.run_working_set = working_set
+    return working_set
+
+
+async def prepare_agent_run_draft(
+    agent: AgentRuntime,
+    state: LoopState,
+    *,
+    run_model_target: ResolvedModelTarget,
+    permission_snapshot: RunPermissionSnapshot,
+    current_user_message: CurrentUserMessageFact,
+    run_start_event_id: str,
+    terminal_run_end_event_id: str,
+    capability_basis: CapabilityResolveBasisFact,
+    frozen_execution_surface: FrozenCapabilityExecutionSurface,
+    new_run_boundary: NewRunBoundaryFact | None,
+    subagent_run_entry: SubagentRunEntryFact | None,
+    prior_messages: list[Msg] | None = None,
+) -> AgentRunDraft:
+    """Freeze one RunStart candidate without granting AgentRuntime commit ownership."""
+
+    if state.run_model_target is not None:
+        if (
+            state.run_model_target.fact.target_fingerprint
+            != run_model_target.fact.target_fingerprint
+        ):
+            raise ValueError("active run model target cannot be replaced")
+    else:
+        state.run_model_target = run_model_target
+    if state.permission_snapshot != permission_snapshot:
+        raise RuntimeError("prepared run permission snapshot/state mismatch")
+    state.messages.extend(
+        message.model_copy(deep=True) for message in (prior_messages or [])
+    )
+    state.messages.append(
+        UserMsg(
+            name="user",
+            content=current_user_message.text,
+            id=current_user_message.message_id,
+            metadata={"run_id": state.run_id},
+            created_at=current_user_message.observed_at_utc,
+        )
+    )
+    event_context = agent._event_context(state)
+    if isinstance(new_run_boundary, NewRunBoundaryFact):
+        if subagent_run_entry is not None:
+            raise RuntimeError("host run entry cannot carry a child entry fact")
+        run_entry_kind = RunEntryKind.HOST
+    elif isinstance(subagent_run_entry, SubagentRunEntryFact):
+        run_entry_kind = RunEntryKind.SUBAGENT_CHILD
+        new_run_boundary = None
+    else:
+        raise RuntimeError(
+            "run entry requires exactly one host boundary or subagent entry fact"
+        )
+    run_start = RunStartEvent(
+        id=run_start_event_id,
+        **event_context.event_fields(),
+        created_at=utc_now(),
+        user_input_chars=len(current_user_message.text),
+        **permission_snapshot.to_event_fields(),
+        model_target=run_model_target.fact,
+        mcp_installation_id=agent.runtime_session.mcp_installation_id,
+        mcp_installation_owner_runtime_session_id=(
+            agent.runtime_session.mcp_installation_owner_runtime_session_id
+        ),
+        run_entry_kind=run_entry_kind,
+        current_user_message=current_user_message,
+        terminal_run_end_event_id=terminal_run_end_event_id,
+        new_run_boundary=new_run_boundary,
+        subagent_run_entry=subagent_run_entry,
+    )
+    expected_basis = (
+        new_run_boundary.capability_basis
+        if isinstance(new_run_boundary, NewRunBoundaryFact)
+        else capability_basis
+    )
+    if expected_basis != capability_basis:
+        raise RuntimeError("prepared run capability basis mismatch")
+    return AgentRunDraft(
+        state=state,
+        run_start_event=run_start,
+        current_user_message=current_user_message,
+        terminal_run_end_event_id=terminal_run_end_event_id,
+        capability_basis=capability_basis,
+        frozen_execution_surface=frozen_execution_surface,
+        prior_messages=tuple(
+            message.model_copy(deep=True) for message in (prior_messages or ())
+        ),
+    )
+
+
+__all__ = [
+    "AgentRunDraft",
+    "CapabilityResolveBasis",
+    "CommittedHostRunEntry",
+    "CommittedRunEntry",
+    "CommittedSubagentRunEntry",
+    "PreparedSubagentRunEntry",
+    "RunWorkingSet",
+    "install_run_working_set",
+    "prepare_agent_run_draft",
+]

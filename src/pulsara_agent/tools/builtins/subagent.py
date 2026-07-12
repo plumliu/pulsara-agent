@@ -86,8 +86,9 @@ class SpawnAgentTool:
                 event_context=runtime_context.event_context,
                 parent_context_id=runtime_context.context_id,
                 parent_model_call_index=runtime_context.model_call_index,
-                spawning_tool_call_id=call.id,
                 spawning_tool_name=call.name,
+                spawn_initiator_kind="tool_call",
+                spawn_initiator_id=call.id,
             )
         except ValueError as exc:
             return _json_result(call, ToolResultState.ERROR, {"status": "error", "error": str(exc)})
@@ -156,6 +157,24 @@ class WaitAgentTool:
         except ValueError as exc:
             return _json_result(call, ToolResultState.ERROR, {"status": "error", "error": str(exc)})
         except SubagentNotReady:
+            terminal_outcome = self.subagent_runtime.terminal_outcome_for_run(
+                subagent_run_id
+            )
+            if terminal_outcome is not None:
+                return _json_result(
+                    call,
+                    ToolResultState.SUCCESS,
+                    {
+                        "status": terminal_outcome.status,
+                        "subagent_run_id": terminal_outcome.subagent_run_id,
+                        "task_id": terminal_outcome.task_id,
+                        "reason_code": terminal_outcome.reason_code,
+                        "terminal_event_id": terminal_outcome.terminal_event_id,
+                        "result_id": None,
+                        "result_artifact_id": None,
+                        "message": "Child agent reached a terminal state without a result.",
+                    },
+                )
             return _json_result(
                 call,
                 ToolResultState.SUCCESS,
@@ -468,28 +487,18 @@ class CreateAgentTasksTool:
                 task for task in self.subagent_runtime.tasks
                 if task.batch_id == batch_id
             )
-            batch_runs = tuple(
-                run for run in self.subagent_runtime.runs
-                if run.batch_id == batch_id
+            repair_id = f"subagent_repair:{uuid4().hex}"
+            error_type = type(exc).__name__
+            await self.subagent_runtime.repair_materialized_batch(
+                batch_id,
+                event_context=runtime_context.event_context,
+                repair_id=repair_id,
+                reason_code="subagent_task_batch_start_failed",
+                reason_message=(
+                    "The materialized subagent task batch could not finish starting; "
+                    "the entire batch was terminalized."
+                ),
             )
-            for run in batch_runs:
-                if run.status in {"starting", "running", "suspended"}:
-                    await self.subagent_runtime.cancel(
-                        run.subagent_run_id,
-                        event_context=runtime_context.event_context,
-                        reason_code="subagent_task_batch_start_failed",
-                        reason_message=str(exc),
-                        cancelled_by="runtime",
-                    )
-            for task in batch_tasks:
-                await self.subagent_runtime.cancel_materialized_task(
-                    task.task_id,
-                    event_context=runtime_context.event_context,
-                    reason_code="subagent_task_batch_start_failed",
-                    reason_message=str(exc),
-                    cancelled_by="runtime",
-                    force=True,
-                )
             return _batch_failure_result(
                 call,
                 batch_id=batch_id,
@@ -499,7 +508,8 @@ class CreateAgentTasksTool:
                     task.task_key or task.task_id
                     for task in (batch_tasks or created_tasks)
                 ],
-                message=str(exc),
+                message="The materialized subagent task batch could not finish starting.",
+                error_type=error_type,
             )
 
         return _json_result(
@@ -515,11 +525,11 @@ class CreateAgentTasksTool:
                         "task_key": task.task_key,
                         "label": task.label,
                         "profile": task.profile_id,
-                        "status": self.subagent_runtime._tasks[task.task_id].status,  # noqa: SLF001 - projection.
-                        "subagent_run_id": self.subagent_runtime._tasks[task.task_id].current_run_id,  # noqa: SLF001
+                        "status": task.status,
+                        "subagent_run_id": task.current_run_id,
                         "child_runtime_session_id": _child_runtime_session_id_for_run(
                             self.subagent_runtime.graph(),
-                            self.subagent_runtime._tasks[task.task_id].current_run_id,  # noqa: SLF001
+                            task.current_run_id,
                         ),
                     }
                     for task in created_tasks
@@ -793,7 +803,11 @@ def _batch_failure_result(
     failed_stage: str,
     failed_task_keys: list[str],
     message: str,
+    error_type: str | None = None,
 ) -> ToolExecutionResult:
+    diagnostic: dict[str, Any] = {"message": message}
+    if error_type is not None:
+        diagnostic["error_type"] = error_type
     return _json_result(
         call,
         ToolResultState.ERROR,
@@ -803,7 +817,7 @@ def _batch_failure_result(
             "error_code": error_code,
             "failed_stage": failed_stage,
             "failed_task_keys": failed_task_keys,
-            "diagnostics": [{"message": message}],
+            "diagnostics": [diagnostic],
         },
     )
 

@@ -7,6 +7,12 @@ from threading import Lock
 from typing import Iterable
 
 from pulsara_agent.event.events import AgentEvent, ReplyStartEvent
+from pulsara_agent.event_log.protocol import (
+    EventBatchConfirmation,
+    EventIdConflict,
+    EventLogWriteConflict,
+    same_event_payload,
+)
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import MessageReducer
 
@@ -17,17 +23,67 @@ class InMemoryEventLog:
     _next_sequence: int = 1
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
-    def append(self, event: AgentEvent) -> AgentEvent:
+    def ensure_runtime_session_owner(self) -> None:
+        """In-memory ledgers have no external ownership foreign key."""
+
+    def append(
+        self,
+        event: AgentEvent,
+        *,
+        expected_last_sequence: int | None = None,
+    ) -> AgentEvent:
+        _validate_live_batch([event])
         with self._lock:
-            stored = event
-            if event.sequence is None:
-                stored = event.model_copy(update={"sequence": self._next_sequence})
-            self._next_sequence = max(self._next_sequence, (stored.sequence or 0) + 1)
+            existing = next((stored for stored in self._events if stored.id == event.id), None)
+            if existing is not None:
+                if same_event_payload(event, existing):
+                    return existing
+                raise EventIdConflict(event.id)
+            actual_last_sequence = self._next_sequence - 1
+            if (
+                expected_last_sequence is not None
+                and expected_last_sequence != actual_last_sequence
+            ):
+                raise EventLogWriteConflict(
+                    expected_last_sequence=expected_last_sequence,
+                    actual_last_sequence=actual_last_sequence,
+                )
+            stored = event.model_copy(update={"sequence": self._next_sequence})
             self._events.append(stored)
+            self._next_sequence += 1
             return stored
 
-    def extend(self, events: Iterable[AgentEvent]) -> list[AgentEvent]:
-        return [self.append(event) for event in events]
+    def extend(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_last_sequence: int | None = None,
+    ) -> list[AgentEvent]:
+        event_list = list(events)
+        if not event_list:
+            return []
+        _validate_live_batch(event_list)
+        with self._lock:
+            actual_last_sequence = self._next_sequence - 1
+            if (
+                expected_last_sequence is not None
+                and expected_last_sequence != actual_last_sequence
+            ):
+                raise EventLogWriteConflict(
+                    expected_last_sequence=expected_last_sequence,
+                    actual_last_sequence=actual_last_sequence,
+                )
+            existing_ids = {event.id for event in self._events}
+            duplicate = next((event.id for event in event_list if event.id in existing_ids), None)
+            if duplicate is not None:
+                raise ValueError(f"Event id already exists in this session: {duplicate}")
+            stored_events = [
+                event.model_copy(update={"sequence": self._next_sequence + index})
+                for index, event in enumerate(event_list)
+            ]
+            self._events.extend(stored_events)
+            self._next_sequence += len(stored_events)
+            return stored_events
 
     def iter(
         self,
@@ -49,6 +105,33 @@ class InMemoryEventLog:
             events = [event for event in events if event.reply_id == reply_id]
         return list(events)
 
+    def get_by_id(self, event_id: str) -> AgentEvent | None:
+        with self._lock:
+            return next((event for event in self._events if event.id == event_id), None)
+
+    def confirm_batch(self, candidates) -> EventBatchConfirmation:
+        candidate_list = list(candidates)
+        ids = [event.id for event in candidate_list]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Confirmed event ids must be unique within one batch")
+        with self._lock:
+            by_id = {event.id: event for event in self._events}
+            committed: list[AgentEvent] = []
+            missing: list[str] = []
+            for candidate in candidate_list:
+                existing = by_id.get(candidate.id)
+                if existing is None:
+                    missing.append(candidate.id)
+                    continue
+                if not same_event_payload(candidate, existing):
+                    raise EventIdConflict(candidate.id)
+                committed.append(existing)
+            return EventBatchConfirmation(
+                committed_events=tuple(committed),
+                missing_event_ids=tuple(missing),
+                actual_last_sequence=self._next_sequence - 1,
+            )
+
     def replay(self, reply_id: str) -> Msg:
         events = self.iter(reply_id=reply_id)
         start = next((event for event in events if isinstance(event, ReplyStartEvent)), None)
@@ -66,3 +149,11 @@ class InMemoryEventLog:
     def next_sequence(self) -> int:
         with self._lock:
             return self._next_sequence
+
+
+def _validate_live_batch(events: list[AgentEvent]) -> None:
+    if any(event.sequence is not None for event in events):
+        raise ValueError("Live EventLog append requires sequence=None")
+    ids = [event.id for event in events]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Event ids must be unique within one batch")

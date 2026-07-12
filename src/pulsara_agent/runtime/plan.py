@@ -9,7 +9,8 @@ from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent, PlanQuestionOption
 from pulsara_agent.runtime.approval import PendingApproval
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode, parse_permission_mode
+from pulsara_agent.primitives.permission import PermissionMode, parse_permission_mode
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.permission_snapshot import validate_preset_policy_payload
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 PLAN_ENTRY_INSTRUCTION_NAME = "plan_entry_instruction"
@@ -134,54 +135,10 @@ PlanInteractionResolution: TypeAlias = PlanQuestionResolution | PlanExitResoluti
 
 
 @dataclass(frozen=True, slots=True)
-class McpElicitationResolution:
-    interaction_id: str
-    answer: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
 class McpInputRequiredInteractionResolution:
     interaction_id: str
     responses: dict[str, dict[str, Any]] = field(default_factory=dict)
     cancelled: bool = False
-
-
-@dataclass(slots=True)
-class PendingMcpElicitation:
-    interaction_id: str
-    kind: Literal["mcp_elicitation"]
-    host_session_id: str
-    runtime_session_id: str
-    run_id: str
-    turn_id: str
-    reply_id: str
-    tool_call_id: str
-    tool_name: str
-    server_id: str
-    request_id: str
-    prompt: str
-    schema: dict[str, Any] = field(default_factory=dict)
-    tool_observation_timing_seed: dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.monotonic)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "interaction_id": self.interaction_id,
-            "kind": self.kind,
-            "host_session_id": self.host_session_id,
-            "runtime_session_id": self.runtime_session_id,
-            "run_id": self.run_id,
-            "turn_id": self.turn_id,
-            "reply_id": self.reply_id,
-            "tool_call_id": self.tool_call_id,
-            "tool_name": self.tool_name,
-            "server_id": self.server_id,
-            "request_id": self.request_id,
-            "prompt": self.prompt,
-            "schema": dict(self.schema),
-            "tool_observation_timing_seed": dict(self.tool_observation_timing_seed),
-            "created_at": self.created_at,
-        }
 
 
 @dataclass(slots=True)
@@ -272,7 +229,7 @@ class PendingPlanInteraction:
         }
 
 
-PendingInteraction: TypeAlias = PendingApproval | PendingPlanInteraction | PendingMcpElicitation | PendingMcpInputRequired
+PendingInteraction: TypeAlias = PendingApproval | PendingPlanInteraction | PendingMcpInputRequired
 
 
 def pending_plan_interaction_from_state(state: LoopState, host_session_id: str) -> PendingPlanInteraction:
@@ -301,30 +258,6 @@ def pending_plan_interaction_from_state(state: LoopState, host_session_id: str) 
         plan_text=str(payload.get("plan_text") or ""),
         plan_artifact_id=payload.get("plan_artifact_id"),
         summary=str(payload.get("summary") or ""),
-    )
-
-
-def pending_mcp_elicitation_from_state(state: LoopState, host_session_id: str) -> PendingMcpElicitation:
-    if state.status is not LoopStatus.WAITING_USER:
-        raise ValueError("cannot create pending MCP elicitation from a non-waiting state")
-    if state.pending_interaction_kind != "mcp_elicitation":
-        raise ValueError("waiting state does not contain an MCP elicitation")
-    payload = dict(state.pending_interaction_payload)
-    return PendingMcpElicitation(
-        interaction_id=str(payload.get("interaction_id") or f"mcp_elicitation:{uuid4().hex}"),
-        kind="mcp_elicitation",
-        host_session_id=host_session_id,
-        runtime_session_id=state.session_id,
-        run_id=state.run_id,
-        turn_id=state.turn_id,
-        reply_id=state.reply_id,
-        tool_call_id=str(payload["tool_call_id"]),
-        tool_name=str(payload["tool_name"]),
-        server_id=str(payload["server_id"]),
-        request_id=str(payload["request_id"]),
-        prompt=str(payload.get("prompt") or ""),
-        schema=dict(payload.get("schema") or {}),
-        tool_observation_timing_seed=dict(payload.get("tool_observation_timing_seed") or {}),
     )
 
 

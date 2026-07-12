@@ -9,19 +9,23 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from tests.support import run_agent_task
+
 from pulsara_agent.event import (
     EventContext,
     ModelCallStartEvent,
     SubagentEdgeRecordedEvent,
     SubagentResultDeliveredEvent,
     SubagentRunCompletedEvent,
+    SubagentRunFailedEvent,
     SubagentRunStartedEvent,
     ToolCallStartEvent,
 )
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.runtime import LoopBudget
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
@@ -37,13 +41,20 @@ BACKGROUND_PARENT_SENTINEL = "PULSARA_REAL_SUBAGENT_BACKGROUND_PARENT_OK"
 
 def test_real_llm_subagent_spawn_wait_dogfood(tmp_path: Path) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_SUBAGENT") != "1":
-        pytest.skip("Set PULSARA_RUN_DOGFOOD_SUBAGENT=1 to run subagent real LLM dogfood.")
+        pytest.skip(
+            "Set PULSARA_RUN_DOGFOOD_SUBAGENT=1 to run subagent real LLM dogfood."
+        )
 
     settings = _settings()
     result = asyncio.run(_run_subagent_spawn_wait_dogfood(settings, tmp_path))
-    print("\nREAL_LLM_SUBAGENT_DOGFOOD=" + json.dumps(result, ensure_ascii=False, sort_keys=True))
+    print(
+        "\nREAL_LLM_SUBAGENT_DOGFOOD="
+        + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    )
 
     assert result["status"] == "finished", result
     assert result["spawn_tool_calls"] >= 1, result
@@ -67,7 +78,9 @@ def test_real_llm_subagent_spawn_wait_dogfood(tmp_path: Path) -> None:
 
 def test_real_llm_subagent_spawn_wait_durable_dogfood(tmp_path: Path) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_SUBAGENT_DURABLE") != "1":
         pytest.skip(
             "Set PULSARA_RUN_DOGFOOD_SUBAGENT_DURABLE=1 to run the durable subagent real LLM dogfood."
@@ -75,8 +88,13 @@ def test_real_llm_subagent_spawn_wait_durable_dogfood(tmp_path: Path) -> None:
 
     settings = _settings()
     _connect_or_skip(settings.storage.postgres_dsn)
-    result = asyncio.run(_run_subagent_spawn_wait_dogfood(settings, tmp_path, durable=True))
-    print("\nREAL_LLM_SUBAGENT_DURABLE_DOGFOOD=" + json.dumps(result, ensure_ascii=False, sort_keys=True))
+    result = asyncio.run(
+        _run_subagent_spawn_wait_dogfood(settings, tmp_path, durable=True)
+    )
+    print(
+        "\nREAL_LLM_SUBAGENT_DURABLE_DOGFOOD="
+        + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    )
 
     assert result["status"] == "finished", result
     assert result["parent_event_log_backend"] == "PostgresEventLog", result
@@ -103,9 +121,13 @@ def test_real_llm_subagent_spawn_wait_durable_dogfood(tmp_path: Path) -> None:
 
 def test_real_llm_subagent_background_result_delivery_dogfood(tmp_path: Path) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_DOGFOOD_SUBAGENT") != "1":
-        pytest.skip("Set PULSARA_RUN_DOGFOOD_SUBAGENT=1 to run subagent real LLM dogfood.")
+        pytest.skip(
+            "Set PULSARA_RUN_DOGFOOD_SUBAGENT=1 to run subagent real LLM dogfood."
+        )
 
     settings = _settings()
     result = asyncio.run(_run_subagent_background_delivery_dogfood(settings, tmp_path))
@@ -149,31 +171,55 @@ async def _run_subagent_spawn_wait_dogfood(
         max_subagent_results_per_parent_compile=0,
     )
     try:
-        run_result = await wiring.agent_runtime.run_task(_user_prompt())
+        run_result = await run_agent_task(wiring.agent_runtime, _user_prompt())
         subagent_runtime = wiring.agent_runtime.subagent_runtime
         assert subagent_runtime is not None
-        parent_events = wiring.runtime_wiring.event_log.iter(run_id=run_result.state.run_id)
-        started = [event for event in parent_events if isinstance(event, SubagentRunStartedEvent)]
-        completed = [event for event in parent_events if isinstance(event, SubagentRunCompletedEvent)]
+        parent_events = wiring.runtime_wiring.event_log.iter(
+            run_id=run_result.state.run_id
+        )
+        started = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentRunStartedEvent)
+        ]
+        completed = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentRunCompletedEvent)
+        ]
+        failed = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentRunFailedEvent)
+        ]
         wait_edges = [
             event
             for event in parent_events
-            if isinstance(event, SubagentEdgeRecordedEvent) and event.edge_kind == "wait"
+            if isinstance(event, SubagentEdgeRecordedEvent)
+            and event.edge_kind == "wait"
         ]
-        delivered = [event for event in parent_events if isinstance(event, SubagentResultDeliveredEvent)]
+        delivered = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentResultDeliveredEvent)
+        ]
         tool_names = [
             event.tool_call_name
             for event in parent_events
             if isinstance(event, ToolCallStartEvent)
         ]
-        model_starts = [event for event in parent_events if isinstance(event, ModelCallStartEvent)]
+        model_starts = [
+            event for event in parent_events if isinstance(event, ModelCallStartEvent)
+        ]
         child_raw_events = []
-        child_runtime_session_id = started[0].child_runtime_session_id if started else None
+        child_runtime_session_id = (
+            started[0].child_runtime_session_id if started else None
+        )
         child_event_log_backend = None
         if started:
-            child_session = subagent_runtime.child_runtime_session(started[0].subagent_run_id)
-            child_event_log_backend = type(child_session.event_log).__name__
-            child_raw_events = child_session.event_log.iter()
+            child_log = subagent_runtime.child_event_log(started[0].subagent_run_id)
+            child_event_log_backend = type(child_log).__name__
+            child_raw_events = child_log.iter()
         child_metadata_missing = [
             event
             for event in child_raw_events
@@ -202,11 +248,28 @@ async def _run_subagent_spawn_wait_dogfood(
             ],
             "subagent_started_count": len(started),
             "subagent_completed_count": len(completed),
+            "subagent_failures": [
+                {
+                    "subagent_run_id": event.subagent_run_id,
+                    "reason_code": event.reason_code,
+                    "reason_message": event.reason_message,
+                    "diagnostics": list(event.diagnostics),
+                }
+                for event in failed
+            ],
             "wait_edge_count": len(wait_edges),
-            "started_parent_context_id": started[0].parent_context_id if started else None,
-            "started_parent_model_call_index": started[0].parent_model_call_index if started else None,
-            "wait_source_context_id": wait_edges[-1].source_context_id if wait_edges else None,
-            "wait_source_model_call_index": wait_edges[-1].source_model_call_index if wait_edges else None,
+            "started_parent_context_id": started[0].parent_context_id
+            if started
+            else None,
+            "started_parent_model_call_index": started[0].parent_model_call_index
+            if started
+            else None,
+            "wait_source_context_id": wait_edges[-1].source_context_id
+            if wait_edges
+            else None,
+            "wait_source_model_call_index": wait_edges[-1].source_model_call_index
+            if wait_edges
+            else None,
             "child_summary": completed[-1].summary if completed else "",
             "child_raw_event_count": len(child_raw_events),
             "child_raw_events_missing_subagent_metadata": len(child_metadata_missing),
@@ -222,13 +285,20 @@ async def _run_subagent_spawn_wait_dogfood(
     finally:
         child_session_ids = [
             run.child_runtime_session_id
-            for run in (wiring.agent_runtime.subagent_runtime.runs if wiring.agent_runtime.subagent_runtime else ())
+            for run in (
+                wiring.agent_runtime.subagent_runtime.runs
+                if wiring.agent_runtime.subagent_runtime
+                else ()
+            )
         ]
         wiring.agent_runtime.close()
         if durable:
             _delete_sessions(
                 settings.storage.postgres_dsn,
-                [*child_session_ids, wiring.runtime_wiring.runtime_session.runtime_session_id],
+                [
+                    *child_session_ids,
+                    wiring.runtime_wiring.runtime_session.runtime_session_id,
+                ],
             )
 
 
@@ -245,7 +315,9 @@ async def _run_subagent_background_delivery_dogfood(
     )
     subagent_runtime = wiring.agent_runtime.subagent_runtime
     assert subagent_runtime is not None
-    seed_context = EventContext(run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed")
+    seed_context = EventContext(
+        run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"
+    )
     seeded = await subagent_runtime.spawn_fake(
         task="seeded background child result",
         event_context=seed_context,
@@ -257,21 +329,30 @@ async def _run_subagent_background_delivery_dogfood(
         event_context=seed_context,
     )
     try:
-        run_result = await wiring.agent_runtime.run_task(_background_delivery_user_prompt())
-        parent_events = wiring.runtime_wiring.event_log.iter(run_id=run_result.state.run_id)
+        run_result = await run_agent_task(
+            wiring.agent_runtime, _background_delivery_user_prompt()
+        )
+        parent_events = wiring.runtime_wiring.event_log.iter(
+            run_id=run_result.state.run_id
+        )
         completed = [
             event
             for event in wiring.runtime_wiring.event_log.iter()
             if isinstance(event, SubagentRunCompletedEvent)
         ]
-        delivered = [event for event in parent_events if isinstance(event, SubagentResultDeliveredEvent)]
+        delivered = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentResultDeliveredEvent)
+        ]
         tool_names = [
             event.tool_call_name
             for event in parent_events
             if isinstance(event, ToolCallStartEvent)
         ]
-        child_session = subagent_runtime.child_runtime_session(seeded.subagent_run_id)
-        child_raw_events = child_session.event_log.iter()
+        child_raw_events = subagent_runtime.child_event_log(
+            seeded.subagent_run_id
+        ).iter()
         child_metadata_missing = [
             event
             for event in child_raw_events
@@ -313,7 +394,7 @@ def _build_real_subagent_wiring(
         workspace_root,
         durable=durable,
         model_role=ModelRole.FLASH,
-        options=LLMOptions(temperature=0, max_output_tokens=1024),
+        options=LLMOptions(),
         system_prompt=system_prompt,
         memory_reflection=False,
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
@@ -383,10 +464,14 @@ def _connect_or_skip(dsn: str) -> None:
 
 
 def _delete_sessions(dsn: str, runtime_session_ids: Iterable[str | None]) -> None:
-    session_ids = [session_id for session_id in dict.fromkeys(runtime_session_ids) if session_id]
+    session_ids = [
+        session_id for session_id in dict.fromkeys(runtime_session_ids) if session_id
+    ]
     if not session_ids:
         return
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             for runtime_session_id in session_ids:
-                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+                cursor.execute(
+                    "delete from sessions where id = %s", (runtime_session_id,)
+                )

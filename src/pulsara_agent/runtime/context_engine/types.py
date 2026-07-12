@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Protocol
 
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.llm.input import ToolSpec
-from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.message import Msg
 from pulsara_agent.runtime.state import LoopBudget, LoopState
+from pulsara_agent.primitives.model_call import (
+    ContextBudgetReportEvent,
+    ResolvedModelCallFact,
+    TokenEstimatorFact,
+)
 
 ContextChannel = Literal[
     "system",
@@ -58,6 +64,7 @@ class ContextBudgetExceeded(ValueError):
         diagnostics: tuple[ContextDiagnostic, ...] = (),
         tool_result_render_decisions: tuple[dict[str, Any], ...] = (),
         tool_result_budget_report: dict[str, Any] | None = None,
+        budget_report: ContextBudgetReport | None = None,
     ) -> None:
         super().__init__(message)
         self.context_id = context_id
@@ -65,6 +72,7 @@ class ContextBudgetExceeded(ValueError):
         self.diagnostics = diagnostics
         self.tool_result_render_decisions = tool_result_render_decisions
         self.tool_result_budget_report = tool_result_budget_report or {}
+        self.budget_report = budget_report
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +156,9 @@ class ContextSectionRenderTiming:
     session_timezone: str | None = None
     compiled_local_date: str | None = None
     age_seconds: float | None = None
-    source: ContextSectionSourceTiming = field(default_factory=ContextSectionSourceTiming)
+    source: ContextSectionSourceTiming = field(
+        default_factory=ContextSectionSourceTiming
+    )
 
     def to_event_value(self) -> dict[str, Any]:
         return {
@@ -198,8 +208,7 @@ class ContextSource(Protocol):
 
     source_id: str
 
-    def collect(self, request: "ContextCompileRequest") -> ContextSourceOutput:
-        ...
+    def collect(self, request: "ContextCompileRequest") -> ContextSourceOutput: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +223,7 @@ class ContextCompileRequest:
     model_call_index: int
     compiled_at_utc: str
     user_observed_at_utc: str
-    model_role: ModelRole
+    resolved_call: ResolvedModelCall
     state: LoopState
     current_user_message: Msg | None
     current_user_input: str
@@ -280,26 +289,30 @@ class CompiledToolSpecUnit:
 
 @dataclass(frozen=True, slots=True)
 class ContextBudgetReport:
-    context_window_tokens: int
-    reserved_output_tokens: int
+    target_fingerprint: str
+    resolved_model_call_id: str
+    measurement_stage: Literal[
+        "tool_result_render",
+        "section_allocation",
+        "final_payload",
+    ]
+    total_context_tokens: int
+    max_input_tokens: int
+    max_output_tokens: int
+    effective_output_tokens: int
     safety_margin_tokens: int
     input_budget_tokens: int
-    sections_estimated_tokens: int
-    tools_estimated_tokens: int
-    envelope_estimated_tokens: int
-    total_estimated_tokens: int
+    sections_estimated_tokens: int | None
+    tools_estimated_tokens: int | None
+    envelope_estimated_tokens: int | None
+    allocation_estimated_tokens: int | None
+    final_payload_estimated_tokens: int | None
+    non_transcript_baseline_tokens: int | None
+    transcript_estimated_tokens: int | None
+    estimator: TokenEstimatorFact
 
-    def to_event_value(self) -> dict[str, int]:
-        return {
-            "context_window_tokens": self.context_window_tokens,
-            "reserved_output_tokens": self.reserved_output_tokens,
-            "safety_margin_tokens": self.safety_margin_tokens,
-            "input_budget_tokens": self.input_budget_tokens,
-            "sections_estimated_tokens": self.sections_estimated_tokens,
-            "tools_estimated_tokens": self.tools_estimated_tokens,
-            "envelope_estimated_tokens": self.envelope_estimated_tokens,
-            "total_estimated_tokens": self.total_estimated_tokens,
-        }
+    def to_event_value(self) -> ContextBudgetReportEvent:
+        return ContextBudgetReportEvent(**asdict(self))
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +325,9 @@ class CompiledContext:
     lifecycle_decisions: tuple[ContextLifecycleDecisionDiagnostic, ...]
     estimated_tokens: int
     budget: ContextBudgetReport
+    resolved_model_call: ResolvedModelCallFact
+    final_token_estimate: TokenEstimate
+    message_budget_scopes: tuple[Literal["transcript", "non_transcript"], ...]
     tool_result_render_decisions: tuple[dict[str, Any], ...] = ()
     tool_result_budget_report: dict[str, Any] = field(default_factory=dict)
 
@@ -319,11 +335,12 @@ class CompiledContext:
         return {
             "context_id": self.context_id,
             "model_call_index": self.llm_context.model_call_index,
-            "estimated_tokens": self.estimated_tokens,
             "budget": self.budget.to_event_value(),
             "sections": [section.to_event_value() for section in self.sections],
             "tool_specs": [tool.to_event_value() for tool in self.tool_specs],
-            "diagnostics": [diagnostic.to_event_value() for diagnostic in self.diagnostics],
+            "diagnostics": [
+                diagnostic.to_event_value() for diagnostic in self.diagnostics
+            ],
             "lifecycle_decisions": [
                 decision.to_event_value() for decision in self.lifecycle_decisions
             ],

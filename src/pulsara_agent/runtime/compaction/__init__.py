@@ -4,7 +4,6 @@ from pulsara_agent.runtime.compaction.service import (
     ContextCompactionPolicy,
     ContextCompactionService,
     ContextCompactionTrigger,
-    estimate_context_tokens,
 )
 from pulsara_agent.runtime.compaction.candidates import (
     CompactionCandidateDiagnostic,
@@ -24,6 +23,5 @@ __all__ = [
     "ContextCompactionService",
     "ContextCompactionTrigger",
     "NormalizedCompactionCandidate",
-    "estimate_context_tokens",
     "parse_compaction_memory_candidates",
 ]

@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 
 from pulsara_agent.capability.local_skills import LocalSkillProvider
-from pulsara_agent.capability.provider import CapabilityProviderOutput
+from pulsara_agent.capability.provider import (
+    CapabilityProjectionOutput,
+)
 from pulsara_agent.capability.render import (
     DEFAULT_CATALOG_BUDGET_CHARS,
     render_active_skill_prompt,
@@ -15,10 +17,11 @@ from pulsara_agent.capability.skill_health import SkillHealthResolver
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityDiagnostic,
-    CapabilityResolveContext,
+    CapabilityProjectionResolveContext,
     LocalSkillManifest,
     ResolvedSkillCatalogEntry,
 )
+from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
 
 
 class LocalSkillCapabilityProvider:
@@ -35,15 +38,15 @@ class LocalSkillCapabilityProvider:
         self.skill_health_resolver = skill_health_resolver or SkillHealthResolver()
         self.catalog_budget_chars = catalog_budget_chars
 
-    def resolve(
+    def _resolve_projection_output(
         self,
-        context: CapabilityResolveContext,
+        context: CapabilityProjectionResolveContext,
         *,
-        bound_tool_names: frozenset[str],
-    ) -> CapabilityProviderOutput:
+        available_tool_names: frozenset[str],
+    ) -> CapabilityProjectionOutput:
         discovery = self.provider.discover(
             context.workspace_root,
-            available_tool_names=bound_tool_names,
+            available_tool_names=available_tool_names,
         )
         skills_by_name = {skill.name: skill for skill in discovery.skills}
         catalog_entries = tuple(
@@ -64,12 +67,27 @@ class LocalSkillCapabilityProvider:
             *catalog.diagnostics,
             *active.diagnostics,
         )
-        return CapabilityProviderOutput(
+        return CapabilityProjectionOutput(
             catalog_entries=catalog_entries,
             active_injections=active_injections,
             diagnostics=diagnostics,
             catalog_prompt=catalog.text,
             active_skill_prompt=active.text,
+            catalog_rendered=catalog,
+            active_skill_rendered=active,
+        )
+
+    def resolve_projection(
+        self,
+        context: CapabilityProjectionResolveContext,
+        *,
+        execution_surface: CapabilityExecutionSurfaceIdentityFact,
+    ) -> CapabilityProjectionOutput:
+        return self._resolve_projection_output(
+            context,
+            available_tool_names=frozenset(
+                entry.capability_name for entry in execution_surface.entries
+            ),
         )
 
 
@@ -87,6 +105,7 @@ def _catalog_entry(skill: LocalSkillManifest) -> ResolvedSkillCatalogEntry:
         auth_required=skill.auth_required,
         cli_usage_kind=skill.cli_usage_kind,
         when_to_use=skill.when_to_use,
+        source=skill.source,
     )
 
 
@@ -129,6 +148,7 @@ def _active_injections(
                 network_required=skill.network_required,
                 auth_required=skill.auth_required,
                 cli_usage_kind=skill.cli_usage_kind,
+                source=skill.source,
             )
         )
     return tuple(injections), tuple(diagnostics)

@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
 from pulsara_agent.capability import LocalSkillCapabilityProvider, SkillBinaryLookupPath, SkillHealthResolver
 from pulsara_agent.capability.providers.mcp import (
-    McpCapabilityBindingBundle,
     McpCapabilityProvider,
-    build_mcp_bundle,
+    empty_mcp_installation,
 )
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event import AgentEvent
@@ -66,9 +65,13 @@ from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.compaction import ContextCompactionPolicy, ContextCompactionService
 from pulsara_agent.runtime.compaction.candidates import CandidatePoolCompactionMemoryCandidateSink
+from pulsara_agent.runtime.compaction.commit import (
+    RuntimeSessionCompactionEventCommitPort,
+)
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
-from pulsara_agent.runtime.mcp.manager import CompositeMcpClientManager, McpClientManager
+from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
+from pulsara_agent.runtime.mcp.types import McpInstalledCapabilitySnapshot
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.terminal import TerminalRuntimeBinding
 from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex, PostgresToolResultArtifactIndex
@@ -96,8 +99,9 @@ class RuntimeWiring:
     governance_coordinator: MemoryGovernanceCoordinator | None = None
     governance_relatedness: GovernanceRelatednessService | None = None
     compaction_service: ContextCompactionService | None = None
-    mcp_manager: McpClientManager | None = None
-    mcp_bundle: McpCapabilityBindingBundle | None = None
+    mcp_installation: McpInstalledCapabilitySnapshot = field(
+        default_factory=empty_mcp_installation
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +117,7 @@ def build_in_memory_runtime_wiring(
     graph_id: str | None = None,
     memory_domain: MemoryDomainContext | None = None,
     terminal_binding: TerminalRuntimeBinding | None = None,
-    mcp_bundle: McpCapabilityBindingBundle | None = None,
+    mcp_installation: McpInstalledCapabilitySnapshot | None = None,
 ) -> RuntimeWiring:
     warnings.warn(
         "build_in_memory_runtime_wiring() is compatibility/test-only; "
@@ -135,7 +139,7 @@ def build_in_memory_runtime_wiring(
         archive=archive,
         tool_result_artifacts=tool_result_artifacts,
         terminal_binding=terminal_binding,
-        extra_tool_bindings=mcp_bundle.tools if mcp_bundle is not None else (),
+        extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
     )
     _register_timeline_hook(
         runtime_session=runtime_session,
@@ -179,8 +183,7 @@ def build_in_memory_runtime_wiring(
         memory_query=None,
         memory_domain=memory_domain,
         working_context_store=None,
-        mcp_manager=mcp_bundle.manager if mcp_bundle is not None else None,
-        mcp_bundle=mcp_bundle,
+        mcp_installation=mcp_installation or empty_mcp_installation(),
     )
 
 
@@ -194,7 +197,7 @@ def build_durable_runtime_wiring(
     terminal_binding: TerminalRuntimeBinding | None = None,
     retrieval_resources: RetrievalRuntimeResources | None = None,
     governance_coordinator: MemoryGovernanceCoordinator | None = None,
-    mcp_bundle: McpCapabilityBindingBundle | None = None,
+    mcp_installation: McpInstalledCapabilitySnapshot | None = None,
 ) -> RuntimeWiring:
     runtime_session_id = runtime_session_id or _new_runtime_session_id()
     resolved_graph_id = graph_id or (
@@ -217,7 +220,7 @@ def build_durable_runtime_wiring(
         archive=archive,
         tool_result_artifacts=tool_result_artifacts,
         terminal_binding=terminal_binding,
-        extra_tool_bindings=mcp_bundle.tools if mcp_bundle is not None else (),
+        extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
     )
     postgres_graph = PostgresGraphStore(settings.storage.postgres_dsn)
     if not settings.storage.oxigraph_url.strip():
@@ -346,8 +349,7 @@ def build_durable_runtime_wiring(
         retrieval_resources=retrieval_resources,
         governance_coordinator=governance_coordinator,
         governance_relatedness=governance_relatedness,
-        mcp_manager=mcp_bundle.manager if mcp_bundle is not None else None,
-        mcp_bundle=mcp_bundle,
+        mcp_installation=mcp_installation or empty_mcp_installation(),
     )
 
 
@@ -370,9 +372,10 @@ def build_agent_runtime_wiring(
     permission_policy: EffectivePermissionPolicy | None = None,
     retrieval_resources: RetrievalRuntimeResources | None = None,
     governance_coordinator: MemoryGovernanceCoordinator | None = None,
-    mcp_managers: tuple[McpClientManager, ...] = (),
+    mcp_supervisor: McpServerSupervisor | None = None,
+    mcp_installation: McpInstalledCapabilitySnapshot | None = None,
 ) -> AgentRuntimeWiring:
-    mcp_bundle = _build_mcp_bundle(mcp_managers)
+    effective_mcp_installation = mcp_installation or empty_mcp_installation()
     runtime_wiring = (
         build_durable_runtime_wiring(
             settings,
@@ -383,7 +386,7 @@ def build_agent_runtime_wiring(
             terminal_binding=terminal_binding,
             retrieval_resources=retrieval_resources,
             governance_coordinator=governance_coordinator,
-            mcp_bundle=mcp_bundle,
+            mcp_installation=effective_mcp_installation,
         )
         if durable
         else build_in_memory_runtime_wiring(
@@ -392,16 +395,20 @@ def build_agent_runtime_wiring(
             graph_id=graph_id,
             memory_domain=memory_domain,
             terminal_binding=terminal_binding,
-            mcp_bundle=mcp_bundle,
+            mcp_installation=effective_mcp_installation,
         )
     )
     llm_runtime = build_llm_runtime(settings.llm)
+    runtime_wiring.runtime_session.mcp_supervisor = mcp_supervisor
+    runtime_wiring.runtime_session.set_mcp_installation_contract(
+        installation_id=effective_mcp_installation.installation_id,
+    )
     runtime_wiring = _with_memory_governance_engine(runtime_wiring, llm_runtime=llm_runtime)
     effective_permission_policy = permission_policy or default_permission_policy()
     effective_capability_runtime = capability_runtime or build_default_capability_runtime(
         runtime_session=runtime_wiring.runtime_session,
         enable_workspace_skills=enable_workspace_skills,
-        mcp_bundle=mcp_bundle,
+        mcp_installation=effective_mcp_installation,
     )
     context_compactor = (
         RuntimeContextCompactor(
@@ -438,22 +445,15 @@ def build_agent_runtime_wiring(
     )
 
 
-def _build_mcp_bundle(managers: tuple[McpClientManager, ...]) -> McpCapabilityBindingBundle | None:
-    if not managers:
-        return None
-    manager: McpClientManager = managers[0] if len(managers) == 1 else CompositeMcpClientManager(managers)
-    return build_mcp_bundle(manager)
-
-
 def build_default_capability_runtime(
     *,
     runtime_session: RuntimeSession,
     enable_workspace_skills: bool,
-    mcp_bundle: McpCapabilityBindingBundle | None = None,
+    mcp_installation: McpInstalledCapabilitySnapshot | None = None,
 ) -> CapabilityRuntime:
     providers = []
-    if mcp_bundle is not None:
-        providers.append(McpCapabilityProvider(mcp_bundle))
+    if mcp_installation is not None and mcp_installation.snapshots:
+        providers.append(McpCapabilityProvider(mcp_installation))
     if enable_workspace_skills:
         providers.append(
             LocalSkillCapabilityProvider(
@@ -501,14 +501,16 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         retrieval_resources=runtime_wiring.retrieval_resources,
         governance_coordinator=runtime_wiring.governance_coordinator,
         governance_relatedness=runtime_wiring.governance_relatedness,
-        mcp_manager=runtime_wiring.mcp_manager,
-        mcp_bundle=runtime_wiring.mcp_bundle,
+        mcp_installation=runtime_wiring.mcp_installation,
         compaction_service=ContextCompactionService(
             event_log=runtime_wiring.event_log,
             archive=runtime_wiring.archive,
             llm_runtime=llm_runtime,
             runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
             policy=ContextCompactionPolicy(),
+            event_commit_port=RuntimeSessionCompactionEventCommitPort(
+                runtime_wiring.runtime_session
+            ),
             candidate_sink=(
                 CandidatePoolCompactionMemoryCandidateSink(
                     candidate_pool=runtime_wiring.candidate_pool,

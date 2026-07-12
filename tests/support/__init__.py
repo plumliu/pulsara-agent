@@ -1,1 +1,41 @@
 """Shared explicit test doubles."""
+
+from tests.support.model_call import (
+    bind_test_context,
+    context_compiled_contract_fields,
+    compaction_completed_contract_fields,
+    compaction_failed_contract_fields,
+    compaction_started_contract_fields,
+    model_call_end_fields,
+    model_call_start_fields,
+    resolve_test_call,
+    run_agent_task,
+    stream_agent_task,
+    test_llm_config,
+    test_llm_context,
+    test_model_limits,
+    test_model_slot,
+    test_resolved_call_fact,
+    test_resolved_call,
+    test_resolved_target_fact,
+)
+
+__all__ = [
+    "bind_test_context",
+    "context_compiled_contract_fields",
+    "compaction_completed_contract_fields",
+    "compaction_failed_contract_fields",
+    "compaction_started_contract_fields",
+    "model_call_end_fields",
+    "model_call_start_fields",
+    "resolve_test_call",
+    "run_agent_task",
+    "stream_agent_task",
+    "test_llm_config",
+    "test_llm_context",
+    "test_model_limits",
+    "test_model_slot",
+    "test_resolved_call_fact",
+    "test_resolved_call",
+    "test_resolved_target_fact",
+]

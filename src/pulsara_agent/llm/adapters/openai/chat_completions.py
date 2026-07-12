@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator
 
 from pulsara_agent.event import AgentEvent, EventContext
@@ -16,8 +16,10 @@ from pulsara_agent.llm.adapters.openai.client import (
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     AgentEventBuilder,
+    ReportedModelIdentityObserver,
+    chat_completion_reported_model,
     sdk_event_to_dict,
-    usage_from_mapping,
+    transport_usage_report_from_mapping,
 )
 from pulsara_agent.llm.adapters.openai.retrying import (
     log_retry_attempt,
@@ -27,9 +29,14 @@ from pulsara_agent.llm.adapters.openai.retrying import (
     sdk_max_retries_for_transport,
 )
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
-from pulsara_agent.llm.models import ModelProfile
-from pulsara_agent.llm.provider import ProviderProfile, ThinkingReplayPolicy
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.provider import (
+    ProviderProfile,
+    ThinkingReplayPolicy,
+    mutable_provider_value,
+)
+from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -38,7 +45,6 @@ from pulsara_agent.llm.retry import (
     compute_retry_delay,
 )
 from pulsara_agent.llm.transport import LLMTransport
-from pulsara_agent.llm.usage import Usage
 
 
 @dataclass(slots=True)
@@ -47,33 +53,37 @@ class OpenAIChatCompletionsTransport(LLMTransport):
 
     api_key: str
     api: str = OPENAI_CHAT_COMPLETIONS_API
+    binding_id: str = "pulsara.openai.chat_completions"
+    contract_version: str = "v1"
     timeout_seconds: float = 60.0
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
     openai_sdk_max_retries: int | None = None
-    retry_sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
+    retry_sleep: Callable[[float], Awaitable[None]] = field(
+        default=asyncio.sleep, repr=False
+    )
     _mock_chunks: list[dict[str, Any]] = field(default_factory=list)
     _client: Any | None = None
 
     async def stream(
         self,
         *,
-        model: ModelProfile,
+        call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-        options: LLMOptions | None = None,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[AgentEvent | TransportUsageReport]:
+        model = call.target.model_profile
         builder = AgentEventBuilder(
-            model=model,
             event_context=event_context,
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
         )
         thinking_delta_fields = model.provider_profile.thinking.delta_fields
-        yield builder.model_start()
-
         if self._mock_chunks:
+            model_identity = ReportedModelIdentityObserver(
+                requested_model_id=model.id,
+                policy=model.provider_profile.model_identity_policy,
+            )
             accumulator = ChatToolCallAccumulator(builder=builder)
             for raw_chunk in self._mock_chunks:
+                model_identity.observe(chat_completion_reported_model(raw_chunk))
                 for event in translate_chat_completion_chunk(
                     raw_chunk,
                     builder=builder,
@@ -85,10 +95,15 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                 yield event
             for event in builder.close_active_blocks():
                 yield event
-            yield builder.model_end(usage=accumulator.usage)
+            report = accumulator.usage_report
+            if report is not None or model_identity.reported_model_id is not None:
+                yield replace(
+                    report or TransportUsageReport(usage_status="missing", usage=None),
+                    reported_model_id=model_identity.reported_model_id,
+                )
             return
 
-        payload = build_chat_completions_payload(model=model, context=context, options=options)
+        payload = build_chat_completions_payload(call=call, context=context)
         should_close_client = self._client is None
         client = self._client or build_async_openai_client(
             api_key=self.api_key,
@@ -100,14 +115,26 @@ class OpenAIChatCompletionsTransport(LLMTransport):
             ),
         )
         retry_traces: list[RetryAttemptTrace] = []
+        completed_model_identity: str | None = None
         try:
             attempt = 1
-            max_attempts = self.retry_config.attempts if self.retry_config.enabled else 1
+            max_attempts = (
+                self.retry_config.attempts if self.retry_config.enabled else 1
+            )
             while True:
+                model_identity = ReportedModelIdentityObserver(
+                    requested_model_id=model.id,
+                    policy=model.provider_profile.model_identity_policy,
+                )
                 accumulator = ChatToolCallAccumulator(builder=builder)
                 try:
-                    stream = await client.chat.completions.create(**payload, stream=True)
+                    stream = await client.chat.completions.create(
+                        **payload, stream=True
+                    )
                     async for raw_chunk in stream:
+                        model_identity.observe(
+                            chat_completion_reported_model(raw_chunk)
+                        )
                         for event in translate_chat_completion_chunk(
                             raw_chunk,
                             builder=builder,
@@ -115,6 +142,7 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                             thinking_delta_fields=thinking_delta_fields,
                         ):
                             yield event
+                    completed_model_identity = model_identity.reported_model_id
                     break
                 except Exception as exc:
                     decision = apply_retry_after_cap(
@@ -169,6 +197,16 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                         yield event
                     for event in builder.close_active_blocks():
                         yield event
+                    failure_report = accumulator.usage_report
+                    if (
+                        failure_report is not None
+                        or model_identity.reported_model_id is not None
+                    ):
+                        yield replace(
+                            failure_report
+                            or TransportUsageReport(usage_status="missing", usage=None),
+                            reported_model_id=model_identity.reported_model_id,
+                        )
                     yield builder.run_error(
                         message=str(exc),
                         code="openai_chat_completions_error",
@@ -197,7 +235,12 @@ class OpenAIChatCompletionsTransport(LLMTransport):
             yield event
         for event in builder.close_active_blocks():
             yield event
-        yield builder.model_end(usage=accumulator.usage)
+        report = accumulator.usage_report
+        if report is not None or completed_model_identity is not None:
+            yield replace(
+                report or TransportUsageReport(usage_status="missing", usage=None),
+                reported_model_id=completed_model_identity,
+            )
 
 
 def _retry_skipped_reason(
@@ -221,15 +264,18 @@ def _retry_skipped_reason(
 
 def build_chat_completions_payload(
     *,
-    model: ModelProfile,
+    call: ResolvedModelCall,
     context: LLMContext,
-    options: LLMOptions | None = None,
 ) -> dict[str, Any]:
+    model = call.target.model_profile
+    options = call.target.effective_options
     provider_profile = model.provider_profile
     messages: list[dict[str, Any]] = []
     if context.system_prompt:
         messages.append({"role": "system", "content": context.system_prompt})
-    messages.extend(_messages_to_chat_messages(context.messages, provider_profile=provider_profile))
+    messages.extend(
+        _messages_to_chat_messages(context.messages, provider_profile=provider_profile)
+    )
 
     payload: dict[str, Any] = {
         "model": model.id,
@@ -237,26 +283,18 @@ def build_chat_completions_payload(
         "stream_options": {"include_usage": True},
     }
     for key, value in provider_profile.request_defaults.items():
-        payload.setdefault(key, value)
+        payload.setdefault(key, mutable_provider_value(value))
     if context.tools and provider_profile.supports_tools:
         payload["tools"] = [_tool_to_chat_tool(tool) for tool in context.tools]
-    if options is not None:
-        omitted = set(provider_profile.omit_params_when_thinking)
-        thinking_enabled = provider_profile.thinking.enabled
-        if options.temperature is not None and not (thinking_enabled and "temperature" in omitted):
-            payload["temperature"] = options.temperature
-        if options.max_output_tokens is not None and not (
-            thinking_enabled and "max_completion_tokens" in omitted
-        ):
-            payload["max_completion_tokens"] = options.max_output_tokens
-        if (
-            options.reasoning_effort is not None
-            and provider_profile.supports_reasoning
-            and not (thinking_enabled and "reasoning_effort" in omitted)
-        ):
-            payload["reasoning_effort"] = options.reasoning_effort
+    payload["max_completion_tokens"] = (
+        call.target.context_budget.effective_output_tokens
+    )
+    if options.reasoning_effort is not None:
+        payload["reasoning_effort"] = options.reasoning_effort
     if provider_profile.request_extra_body:
-        payload["extra_body"] = dict(provider_profile.request_extra_body)
+        payload["extra_body"] = mutable_provider_value(
+            provider_profile.request_extra_body
+        )
     return payload
 
 
@@ -265,7 +303,9 @@ def _messages_to_chat_messages(
     *,
     provider_profile: ProviderProfile | None = None,
 ) -> list[dict[str, Any]]:
-    provider_profile = provider_profile or ProviderProfile(wire_api=OPENAI_CHAT_COMPLETIONS_API)
+    provider_profile = provider_profile or ProviderProfile(
+        wire_api=OPENAI_CHAT_COMPLETIONS_API
+    )
     chat_messages: list[dict[str, Any]] = []
     pending_tool_calls: list[dict[str, Any]] = []
     for message in messages:
@@ -281,7 +321,9 @@ def _messages_to_chat_messages(
                 }
             )
             pending_tool_calls = []
-        chat_messages.append(_message_to_chat_message(message, provider_profile=provider_profile))
+        chat_messages.append(
+            _message_to_chat_message(message, provider_profile=provider_profile)
+        )
     if pending_tool_calls:
         chat_messages.append(
             {
@@ -341,7 +383,7 @@ class _ChatToolCallState:
 @dataclass(slots=True)
 class ChatToolCallAccumulator:
     builder: AgentEventBuilder
-    usage: Usage = field(default_factory=Usage)
+    usage_report: TransportUsageReport | None = None
     _states: dict[str, _ChatToolCallState] = field(default_factory=dict)
 
     def apply_tool_call_delta(self, raw_tool_call: dict[str, Any]) -> list[AgentEvent]:
@@ -362,8 +404,10 @@ class ChatToolCallAccumulator:
                 arguments_delta = arguments
 
         events: list[AgentEvent] = []
-        if not state.started and state.tool_call_id and (
-            state.name or arguments_delta or state.pending_arguments
+        if (
+            not state.started
+            and state.tool_call_id
+            and (state.name or arguments_delta or state.pending_arguments)
         ):
             events.extend(
                 self.builder.tool_call_start(
@@ -394,15 +438,17 @@ class ChatToolCallAccumulator:
         return events
 
     def update_usage(self, raw_usage: Any) -> None:
-        usage = usage_from_mapping(raw_usage)
-        if usage.total_tokens or usage.input_tokens or usage.output_tokens:
-            self.usage = usage
+        report = transport_usage_report_from_mapping(raw_usage)
+        if report.usage_status == "reported":
+            self.usage_report = report
 
     def close_active_tool_calls(self) -> list[AgentEvent]:
         events: list[AgentEvent] = []
         for state in self._states.values():
             if state.started and state.tool_call_id:
-                events.extend(self.builder.tool_call_end(tool_call_id=state.tool_call_id))
+                events.extend(
+                    self.builder.tool_call_end(tool_call_id=state.tool_call_id)
+                )
                 state.started = False
         return events
 
@@ -436,7 +482,9 @@ def _message_to_chat_message(
             if message_field:
                 payload[message_field] = "\n".join(message.thinking)
         if message.tool_calls:
-            payload["tool_calls"] = [_tool_call_to_chat_tool_call(call) for call in message.tool_calls]
+            payload["tool_calls"] = [
+                _tool_call_to_chat_tool_call(call) for call in message.tool_calls
+            ]
         return payload
     return {
         "role": _chat_role(message.role),
@@ -475,7 +523,9 @@ def _tool_call_to_chat_tool_call(tool_call: LLMToolCall) -> dict[str, Any]:
     }
 
 
-def _should_replay_thinking(message: LLMMessage, *, provider_profile: ProviderProfile) -> bool:
+def _should_replay_thinking(
+    message: LLMMessage, *, provider_profile: ProviderProfile
+) -> bool:
     if not message.thinking:
         return False
     policy = provider_profile.thinking.replay_policy

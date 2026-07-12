@@ -81,17 +81,15 @@ def rebuild_prior_messages(
     noted_runs: set[str] = set()
     for event in events:
         if isinstance(event, RunStartEvent):
-            user_input = event.metadata.get("user_input")
-            if isinstance(user_input, str):
-                messages.append(
-                    UserMsg(
-                        name="user",
-                        content=user_input,
-                        id=f"user-message:{event.run_id}",
-                        created_at=event.created_at,
-                        metadata={"run_id": event.run_id},
-                    )
+            messages.append(
+                UserMsg(
+                    name="user",
+                    content=event.current_user_message.text,
+                    id=event.current_user_message.message_id,
+                    created_at=event.current_user_message.observed_at_utc,
+                    metadata={"run_id": event.run_id},
                 )
+            )
         if _should_emit_terminal_note(event, note_target, noted_runs):
             messages.append(_note_message(note_target, recovery=recovery, created_at=event.created_at))
             noted_runs.add(event.run_id)
@@ -194,17 +192,15 @@ def _rebuild_messages_from_events(
     noted_runs: set[str] = set()
     for event in events:
         if isinstance(event, RunStartEvent):
-            user_input = event.metadata.get("user_input")
-            if isinstance(user_input, str):
-                messages.append(
-                    UserMsg(
-                        name="user",
-                        content=user_input,
-                        id=f"user-message:{event.run_id}",
-                        created_at=event.created_at,
-                        metadata={"run_id": event.run_id},
-                    )
+            messages.append(
+                UserMsg(
+                    name="user",
+                    content=event.current_user_message.text,
+                    id=event.current_user_message.message_id,
+                    created_at=event.current_user_message.observed_at_utc,
+                    metadata={"run_id": event.run_id},
                 )
+            )
         if _should_emit_terminal_note(event, note_target, noted_runs):
             messages.append(_note_message(note_target, recovery=recovery, created_at=event.created_at))
             noted_runs.add(event.run_id)

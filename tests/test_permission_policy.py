@@ -2,20 +2,22 @@ import asyncio
 
 import pytest
 
+from pulsara_agent.primitives.permission import (
+    DEFAULT_PERMISSION_MODE,
+    PermissionMode,
+    parse_permission_mode,
+)
 from pulsara_agent.runtime.permission import (
     AllowAllPermissionGate,
     ApprovalPolicy,
-    DEFAULT_PERMISSION_MODE,
     EffectivePermissionPolicy,
     PermissionDecisionKind,
-    PermissionMode,
     PermissionProfile,
     PermissionState,
     PolicyPermissionGate,
     TerminalAccess,
     default_permission_policy,
     mode_for_policy,
-    parse_permission_mode,
     preset_to_policy,
     resolve_permission_policy,
 )

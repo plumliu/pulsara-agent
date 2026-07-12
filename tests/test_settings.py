@@ -5,6 +5,21 @@ import pytest
 from pulsara_agent.settings import PulsaraSettings, StorageConfig, load_env_file
 
 
+_MODEL_LIMIT_ENV_LINES = [
+    "PULSARA_PRO_TOTAL_CONTEXT_TOKENS=4096",
+    "PULSARA_PRO_MAX_INPUT_TOKENS=3584",
+    "PULSARA_PRO_MAX_OUTPUT_TOKENS=1024",
+    "PULSARA_PRO_DEFAULT_OUTPUT_TOKENS=512",
+    "PULSARA_PRO_INPUT_SAFETY_MARGIN_TOKENS=128",
+    "PULSARA_FLASH_TOTAL_CONTEXT_TOKENS=4096",
+    "PULSARA_FLASH_MAX_INPUT_TOKENS=3584",
+    "PULSARA_FLASH_MAX_OUTPUT_TOKENS=1024",
+    "PULSARA_FLASH_DEFAULT_OUTPUT_TOKENS=512",
+    "PULSARA_FLASH_INPUT_SAFETY_MARGIN_TOKENS=128",
+]
+_MODEL_LIMIT_ENV_KEYS = tuple(line.split("=", 1)[0] for line in _MODEL_LIMIT_ENV_LINES)
+
+
 def test_storage_config_rejects_empty_oxigraph_url() -> None:
     with pytest.raises(ValueError, match="oxigraph_url is required"):
         StorageConfig(oxigraph_url="   ")
@@ -25,6 +40,7 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
                 "PULSARA_BASE_URL=https://example.test/v1 # comment",
                 "export PULSARA_PRO_MODEL=gpt-5",
                 'PULSARA_FLASH_MODEL="gpt-5-mini"',
+                *_MODEL_LIMIT_ENV_LINES,
                 "PULSARA_OXIGRAPH_URL=http://localhost:7878",
                 "PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara",
             ]
@@ -37,6 +53,7 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
         "PULSARA_BASE_URL",
         "PULSARA_PRO_MODEL",
         "PULSARA_FLASH_MODEL",
+        *_MODEL_LIMIT_ENV_KEYS,
         "PULSARA_OXIGRAPH_URL",
         "PULSARA_POSTGRES_DSN",
     ):
@@ -50,12 +67,53 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
     assert settings.llm.pro_model == "gpt-5"
     assert settings.llm.flash_model == "gpt-5-mini"
     assert settings.storage.oxigraph_url == "http://localhost:7878"
-    assert settings.storage.postgres_dsn == "postgresql://pulsara:pulsara@localhost:5432/pulsara"
+    assert (
+        settings.storage.postgres_dsn
+        == "postgresql://pulsara:pulsara@localhost:5432/pulsara"
+    )
     assert settings.redacted_dict()["storage"] == {
         "oxigraph_url": "http://localhost:7878",
         "postgres_dsn_set": True,
     }
     assert settings.redacted_dict()["llm"]["api"] == "openai_chat_completions"
+    assert settings.redacted_dict()["llm"]["endpoint_origin"] == "https://example.test"
+    assert "base_url" not in settings.redacted_dict()["llm"]
+
+
+def test_settings_redacted_llm_endpoint_never_exposes_userinfo_path_or_query(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "PULSARA_API_KEY=dummy-key",
+                "PULSARA_BASE_URL=https://user:secret@example.test/private?token=secret",
+                "PULSARA_PRO_MODEL=gpt-5",
+                "PULSARA_FLASH_MODEL=gpt-5-mini",
+                *_MODEL_LIMIT_ENV_LINES,
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for key in (
+        "PULSARA_API_KEY",
+        "PULSARA_BASE_URL",
+        "PULSARA_PRO_MODEL",
+        "PULSARA_FLASH_MODEL",
+        *_MODEL_LIMIT_ENV_KEYS,
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = PulsaraSettings.from_env_file(env_file)
+    rendered = str(settings.redacted_dict()["llm"])
+
+    assert settings.redacted_dict()["llm"]["endpoint_origin"] == "https://example.test"
+    assert "user" not in rendered
+    assert "secret" not in rendered
+    assert "private" not in rendered
+    assert "token=secret" not in rendered
 
 
 def test_settings_default_llm_api_is_openai_responses(tmp_path, monkeypatch):
@@ -66,6 +124,7 @@ def test_settings_default_llm_api_is_openai_responses(tmp_path, monkeypatch):
                 "PULSARA_API_KEY=dummy-key",
                 "PULSARA_PRO_MODEL=gpt-5",
                 "PULSARA_FLASH_MODEL=gpt-5-mini",
+                *_MODEL_LIMIT_ENV_LINES,
             ]
         ),
         encoding="utf-8",
@@ -74,6 +133,8 @@ def test_settings_default_llm_api_is_openai_responses(tmp_path, monkeypatch):
     monkeypatch.delenv("PULSARA_API_KEY", raising=False)
     monkeypatch.delenv("PULSARA_PRO_MODEL", raising=False)
     monkeypatch.delenv("PULSARA_FLASH_MODEL", raising=False)
+    for key in _MODEL_LIMIT_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
 
     settings = PulsaraSettings.from_env_file(env_file)
 
@@ -90,6 +151,7 @@ def test_settings_loads_custom_provider_profile(tmp_path, monkeypatch):
                 "PULSARA_PROVIDER=custom-deepseek",
                 "PULSARA_PRO_MODEL=deepseek-reasoner",
                 "PULSARA_FLASH_MODEL=deepseek-chat",
+                *_MODEL_LIMIT_ENV_LINES,
                 "PULSARA_THINKING_TYPE=enabled",
                 "PULSARA_THINKING_REPLAY_POLICY=when_tool_calls",
                 "PULSARA_OMIT_PARAMS_WHEN_THINKING=temperature,top_p",
@@ -103,6 +165,7 @@ def test_settings_loads_custom_provider_profile(tmp_path, monkeypatch):
         "PULSARA_PROVIDER",
         "PULSARA_PRO_MODEL",
         "PULSARA_FLASH_MODEL",
+        *_MODEL_LIMIT_ENV_KEYS,
         "PULSARA_THINKING_TYPE",
         "PULSARA_THINKING_REPLAY_POLICY",
         "PULSARA_OMIT_PARAMS_WHEN_THINKING",
@@ -129,6 +192,7 @@ def test_settings_chat_completions_defaults_to_thinking_profile(tmp_path, monkey
                 "PULSARA_API=openai_chat_completions",
                 "PULSARA_PRO_MODEL=custom-pro",
                 "PULSARA_FLASH_MODEL=custom-flash",
+                *_MODEL_LIMIT_ENV_LINES,
             ]
         ),
         encoding="utf-8",
@@ -138,6 +202,7 @@ def test_settings_chat_completions_defaults_to_thinking_profile(tmp_path, monkey
         "PULSARA_API",
         "PULSARA_PRO_MODEL",
         "PULSARA_FLASH_MODEL",
+        *_MODEL_LIMIT_ENV_KEYS,
         "PULSARA_THINKING_TYPE",
         "PULSARA_THINKING_REPLAY_POLICY",
         "PULSARA_OMIT_PARAMS_WHEN_THINKING",
@@ -160,7 +225,9 @@ def test_settings_chat_completions_defaults_to_thinking_profile(tmp_path, monkey
     )
 
 
-def test_env_file_does_not_override_existing_environment_by_default(tmp_path, monkeypatch):
+def test_env_file_does_not_override_existing_environment_by_default(
+    tmp_path, monkeypatch
+):
     env_file = tmp_path / ".env"
     env_file.write_text("PULSARA_PRO_MODEL=from-file\n", encoding="utf-8")
     monkeypatch.setenv("PULSARA_PRO_MODEL", "from-env")

@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import threading
 import termios
 from pathlib import Path
 
@@ -25,6 +26,33 @@ def test_redirected_repl_uses_basic_prompt(monkeypatch, tmp_path: Path) -> None:
 
     assert isinstance(prompt, repl.BasicReplPrompt)
     assert asyncio.run(prompt.read_line("pulsara> ")) == "pulsara> hello"
+
+
+def test_redirected_repl_input_does_not_block_background_event_loop(
+    monkeypatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_input(_message: str) -> str:
+        entered.set()
+        release.wait(timeout=1)
+        return "done"
+
+    monkeypatch.setattr("builtins.input", blocking_input)
+
+    async def run() -> None:
+        prompt = repl.BasicReplPrompt()
+        reading = asyncio.create_task(prompt.read_line("pulsara> "))
+        await asyncio.wait_for(asyncio.to_thread(entered.wait), timeout=0.2)
+        background_progressed = asyncio.Event()
+        asyncio.get_running_loop().call_soon(background_progressed.set)
+        await asyncio.wait_for(background_progressed.wait(), timeout=0.2)
+        assert not reading.done()
+        release.set()
+        assert await reading == "done"
+
+    asyncio.run(run())
 
 
 def test_interactive_repl_enables_async_history_and_suspend(tmp_path: Path) -> None:

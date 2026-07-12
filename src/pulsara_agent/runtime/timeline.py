@@ -21,6 +21,8 @@ from pulsara_agent.event import (
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
+    RunInteractionResumeBoundaryEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
     ToolCallDeltaEvent,
@@ -34,6 +36,8 @@ from pulsara_agent.event import (
 )
 
 TimelineItemKind = Literal[
+    "run_boundary",
+    "continuation_boundary",
     "reply",
     "model_call",
     "assistant_text",
@@ -118,7 +122,9 @@ class RunTimeline:
             status=payload["status"],
             start_sequence=payload.get("start_sequence"),
             end_sequence=payload.get("end_sequence"),
-            items=[RunTimelineItem.from_dict(item) for item in payload.get("items", [])],
+            items=[
+                RunTimelineItem.from_dict(item) for item in payload.get("items", [])
+            ],
         )
 
 
@@ -152,6 +158,63 @@ def build_run_timeline(
     terminal_status: str | None = None
 
     for event in ordered:
+        if isinstance(event, RunStartEvent):
+            if event.new_run_boundary is not None:
+                boundary = event.new_run_boundary
+                metadata = {
+                    "run_entry_kind": "host",
+                    "boundary_id": boundary.identity.boundary_id,
+                    "boundary_kind": boundary.identity.kind.value,
+                    "permission_snapshot_id": boundary.permission_snapshot_id,
+                    "model_target_fingerprint": boundary.model_target_fingerprint,
+                    "mcp_installation_id": boundary.mcp_installation_id,
+                    "capability_basis_fingerprint": (
+                        boundary.capability_basis.basis_fingerprint
+                    ),
+                }
+                title = "Host run boundary"
+            else:
+                entry = event.subagent_run_entry
+                metadata = {
+                    "run_entry_kind": "subagent_child",
+                    "subagent_run_id": (
+                        entry.subagent_run_id if entry is not None else None
+                    ),
+                    "subagent_task_id": (
+                        entry.subagent_task_id if entry is not None else None
+                    ),
+                }
+                title = "Subagent run entry"
+            item = _item(
+                "run_boundary",
+                title,
+                event,
+                status="committed",
+                metadata=metadata,
+            )
+            _finish(item, event, status="committed")
+            items.append(item)
+            continue
+        if isinstance(event, RunInteractionResumeBoundaryEvent):
+            boundary = event.boundary
+            item = _item(
+                "continuation_boundary",
+                f"Interaction resume: {boundary.interaction_kind}",
+                event,
+                status="committed",
+                metadata={
+                    "boundary_id": boundary.identity.boundary_id,
+                    "interaction_id": boundary.interaction_id,
+                    "interaction_kind": boundary.interaction_kind,
+                    "exposure_transition": boundary.exposure_transition,
+                    "source_exposure_id": boundary.source_exposure_id,
+                    "effective_exposure_id": boundary.effective_exposure_id,
+                    "mcp_installation_id": boundary.mcp_installation_id,
+                },
+            )
+            _finish(item, event, status="committed")
+            items.append(item)
+            continue
         if isinstance(event, ReplyStartEvent):
             item = _item(
                 "reply",
@@ -169,13 +232,17 @@ def build_run_timeline(
         if isinstance(event, ModelCallStartEvent):
             item = _item(
                 "model_call",
-                f"Model call: {event.model_name}",
+                f"Model call: {event.resolved_call.target.model_id}",
                 event,
                 status="running",
                 metadata={
-                    "model_name": event.model_name,
-                    "model_role": event.model_role,
-                    "provider": event.provider,
+                    "resolved_model_call_id": event.resolved_call.resolved_model_call_id,
+                    "target_fingerprint": event.resolved_call.target.target_fingerprint,
+                    "model_id": event.resolved_call.target.model_id,
+                    "model_role": event.resolved_call.target.model_role,
+                    "provider": event.resolved_call.target.provider,
+                    "context_id": event.context_id,
+                    "model_call_index": event.model_call_index,
                 },
             )
             model_calls[event.reply_id] = item
@@ -187,9 +254,14 @@ def build_run_timeline(
             if item is not None:
                 item.metadata.update(
                     {
-                        "input_tokens": event.input_tokens,
-                        "output_tokens": event.output_tokens,
-                        "total_tokens": event.total_tokens,
+                        "resolved_model_call_id": event.resolved_model_call_id,
+                        "target_fingerprint": event.target_fingerprint,
+                        "outcome": event.outcome,
+                        "usage_status": event.usage_status,
+                        "usage": event.usage.model_dump(mode="json")
+                        if event.usage is not None
+                        else None,
+                        "estimated_input_tokens": event.estimated_input_tokens,
                     }
                 )
             continue
@@ -219,7 +291,11 @@ def build_run_timeline(
                 f"Tool call: {event.tool_call_name}",
                 event,
                 status="running",
-                metadata={"tool_call_id": event.tool_call_id, "tool_name": event.tool_call_name, "arguments": ""},
+                metadata={
+                    "tool_call_id": event.tool_call_id,
+                    "tool_name": event.tool_call_name,
+                    "arguments": "",
+                },
             )
             tool_calls[event.tool_call_id] = item
             items.append(item)
@@ -227,10 +303,17 @@ def build_run_timeline(
         if isinstance(event, ToolCallDeltaEvent):
             item = tool_calls.get(event.tool_call_id)
             if item is None:
-                item = _item("tool_call", f"Tool call: {event.tool_call_id}", event, status="running")
+                item = _item(
+                    "tool_call",
+                    f"Tool call: {event.tool_call_id}",
+                    event,
+                    status="running",
+                )
                 tool_calls[event.tool_call_id] = item
                 items.append(item)
-            item.metadata["arguments"] = str(item.metadata.get("arguments", "")) + event.delta
+            item.metadata["arguments"] = (
+                str(item.metadata.get("arguments", "")) + event.delta
+            )
             _finish(item, event)
             continue
         if isinstance(event, ToolCallEndEvent):
@@ -242,7 +325,10 @@ def build_run_timeline(
                 f"Tool result: {event.tool_call_name}",
                 event,
                 status="running",
-                metadata={"tool_call_id": event.tool_call_id, "tool_name": event.tool_call_name},
+                metadata={
+                    "tool_call_id": event.tool_call_id,
+                    "tool_name": event.tool_call_name,
+                },
             )
             tool_results[event.tool_call_id] = item
             items.append(item)
@@ -250,7 +336,12 @@ def build_run_timeline(
         if isinstance(event, ToolResultTextDeltaEvent):
             item = tool_results.get(event.tool_call_id)
             if item is None:
-                item = _item("tool_result", f"Tool result: {event.tool_call_id}", event, status="running")
+                item = _item(
+                    "tool_result",
+                    f"Tool result: {event.tool_call_id}",
+                    event,
+                    status="running",
+                )
                 tool_results[event.tool_call_id] = item
                 items.append(item)
             _append_summary(item, event.delta)
@@ -259,7 +350,12 @@ def build_run_timeline(
         if isinstance(event, ToolResultDataDeltaEvent):
             item = tool_results.get(event.tool_call_id)
             if item is None:
-                item = _item("tool_result", f"Tool result: {event.tool_call_id}", event, status="running")
+                item = _item(
+                    "tool_result",
+                    f"Tool result: {event.tool_call_id}",
+                    event,
+                    status="running",
+                )
                 tool_results[event.tool_call_id] = item
                 items.append(item)
             item.metadata.setdefault("data_blocks", 0)
@@ -293,7 +389,9 @@ def build_run_timeline(
             continue
         if isinstance(event, RunErrorEvent):
             failed = True
-            items.append(_item("error", event.code, event, status="error", summary=event.message))
+            items.append(
+                _item("error", event.code, event, status="error", summary=event.message)
+            )
             continue
         if isinstance(event, PlanModeEnteredEvent):
             items.append(
@@ -379,12 +477,28 @@ def build_run_timeline(
             continue
         if isinstance(event, ExceedMaxItersEvent):
             failed = True
-            items.append(_item("error", event.name, event, status="error", summary=f"Exceeded max turns: {event.max_iters}"))
+            items.append(
+                _item(
+                    "error",
+                    event.name,
+                    event,
+                    status="error",
+                    summary=f"Exceeded max turns: {event.max_iters}",
+                )
+            )
             continue
 
-    start_sequence = min((event.sequence for event in ordered if event.sequence is not None), default=None)
-    end_sequence = max((event.sequence for event in ordered if event.sequence is not None), default=None)
-    status = terminal_status or ("failed" if failed else "waiting_user" if waiting_user else "completed")
+    start_sequence = min(
+        (event.sequence for event in ordered if event.sequence is not None),
+        default=None,
+    )
+    end_sequence = max(
+        (event.sequence for event in ordered if event.sequence is not None),
+        default=None,
+    )
+    status = terminal_status or (
+        "failed" if failed else "waiting_user" if waiting_user else "completed"
+    )
     return RunTimeline(
         runtime_session_id=runtime_session_id,
         run_id=run_id,
@@ -418,7 +532,9 @@ def _item(
     )
 
 
-def _finish(item: RunTimelineItem | None, event: AgentEvent, *, status: str | None = None) -> None:
+def _finish(
+    item: RunTimelineItem | None, event: AgentEvent, *, status: str | None = None
+) -> None:
     if item is None:
         return
     item.end_sequence = event.sequence

@@ -14,10 +14,12 @@ from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.memory import (
+    ArtifactContentConflict,
     PostgresArtifactStore,
     RunTimelinePersistenceHook,
     load_run_timeline,
 )
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.settings import StorageConfig
@@ -241,6 +243,130 @@ def test_postgres_artifact_store_concurrent_different_content_rejects_one_writer
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(put, "first"), executor.submit(put, "second")]
             assert sorted(future.result() for future in futures) == ["error", "ok"]
+        assert _artifact_count(dsn, blob_id) == 1
+    finally:
+        _delete_artifact(dsn, blob_id)
+
+
+def test_in_memory_deterministic_artifact_confirms_semantic_identity() -> None:
+    store = InMemoryArchiveStore()
+    first = store.put_text_if_absent_or_confirm_identical(
+        "artifact:deterministic",
+        "payload",
+        session_id="runtime:1",
+        run_id="run:1",
+        media_type="application/json",
+        semantic_metadata={"renderer": "v1", "nested": {"b": 2, "a": 1}},
+    )
+    second = store.put_text_if_absent_or_confirm_identical(
+        "artifact:deterministic",
+        "payload",
+        session_id="runtime:1",
+        run_id="run:1",
+        media_type="application/json",
+        semantic_metadata={"nested": {"a": 1, "b": 2}, "renderer": "v1"},
+    )
+    assert first.status == "inserted"
+    assert second.status == "confirmed_identical"
+    assert first.result == second.result
+
+
+def test_in_memory_deterministic_artifact_rejects_metadata_only_conflict() -> None:
+    store = InMemoryArchiveStore()
+    store.put_text_if_absent_or_confirm_identical(
+        "artifact:metadata-conflict",
+        "same bytes",
+        session_id=None,
+        run_id=None,
+        media_type="text/plain",
+        semantic_metadata={"renderer": "v1"},
+    )
+    with pytest.raises(ArtifactContentConflict, match="semantic_metadata"):
+        store.put_text_if_absent_or_confirm_identical(
+            "artifact:metadata-conflict",
+            "same bytes",
+            session_id=None,
+            run_id=None,
+            media_type="text/plain",
+            semantic_metadata={"renderer": "v2"},
+        )
+
+
+def test_in_memory_deterministic_artifact_is_thread_safe() -> None:
+    store = InMemoryArchiveStore()
+    barrier = Barrier(2)
+
+    def put() -> str:
+        barrier.wait(timeout=2)
+        return store.put_text_if_absent_or_confirm_identical(
+            "artifact:concurrent",
+            "same",
+            session_id=None,
+            run_id=None,
+            media_type="text/plain",
+            semantic_metadata={"policy": "v1"},
+        ).status
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = sorted(
+            future.result() for future in (executor.submit(put), executor.submit(put))
+        )
+    assert statuses == ["confirmed_identical", "inserted"]
+
+
+def test_postgres_deterministic_artifact_rejects_metadata_only_conflict() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    blob_id = f"artifact:test:{uuid4().hex}"
+    store = PostgresArtifactStore(dsn=dsn)
+    try:
+        store.put_text_if_absent_or_confirm_identical(
+            blob_id,
+            "same",
+            session_id=None,
+            run_id=None,
+            media_type="text/plain",
+            semantic_metadata={"renderer": "v1"},
+        )
+        with pytest.raises(ArtifactContentConflict, match="semantic_metadata"):
+            store.put_text_if_absent_or_confirm_identical(
+                blob_id,
+                "same",
+                session_id=None,
+                run_id=None,
+                media_type="text/plain",
+                semantic_metadata={"renderer": "v2"},
+            )
+    finally:
+        _delete_artifact(dsn, blob_id)
+
+
+def test_postgres_deterministic_artifact_concurrent_writers_confirm_identity() -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    blob_id = f"artifact:test:{uuid4().hex}"
+    barrier = Barrier(2)
+
+    def put() -> str:
+        barrier.wait(timeout=2)
+        return PostgresArtifactStore(
+            dsn=dsn
+        ).put_text_if_absent_or_confirm_identical(
+            blob_id,
+            "same",
+            session_id=None,
+            run_id=None,
+            media_type="text/plain",
+            semantic_metadata={"renderer": "v1", "cap": 17},
+        ).status
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses = sorted(
+                future.result()
+                for future in (executor.submit(put), executor.submit(put))
+            )
+        assert statuses == ["confirmed_identical", "inserted"]
         assert _artifact_count(dsn, blob_id) == 1
     finally:
         _delete_artifact(dsn, blob_id)

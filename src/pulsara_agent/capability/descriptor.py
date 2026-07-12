@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from pulsara_agent.primitives.model_call import sha256_fingerprint
+
 
 class CapabilityProviderKind(StrEnum):
     BUILTIN = "builtin"
@@ -87,3 +89,46 @@ class CapabilityDescriptor:
             "availability": self.availability.value,
             "health_message": self.health_message,
         }
+
+    def to_event_payload(self) -> dict[str, object]:
+        provenance = self.provenance
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+            "namespace": self.namespace,
+            "provider_kind": self.provider_kind.value,
+            "provider_id": self.provider_id,
+            "is_model_callable": self.is_model_callable,
+            "is_read_only": self.is_read_only,
+            "is_concurrency_safe": self.is_concurrency_safe,
+            "is_destructive": self.is_destructive,
+            "is_open_world": self.is_open_world,
+            "requires_user_interaction": self.requires_user_interaction,
+            "permission_category": self.permission_category,
+            "approval_policy_hint": self.approval_policy_hint,
+            "advertise_policy": self.advertise_policy.value,
+            "artifact_mode": self.artifact_mode.value,
+            "max_inline_chars": self.max_inline_chars,
+            "timeout_ms": self.timeout_ms,
+            "availability": self.availability.value,
+            "health_message": self.health_message,
+            "provenance": (
+                {
+                    "provider_kind": provenance.provider_kind.value,
+                    "provider_id": provenance.provider_id,
+                    "source": provenance.source,
+                    "version": provenance.version,
+                    "owner": provenance.owner,
+                }
+                if provenance is not None
+                else None
+            ),
+            "metadata": self.metadata,
+        }
+
+    def fingerprint(self) -> str:
+        return sha256_fingerprint(
+            "capability-descriptor:v1", self.to_event_payload()
+        )

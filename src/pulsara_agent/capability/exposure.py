@@ -11,7 +11,7 @@ from pulsara_agent.capability.descriptor import (
     CapabilityAvailability,
     CapabilityDescriptor,
 )
-from pulsara_agent.capability.provider import CapabilityProviderOutput
+from pulsara_agent.capability.provider import CapabilityProjectionOutput
 from pulsara_agent.capability.registry import CapabilityRegistrySnapshot
 from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityDiagnostic, ResolvedSkillCatalogEntry
 from pulsara_agent.llm.input import ToolSpec
@@ -57,7 +57,7 @@ class CapabilityExposurePlan:
 def build_exposure_plan(
     snapshot: CapabilityRegistrySnapshot,
     *,
-    provider_output: CapabilityProviderOutput,
+    provider_output: CapabilityProjectionOutput,
     bound_tool_names: frozenset[str] | None = None,
 ) -> CapabilityExposurePlan:
     descriptors = tuple(snapshot.descriptors)

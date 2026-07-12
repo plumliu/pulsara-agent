@@ -32,11 +32,18 @@ from pulsara_agent.capability.descriptor import (
     CapabilityProvenance,
 )
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
-from pulsara_agent.capability.provider import CapabilityProvider, CapabilityProviderOutput
+from pulsara_agent.capability.provider import (
+    CapabilityDescriptorSnapshotOutput,
+    CapabilityExecutionSurfaceProvider,
+    CapabilityProviderComponent,
+    CapabilityProjectionOutput,
+    CapabilityProjectionProvider,
+)
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityDiagnostic,
-    CapabilityResolveContext,
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
     LocalSkillManifest,
     ResolvedSkillCatalogEntry,
     RenderedCapabilityPrompt,
@@ -61,9 +68,13 @@ __all__ = [
     "CapabilityExposurePlan",
     "CapabilityProviderKind",
     "CapabilityProvenance",
-    "CapabilityProvider",
-    "CapabilityProviderOutput",
-    "CapabilityResolveContext",
+    "CapabilityDescriptorSnapshotOutput",
+    "CapabilityExecutionSurfaceProvider",
+    "CapabilityExecutionSurfaceSnapshotContext",
+    "CapabilityProjectionOutput",
+    "CapabilityProjectionProvider",
+    "CapabilityProviderComponent",
+    "CapabilityProjectionResolveContext",
     "DefaultCapabilityCallClassifier",
     "LocalSkillManifest",
     "LocalSkillCapabilityProvider",

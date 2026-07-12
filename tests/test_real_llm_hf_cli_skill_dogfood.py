@@ -10,11 +10,16 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from pulsara_agent.event import ToolCallDeltaEvent, ToolCallStartEvent, ToolResultTextDeltaEvent
+from pulsara_agent.event import (
+    ToolCallDeltaEvent,
+    ToolCallStartEvent,
+    ToolResultTextDeltaEvent,
+)
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -29,9 +34,13 @@ DELETE_SENTINEL = "PULSARA_HF_CLI_DOGFOOD_DELETE_OK"
 
 def test_real_llm_hf_cli_skill_downloads_and_deletes_model_repo(tmp_path: Path) -> None:
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        pytest.skip("Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider.")
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
     if os.getenv("PULSARA_RUN_HF_CLI_DOGFOOD") != "1":
-        pytest.skip("Set PULSARA_RUN_HF_CLI_DOGFOOD=1 to run the Hugging Face CLI skill dogfood.")
+        pytest.skip(
+            "Set PULSARA_RUN_HF_CLI_DOGFOOD=1 to run the Hugging Face CLI skill dogfood."
+        )
     if shutil.which("hf") is None:
         pytest.skip("The hf CLI is not available on Pulsara process PATH.")
 
@@ -39,14 +48,34 @@ def test_real_llm_hf_cli_skill_downloads_and_deletes_model_repo(tmp_path: Path) 
     _connect_or_skip(settings.storage.postgres_dsn)
 
     result = asyncio.run(_run_hf_cli_skill_dogfood(settings, tmp_path))
-    print("\nREAL_LLM_HF_CLI_SKILL_DOGFOOD=" + json.dumps(_report(result), ensure_ascii=False, sort_keys=True))
+    print(
+        "\nREAL_LLM_HF_CLI_SKILL_DOGFOOD="
+        + json.dumps(_report(result), ensure_ascii=False, sort_keys=True)
+    )
 
     assert result["status"] == "finished", result
     assert result["download_dir_exists_after"] is False, result
-    assert "terminal" in result["tool_names"], result
-    assert result["terminal_process_used"] is False, result
-    assert any("hf download" in command and REPO_ID in command for command in result["terminal_commands"]), result
-    assert any("rm -rf" in command and DOWNLOAD_DIR in command for command in result["terminal_commands"]), result
+    assert result["tool_names"].count("terminal") >= 1, result
+    # Terminal output may be archived before the follow-up model call. Reading
+    # that Pulsara-owned artifact is part of the normal terminal observation
+    # path, not an unrelated way to perform the Hugging Face operation.
+    assert set(result["tool_names"]).issubset(
+        {"terminal", "terminal_process", "artifact_read"}
+    ), result
+    assert (
+        sum(command.count("hf download") for command in result["terminal_commands"])
+        == 1
+    ), result
+    assert (
+        sum(command.count("rm -rf") for command in result["terminal_commands"]) == 1
+    ), result
+    assert any(
+        "hf download" in command
+        and REPO_ID in command
+        and "rm -rf" in command
+        and DOWNLOAD_DIR in command
+        for command in result["terminal_commands"]
+    ), result
     assert DOWNLOAD_SENTINEL in result["terminal_output"], result
     assert DELETE_SENTINEL in result["terminal_output"], result
     assert DOWNLOAD_SENTINEL in result["final_text"], result
@@ -60,13 +89,16 @@ def _report(result: dict[str, object]) -> dict[str, object]:
         "tool_names": result["tool_names"],
         "terminal_commands": result["terminal_commands"],
         "download_dir_exists_after": result["download_dir_exists_after"],
+        "terminal_process_used": result["terminal_process_used"],
         "final_text": result["final_text"],
         "download_sentinel_seen": DOWNLOAD_SENTINEL in str(result["terminal_output"]),
         "delete_sentinel_seen": DELETE_SENTINEL in str(result["terminal_output"]),
     }
 
 
-async def _run_hf_cli_skill_dogfood(settings: PulsaraSettings, tmp_path: Path) -> dict[str, object]:
+async def _run_hf_cli_skill_dogfood(
+    settings: PulsaraSettings, tmp_path: Path
+) -> dict[str, object]:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     _write_hf_cli_skill(workspace_root)
@@ -84,7 +116,7 @@ async def _run_hf_cli_skill_dogfood(settings: PulsaraSettings, tmp_path: Path) -
             host_session_id=f"host:hf-cli-dogfood:{uuid4().hex[:12]}",
             conversation_id=f"conversation:hf-cli-dogfood:{uuid4().hex[:12]}",
             model_role=ModelRole.FLASH,
-            options=LLMOptions(temperature=0, max_output_tokens=1024),
+            options=LLMOptions(),
             memory_reflection=False,
             system_prompt=_system_prompt(),
             permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
@@ -97,20 +129,29 @@ async def _run_hf_cli_skill_dogfood(settings: PulsaraSettings, tmp_path: Path) -
             ),
             active_skill_names=frozenset({"hf-cli"}),
         )
-        events = list(session.wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id))
+        events = list(
+            session.wiring.runtime_wiring.event_log.iter(run_id=result.state.run_id)
+        )
         terminal_commands = _terminal_commands(events)
         terminal_output = "".join(
-            event.delta for event in events if isinstance(event, ToolResultTextDeltaEvent)
+            event.delta
+            for event in events
+            if isinstance(event, ToolResultTextDeltaEvent)
         )
         return {
             "status": result.status.value,
             "stop_reason": result.stop_reason,
             "final_text": result.final_text,
-            "tool_names": [event.tool_call_name for event in events if isinstance(event, ToolCallStartEvent)],
+            "tool_names": [
+                event.tool_call_name
+                for event in events
+                if isinstance(event, ToolCallStartEvent)
+            ],
             "terminal_commands": terminal_commands,
             "terminal_output": terminal_output,
             "terminal_process_used": any(
-                isinstance(event, ToolCallStartEvent) and event.tool_call_name == "terminal_process"
+                isinstance(event, ToolCallStartEvent)
+                and event.tool_call_name == "terminal_process"
                 for event in events
             ),
             "download_dir_exists_after": (workspace_root / DOWNLOAD_DIR).exists(),
@@ -118,8 +159,8 @@ async def _run_hf_cli_skill_dogfood(settings: PulsaraSettings, tmp_path: Path) -
     finally:
         if session is not None:
             await core.close_session(session.host_session_id, close_conversation=True)
-        else:
-            await core.shutdown()
+        await core.shutdown()
+        await asyncio.sleep(0)
 
 
 def _write_hf_cli_skill(workspace_root: Path) -> None:
@@ -148,6 +189,11 @@ hf download REPO_ID --local-dir LOCAL_DIR
 
 For this dogfood, the exact repository is `{REPO_ID}` and the local directory is `{DOWNLOAD_DIR}`.
 The repository is small enough for a full download.
+
+Use one compound `terminal` command for the download/verify/delete mutation. If Pulsara returns a
+managed process id because the command is still running, continue observing that same process with
+`terminal_process` (`poll`, `log`, or `wait`) until it finishes. A bounded read-only follow-up
+verification is acceptable, but never repeat `hf download` or `rm -rf`.
 
 If network access to Hugging Face is flaky in the user's local shell, prefix the command with:
 
@@ -186,12 +232,14 @@ You are Pulsara running a real Hugging Face CLI active-skill dogfood.
 
 Rules:
 - Use the active hf-cli skill as your CLI usage guide.
-- Use terminal exactly once if possible.
+- Use one compound terminal command for all download/delete mutations.
 - Work only inside the current workspace.
 - Download {REPO_ID} into relative directory {DOWNLOAD_DIR}/.
 - Verify the download happened before deleting it.
 - Delete {DOWNLOAD_DIR}/ before your final answer.
-- Do not use terminal_process for this dogfood.
+- If the compound command yields a managed process id, use terminal_process to observe/wait for
+  that same process until completion. A bounded read-only follow-up verification is acceptable;
+  never repeat the download or deletion mutation.
 - The terminal command output itself must contain these exact evidence markers after successful verification:
   {DOWNLOAD_SENTINEL}
   {DELETE_SENTINEL}

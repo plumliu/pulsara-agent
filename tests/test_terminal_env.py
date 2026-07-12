@@ -77,7 +77,9 @@ def test_sanitize_subprocess_env_strips_loader_and_hook_vars() -> None:
     assert env == {"PATH": "/usr/bin"}
 
 
-def test_sanitize_subprocess_env_value_scan_is_shape_specific_not_entropy_based() -> None:
+def test_sanitize_subprocess_env_value_scan_is_shape_specific_not_entropy_based() -> (
+    None
+):
     env, diagnostics = sanitize_subprocess_env(
         {
             "LANG": "Bearer definitely-secret",
@@ -165,7 +167,12 @@ def test_capture_shell_env_snapshot_filters_profile_noise_and_secrets(tmp_path) 
     snapshot = capture_shell_env_snapshot(
         shell=TerminalShellConfig(path=fake_shell),
         parent_env={"PATH": "/usr/bin", "HOME": str(tmp_path)},
-        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_timeout_seconds=2),
+        # Full-suite CI can briefly starve the subprocess/selector under heavy
+        # PostgreSQL and async test load; the fake shell itself still exits
+        # immediately, so use a generous watchdog rather than a flaky deadline.
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=True, shell_snapshot_timeout_seconds=10
+        ),
         now=123.0,
     )
 
@@ -176,21 +183,23 @@ def test_capture_shell_env_snapshot_filters_profile_noise_and_secrets(tmp_path) 
     assert "profile-noise" not in snapshot.env
 
 
-def test_capture_shell_env_snapshot_uses_login_interactive_probe_for_zshrc_tools(tmp_path) -> None:
+def test_capture_shell_env_snapshot_uses_login_interactive_probe_for_zshrc_tools(
+    tmp_path,
+) -> None:
     fake_zsh = tmp_path / "zsh"
     fake_zsh.write_text(
         "#!/bin/sh\n"
         "has_login=0\n"
         "has_interactive=0\n"
-        "while [ \"$#\" -gt 0 ]; do\n"
-        "  case \"$1\" in\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
         "    -l) has_login=1 ;;\n"
         "    -i) has_interactive=1 ;;\n"
         "  esac\n"
         "  shift\n"
         "done\n"
         "printf '__PULSARA_ENV_START__\\0'\n"
-        "if [ \"$has_login\" = 1 ] && [ \"$has_interactive\" = 1 ]; then\n"
+        'if [ "$has_login" = 1 ] && [ "$has_interactive" = 1 ]; then\n'
         "  printf 'PATH=/zshrc-tool/bin:/usr/bin\\0'\n"
         "else\n"
         "  printf 'PATH=/login-only/bin:/usr/bin\\0'\n"
@@ -202,7 +211,9 @@ def test_capture_shell_env_snapshot_uses_login_interactive_probe_for_zshrc_tools
     snapshot = capture_shell_env_snapshot(
         shell=TerminalShellConfig(path=fake_zsh),
         parent_env={"PATH": "/usr/bin", "HOME": str(tmp_path)},
-        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_timeout_seconds=2),
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=True, shell_snapshot_timeout_seconds=2
+        ),
         now=123.0,
     )
 
@@ -210,7 +221,9 @@ def test_capture_shell_env_snapshot_uses_login_interactive_probe_for_zshrc_tools
     assert snapshot.env["PATH"].split(os.pathsep)[0] == "/zshrc-tool/bin"
 
 
-def test_capture_shell_env_snapshot_detaches_interactive_probe_from_host_tty(tmp_path, monkeypatch) -> None:
+def test_capture_shell_env_snapshot_detaches_interactive_probe_from_host_tty(
+    tmp_path, monkeypatch
+) -> None:
     fake_shell = tmp_path / "zsh"
     _write_executable(
         fake_shell,
@@ -228,14 +241,18 @@ def test_capture_shell_env_snapshot_detaches_interactive_probe_from_host_tty(tmp
     snapshot = capture_shell_env_snapshot(
         shell=TerminalShellConfig(path=fake_shell),
         parent_env={"PATH": "/usr/bin", "HOME": str(tmp_path)},
-        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_timeout_seconds=2),
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=True, shell_snapshot_timeout_seconds=2
+        ),
     )
 
     assert snapshot.error is None
     assert observed_kwargs["start_new_session"] is True
 
 
-def test_terminal_env_builder_uses_snapshot_cache_until_startup_file_changes(tmp_path) -> None:
+def test_terminal_env_builder_uses_snapshot_cache_until_startup_file_changes(
+    tmp_path,
+) -> None:
     home = tmp_path / "home"
     home.mkdir()
     profile = home / ".profile"
@@ -245,7 +262,7 @@ def test_terminal_env_builder_uses_snapshot_cache_until_startup_file_changes(tmp
     fake_shell = tmp_path / "fake-sh"
     fake_shell.write_text(
         "#!/bin/sh\n"
-        "snapshot_path=$(/bin/cat \"$HOME/path_value\")\n"
+        'snapshot_path=$(/bin/cat "$HOME/path_value")\n'
         "printf '__PULSARA_ENV_START__\\0'\n"
         "printf 'PATH='\"$snapshot_path\"'\\0'\n",
         encoding="utf-8",
@@ -295,10 +312,19 @@ def test_terminal_env_builder_path_precedence_is_canonical(tmp_path) -> None:
         parent_env={"HOME": str(tmp_path), "PATH": f"{parent_bin}:{snapshot_bin}"},
     )
 
-    result = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=TerminalShellConfig(path=fake_shell))
+    result = builder.build(
+        cwd=tmp_path,
+        workspace_root=tmp_path,
+        shell=TerminalShellConfig(path=fake_shell),
+    )
     path_entries = result.env["PATH"].split(os.pathsep)
 
-    assert path_entries[:4] == [str(venv_bin), str(extra_bin), str(snapshot_bin), str(parent_bin)]
+    assert path_entries[:4] == [
+        str(venv_bin),
+        str(extra_bin),
+        str(snapshot_bin),
+        str(parent_bin),
+    ]
     assert path_entries.count(str(extra_bin)) == 1
     assert path_entries.count(str(snapshot_bin)) == 1
     assert path_entries.index("/usr/bin") > path_entries.index(str(parent_bin))
@@ -322,7 +348,11 @@ def test_terminal_env_builder_snapshot_non_path_vars_override_parent(tmp_path) -
         },
     )
 
-    result = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=TerminalShellConfig(path=fake_shell))
+    result = builder.build(
+        cwd=tmp_path,
+        workspace_root=tmp_path,
+        shell=TerminalShellConfig(path=fake_shell),
+    )
 
     assert result.env["NVM_DIR"] == "/snapshot/nvm"
     assert result.env["PATH"].split(os.pathsep)[:2] == ["/snapshot/bin", "/usr/bin"]
@@ -333,7 +363,9 @@ def test_terminal_env_builder_caches_snapshot_failure_until_ttl(tmp_path) -> Non
     fake_shell.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     now = 100.0
     builder = TerminalEnvBuilder(
-        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_ttl_seconds=10),
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=True, shell_snapshot_ttl_seconds=10
+        ),
         parent_env={"HOME": str(tmp_path), "PATH": "/parent/bin"},
         time_fn=lambda: now,
     )
@@ -353,7 +385,10 @@ def test_terminal_env_builder_caches_snapshot_failure_until_ttl(tmp_path) -> Non
 
     assert first.diagnostics["shell_snapshot_used"] is False
     assert first.diagnostics["shell_snapshot_error"]
-    assert second.diagnostics["shell_snapshot_error"] == first.diagnostics["shell_snapshot_error"]
+    assert (
+        second.diagnostics["shell_snapshot_error"]
+        == first.diagnostics["shell_snapshot_error"]
+    )
     assert second.env["PATH"].split(os.pathsep)[0] == "/parent/bin"
     assert third.diagnostics["shell_snapshot_used"] is True
     assert third.diagnostics["shell_snapshot_error"] is None
@@ -370,14 +405,16 @@ def test_terminal_env_builder_uses_snapshot_cache_until_zshrc_changes(tmp_path) 
     fake_zsh = tmp_path / "zsh"
     fake_zsh.write_text(
         "#!/bin/sh\n"
-        "snapshot_path=$(/bin/cat \"$HOME/path_value\")\n"
+        'snapshot_path=$(/bin/cat "$HOME/path_value")\n'
         "printf '__PULSARA_ENV_START__\\0'\n"
         "printf 'PATH='\"$snapshot_path\"'\\0'\n",
         encoding="utf-8",
     )
     fake_zsh.chmod(fake_zsh.stat().st_mode | stat.S_IXUSR)
     builder = TerminalEnvBuilder(
-        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_ttl_seconds=300),
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=True, shell_snapshot_ttl_seconds=300
+        ),
         parent_env={"HOME": str(home), "PATH": "/parent/bin"},
     )
     shell = TerminalShellConfig(path=fake_zsh)
@@ -395,7 +432,9 @@ def test_terminal_env_builder_uses_snapshot_cache_until_zshrc_changes(tmp_path) 
     assert third.env["PATH"].split(os.pathsep)[0] == "/snapshot-2"
 
 
-def test_terminal_env_builder_snapshot_failure_falls_back_to_parent_and_sane_path(tmp_path) -> None:
+def test_terminal_env_builder_snapshot_failure_falls_back_to_parent_and_sane_path(
+    tmp_path,
+) -> None:
     missing_shell = tmp_path / "missing-shell"
     builder = TerminalEnvBuilder(
         config=TerminalEnvConfig(enable_shell_snapshot=True),
@@ -445,12 +484,18 @@ def test_terminal_env_builder_diagnostics_do_not_dump_complete_path(tmp_path) ->
         parent_env={"HOME": str(tmp_path), "PATH": "/parent/bin:/usr/bin:/bin"},
     )
 
-    result = builder.build(cwd=tmp_path, workspace_root=tmp_path, shell=TerminalShellConfig(path=tmp_path / "sh"))
+    result = builder.build(
+        cwd=tmp_path,
+        workspace_root=tmp_path,
+        shell=TerminalShellConfig(path=tmp_path / "sh"),
+    )
 
     assert "PATH" not in result.diagnostics
     assert "path" not in result.diagnostics
     assert result.diagnostics["venv_overlay"] == str(venv_bin)
-    assert result.diagnostics["path_entries_count"] == len(result.env["PATH"].split(os.pathsep))
+    assert result.diagnostics["path_entries_count"] == len(
+        result.env["PATH"].split(os.pathsep)
+    )
 
 
 def test_terminal_env_builder_refreshes_snapshot_after_ttl(tmp_path) -> None:
@@ -461,7 +506,7 @@ def test_terminal_env_builder_refreshes_snapshot_after_ttl(tmp_path) -> None:
     fake_shell = tmp_path / "fake-sh"
     fake_shell.write_text(
         "#!/bin/sh\n"
-        "snapshot_path=$(/bin/cat \"$HOME/path_value\")\n"
+        'snapshot_path=$(/bin/cat "$HOME/path_value")\n'
         "printf '__PULSARA_ENV_START__\\0'\n"
         "printf 'PATH='\"$snapshot_path\"'\\0'\n",
         encoding="utf-8",
@@ -469,7 +514,9 @@ def test_terminal_env_builder_refreshes_snapshot_after_ttl(tmp_path) -> None:
     fake_shell.chmod(fake_shell.stat().st_mode | stat.S_IXUSR)
     now = 100.0
     builder = TerminalEnvBuilder(
-        config=TerminalEnvConfig(enable_shell_snapshot=True, shell_snapshot_ttl_seconds=10),
+        config=TerminalEnvConfig(
+            enable_shell_snapshot=True, shell_snapshot_ttl_seconds=10
+        ),
         parent_env={"HOME": str(home), "PATH": "/parent/bin"},
         time_fn=lambda: now,
     )

@@ -45,11 +45,12 @@ class MessageReducer:
 
             case EventType.MODEL_CALL_END:
                 assert isinstance(event, ModelCallEndEvent)
-                if self.message.usage is None:
-                    self.message.usage = Usage()
-                self.message.usage.input_tokens += event.input_tokens
-                self.message.usage.output_tokens += event.output_tokens
-                self.message.usage.total_tokens += event.total_tokens
+                if event.usage is not None:
+                    if self.message.usage is None:
+                        self.message.usage = Usage()
+                    self.message.usage.input_tokens += event.usage.input_tokens
+                    self.message.usage.output_tokens += event.usage.output_tokens
+                    self.message.usage.total_tokens += event.usage.total_tokens
 
             case EventType.TOOL_RESULT_END:
                 assert isinstance(event, ToolResultEndEvent)
@@ -75,7 +76,11 @@ class MessageReducer:
                 for result in event.confirm_results:
                     block = self._find_block("tool_call", result.tool_call.id)
                     if isinstance(block, ToolCallBlock):
-                        block.state = ToolCallState.ALLOWED if result.confirmed else ToolCallState.FINISHED
+                        block.state = (
+                            ToolCallState.ALLOWED
+                            if result.confirmed
+                            else ToolCallState.FINISHED
+                        )
 
             case EventType.REQUIRE_EXTERNAL_EXECUTION:
                 assert isinstance(event, RequireExternalExecutionEvent)
@@ -90,8 +95,14 @@ class MessageReducer:
                     block = self._find_block("tool_call", result.id)
                     if isinstance(block, ToolCallBlock):
                         block.state = ToolCallState.FINISHED
-                    timing_by_call_id = event.metadata.get("tool_observation_timing_by_call_id")
-                    timing = timing_by_call_id.get(result.id) if isinstance(timing_by_call_id, dict) else None
+                    timing_by_call_id = event.metadata.get(
+                        "tool_observation_timing_by_call_id"
+                    )
+                    timing = (
+                        timing_by_call_id.get(result.id)
+                        if isinstance(timing_by_call_id, dict)
+                        else None
+                    )
                     _remember_tool_observation_timing(
                         self.message,
                         tool_call_id=result.id,
@@ -102,7 +113,10 @@ class MessageReducer:
 
     def _find_block(self, block_type: str, block_id: str):
         for block in self.message.content:
-            if getattr(block, "type", None) == block_type and getattr(block, "id", None) == block_id:
+            if (
+                getattr(block, "type", None) == block_type
+                and getattr(block, "id", None) == block_id
+            ):
                 return block
         return None
 
@@ -111,7 +125,9 @@ class MessageReducer:
             self.message.content.append(block)
 
 
-def _remember_tool_observation_timing(message: Msg, *, tool_call_id: str, timing: object) -> None:
+def _remember_tool_observation_timing(
+    message: Msg, *, tool_call_id: str, timing: object
+) -> None:
     if not isinstance(timing, dict):
         return
     by_call_id = message.metadata.setdefault("tool_observation_timing_by_call_id", {})
@@ -122,5 +138,8 @@ def _remember_tool_observation_timing(message: Msg, *, tool_call_id: str, timing
         for block in message.content
         if getattr(block, "type", None) == "tool_result"
     ]
-    if len(tool_result_blocks) == 1 and getattr(tool_result_blocks[0], "id", None) == tool_call_id:
+    if (
+        len(tool_result_blocks) == 1
+        and getattr(tool_result_blocks[0], "id", None) == tool_call_id
+    ):
         message.metadata["tool_observation_timing"] = dict(timing)

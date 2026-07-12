@@ -46,6 +46,7 @@ class WorkspaceTerminalSnapshot:
     owner_host_session_ids: tuple[str, ...]
     live_process_count: int
     finished_process_count: int
+    pending_completion_count: int
     terminal_session_count: int
     owner_session_distribution: dict[str, int]
     processes: tuple[dict[str, object], ...]
@@ -59,6 +60,7 @@ class WorkspaceTerminalSnapshot:
             "owner_host_session_ids": list(self.owner_host_session_ids),
             "live_process_count": self.live_process_count,
             "finished_process_count": self.finished_process_count,
+            "pending_completion_count": self.pending_completion_count,
             "terminal_session_count": self.terminal_session_count,
             "owner_session_distribution": dict(self.owner_session_distribution),
             "processes": [dict(process) for process in self.processes],
@@ -178,6 +180,7 @@ class WorkspaceTerminalSupervisor:
             owner_host_session_ids=tuple(self._leases),
             live_process_count=self.terminal_sessions.live_process_count(),
             finished_process_count=self.terminal_sessions.finished_process_count(),
+            pending_completion_count=self.terminal_sessions.pending_completion_count(),
             terminal_session_count=self.terminal_sessions.session_count(),
             owner_session_distribution=distribution,
             processes=tuple(process.to_payload(include_owner=True) for process in processes),

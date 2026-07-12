@@ -23,5 +23,3 @@ class ModelProfile:
     provider_profile: ProviderProfile = field(default_factory=ProviderProfile)
     supports_tools: bool = True
     supports_reasoning: bool = True
-    context_window: int | None = None
-    max_output_tokens: int | None = None

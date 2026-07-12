@@ -10,7 +10,14 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.memory.foundation.records import ArtifactRecord, ArtifactTextSlice, ArtifactWriteResult
+from pulsara_agent.memory.artifacts.archive import canonical_artifact_semantic_metadata
+from pulsara_agent.memory.foundation.records import (
+    ArtifactContentConflict,
+    ArtifactPutConfirmation,
+    ArtifactRecord,
+    ArtifactTextSlice,
+    ArtifactWriteResult,
+)
 
 
 @dataclass(slots=True)
@@ -150,6 +157,80 @@ class PostgresArtifactStore:
                     digest=row["digest"],
                     stored_at=row["stored_at"],
                     size_bytes=row["size_bytes"],
+                )
+
+    def put_text_if_absent_or_confirm_identical(
+        self,
+        blob_id: str,
+        content: str,
+        *,
+        session_id: str | None,
+        run_id: str | None,
+        media_type: str,
+        semantic_metadata: dict[str, Any],
+    ) -> ArtifactPutConfirmation:
+        if run_id is not None and session_id is None:
+            raise ValueError(
+                "PostgresArtifactStore deterministic put requires session_id "
+                "when run_id is provided"
+            )
+        metadata = canonical_artifact_semantic_metadata(semantic_metadata)
+        encoded = content.encode("utf-8")
+        digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        stored_at = f"postgres://artifacts/{blob_id}"
+        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+            with connection.cursor() as cursor:
+                self._lock_artifact(cursor, blob_id)
+                self._validate_owner(cursor, session_id=session_id, run_id=run_id)
+                cursor.execute(
+                    """
+                    insert into artifacts (
+                        id,
+                        session_id,
+                        run_id,
+                        media_type,
+                        text_body,
+                        digest,
+                        size_bytes,
+                        stored_at,
+                        metadata
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (id) do nothing
+                    """,
+                    (
+                        blob_id,
+                        session_id,
+                        run_id,
+                        media_type,
+                        content,
+                        digest,
+                        len(encoded),
+                        stored_at,
+                        Jsonb(metadata),
+                    ),
+                )
+                inserted = cursor.rowcount == 1
+                row = self._artifact_row(cursor, blob_id)
+                self._validate_deterministic_text_row(
+                    row,
+                    blob_id=blob_id,
+                    content=content,
+                    digest=digest,
+                    size_bytes=len(encoded),
+                    media_type=media_type,
+                    session_id=session_id,
+                    run_id=run_id,
+                    semantic_metadata=metadata,
+                )
+                return ArtifactPutConfirmation(
+                    status="inserted" if inserted else "confirmed_identical",
+                    result=ArtifactWriteResult(
+                        id=row["id"],
+                        digest=row["digest"],
+                        stored_at=row["stored_at"],
+                        size_bytes=row["size_bytes"],
+                    ),
                 )
 
     def get_info(self, blob_id: str, *, session_id: str | None = None) -> ArtifactRecord:
@@ -302,3 +383,39 @@ class PostgresArtifactStore:
             raise ValueError(f"artifact {blob_id!r} already belongs to runtime session {row['session_id']!r}")
         if run_id is not None and row["run_id"] != run_id:
             raise ValueError(f"artifact {blob_id!r} already belongs to run {row['run_id']!r}")
+
+    def _validate_deterministic_text_row(
+        self,
+        row: dict[str, Any],
+        *,
+        blob_id: str,
+        content: str,
+        digest: str,
+        size_bytes: int,
+        media_type: str,
+        session_id: str | None,
+        run_id: str | None,
+        semantic_metadata: dict[str, Any],
+    ) -> None:
+        conflicts: list[str] = []
+        if (
+            row["text_body"] != content
+            or row["binary_body"] is not None
+            or row["digest"] != digest
+            or row["size_bytes"] != size_bytes
+        ):
+            conflicts.append("content")
+        if row["media_type"] != media_type:
+            conflicts.append("media_type")
+        if row["session_id"] != session_id or row["run_id"] != run_id:
+            conflicts.append("ownership")
+        existing_metadata = canonical_artifact_semantic_metadata(
+            dict(row["metadata"] or {})
+        )
+        if existing_metadata != semantic_metadata:
+            conflicts.append("semantic_metadata")
+        if conflicts:
+            raise ArtifactContentConflict(
+                f"artifact {blob_id!r} deterministic identity conflict: "
+                f"{','.join(conflicts)}"
+            )

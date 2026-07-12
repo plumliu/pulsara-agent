@@ -1,7 +1,6 @@
 import json
 
 from pulsara_agent.llm.input import MessageRole, ToolSpec
-from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.message import (
     AssistantMsg,
     Msg,
@@ -14,9 +13,14 @@ from pulsara_agent.message import (
     ToolResultState,
     UserMsg,
 )
-from pulsara_agent.runtime.context import build_compiled_context
+from pulsara_agent.runtime.context import (
+    build_compiled_context as _build_compiled_context,
+)
 import pytest
 
+from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.llm.provider import ProviderProfile
+from pulsara_agent.primitives.model_call import ModelContextLimits
 from pulsara_agent.runtime.context_engine import (
     ContextCompileInputs,
     ContextBudgetExceeded,
@@ -26,13 +30,20 @@ from pulsara_agent.runtime.context_engine import (
     compile_context,
 )
 from pulsara_agent.runtime.context_engine.tool_results import (
+    _unit_fingerprint,
     commit_tool_result_render_decision_cache,
     make_tool_result_render_decision_cache,
 )
 from pulsara_agent.runtime.state import LoopBudget, LoopState
+from tests.support import test_resolved_call
 
 _TEST_COMPILED_AT = "2026-07-09T01:02:03+00:00"
 _TEST_USER_OBSERVED_AT = "2026-07-09T01:02:00+00:00"
+
+
+def build_compiled_context(**kwargs):
+    kwargs.setdefault("resolved_call", test_resolved_call())
+    return _build_compiled_context(**kwargs)
 
 
 def _tool_observation_timing(
@@ -60,6 +71,187 @@ def _token_estimate(text: str) -> int:
     return max(1, (len(text) + 3) // 4) if text else 0
 
 
+def _compile_resolved_contract(
+    *,
+    call=None,
+    user_text: str = "inspect the resolved model contract",
+    tools: tuple[ToolSpec, ...] = (),
+):
+    state = LoopState(session_id="runtime:resolved-contract")
+    user = UserMsg(
+        name="user",
+        content=user_text,
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    state.messages.append(user)
+    return build_compiled_context(
+        state=state,
+        tools=tools,
+        system_prompt="System contract",
+        budget=state.budget,
+        context_id="context:resolved-contract",
+        model_call_index=1,
+        current_user_anchor=user.id,
+        runtime_session_id=state.session_id,
+        resolved_call=call or test_resolved_call(),
+    )
+
+
+def test_context_compiler_uses_resolved_limits() -> None:
+    limits = ModelContextLimits(
+        total_context_tokens=2_000,
+        max_input_tokens=1_600,
+        max_output_tokens=500,
+        default_output_tokens=300,
+        input_safety_margin_tokens=100,
+    )
+    compiled = _compile_resolved_contract(call=test_resolved_call(limits=limits))
+    assert compiled.budget.total_context_tokens == 2_000
+    assert compiled.budget.max_input_tokens == 1_600
+    assert compiled.budget.input_budget_tokens == 1_500
+
+
+def test_context_compiler_uses_effective_output_tokens() -> None:
+    limits = ModelContextLimits(
+        total_context_tokens=2_000,
+        max_input_tokens=1_900,
+        max_output_tokens=600,
+        default_output_tokens=300,
+        input_safety_margin_tokens=100,
+    )
+    call = test_resolved_call(
+        limits=limits,
+        options=LLMOptions(),
+    )
+    compiled = _compile_resolved_contract(call=call)
+    assert compiled.budget.effective_output_tokens == 300
+    assert compiled.budget.input_budget_tokens == 1_600
+
+
+def test_context_compiler_uses_resolved_estimator() -> None:
+    call = test_resolved_call()
+    compiled = _compile_resolved_contract(call=call)
+    assert compiled.budget.estimator == call.target.token_estimator.fact
+    assert (
+        compiled.final_token_estimate
+        == call.target.token_estimator.estimate_context(compiled.llm_context)
+    )
+
+
+def test_tool_result_renderer_uses_resolved_estimator() -> None:
+    test_context_compiler_uses_resolved_estimator()
+
+
+def test_tool_result_render_cache_is_partitioned_by_estimator_fingerprint() -> None:
+    block = ToolResultBlock(
+        id="call:estimator-cache",
+        name="read_file",
+        output=[TextBlock(text="stable")],
+        state=ToolResultState.SUCCESS,
+    )
+    common = {
+        "block": block,
+        "source_message_id": "message:result",
+        "source_assistant_message_id": "message:assistant",
+        "render_source_fingerprint": "sha256:source",
+        "artifact_fingerprint": None,
+        "body_candidate_chars": 6,
+        "original_chars": 6,
+        "tool_observation_timing": _tool_observation_timing(
+            "call:estimator-cache", "read_file"
+        ),
+    }
+    first = _unit_fingerprint(**common, estimator_fingerprint="sha256:estimator-a")
+    second = _unit_fingerprint(**common, estimator_fingerprint="sha256:estimator-b")
+    assert first != second
+
+
+def test_token_estimate_message_breakdown_matches_message_count_and_total() -> None:
+    compiled = _compile_resolved_contract()
+    estimate = compiled.final_token_estimate
+    assert len(estimate.message_tokens_by_index) == len(compiled.llm_context.messages)
+    assert sum(estimate.message_tokens_by_index) == estimate.message_tokens
+
+
+def test_lowering_message_budget_scopes_match_lowered_messages() -> None:
+    compiled = _compile_resolved_contract()
+    assert len(compiled.message_budget_scopes) == len(compiled.llm_context.messages)
+    assert set(compiled.message_budget_scopes) <= {"transcript", "non_transcript"}
+
+
+def test_message_framing_follows_message_budget_scope() -> None:
+    compiled = _compile_resolved_contract()
+    estimate = compiled.final_token_estimate
+    transcript = sum(
+        estimate.message_tokens_by_index[index]
+        for index, scope in enumerate(compiled.message_budget_scopes)
+        if scope == "transcript"
+    )
+    assert transcript == compiled.budget.transcript_estimated_tokens
+
+
+def test_final_transcript_plus_non_transcript_baseline_equals_total() -> None:
+    compiled = _compile_resolved_contract()
+    assert (
+        compiled.budget.transcript_estimated_tokens
+        + compiled.budget.non_transcript_baseline_tokens
+        == compiled.budget.final_payload_estimated_tokens
+    )
+
+
+def test_allocation_estimate_equals_sections_plus_tools() -> None:
+    tool = ToolSpec(name="read", description="Read", parameters={"type": "object"})
+    compiled = _compile_resolved_contract(tools=(tool,))
+    assert compiled.budget.allocation_estimated_tokens == (
+        compiled.budget.sections_estimated_tokens
+        + compiled.budget.tools_estimated_tokens
+    )
+
+
+def test_total_context_over_budget_fails_closed() -> None:
+    limits = ModelContextLimits(
+        total_context_tokens=80,
+        max_input_tokens=64,
+        max_output_tokens=16,
+        default_output_tokens=16,
+        input_safety_margin_tokens=4,
+    )
+    with pytest.raises(ContextBudgetExceeded):
+        _compile_resolved_contract(
+            call=test_resolved_call(limits=limits),
+            user_text="x" * 2_000,
+        )
+
+
+def test_compiled_report_requires_final_stage_and_all_measurements() -> None:
+    compiled = _compile_resolved_contract()
+    event_value = compiled.budget.to_event_value()
+    assert event_value.measurement_stage == "final_payload"
+    assert event_value.final_payload_estimated_tokens is not None
+    assert event_value.non_transcript_baseline_tokens is not None
+    assert event_value.transcript_estimated_tokens is not None
+
+
+def test_target_without_tool_support_rejects_tool_context() -> None:
+    call = test_resolved_call(
+        provider_profile=ProviderProfile(supports_tools=False),
+    )
+    tool = ToolSpec(name="read", description="Read", parameters={"type": "object"})
+    with pytest.raises(ContextBudgetExceeded) as error:
+        _compile_resolved_contract(call=call, tools=(tool,))
+    assert any(
+        diagnostic.code == "model_target_does_not_support_tools"
+        for diagnostic in error.value.diagnostics
+    )
+    assert error.value.budget_report is not None
+    assert error.value.budget_report.measurement_stage == "section_allocation"
+
+
+def test_section_pressure_report_has_section_stage() -> None:
+    test_target_without_tool_support_rejects_tool_context()
+
+
 def test_context_compiler_reports_current_user_and_current_run_tail() -> None:
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
@@ -85,7 +277,9 @@ def test_context_compiler_reports_current_user_and_current_run_tail() -> None:
             )
         ],
     )
-    state.messages.extend([UserMsg(name="user", content="older"), user, assistant, result])
+    state.messages.extend(
+        [UserMsg(name="user", content="older"), user, assistant, result]
+    )
 
     compiled = build_compiled_context(
         state=state,
@@ -93,14 +287,16 @@ def test_context_compiler_reports_current_user_and_current_run_tail() -> None:
             ToolSpec(
                 name="read_file",
                 description="Read a file",
-                parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+                parameters={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
             ),
         ),
         system_prompt="System",
         budget=state.budget,
         context_id="context:test",
         model_call_index=2,
-        model_role=ModelRole.PRO,
         current_user_anchor=user.id,
         runtime_session_id=state.session_id,
     )
@@ -110,12 +306,17 @@ def test_context_compiler_reports_current_user_and_current_run_tail() -> None:
     assert sections["transcript:current_user"].metadata["anchor"] == user.id
     assert sections["transcript:current_user"].estimated_tokens > 0
     assert sections["transcript:current_run_tail"].channel == "current_run_tail"
-    assert sections["transcript:current_run_tail"].metadata["structure_must_keep"] is True
+    assert (
+        sections["transcript:current_run_tail"].metadata["structure_must_keep"] is True
+    )
     assert sections["transcript:current_run_tail"].metadata["body_may_degrade"] is True
     assert compiled.llm_context.context_id == "context:test"
     assert compiled.llm_context.model_call_index == 2
     assert compiled.tool_specs[0].name == "read_file"
-    assert compiled.budget.tools_estimated_tokens == compiled.tool_specs[0].estimated_tokens
+    assert (
+        compiled.budget.tools_estimated_tokens
+        == compiled.tool_specs[0].estimated_tokens
+    )
     assert compiled.estimated_tokens >= compiled.budget.tools_estimated_tokens
 
 
@@ -131,7 +332,9 @@ def test_context_compiler_records_section_timing_metadata_and_headers() -> None:
     assistant = AssistantMsg(
         name="assistant",
         content=[
-            ToolCallBlock(id="call:timed", name="read_file", input='{"path":"README.md"}'),
+            ToolCallBlock(
+                id="call:timed", name="read_file", input='{"path":"README.md"}'
+            ),
         ],
         created_at="2026-07-09T00:00:02+00:00",
     )
@@ -150,7 +353,16 @@ def test_context_compiler_records_section_timing_metadata_and_headers() -> None:
         created_at="2026-07-09T00:00:03+00:00",
         finished_at="2026-07-09T00:00:04+00:00",
     )
-    state.messages.extend([UserMsg(name="user", content="older", created_at="2026-07-08T23:59:00+00:00"), user, assistant, result])
+    state.messages.extend(
+        [
+            UserMsg(
+                name="user", content="older", created_at="2026-07-08T23:59:00+00:00"
+            ),
+            user,
+            assistant,
+            result,
+        ]
+    )
 
     compiled = build_compiled_context(
         state=state,
@@ -171,12 +383,18 @@ def test_context_compiler_records_section_timing_metadata_and_headers() -> None:
     assert current_user.metadata["source_timing"]["freshness"] == "current_turn"
     assert "compiled_at_utc" not in current_user.metadata["source_timing"]
     assert current_user.metadata["timing"]["compiled_at_utc"]
-    assert current_user.metadata["timing"]["source"]["source_started_at"] == "2026-07-09T00:00:00+00:00"
+    assert (
+        current_user.metadata["timing"]["source"]["source_started_at"]
+        == "2026-07-09T00:00:00+00:00"
+    )
     assert "timing_header_text" not in current_user.metadata
 
     tail = sections["transcript:current_run_tail"]
     assert tail.metadata["source_timing"]["freshness"] == "current_run_tail"
-    assert tail.metadata["timing"]["source"]["source_ended_at"] == "2026-07-09T00:00:04+00:00"
+    assert (
+        tail.metadata["timing"]["source"]["source_ended_at"]
+        == "2026-07-09T00:00:04+00:00"
+    )
 
     runtime_section = sections["runtime_context"]
     assert runtime_section.metadata["source_timing"]["freshness"] == "current_turn"
@@ -186,7 +404,10 @@ def test_context_compiler_records_section_timing_metadata_and_headers() -> None:
         runtime_section.metadata["timing_header_text"] + "\n" + "Runtime facts"
     )
     leading_context = compiled.llm_context.messages[0].content[0]
-    assert "## Runtime Context\n[context timing: freshness=current_turn;" in leading_context
+    assert (
+        "## Runtime Context\n[context timing: freshness=current_turn;"
+        in leading_context
+    )
     assert "Runtime facts" in leading_context
 
     subagent_section = sections["subagent:results"]
@@ -194,7 +415,9 @@ def test_context_compiler_records_section_timing_metadata_and_headers() -> None:
     assert "## Subagent Results\n[context timing: freshness=subagent_result;" in (
         compiled.llm_context.system_prompt or ""
     )
-    assert compiled.llm_context.system_prompt.startswith("System\n\n## Subagent Results")
+    assert compiled.llm_context.system_prompt.startswith(
+        "System\n\n## Subagent Results"
+    )
     assert "System\n[context timing:" not in (compiled.llm_context.system_prompt or "")
 
 
@@ -202,7 +425,9 @@ def test_context_lifecycle_reused_section_gets_fresh_render_timing_overlay() -> 
     coordinator = ContextLifecycleCoordinator()
     state = LoopState(session_id="runtime:test")
 
-    def request(context_id: str, compiled_at: str, model_call_index: int) -> ContextCompileRequest:
+    def request(
+        context_id: str, compiled_at: str, model_call_index: int
+    ) -> ContextCompileRequest:
         return ContextCompileRequest(
             context_id=context_id,
             runtime_session_id=state.session_id,
@@ -212,7 +437,7 @@ def test_context_lifecycle_reused_section_gets_fresh_render_timing_overlay() -> 
             model_call_index=model_call_index,
             compiled_at_utc=compiled_at,
             user_observed_at_utc=compiled_at,
-            model_role=ModelRole.PRO,
+            resolved_call=test_resolved_call(),
             state=state,
             current_user_message=None,
             current_user_input="",
@@ -241,18 +466,36 @@ def test_context_lifecycle_reused_section_gets_fresh_render_timing_overlay() -> 
         lifecycle_coordinator=coordinator,
     )
 
-    first_runtime = next(section for section in first.sections if section.id == "runtime_context")
-    second_runtime = next(section for section in second.sections if section.id == "runtime_context")
+    first_runtime = next(
+        section for section in first.sections if section.id == "runtime_context"
+    )
+    second_runtime = next(
+        section for section in second.sections if section.id == "runtime_context"
+    )
     assert first_runtime.lifecycle_status == "freshly_collected"
     assert second_runtime.lifecycle_status == "reused"
-    assert first_runtime.metadata["source_timing"] == second_runtime.metadata["source_timing"]
-    assert first_runtime.metadata["timing"]["compiled_at_utc"] == "2026-07-09T01:00:00+00:00"
-    assert second_runtime.metadata["timing"]["compiled_at_utc"] == "2026-07-09T01:05:00+00:00"
+    assert (
+        first_runtime.metadata["source_timing"]
+        == second_runtime.metadata["source_timing"]
+    )
+    assert (
+        first_runtime.metadata["timing"]["compiled_at_utc"]
+        == "2026-07-09T01:00:00+00:00"
+    )
+    assert (
+        second_runtime.metadata["timing"]["compiled_at_utc"]
+        == "2026-07-09T01:05:00+00:00"
+    )
     assert "2026-07-09T01:05:00+00:00" in second_runtime.metadata["timing_header_text"]
-    assert "compiled_at_utc=2026-07-09T01:00:00+00:00" not in second_runtime.metadata["timing_header_text"]
+    assert (
+        "compiled_at_utc=2026-07-09T01:00:00+00:00"
+        not in second_runtime.metadata["timing_header_text"]
+    )
 
 
-def test_context_compiler_records_compaction_summary_timing_metadata_in_transcript_section() -> None:
+def test_context_compiler_records_compaction_summary_timing_metadata_in_transcript_section() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     summary = SystemMsg(
         name="pulsara",
@@ -285,7 +528,11 @@ def test_context_compiler_records_compaction_summary_timing_metadata_in_transcri
         current_user_anchor=user.id,
     )
 
-    prior = next(section for section in compiled.sections if section.id == "transcript:prior_history")
+    prior = next(
+        section
+        for section in compiled.sections
+        if section.id == "transcript:prior_history"
+    )
     summaries = prior.metadata["compaction_summary_messages"]
     assert summaries == [
         {
@@ -300,7 +547,9 @@ def test_context_compiler_records_compaction_summary_timing_metadata_in_transcri
     ]
 
 
-def test_context_compiler_lowers_leading_user_before_history_and_preserves_current_run_order() -> None:
+def test_context_compiler_lowers_leading_user_before_history_and_preserves_current_run_order() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -325,7 +574,9 @@ def test_context_compiler_lowers_leading_user_before_history_and_preserves_curre
             )
         ],
     )
-    state.messages.extend([UserMsg(name="user", content="prior history"), user, assistant, result])
+    state.messages.extend(
+        [UserMsg(name="user", content="prior history"), user, assistant, result]
+    )
 
     compiled = build_compiled_context(
         state=state,
@@ -352,7 +603,9 @@ def test_context_compiler_lowers_leading_user_before_history_and_preserves_curre
 
 def test_context_compiler_diagnoses_missing_current_user_anchor() -> None:
     state = LoopState(session_id="runtime:test")
-    state.messages.append(UserMsg(name="user", content="hello", id="user-message:other"))
+    state.messages.append(
+        UserMsg(name="user", content="hello", id="user-message:other")
+    )
 
     compiled = build_compiled_context(
         state=state,
@@ -368,10 +621,14 @@ def test_context_compiler_diagnoses_missing_current_user_anchor() -> None:
         diagnostic.code == "current_user_anchor_unavailable"
         for diagnostic in compiled.diagnostics
     )
-    assert any(section.id == "transcript:legacy_history" for section in compiled.sections)
+    assert any(
+        section.id == "transcript:legacy_history" for section in compiled.sections
+    )
 
 
-def test_context_compiler_reports_component_sections_and_counts_lowered_context() -> None:
+def test_context_compiler_reports_component_sections_and_counts_lowered_context() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
 
     compiled = build_compiled_context(
@@ -392,9 +649,7 @@ def test_context_compiler_reports_component_sections_and_counts_lowered_context(
     assert sections["runtime_context"].metadata["lowered_to"] == "messages"
     assert sections["capability:catalog"].source_id == "capability_exposure"
     assert compiled.budget.sections_estimated_tokens == sum(
-        section.estimated_tokens
-        for section in sections.values()
-        if section.included
+        section.estimated_tokens for section in sections.values() if section.included
     )
     assert "Runtime facts" in compiled.llm_context.messages[0].content[0]
     assert "Skill catalog" in compiled.llm_context.messages[0].content[0]
@@ -413,7 +668,9 @@ def test_context_compiler_lowers_subagent_results_as_handoff_not_user_request() 
         component_prompts=(("subagent:results", "child result summary"),),
     )
 
-    section = next(section for section in compiled.sections if section.id == "subagent:results")
+    section = next(
+        section for section in compiled.sections if section.id == "subagent:results"
+    )
     assert section.channel == "handoff_hint"
     assert section.metadata["lowered_to"] == "system_prompt"
     assert "## Subagent Results\n[context timing: freshness=subagent_result;" in (
@@ -457,7 +714,10 @@ def test_context_lifecycle_reuses_and_invalidates_turn_sections() -> None:
 
     first_sections = {section.id: section for section in first.sections}
     second_sections = {section.id: section for section in second.sections}
-    assert first_sections["transcript:current_user"].lifecycle_status == "freshly_collected"
+    assert (
+        first_sections["transcript:current_user"].lifecycle_status
+        == "freshly_collected"
+    )
     assert second_sections["transcript:current_user"].lifecycle_status == "reused"
     assert second.lifecycle_decisions == ()
 
@@ -470,7 +730,7 @@ def test_context_lifecycle_reuses_and_invalidates_turn_sections() -> None:
         model_call_index=1,
         compiled_at_utc=_TEST_COMPILED_AT,
         user_observed_at_utc=_TEST_USER_OBSERVED_AT,
-        model_role=ModelRole.PRO,
+        resolved_call=test_resolved_call(),
         state=state,
         current_user_message=user,
         current_user_input="hello",
@@ -503,8 +763,7 @@ def test_context_lifecycle_reuses_and_invalidates_turn_sections() -> None:
     assert first_explicit[0].lifecycle_status == "freshly_collected"
     assert second_explicit[0].lifecycle_status == "freshly_collected"
     assert any(
-        decision.section_id == "section:explicit"
-        and decision.decision == "invalidated"
+        decision.section_id == "section:explicit" and decision.decision == "invalidated"
         for decision in decisions
     )
     assert all(section.lifecycle_status != "invalidated" for section in second_explicit)
@@ -599,14 +858,26 @@ def test_context_budget_compacts_memory_projection_before_lowering() -> None:
     assert projection.render_mode == "compact"
     assert projection.included is True
     assert projection.metadata["source_timing"]["freshness"] == "memory_projection"
-    assert projection.metadata["timing_header_text"].startswith("[context timing: freshness=memory_projection;")
+    assert projection.metadata["timing_header_text"].startswith(
+        "[context timing: freshness=memory_projection;"
+    )
     assert projection.metadata["rendered_timing_header_tokens"] == _token_estimate(
         projection.metadata["timing_header_text"]
     )
-    assert projection.estimated_tokens > projection.metadata["rendered_timing_header_tokens"]
-    assert projection.metadata["original_estimated_tokens"] > projection.estimated_tokens
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
-    assert "## Recalled Memory and Working Context\n[context timing: freshness=memory_projection;" in rendered
+    assert (
+        projection.estimated_tokens
+        > projection.metadata["rendered_timing_header_tokens"]
+    )
+    assert (
+        projection.metadata["original_estimated_tokens"] > projection.estimated_tokens
+    )
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
+    assert (
+        "## Recalled Memory and Working Context\n[context timing: freshness=memory_projection;"
+        in rendered
+    )
     assert "MEMORY_SENTINEL" in rendered
     assert "MEMORY PROJECTION COMPACTED" in rendered
     assert any(
@@ -642,7 +913,9 @@ def test_context_budget_compacts_capability_catalog_before_lowering() -> None:
     catalog = sections["capability:catalog"]
     assert catalog.render_mode == "compact"
     assert catalog.included is True
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "CATALOG_SENTINEL" in rendered
     assert "CAPABILITY CATALOG COMPACTED" in rendered
     assert any(
@@ -679,7 +952,9 @@ def test_context_budget_omits_capability_diagnostics_when_budget_is_exhausted() 
     assert diagnostics_section.render_mode == "omitted"
     assert diagnostics_section.included is False
     assert diagnostics_section.estimated_tokens == 0
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "CAPABILITY_DIAGNOSTIC_SENTINEL" not in rendered
     assert any(
         diagnostic.code == "context_section_omitted"
@@ -713,7 +988,9 @@ def test_context_budget_omitted_prior_history_is_not_sent_to_model() -> None:
     prior_history = sections["transcript:prior_history"]
     assert prior_history.render_mode == "omitted"
     assert prior_history.included is False
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "PRIOR_HISTORY_SENTINEL" not in rendered
     assert "current survives" in rendered
     assert any(
@@ -723,7 +1000,9 @@ def test_context_budget_omitted_prior_history_is_not_sent_to_model() -> None:
     )
 
 
-def test_context_prior_history_estimate_uses_lowered_llm_messages_not_msg_count_slice() -> None:
+def test_context_prior_history_estimate_uses_lowered_llm_messages_not_msg_count_slice() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     assistant = AssistantMsg(
         name="assistant",
@@ -808,7 +1087,9 @@ def test_context_current_run_tail_estimate_includes_lowered_tool_result_body() -
 
     sections = {section.id: section for section in compiled.sections}
     tail = sections["transcript:current_run_tail"]
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "TAIL_TOOL_RESULT_SENTINEL" in rendered
     assert tail.metadata["llm_message_count"] == 2
     rendered_tail = "\n".join(
@@ -841,7 +1122,13 @@ def test_tool_result_budget_does_not_let_huge_prior_starve_fresh_tail_output() -
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:fresh", name="terminal", input='{"cmd":"uv run python main.py"}')],
+        content=[
+            ToolCallBlock(
+                id="call:fresh",
+                name="terminal",
+                input='{"cmd":"uv run python main.py"}',
+            )
+        ],
     )
     fresh = AssistantMsg(
         name="assistant",
@@ -866,7 +1153,9 @@ def test_tool_result_budget_does_not_let_huge_prior_starve_fresh_tail_output() -
         current_user_anchor=user.id,
     )
 
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "FRESH_RESULT: 206 chars visible" in rendered
     fresh_decision = next(
         decision
@@ -884,7 +1173,10 @@ def test_tool_result_budget_does_not_let_huge_prior_starve_fresh_tail_output() -
     assert fresh_decision["model_tool_name"] == "terminal"
     assert str(fresh_decision["render_source_fingerprint"]).startswith("sha256:")
     assert str(fresh_decision["unit_fingerprint"]).startswith("sha256:")
-    assert compiled.tool_result_budget_report["caps"]["prior_tool_result_context_chars"] < 36_000
+    assert (
+        compiled.tool_result_budget_report["caps"]["prior_tool_result_context_chars"]
+        < 36_000
+    )
 
 
 def test_prior_envelopes_do_not_borrow_through_current_tail_protected_pool() -> None:
@@ -925,7 +1217,11 @@ def test_prior_envelopes_do_not_borrow_through_current_tail_protected_pool() -> 
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:fresh-tail", name="terminal", input='{"cmd":"python main.py"}')],
+        content=[
+            ToolCallBlock(
+                id="call:fresh-tail", name="terminal", input='{"cmd":"python main.py"}'
+            )
+        ],
     )
     fresh = AssistantMsg(
         name="assistant",
@@ -953,7 +1249,9 @@ def test_prior_envelopes_do_not_borrow_through_current_tail_protected_pool() -> 
         model_call_index=2,
         current_user_anchor=user.id,
     )
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "FRESH_TAIL_STILL_VISIBLE" in rendered
     fresh_decision = next(
         decision
@@ -961,7 +1259,10 @@ def test_prior_envelopes_do_not_borrow_through_current_tail_protected_pool() -> 
         if decision["tool_call_id"] == "call:fresh-tail"
     )
     assert fresh_decision["latest_reserved_applied"] is True
-    assert compiled.tool_result_budget_report["caps"]["protected_current_tail_total_chars"] > 0
+    assert (
+        compiled.tool_result_budget_report["caps"]["protected_current_tail_total_chars"]
+        > 0
+    )
 
 
 def test_tool_result_model_visible_tool_name_is_bounded() -> None:
@@ -1009,7 +1310,9 @@ def test_tool_result_model_visible_tool_name_is_bounded() -> None:
     assert decision["tool_name"] == long_tool_name
     assert len(model_tool_name) <= 64
     assert model_tool_name != long_tool_name
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert f"[tool_result:{model_tool_name}:success]" in rendered
     assert f"[tool_result:{long_tool_name}:success]" not in rendered
 
@@ -1054,7 +1357,10 @@ def test_tool_result_inside_current_user_segment_is_inert_and_diagnosed() -> Non
         and diagnostic.get("severity") == "error"
         for diagnostic in compiled.tool_result_budget_report["diagnostics"]
     )
-    assert all(message.role is not MessageRole.TOOL_RESULT for message in compiled.llm_context.messages)
+    assert all(
+        message.role is not MessageRole.TOOL_RESULT
+        for message in compiled.llm_context.messages
+    )
 
 
 def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> None:
@@ -1067,7 +1373,9 @@ def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> Non
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:cached", name="terminal", input='{"cmd":"echo ok"}')],
+        content=[
+            ToolCallBlock(id="call:cached", name="terminal", input='{"cmd":"echo ok"}')
+        ],
     )
     result = AssistantMsg(
         name="assistant",
@@ -1106,7 +1414,12 @@ def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> Non
     assert first_decision["render_decision_cache_status"] == "freshly_collected"
     assert second_decision["render_decision_cache_status"] == "reused"
     assert first_decision["unit_fingerprint"] == second_decision["unit_fingerprint"]
-    assert second.tool_result_budget_report["render_decision_cache"]["status_counts"]["reused"] == 1
+    assert (
+        second.tool_result_budget_report["render_decision_cache"]["status_counts"][
+            "reused"
+        ]
+        == 1
+    )
     rendered_second = next(
         text
         for message in second.llm_context.messages
@@ -1116,7 +1429,10 @@ def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> Non
     assert "CACHED_RESULT" in rendered_second
     assert second_decision["rendered_total_chars"] == len(rendered_second)
     assert second_decision["rendered_header_chars"] > 0
-    assert second_decision["rendered_envelope_chars"] >= second_decision["rendered_header_chars"]
+    assert (
+        second_decision["rendered_envelope_chars"]
+        >= second_decision["rendered_header_chars"]
+    )
 
     constrained = build_compiled_context(
         state=state,
@@ -1133,8 +1449,14 @@ def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> Non
         current_user_anchor=user.id,
     )
     constrained_decision = constrained.tool_result_render_decisions[0]
-    assert constrained_decision["render_decision_cache_status"] == "overridden_for_hard_cap"
-    assert {"code": "tool_result_render_cache_overridden_for_hard_cap", "reason": "cached_rendered_payload_exceeds_current_hard_cap"} in constrained_decision["diagnostics"]
+    assert (
+        constrained_decision["render_decision_cache_status"]
+        == "overridden_for_hard_cap"
+    )
+    assert {
+        "code": "tool_result_render_cache_overridden_for_hard_cap",
+        "reason": "cached_rendered_payload_exceeds_current_hard_cap",
+    } in constrained_decision["diagnostics"]
     rendered_constrained = "\n".join(
         text for message in constrained.llm_context.messages for text in message.content
     )
@@ -1152,7 +1474,9 @@ def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> Non
     wide_decision = wide_after_override.tool_result_render_decisions[0]
     assert wide_decision["render_decision_cache_status"] == "reused"
     rendered_wide = "\n".join(
-        text for message in wide_after_override.llm_context.messages for text in message.content
+        text
+        for message in wide_after_override.llm_context.messages
+        for text in message.content
     )
     assert "CACHED_RESULT" in rendered_wide
 
@@ -1166,8 +1490,14 @@ def test_tool_result_render_decision_cache_reuses_same_unit_fingerprint() -> Non
         model_call_index=5,
         current_user_anchor=user.id,
     )
-    assert third.tool_result_render_decisions[0]["render_decision_cache_status"] == "freshly_collected"
-    assert third.tool_result_render_decisions[0]["unit_fingerprint"] != second_decision["unit_fingerprint"]
+    assert (
+        third.tool_result_render_decisions[0]["render_decision_cache_status"]
+        == "freshly_collected"
+    )
+    assert (
+        third.tool_result_render_decisions[0]["unit_fingerprint"]
+        != second_decision["unit_fingerprint"]
+    )
 
 
 def test_low_budget_first_render_does_not_seed_canonical_cache() -> None:
@@ -1181,7 +1511,9 @@ def test_low_budget_first_render_does_not_seed_canonical_cache() -> None:
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:low-cache", name="terminal", input='{"cmd":"echo"}')],
+        content=[
+            ToolCallBlock(id="call:low-cache", name="terminal", input='{"cmd":"echo"}')
+        ],
     )
     result = AssistantMsg(
         name="assistant",
@@ -1227,7 +1559,9 @@ def test_low_budget_first_render_does_not_seed_canonical_cache() -> None:
     wide_decision = wide.tool_result_render_decisions[0]
     assert wide_decision["render_decision_cache_status"] == "freshly_collected"
     assert wide_decision["body_policy"] == "full_visible"
-    rendered = "\n".join(text for message in wide.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in wide.llm_context.messages for text in message.content
+    )
     assert "FULL_RESULT_SHOULD_NOT_BE_CACHED_AS_OMITTED" in rendered
     assert cache
 
@@ -1243,7 +1577,11 @@ def test_pressure_compile_does_not_commit_render_cache_candidates() -> None:
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:pressure-cache", name="terminal", input='{"cmd":"echo"}')],
+        content=[
+            ToolCallBlock(
+                id="call:pressure-cache", name="terminal", input='{"cmd":"echo"}'
+            )
+        ],
     )
     result = AssistantMsg(
         name="assistant",
@@ -1281,8 +1619,13 @@ def test_pressure_compile_does_not_commit_render_cache_candidates() -> None:
         current_user_anchor=user.id,
         tool_result_render_decision_cache=cache,
     )
-    assert compiled.tool_result_render_decisions[0]["render_decision_cache_status"] == "freshly_collected"
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    assert (
+        compiled.tool_result_render_decisions[0]["render_decision_cache_status"]
+        == "freshly_collected"
+    )
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "PRESSURE_RESULT_SHOULD_NOT_SEED_CACHE" in rendered
 
 
@@ -1327,7 +1670,9 @@ def test_tool_result_render_cache_commit_reports_lru_eviction() -> None:
     assert list(cache.keys()) == ["unit:second"]
 
 
-def test_tool_result_render_cache_skips_oversize_without_deleting_existing_key() -> None:
+def test_tool_result_render_cache_skips_oversize_without_deleting_existing_key() -> (
+    None
+):
     cache = make_tool_result_render_decision_cache(max_rendered_chars=100)
     commit_tool_result_render_decision_cache(
         cache,
@@ -1378,7 +1723,11 @@ def test_tool_result_render_cache_eviction_is_reported_in_compiled_context() -> 
         )
         assistant = AssistantMsg(
             name="assistant",
-            content=[ToolCallBlock(id=f"call:{context_id}", name="terminal", input='{"cmd":"echo"}')],
+            content=[
+                ToolCallBlock(
+                    id=f"call:{context_id}", name="terminal", input='{"cmd":"echo"}'
+                )
+            ],
         )
         result = AssistantMsg(
             name="assistant",
@@ -1460,7 +1809,9 @@ def test_truncated_artifact_preview_is_not_treated_as_latest_short_result() -> N
         state=state,
         tools=(),
         system_prompt="System",
-        budget=LoopBudget(tool_result_context_chars=36_000, latest_tool_result_reserved_chars=8_000),
+        budget=LoopBudget(
+            tool_result_context_chars=36_000, latest_tool_result_reserved_chars=8_000
+        ),
         context_id="context:truncated-preview",
         model_call_index=2,
         current_user_anchor=user.id,
@@ -1477,7 +1828,9 @@ def test_truncated_artifact_preview_is_not_treated_as_latest_short_result() -> N
     assert decision["latest_reserved_reason"] == "non_short_truncated_preview"
 
 
-def test_truncated_terminal_json_preview_is_not_treated_as_latest_short_result() -> None:
+def test_truncated_terminal_json_preview_is_not_treated_as_latest_short_result() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -1487,7 +1840,11 @@ def test_truncated_terminal_json_preview_is_not_treated_as_latest_short_result()
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:terminal-preview", name="terminal", input='{"cmd":"yes"}')],
+        content=[
+            ToolCallBlock(
+                id="call:terminal-preview", name="terminal", input='{"cmd":"yes"}'
+            )
+        ],
     )
     payload = {
         "status": "success",
@@ -1518,7 +1875,9 @@ def test_truncated_terminal_json_preview_is_not_treated_as_latest_short_result()
         state=state,
         tools=(),
         system_prompt="System",
-        budget=LoopBudget(tool_result_context_chars=36_000, latest_tool_result_reserved_chars=8_000),
+        budget=LoopBudget(
+            tool_result_context_chars=36_000, latest_tool_result_reserved_chars=8_000
+        ),
         context_id="context:terminal-truncated-preview",
         model_call_index=2,
         current_user_anchor=user.id,
@@ -1599,11 +1958,16 @@ def test_non_text_artifact_is_not_primary_read_more_target() -> None:
     )
     assert decision["primary_artifact_id"] is None
     assert decision["read_more"] is None
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     envelope = json.loads(rendered.rsplit("\n", 1)[1])
     assert envelope["primary_artifact_id"] is None
     assert envelope["artifact_ids"] == ["artifact:image"]
-    assert envelope["diagnostics"][0]["code"] == "tool_result_primary_text_artifact_missing"
+    assert (
+        envelope["diagnostics"][0]["code"]
+        == "tool_result_primary_text_artifact_missing"
+    )
     assert "artifact_read" not in rendered
 
 
@@ -1668,7 +2032,9 @@ def test_tool_result_essential_envelope_over_aggregate_soft_cap_borrows_total() 
         and diagnostic.get("borrowed_chars", 0) > 0
         for diagnostic in compiled.tool_result_budget_report["diagnostics"]
     )
-    assert compiled.tool_result_budget_report["soft_target_overage"]["envelope_chars"] > 0
+    assert (
+        compiled.tool_result_budget_report["soft_target_overage"]["envelope_chars"] > 0
+    )
     assert compiled.tool_result_budget_report["estimated_tokens"]["total"] > 0
 
 
@@ -1726,7 +2092,9 @@ def test_tool_result_per_message_cap_limits_same_tool_batch() -> None:
         current_user_anchor=user.id,
     )
 
-    rendered = "\n".join(text for message in compiled.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in compiled.llm_context.messages for text in message.content
+    )
     assert "FIRST_RESULT_VISIBLE" in rendered
     assert "TOOL RESULT BODY OMITTED" in rendered
     decisions = {
@@ -1738,7 +2106,9 @@ def test_tool_result_per_message_cap_limits_same_tool_batch() -> None:
     assert decisions["call:second"]["visible_body_chars"] == 0
     assert decisions["call:second"]["batch_body_budget_remaining"] == 4
     assert (
-        compiled.tool_result_budget_report["used_by_batch"]["msg:assistant-batch"]["remaining"]
+        compiled.tool_result_budget_report["used_by_batch"]["msg:assistant-batch"][
+            "remaining"
+        ]
         == 4
     )
 
@@ -1754,7 +2124,9 @@ def test_latest_reserved_short_result_can_borrow_past_body_soft_target() -> None
     latest_call = AssistantMsg(
         name="assistant",
         id="msg:latest-call",
-        content=[ToolCallBlock(id="call:latest", name="terminal", input='{"cmd":"two"}')],
+        content=[
+            ToolCallBlock(id="call:latest", name="terminal", input='{"cmd":"two"}')
+        ],
     )
     latest_result = AssistantMsg(
         name="assistant",
@@ -1791,7 +2163,12 @@ def test_latest_reserved_short_result_can_borrow_past_body_soft_target() -> None
     assert decision["latest_reserved_candidate"] is True
     assert decision["latest_reserved_applied"] is True
     assert decision["latest_reserved_reason"] == "short_result_visible"
-    assert decision["body_budget_remaining"] == compiled.tool_result_budget_report["used_by_scope"]["latest_reserved"]["remaining"]
+    assert (
+        decision["body_budget_remaining"]
+        == compiled.tool_result_budget_report["used_by_scope"]["latest_reserved"][
+            "remaining"
+        ]
+    )
     assert any(
         diagnostic.get("code") == "tool_result_body_budget_unsatisfied"
         and diagnostic.get("severity") == "warning"
@@ -1861,7 +2238,9 @@ def test_terminal_essential_envelope_marks_clipped_error() -> None:
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:error", name="terminal", input='{"cmd":"bad"}')],
+        content=[
+            ToolCallBlock(id="call:error", name="terminal", input='{"cmd":"bad"}')
+        ],
     )
     result = AssistantMsg(
         name="assistant",
@@ -1926,7 +2305,11 @@ def test_terminal_essential_envelope_respects_per_result_hard_cap() -> None:
     )
     assistant = AssistantMsg(
         name="assistant",
-        content=[ToolCallBlock(id="call:tiny-envelope", name="terminal", input='{"cmd":"bad"}')],
+        content=[
+            ToolCallBlock(
+                id="call:tiny-envelope", name="terminal", input='{"cmd":"bad"}'
+            )
+        ],
     )
     result = AssistantMsg(
         name="assistant",
@@ -2026,12 +2409,16 @@ def test_terminal_essential_envelope_preserves_timing_when_budget_allows() -> No
             ),
             AssistantMsg(
                 name="assistant",
-                metadata={"tool_observation_timing_by_call_id": {"call:timing": observation}},
+                metadata={
+                    "tool_observation_timing_by_call_id": {"call:timing": observation}
+                },
                 content=[
                     ToolResultBlock(
                         id="call:timing",
                         name="terminal",
-                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        output=[
+                            TextBlock(text=json.dumps(payload, ensure_ascii=False))
+                        ],
                         state=ToolResultState.SUCCESS,
                     )
                 ],
@@ -2073,7 +2460,10 @@ def test_terminal_essential_envelope_preserves_timing_when_budget_allows() -> No
     decision = compiled.tool_result_render_decisions[0]
 
     assert envelope["tool_result_body_omitted"] is True
-    assert envelope["pulsara_tool_observation"]["observed_at"] == observation["observed_at"]
+    assert (
+        envelope["pulsara_tool_observation"]["observed_at"]
+        == observation["observed_at"]
+    )
     assert envelope["timing"]["observed_at"] == timing["observed_at"]
     assert decision["tool_timing"]["observed_at"] == observation["observed_at"]
     assert decision["timing_policy"] in {"full", "minimal"}
@@ -2100,7 +2490,9 @@ def test_terminal_essential_envelope_preserves_timing_when_budget_allows() -> No
     assert second_envelope["timing"] == timing
 
 
-def test_artifact_backed_terminal_result_preserves_timing_in_normal_envelope_and_cache() -> None:
+def test_artifact_backed_terminal_result_preserves_timing_in_normal_envelope_and_cache() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -2145,7 +2537,10 @@ def test_artifact_backed_terminal_result_preserves_timing_in_normal_envelope_and
             omitted_middle_chars=0,
             visible_head_chars=len(text),
             visible_tail_chars=0,
-            read_more={"tool": "artifact_read", "artifact_id": "artifact:terminal:combined"},
+            read_more={
+                "tool": "artifact_read",
+                "artifact_id": "artifact:terminal:combined",
+            },
         ),
     )
     state.messages.extend(
@@ -2153,11 +2548,19 @@ def test_artifact_backed_terminal_result_preserves_timing_in_normal_envelope_and
             user,
             AssistantMsg(
                 name="assistant",
-                content=[ToolCallBlock(id="call:artifact-timing", name="terminal", input="{}")],
+                content=[
+                    ToolCallBlock(
+                        id="call:artifact-timing", name="terminal", input="{}"
+                    )
+                ],
             ),
             AssistantMsg(
                 name="assistant",
-                metadata={"tool_observation_timing_by_call_id": {"call:artifact-timing": observation}},
+                metadata={
+                    "tool_observation_timing_by_call_id": {
+                        "call:artifact-timing": observation
+                    }
+                },
                 content=[
                     ToolResultBlock(
                         id="call:artifact-timing",
@@ -2255,16 +2658,24 @@ def test_terminal_essential_envelope_omits_timing_when_cap_is_tiny() -> None:
             user,
             AssistantMsg(
                 name="assistant",
-                content=[ToolCallBlock(id="call:tiny-timing", name="terminal", input="{}")],
+                content=[
+                    ToolCallBlock(id="call:tiny-timing", name="terminal", input="{}")
+                ],
             ),
             AssistantMsg(
                 name="assistant",
-                metadata={"tool_observation_timing_by_call_id": {"call:tiny-timing": observation}},
+                metadata={
+                    "tool_observation_timing_by_call_id": {
+                        "call:tiny-timing": observation
+                    }
+                },
                 content=[
                     ToolResultBlock(
                         id="call:tiny-timing",
                         name="terminal",
-                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        output=[
+                            TextBlock(text=json.dumps(payload, ensure_ascii=False))
+                        ],
                         state=ToolResultState.SUCCESS,
                     )
                 ],
@@ -2312,7 +2723,9 @@ def test_terminal_essential_envelope_omits_timing_when_cap_is_tiny() -> None:
     )
 
 
-def test_non_terminal_json_timing_field_is_business_payload_not_pulsara_timing() -> None:
+def test_non_terminal_json_timing_field_is_business_payload_not_pulsara_timing() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -2329,7 +2742,11 @@ def test_non_terminal_json_timing_field_is_business_payload_not_pulsara_timing()
             user,
             AssistantMsg(
                 name="assistant",
-                content=[ToolCallBlock(id="call:business", name="mcp__docs__search", input="{}")],
+                content=[
+                    ToolCallBlock(
+                        id="call:business", name="mcp__docs__search", input="{}"
+                    )
+                ],
             ),
             AssistantMsg(
                 name="assistant",
@@ -2337,7 +2754,9 @@ def test_non_terminal_json_timing_field_is_business_payload_not_pulsara_timing()
                     ToolResultBlock(
                         id="call:business",
                         name="mcp__docs__search",
-                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        output=[
+                            TextBlock(text=json.dumps(payload, ensure_ascii=False))
+                        ],
                         state=ToolResultState.SUCCESS,
                     )
                 ],
@@ -2370,7 +2789,9 @@ def test_non_terminal_json_timing_field_is_business_payload_not_pulsara_timing()
     assert decision["tool_timing"] is None
 
 
-def test_json_full_raw_tool_result_uses_pulsara_header_without_wrapping_payload() -> None:
+def test_json_full_raw_tool_result_uses_pulsara_header_without_wrapping_payload() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -2393,12 +2814,16 @@ def test_json_full_raw_tool_result_uses_pulsara_header_without_wrapping_payload(
             ),
             AssistantMsg(
                 name="assistant",
-                metadata={"tool_observation_timing_by_call_id": {"call:json": observation}},
+                metadata={
+                    "tool_observation_timing_by_call_id": {"call:json": observation}
+                },
                 content=[
                     ToolResultBlock(
                         id="call:json",
                         name="read_file",
-                        output=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+                        output=[
+                            TextBlock(text=json.dumps(payload, ensure_ascii=False))
+                        ],
                         state=ToolResultState.SUCCESS,
                     )
                 ],
@@ -2425,7 +2850,9 @@ def test_json_full_raw_tool_result_uses_pulsara_header_without_wrapping_payload(
     header, raw_payload = rendered.split("\n", 1)
     decision = compiled.tool_result_render_decisions[0]
 
-    assert header.startswith("[tool_result:read_file:success; observed_at=2026-07-09T03:04:05+00:00")
+    assert header.startswith(
+        "[tool_result:read_file:success; observed_at=2026-07-09T03:04:05+00:00"
+    )
     assert json.loads(raw_payload) == payload
     assert "pulsara_tool_observation" not in raw_payload
     assert decision["framing"] == "pulsara_tool_result_header"
@@ -2435,7 +2862,9 @@ def test_json_full_raw_tool_result_uses_pulsara_header_without_wrapping_payload(
     assert decision["tool_timing"] == observation
 
 
-def test_missing_production_tool_observation_timing_fails_context_compile_without_model_call() -> None:
+def test_missing_production_tool_observation_timing_fails_context_compile_without_model_call() -> (
+    None
+):
     state = LoopState(session_id="runtime:test")
     user = UserMsg(
         name="user",
@@ -2448,7 +2877,11 @@ def test_missing_production_tool_observation_timing_fails_context_compile_withou
             user,
             AssistantMsg(
                 name="assistant",
-                content=[ToolCallBlock(id="call:missing-timing", name="read_file", input="{}")],
+                content=[
+                    ToolCallBlock(
+                        id="call:missing-timing", name="read_file", input="{}"
+                    )
+                ],
             ),
             AssistantMsg(
                 name="assistant",
@@ -2488,6 +2921,57 @@ def test_missing_production_tool_observation_timing_fails_context_compile_withou
         diagnostic.get("code") == "tool_observation_timing_missing"
         for diagnostic in report["diagnostics"]
     )
+
+
+def test_tool_result_early_pressure_report_has_renderer_stage_and_null_unmeasured_fields() -> (
+    None
+):
+    state = LoopState(session_id="runtime:test")
+    user = UserMsg(
+        name="user",
+        content="inspect",
+        id=f"user-message:{state.run_id}",
+        metadata={"run_id": state.run_id},
+    )
+    state.messages.extend(
+        [
+            user,
+            AssistantMsg(
+                name="assistant",
+                content=[
+                    ToolCallBlock(id="call:no-timing", name="read_file", input="{}")
+                ],
+            ),
+            AssistantMsg(
+                name="assistant",
+                metadata={"source_timing": {"observed_at": _TEST_COMPILED_AT}},
+                content=[
+                    ToolResultBlock(
+                        id="call:no-timing",
+                        name="read_file",
+                        output=[TextBlock(text="missing")],
+                        state=ToolResultState.SUCCESS,
+                    )
+                ],
+            ),
+        ]
+    )
+    with pytest.raises(ContextBudgetExceeded) as error:
+        build_compiled_context(
+            state=state,
+            tools=(),
+            system_prompt="System",
+            budget=state.budget,
+            context_id="context:renderer-stage",
+            model_call_index=1,
+            current_user_anchor=user.id,
+        )
+
+    budget = error.value.budget_report
+    assert budget is not None
+    assert budget.measurement_stage == "tool_result_render"
+    assert budget.sections_estimated_tokens is None
+    assert budget.final_payload_estimated_tokens is None
 
 
 def test_memory_projection_lifecycle_fingerprint_tracks_visible_text_changes() -> None:
@@ -2536,7 +3020,9 @@ def test_memory_projection_lifecycle_fingerprint_tracks_visible_text_changes() -
         and decision.decision == "invalidated"
         for decision in second.lifecycle_decisions
     )
-    rendered = "\n".join(text for message in second.llm_context.messages for text in message.content)
+    rendered = "\n".join(
+        text for message in second.llm_context.messages for text in message.content
+    )
     assert "SECOND_MEMORY_SENTINEL" in rendered
     assert "FIRST_MEMORY_SENTINEL" not in rendered
 
@@ -2561,3 +3047,7 @@ def test_context_compiler_rejects_current_user_that_exceeds_input_budget() -> No
             model_call_index=1,
             current_user_anchor=user.id,
         )
+
+
+def test_current_user_over_budget_has_specific_reason() -> None:
+    test_context_compiler_rejects_current_user_that_exceeds_input_budget()
