@@ -1012,6 +1012,8 @@ async def _write_seed_run_start(wiring, context: EventContext, user_input: str) 
             **context.event_fields(),
             **run_start_permission_fields(
                 context.run_id,
+                turn_id=context.turn_id,
+                reply_id=context.reply_id,
                 user_input=user_input,
                 mcp_installation_id=runtime_session.mcp_installation_id,
                 mcp_installation_owner_runtime_session_id=(

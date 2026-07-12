@@ -96,6 +96,23 @@ class ToolRegistry:
             self._binding_contracts[name] for name in sorted(self._binding_contracts)
         )
 
+    def restricted_to(self, allowed_names: frozenset[str]) -> ToolRegistry:
+        """Return a registry containing only one frozen execution surface subset."""
+
+        unknown = allowed_names.difference(self._tools)
+        if unknown:
+            raise ValueError(
+                "Cannot restrict ToolRegistry to unknown tools: "
+                + ", ".join(sorted(unknown))
+            )
+        restricted = ToolRegistry()
+        for name in sorted(allowed_names):
+            restricted.register(
+                self._tools[name],
+                binding_contract=self._binding_contracts.get(name),
+            )
+        return restricted
+
     def tool_specs(self) -> tuple[ToolSpec, ...]:
         return tuple(
             ToolSpec(

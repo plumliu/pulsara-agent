@@ -29,6 +29,14 @@ class PostgresEventLog:
     runtime_session_id: str
     workspace_root: str | Path | None = None
 
+    def ensure_runtime_session_owner(self) -> None:
+        """Create the session row needed by artifacts produced before RunStart."""
+
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                self._lock_session(cursor)
+                self._ensure_session_row(cursor)
+
     def append(
         self,
         event: AgentEvent,
@@ -250,14 +258,8 @@ class PostgresEventLog:
         )
 
     def _ensure_parent_rows(self, cursor, event: AgentEvent) -> None:
-        cursor.execute(
-            """
-            insert into sessions (id, workspace_root)
-            values (%s, %s)
-            on conflict (id) do nothing
-            """,
-            (self.runtime_session_id, str(self.workspace_root) if self.workspace_root is not None else None),
-        )
+        self._ensure_session_row(cursor)
+
         cursor.execute(
             """
             insert into runs (id, session_id)
@@ -278,6 +280,16 @@ class PostgresEventLog:
             (event.turn_id, self.runtime_session_id, event.run_id, event.run_id),
         )
         self._ensure_turn_belongs_to_run(cursor, event)
+
+    def _ensure_session_row(self, cursor) -> None:
+        cursor.execute(
+            """
+            insert into sessions (id, workspace_root)
+            values (%s, %s)
+            on conflict (id) do nothing
+            """,
+            (self.runtime_session_id, str(self.workspace_root) if self.workspace_root is not None else None),
+        )
 
     def _ensure_run_belongs_to_session(self, cursor, event: AgentEvent) -> None:
         cursor.execute("select session_id from runs where id = %s", (event.run_id,))

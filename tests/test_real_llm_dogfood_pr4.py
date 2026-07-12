@@ -1819,9 +1819,18 @@ async def _inject_controlled_failed_run(session, user_input: str) -> None:
     events = (
         RunStartEvent(
             **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id, user_input=user_input),
+            **run_start_permission_fields(
+                ctx.run_id,
+                turn_id=ctx.turn_id,
+                reply_id=ctx.reply_id,
+                user_input=user_input,
+                mcp_installation_id=runtime_session.mcp_installation_id,
+                mcp_installation_owner_runtime_session_id=(
+                    runtime_session.mcp_installation_owner_runtime_session_id
+                ),
+                model_target=session.wiring.agent_runtime.resolve_run_model_target().fact,
+            ),
             user_input_chars=len(user_input),
-            metadata={"user_input": user_input},
         ),
         RunEndEvent(
             **run_end_contract_fields(

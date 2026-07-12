@@ -1054,6 +1054,12 @@ class AgentRuntime:
             subagent_runtime=subagent_runtime,
             enable_subagents=False,
         )
+        # A child profile is an execution-surface boundary, not merely a
+        # model-visible projection.  Keep descriptor and binding sets exact so
+        # disallowed parent tools cannot remain as unowned executable bindings.
+        child_agent.tool_executor.registry = child_agent.tool_executor.registry.restricted_to(
+            frozenset(capability_profile.allowed_tool_names)
+        )
         if not run_view.task_text_complete or run_view.task_text is None:
             raise ValueError(
                 "child subagent run requires a fully hydrated task artifact"

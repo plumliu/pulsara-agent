@@ -23,6 +23,9 @@ class InMemoryEventLog:
     _next_sequence: int = 1
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
+    def ensure_runtime_session_owner(self) -> None:
+        """In-memory ledgers have no external ownership foreign key."""
+
     def append(
         self,
         event: AgentEvent,

@@ -39,6 +39,10 @@ class EventBatchConfirmation:
 class EventLog(Protocol):
     """Append-only runtime event log contract."""
 
+    def ensure_runtime_session_owner(self) -> None:
+        """Ensure the durable session owner exists before pre-event artifacts."""
+        ...
+
     def append(
         self,
         event: AgentEvent,

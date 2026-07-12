@@ -2976,6 +2976,10 @@ class SubagentRuntime:
         capability_profile_id: str,
     ) -> RuntimeSession:
         event_log = self._child_event_log_factory(child_runtime_session_id)
+        # Capability exposure artifacts are frozen before the child RunStart
+        # batch is committed.  PostgreSQL artifact ownership therefore needs
+        # the child session row to exist before the first event append.
+        event_log.ensure_runtime_session_owner()
         if hasattr(self.event_log_locator, "register"):
             self.event_log_locator.register(child_runtime_session_id, event_log)  # type: ignore[attr-defined]
         child = RuntimeSession(

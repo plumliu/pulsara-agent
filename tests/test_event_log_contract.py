@@ -615,6 +615,41 @@ def test_postgres_event_log_reloads_persisted_events(tmp_path: Path) -> None:
         _cleanup_session(dsn, runtime_session_id)
 
 
+def test_postgres_event_log_can_reserve_session_owner_before_first_event(
+    tmp_path: Path,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+
+    try:
+        event_log = PostgresEventLog(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        event_log.ensure_runtime_session_owner()
+
+        with psycopg.connect(dsn, row_factory=dict_row) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select id, workspace_root from sessions where id = %s",
+                    (runtime_session_id,),
+                )
+                row = cursor.fetchone()
+                cursor.execute(
+                    "select count(*) as count from agent_events where session_id = %s",
+                    (runtime_session_id,),
+                )
+                event_count = cursor.fetchone()["count"]
+
+        assert row == {"id": runtime_session_id, "workspace_root": str(tmp_path)}
+        assert event_count == 0
+        assert event_log.next_sequence() == 1
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
 def test_postgres_event_log_concurrent_append_keeps_unique_sequences(
     tmp_path: Path,
 ) -> None:
