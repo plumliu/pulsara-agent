@@ -1310,7 +1310,7 @@ def test_llm_runtime_does_not_persist_model_call_rejected() -> None:
 
 
 def test_run_start_model_target_is_required() -> None:
-    fields = run_start_permission_fields(EVENT_CONTEXT.run_id)
+    fields = run_start_permission_fields(EVENT_CONTEXT.run_id, user_input="x")
     fields.pop("model_target")
     with pytest.raises(ValidationError, match="model_target"):
         RunStartEvent(

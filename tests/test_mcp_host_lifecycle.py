@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import replace
 
 import pytest
 
 from tests.test_agent_runtime_loop import _pending_mcp_installation_audit
-from tests.test_host_lifecycle_contract import ScriptedTransport, _core, _open
+from tests.test_host_lifecycle_contract import (
+    ScriptedTransport,
+    _core,
+    _open,
+    _trusted_terminal_ask_policy,
+)
 
 from pulsara_agent.host import (
     HostCore,
@@ -16,6 +22,7 @@ from pulsara_agent.host import (
 )
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime import EventPublicationAfterCommitError
+from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.event import McpCapabilitySnapshotInstalledEvent, RunStartEvent
 from pulsara_agent.primitives.mcp import McpServerLifecycleTimingFact
@@ -333,7 +340,23 @@ def test_resume_audit_post_commit_publication_failure_acknowledges_pending(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    core = _core(monkeypatch, ScriptedTransport([]))
+    core = _core(
+        monkeypatch,
+        ScriptedTransport(
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "call:resume-audit",
+                            "name": "terminal",
+                            "arguments": json.dumps({"command": "printf ok"}),
+                        }
+                    ]
+                },
+                {"text": "unused after publication failure"},
+            ]
+        ),
+    )
 
     class FailInstallationAudit:
         async def on_published_event(self, published: RuntimePublishedEvent) -> None:
@@ -344,7 +367,15 @@ def test_resume_audit_post_commit_publication_failure_acknowledges_pending(
                 raise RuntimeError("synthetic resume audit observer failure")
 
     async def run() -> None:
-        session = await _open(core, tmp_path, host_session_id="host:resume-audit")
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:resume-audit",
+            policy=_trusted_terminal_ask_policy(),
+        )
+        await session.run_turn("suspend before MCP audit")
+        pending = session.get_pending_approval()
+        assert pending is not None
         runtime_session = session.wiring.runtime_wiring.runtime_session
         runtime_session.set_mcp_installation_contract(
             installation_id="mcp_installation:atomic",
@@ -352,14 +383,23 @@ def test_resume_audit_post_commit_publication_failure_acknowledges_pending(
         )
         failing = FailInstallationAudit()
         runtime_session.publisher.subscribe(failing)
-        state = session.wiring.agent_runtime.new_state()
 
         with pytest.raises(EventPublicationAfterCommitError):
-            await session._commit_pending_mcp_audits_for_resume(state)
+            await session.resolve_approval(
+                ApprovalResolution(
+                    approval_id=pending.approval_id,
+                    decisions=tuple(
+                        ToolApprovalDecision(
+                            tool_call_id=tool_call.id,
+                            confirmed=True,
+                        )
+                        for tool_call in pending.tool_calls
+                    ),
+                )
+            )
 
         assert runtime_session._pending_mcp_installation_audits == []
         runtime_session.publisher.unsubscribe(failing)
-        assert await session._commit_pending_mcp_audits_for_resume(state) == ()
         assert len(
             [
                 event

@@ -63,6 +63,7 @@ _LAZY_EXPORTS = {
     "RuntimeEventSubscriber": ("pulsara_agent.runtime.publisher", "RuntimeEventSubscriber"),
     "RuntimePublishedEvent": ("pulsara_agent.runtime.publisher", "RuntimePublishedEvent"),
     "RuntimeSession": ("pulsara_agent.runtime.session", "RuntimeSession"),
+    "RuntimeEventSnapshot": ("pulsara_agent.runtime.session", "RuntimeEventSnapshot"),
     "CommittedReducerError": ("pulsara_agent.runtime.session", "CommittedReducerError"),
     "EventCommitError": ("pulsara_agent.runtime.session", "EventCommitError"),
     "EventPublicationAfterCommitError": (

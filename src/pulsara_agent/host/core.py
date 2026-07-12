@@ -12,6 +12,7 @@ from uuid import uuid4
 from pulsara_agent.host.identity import HostWorkspaceInput, ResolvedWorkspace, resolve_workspace
 from pulsara_agent.host.registry import HostSessionRegistry, HostSessionSummary
 from pulsara_agent.host.resume import DanglingRunRepairResult, repair_dangling_runs_for_resume
+from pulsara_agent.host.run_boundary import HostBoundaryStopResult
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.host.session_manifest import (
     ResumableSessionSummary,
@@ -453,7 +454,7 @@ class HostCore:
         host_session_id: str,
         *,
         reason: AbortKind = AbortKind.USER_STOP,
-    ) -> AgentRunResult | None:
+    ) -> AgentRunResult | HostBoundaryStopResult | None:
         self._raise_if_not_accepting("stop the current turn")
         session = await self.get_session(host_session_id)
         return await session.stop_current_turn(reason=reason)

@@ -22,7 +22,8 @@ from pulsara_agent.runtime import (
     PendingPlanInteraction,
     PlanQuestionOption,
 )
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.mcp.types import McpRequiredStartupError
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.state import LoopStatus

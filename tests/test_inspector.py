@@ -7,7 +7,11 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import (
+    run_end_contract_fields,
+    run_start_permission_fields,
+    subagent_result_handoff_fields,
+)
 from tests.support import (
     compaction_completed_contract_fields,
     compaction_started_contract_fields,
@@ -18,6 +22,7 @@ from tests.support import (
 )
 
 from pulsara_agent.event import (
+    CapabilityExposureResolvedEvent,
     CapabilityGateDecisionEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
@@ -33,6 +38,7 @@ from pulsara_agent.event import (
     ReplyEndEvent,
     ReplyStartEvent,
     RunEndEvent,
+    RunInteractionResumeBoundaryEvent,
     RunStartEvent,
     SubagentEdgeRecordedEvent,
     SubagentMessageSentEvent,
@@ -64,6 +70,18 @@ from pulsara_agent.primitives.model_call import (
     CompactionTargetEstimateFact,
     ModelCallPurpose,
 )
+from pulsara_agent.primitives.capability import (
+    build_capability_resolve_basis,
+    build_capability_exposure_semantic,
+    build_capability_exposure_snapshot,
+    capability_authorization_fingerprint,
+    empty_capability_projection,
+)
+from pulsara_agent.primitives.run_boundary import InteractionResumeBoundaryFact
+from pulsara_agent.primitives.run_entry import (
+    CapabilityExposureOwnerFact,
+    HostRunBoundaryIdentityFact,
+)
 from pulsara_agent.primitives.mcp import (
     McpInstalledServerSnapshotFact,
     McpReconcileAttemptSummaryFact,
@@ -71,7 +89,8 @@ from pulsara_agent.primitives.mcp import (
 )
 from pulsara_agent.memory.candidates.pool import CANDIDATE_POOL_SCHEMA_SQL
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.subagent.facts import subagent_dependency_generation
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
@@ -84,8 +103,9 @@ def _stored(event, sequence: int):
 def _compiled_call_events(*, reported_usage: bool = True):
     ctx = _ctx("model-contract")
     call = test_resolved_call_fact()
-    permission = run_start_permission_fields(ctx.run_id)
-    permission["model_target"] = call.target
+    permission = run_start_permission_fields(
+        ctx.run_id, user_input="x", model_target=call.target
+    )
     usage_fields = model_call_end_fields(
         input_tokens=10,
         output_tokens=5,
@@ -444,17 +464,54 @@ def _subagent_budget_snapshot() -> dict[str, object]:
         "child_timeout_seconds": None,
         "max_total_child_runs_per_parent_run": 16,
         "max_result_summary_chars_per_child": 4_000,
+        "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
     }
 
 
-def _simple_run_events(ctx: EventContext, *, user_input: str, text: str):
+def _simple_run_events(
+    ctx: EventContext,
+    *,
+    user_input: str,
+    text: str,
+    include_exposure: bool = True,
+):
+    run_start = RunStartEvent(
+        **ctx.event_fields(),
+        **run_start_permission_fields(ctx.run_id, user_input=user_input),
+        user_input_chars=len(user_input),
+        metadata={"user_input": user_input},
+    )
+    assert run_start.new_run_boundary is not None
+    basis = run_start.new_run_boundary.capability_basis
+    projection = empty_capability_projection()
+    semantic = build_capability_exposure_semantic(
+        execution_surface=basis.execution_surface_identity,
+        catalog_projection=projection,
+        active_skill_projection=projection,
+        authorization_fingerprint=capability_authorization_fingerprint(()),
+    )
+    exposure = build_capability_exposure_snapshot(
+        exposure_id=f"exposure:{ctx.run_id}",
+        owner=basis.owner,
+        resolution_kind="initial",
+        resolve_basis=basis,
+        semantic=semantic,
+        authorization_entries=(),
+        source_exposure_id=None,
+    )
     return [
-        RunStartEvent(
-            **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id),
-            user_input_chars=len(user_input),
-            metadata={"user_input": user_input},
+        run_start,
+        *(
+            [
+                CapabilityExposureResolvedEvent(
+                    **ctx.event_fields(),
+                    exposure=exposure,
+                    exposure_revision=1,
+                )
+            ]
+            if include_exposure
+            else []
         ),
         ReplyStartEvent(**ctx.event_fields(), name="assistant"),
         TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
@@ -463,7 +520,12 @@ def _simple_run_events(ctx: EventContext, *, user_input: str, text: str):
         ),
         TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
         ReplyEndEvent(**ctx.event_fields()),
-        RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
+        RunEndEvent(
+            **run_end_contract_fields(ctx.run_id, status="finished"),
+            **ctx.event_fields(),
+            status="finished",
+            stop_reason="final",
+        ),
     ]
 
 
@@ -536,7 +598,8 @@ def test_inspect_run_rebuilds_timeline_and_assistant_reply(tmp_path: Path) -> No
         assert report["inspect_kind"] == "run"
         assert report["session"]["id"] == runtime_session_id
         assert report["run"]["status"] == "finished"
-        assert report["canonical"]["current_user_input"] == "hello"
+        assert report["canonical"]["current_user_input"]["chars"] == 5
+        assert report["canonical"]["current_user_input"]["text_redacted"] is True
         assert (
             report["canonical"]["permission_snapshot"]["permission_snapshot_id"]
             == f"permission_snapshot:{ctx.run_id}"
@@ -550,11 +613,276 @@ def test_inspect_run_rebuilds_timeline_and_assistant_reply(tmp_path: Path) -> No
             == "session_default"
         )
         assert report["timeline"]["status"] == "completed"
+        assert report["run_boundary"]["run_entry_kind"] == "host"
+        assert report["run_boundary"]["status"] == "committed"
+        assert report["run_boundary"]["current_user_chars"] == 5
+        assert report["run_boundary"]["current_user_content_sha256"]
         assert (
             "PULSARA_INSPECTOR_TEXT"
             in report["assistant_replies"][0]["content"][0]["text"]
         )
         assert report["diagnostics"] == []
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspector_projects_all_committed_resume_boundaries(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        ctx = _ctx("resume-boundary")
+        events = _simple_run_events(ctx, user_input="hello", text="done")
+        run_start = events[0]
+        source_event = events[1]
+        assert isinstance(run_start, RunStartEvent)
+        assert isinstance(source_event, CapabilityExposureResolvedEvent)
+        assert run_start.sequence is None
+        owner = CapabilityExposureOwnerFact(
+            owner_kind="host_boundary",
+            owner_id="boundary:resume:inspect",
+            host_boundary_kind="pre_interaction_resume",
+            runtime_session_id=runtime_session_id,
+            run_id=ctx.run_id,
+        )
+        source_basis = source_event.exposure.resolve_basis
+        basis = build_capability_resolve_basis(
+            basis_id="basis:resume:inspect",
+            basis_kind="continuation",
+            source_basis_id=source_basis.basis_id,
+            source_basis_fingerprint=source_basis.basis_fingerprint,
+            owner=owner,
+            workspace_identity_fingerprint=(
+                source_basis.workspace_identity_fingerprint
+            ),
+            memory_domain_id=source_basis.memory_domain_id,
+            permission_snapshot_id=source_basis.permission_snapshot_id,
+            plan_active=source_basis.plan_active,
+            active_skill_names=source_basis.active_skill_names,
+            user_intent_fingerprint=source_basis.user_intent_fingerprint,
+            prior_transcript_fingerprint=(
+                source_basis.prior_transcript_fingerprint
+            ),
+            mcp_installation_id=source_basis.mcp_installation_id,
+            execution_surface_identity=source_basis.execution_surface_identity,
+        )
+        effective = build_capability_exposure_snapshot(
+            exposure_id="exposure:resume:inspect",
+            owner=owner,
+            resolution_kind="continuation_reused",
+            resolve_basis=basis,
+            semantic=source_event.exposure.semantic,
+            authorization_entries=source_event.exposure.authorization_entries,
+            source_exposure_id=source_event.exposure.exposure_id,
+        )
+        identity = HostRunBoundaryIdentityFact(
+            boundary_id=owner.owner_id,
+            kind="pre_interaction_resume",
+            runtime_session_id=runtime_session_id,
+            run_id=ctx.run_id,
+            turn_id=ctx.turn_id,
+            reply_id=ctx.reply_id,
+            attempt_number=1,
+            observed_at_utc="2026-07-12T01:02:03Z",
+        )
+        exposure_event = CapabilityExposureResolvedEvent(
+            **ctx.event_fields(),
+            exposure=effective,
+            exposure_revision=2,
+        )
+        resume_event = RunInteractionResumeBoundaryEvent(
+            **ctx.event_fields(),
+            boundary=InteractionResumeBoundaryFact(
+                identity=identity,
+                original_run_start_event_id=run_start.id,
+                original_run_start_sequence=1,
+                interaction_id="approval:inspect",
+                interaction_kind="approval",
+                suspended_state_token_fingerprint="token-fp",
+                permission_snapshot_id=run_start.permission_snapshot_id,
+                model_target_fingerprint=run_start.model_target.target_fingerprint,
+                mcp_installation_id=run_start.mcp_installation_id,
+                source_exposure_id=source_event.exposure.exposure_id,
+                source_exposure_semantic_fingerprint=(
+                    source_event.exposure.exposure_semantic_fingerprint
+                ),
+                source_exposure_fact_fingerprint=(
+                    source_event.exposure.exposure_fact_fingerprint
+                ),
+                effective_exposure_id=effective.exposure_id,
+                effective_exposure_semantic_fingerprint=(
+                    effective.exposure_semantic_fingerprint
+                ),
+                effective_exposure_fact_fingerprint=(
+                    effective.exposure_fact_fingerprint
+                ),
+                exposure_transition="reused",
+                committed_mcp_audit_event_ids=(),
+            ),
+        )
+        log.extend([*events[:2], exposure_event, resume_event, *events[2:]])
+
+        report = _service(dsn).inspect_run(ctx.run_id)
+        assert len(report["continuation_boundaries"]) == 1
+        projected = report["continuation_boundaries"][0]
+        assert projected["boundary_id"] == identity.boundary_id
+        assert projected["exposure_transition"] == "reused"
+        assert projected["status"] == "committed"
+    finally:
+        _cleanup_session(dsn, runtime_session_id)
+
+
+def test_inspector_projects_primitive_child_entry_with_nullable_task(
+    tmp_path: Path,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    child_runtime_session_id = _runtime_session_id()
+    parent_runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(
+            dsn=dsn,
+            runtime_session_id=child_runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        ctx = _ctx("primitive-child-boundary")
+        fields = run_start_permission_fields(
+            ctx.run_id,
+            source="child_profile",
+            user_input="primitive objective",
+            turn_id=ctx.turn_id,
+            reply_id=ctx.reply_id,
+            mcp_installation_owner_runtime_session_id=(
+                parent_runtime_session_id
+            ),
+        )
+        entry = fields["subagent_run_entry"]
+        current_user = fields["current_user_message"]
+        assert entry is not None
+        fields["subagent_run_entry"] = entry.model_copy(
+            update={"subagent_task_id": None}
+        )
+        fields["current_user_message"] = current_user.model_copy(
+            update={"source_kind": "subagent_primitive_objective"}
+        )
+        run_start = RunStartEvent(
+            **ctx.event_fields(),
+            **fields,
+            user_input_chars=len("primitive objective"),
+        )
+        log.extend(
+            [
+                run_start,
+                RunEndEvent(
+                    **ctx.event_fields(),
+                    **run_end_contract_fields(ctx.run_id, status="finished"),
+                    status="finished",
+                    stop_reason="final",
+                ),
+            ]
+        )
+
+        report = _service(dsn).inspect_run(ctx.run_id)
+        assert report["run_boundary"]["run_entry_kind"] == "subagent_child"
+        child = report["child_run_entry"]
+        assert child["subagent_task_id"] is None
+        assert child["entry_mode"] == "primitive_run"
+        assert child["child_result_render_policy"]["renderer_version"] == "test:v1"
+        assert child["child_terminal_reference"] is None
+    finally:
+        _cleanup_session(dsn, child_runtime_session_id)
+
+
+def test_inspector_joins_preflight_compaction_to_host_boundary(tmp_path: Path) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    runtime_session_id = _runtime_session_id()
+    _connect_or_skip(dsn).close()
+    try:
+        log = PostgresEventLog(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+            workspace_root=tmp_path,
+        )
+        ctx = _ctx("boundary-compaction")
+        run_events = _simple_run_events(ctx, user_input="next", text="done")
+        run_start = run_events[0]
+        assert isinstance(run_start, RunStartEvent)
+        boundary = run_start.new_run_boundary
+        assert boundary is not None
+        compaction_id = f"context_compaction:{uuid4().hex}"
+        started_fields = compaction_started_contract_fields()
+        started = log.append(
+            ContextCompactionStartedEvent(
+                id="context_compaction_started:test-boundary",
+                **ctx.event_fields(),
+                **started_fields,
+                compaction_id=compaction_id,
+                trigger="auto",
+                reason="context_threshold",
+                window_number=1,
+                window_id="context_window:boundary",
+                threshold_tokens=200_000,
+                through_sequence=0,
+                keep_after_sequence=0,
+                host_boundary_id=boundary.identity.boundary_id,
+                host_boundary_kind="pre_run",
+            )
+        )
+        completed_fields = compaction_completed_contract_fields(
+            estimated_tokens_before=200_001,
+            estimated_tokens_after=1_000,
+        )
+        completed_fields["started_event_id"] = started.id
+        completed = log.append(
+            ContextCompactionCompletedEvent(
+                id=started.terminal_event_id,
+                **ctx.event_fields(),
+                **completed_fields,
+                compaction_id=compaction_id,
+                trigger="auto",
+                reason="context_threshold",
+                window_number=1,
+                window_id="context_window:boundary",
+                summary_artifact_id=f"artifact:missing:{uuid4().hex}",
+                summary_chars=10,
+                threshold_tokens=200_000,
+                through_sequence=0,
+                keep_after_sequence=0,
+                included_run_ids=[],
+                host_boundary_id=boundary.identity.boundary_id,
+                host_boundary_kind="pre_run",
+            )
+        )
+        assert completed.sequence is not None
+        transcript = boundary.transcript.model_copy(
+            update={
+                "preflight_compaction_id": compaction_id,
+                "preflight_compaction_terminal_event_id": completed.id,
+                "preflight_compaction_terminal_sequence": completed.sequence,
+            }
+        )
+        run_events[0] = run_start.model_copy(
+            update={
+                "new_run_boundary": boundary.model_copy(
+                    update={"transcript": transcript}
+                )
+            }
+        )
+        log.extend(run_events)
+
+        report = _service(dsn).inspect_run(ctx.run_id)
+        joined = report["run_boundary"]["preflight_compaction"]
+        assert joined["compaction_id"] == compaction_id
+        assert joined["terminal_event_id"] == completed.id
+        assert [item["event_id"] for item in joined["events"]] == [
+            started.id,
+            completed.id,
+        ]
     finally:
         _cleanup_session(dsn, runtime_session_id)
 
@@ -736,7 +1064,7 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
             [
                 RunStartEvent(
                     **ctx.event_fields(),
-                    **run_start_permission_fields(ctx.run_id),
+                    **run_start_permission_fields(ctx.run_id, user_input="hello"),
                     user_input_chars=5,
                     metadata={"user_input": "hello"},
                 ),
@@ -836,6 +1164,7 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
                 TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
                 ReplyEndEvent(**ctx.event_fields()),
                 RunEndEvent(
+                    **run_end_contract_fields(ctx.run_id, status="finished"),
                     **ctx.event_fields(), status="finished", stop_reason="final"
                 ),
             ]
@@ -1113,7 +1442,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
             [
                 RunStartEvent(
                     **target.event_fields(),
-                    **run_start_permission_fields(target.run_id),
+                    **run_start_permission_fields(target.run_id, user_input="target"),
                     user_input_chars=6,
                     metadata={"user_input": "target"},
                 ),
@@ -1133,6 +1462,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                 TextBlockEndEvent(**target.event_fields(), block_id="text:target"),
                 ReplyEndEvent(**target.event_fields()),
                 RunEndEvent(
+                    **run_end_contract_fields(target.run_id, status="finished"),
                     **target.event_fields(), status="finished", stop_reason="final"
                 ),
             ]
@@ -1141,7 +1471,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
             [
                 RunStartEvent(
                     **future.event_fields(),
-                    **run_start_permission_fields(future.run_id),
+                    **run_start_permission_fields(future.run_id, user_input="future"),
                     user_input_chars=6,
                     metadata={"user_input": "future"},
                 ),
@@ -1154,6 +1484,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                     summary="FUTURE_PROJECTION_NOT_SEEN",
                 ),
                 RunEndEvent(
+                    **run_end_contract_fields(future.run_id, status="finished"),
                     **future.event_fields(), status="finished", stop_reason="final"
                 ),
             ]
@@ -1178,18 +1509,39 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
             dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
         )
         ctx = _ctx("capability-surface")
-        events = _simple_run_events(ctx, user_input="hello", text="done")
+        events = _simple_run_events(
+            ctx,
+            user_input="hello",
+            text="done",
+            include_exposure=False,
+        )
+        run_start = events[0]
+        assert isinstance(run_start, RunStartEvent)
+        assert run_start.new_run_boundary is not None
+        basis = run_start.new_run_boundary.capability_basis
+        projection = empty_capability_projection()
+        semantic = build_capability_exposure_semantic(
+            execution_surface=basis.execution_surface_identity,
+            catalog_projection=projection,
+            active_skill_projection=projection,
+            authorization_fingerprint=capability_authorization_fingerprint(()),
+        )
+        exposure = build_capability_exposure_snapshot(
+            exposure_id="exposure:inspect",
+            owner=basis.owner,
+            resolution_kind="initial",
+            resolve_basis=basis,
+            semantic=semantic,
+            authorization_entries=(),
+            source_exposure_id=None,
+        )
         log.extend(
             [
                 events[0],
-                CustomEvent(
+                CapabilityExposureResolvedEvent(
                     **ctx.event_fields(),
-                    name="capability_exposure_resolved",
-                    value={
-                        "registry_generation": 1,
-                        "direct_names": ["read_file"],
-                        "callable_names": ["read_file"],
-                    },
+                    exposure=exposure,
+                    exposure_revision=1,
                 ),
                 CapabilityGateDecisionEvent(
                     **ctx.event_fields(),
@@ -1224,8 +1576,8 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
         report = _service(dsn).inspect_run(ctx.run_id)
 
         capability = report["capability_surface_as_seen"]
-        assert capability["latest_exposure"]["direct_names"] == ["read_file"]
-        assert capability["latest_exposure"]["callable_names"] == ["read_file"]
+        assert capability["latest_exposure"]["direct_names"] == []
+        assert capability["latest_exposure"]["callable_names"] == []
         assert capability["gate_decisions"] == [
             {
                 "sequence": capability["gate_decisions"][0]["sequence"],
@@ -1265,12 +1617,11 @@ def test_inspector_projects_bounded_mcp_installation_facts(tmp_path: Path) -> No
             dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
         )
         ctx = _ctx("mcp-installation")
-        permission = run_start_permission_fields(ctx.run_id)
-        permission.update(
-            {
-                "mcp_installation_id": "mcp_installation:inspect",
-                "mcp_installation_owner_runtime_session_id": runtime_session_id,
-            }
+        permission = run_start_permission_fields(
+            ctx.run_id,
+            user_input="mcp",
+            mcp_installation_id="mcp_installation:inspect",
+            mcp_installation_owner_runtime_session_id=runtime_session_id,
         )
         log.extend(
             [
@@ -1282,6 +1633,7 @@ def test_inspector_projects_bounded_mcp_installation_facts(tmp_path: Path) -> No
                 ),
                 _mcp_installed_event(ctx),
                 RunEndEvent(
+                    **run_end_contract_fields(ctx.run_id, status="finished"),
                     **ctx.event_fields(), status="finished", stop_reason="final"
                 ),
             ]
@@ -1325,12 +1677,11 @@ def test_inspector_joins_child_mcp_installation_through_owner_session(
             workspace_root=tmp_path,
         )
         parent_ctx = _ctx("mcp-parent-owner")
-        parent_fields = run_start_permission_fields(parent_ctx.run_id)
-        parent_fields.update(
-            {
-                "mcp_installation_id": "mcp_installation:inspect",
-                "mcp_installation_owner_runtime_session_id": parent_session_id,
-            }
+        parent_fields = run_start_permission_fields(
+            parent_ctx.run_id,
+            user_input="x" * 6,
+            mcp_installation_id="mcp_installation:inspect",
+            mcp_installation_owner_runtime_session_id=parent_session_id,
         )
         parent_log.extend(
             [
@@ -1341,6 +1692,7 @@ def test_inspector_joins_child_mcp_installation_through_owner_session(
                 ),
                 _mcp_installed_event(parent_ctx),
                 RunEndEvent(
+                    **run_end_contract_fields(parent_ctx.run_id, status="finished"),
                     **parent_ctx.event_fields(),
                     status="finished",
                     stop_reason="final",
@@ -1354,12 +1706,12 @@ def test_inspector_joins_child_mcp_installation_through_owner_session(
             workspace_root=tmp_path,
         )
         child_ctx = _ctx("mcp-child-owner")
-        child_fields = run_start_permission_fields(child_ctx.run_id)
-        child_fields.update(
-            {
-                "mcp_installation_id": "mcp_installation:inspect",
-                "mcp_installation_owner_runtime_session_id": parent_session_id,
-            }
+        child_fields = run_start_permission_fields(
+            child_ctx.run_id,
+            source="child_profile",
+            user_input="x" * 5,
+            mcp_installation_id="mcp_installation:inspect",
+            mcp_installation_owner_runtime_session_id=parent_session_id,
         )
         child_log.extend(
             [
@@ -1369,6 +1721,7 @@ def test_inspector_joins_child_mcp_installation_through_owner_session(
                     user_input_chars=5,
                 ),
                 RunEndEvent(
+                    **run_end_contract_fields(child_ctx.run_id, status="finished"),
                     **child_ctx.event_fields(),
                     status="finished",
                     stop_reason="final",
@@ -1398,12 +1751,11 @@ def test_inspector_reports_missing_mcp_installation_audit(tmp_path: Path) -> Non
             workspace_root=tmp_path,
         )
         ctx = _ctx("mcp-missing-audit")
-        fields = run_start_permission_fields(ctx.run_id)
-        fields.update(
-            {
-                "mcp_installation_id": "mcp_installation:missing",
-                "mcp_installation_owner_runtime_session_id": runtime_session_id,
-            }
+        fields = run_start_permission_fields(
+            ctx.run_id,
+            user_input="x",
+            mcp_installation_id="mcp_installation:missing",
+            mcp_installation_owner_runtime_session_id=runtime_session_id,
         )
         log.extend(
             [
@@ -1413,6 +1765,7 @@ def test_inspector_reports_missing_mcp_installation_audit(tmp_path: Path) -> Non
                     user_input_chars=1,
                 ),
                 RunEndEvent(
+                    **run_end_contract_fields(ctx.run_id, status="finished"),
                     **ctx.event_fields(), status="finished", stop_reason="final"
                 ),
             ]
@@ -1590,10 +1943,20 @@ def test_inspect_projects_subagent_graph(tmp_path: Path) -> None:
                     delivery_kind="spawn_task",
                 ),
                 SubagentRunCompletedEvent(
+                    **subagent_result_handoff_fields(
+                        subagent_run_id=subagent_run_id,
+                        child_runtime_session_id=child_runtime_session_id,
+                        child_run_id=f"child-run:{subagent_run_id}",
+                        result_id=result_id,
+                        summary="child summary",
+                        result_artifact_id=result_artifact_id,
+                        artifact_ids=(result_artifact_id,),
+                    ),
                     **ctx.event_fields(),
                     subagent_run_id=subagent_run_id,
                     parent_runtime_session_id=runtime_session_id,
                     child_runtime_session_id=child_runtime_session_id,
+                    child_run_id=f"child-run:{subagent_run_id}",
                     result_id=result_id,
                     summary="child summary",
                     result_artifact_id=result_artifact_id,
@@ -1704,8 +2067,8 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
             [
                 RunStartEvent(
                     **ctx.event_fields(),
-                    **run_start_permission_fields(ctx.run_id),
-                    user_input_chars=5,
+                    **run_start_permission_fields(ctx.run_id, user_input="tool"),
+                    user_input_chars=len("tool"),
                     metadata={"user_input": "tool"},
                 ),
                 ToolCallStartEvent(
@@ -1741,6 +2104,7 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
                     ],
                 ),
                 RunEndEvent(
+                    **run_end_contract_fields(ctx.run_id, status="finished"),
                     **ctx.event_fields(), status="finished", stop_reason="final"
                 ),
             ]

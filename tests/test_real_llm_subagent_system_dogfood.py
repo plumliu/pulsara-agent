@@ -10,9 +10,10 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support import run_agent_task
+from tests.support.capability import preview_capability_plan
 
-from pulsara_agent.capability.types import CapabilityResolveContext
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     EventContext,
@@ -37,7 +38,8 @@ from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime import LoopBudget
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.tools.base import ToolCall, ToolRuntimeContext
@@ -283,9 +285,10 @@ async def _run_independent_parallel_explicit_result_dogfood(
         assert len(waited) == 2, waited
         await wiring.runtime_wiring.runtime_session.write_event(
             RunEndEvent(
+                **run_end_contract_fields(context.run_id, status="finished"),
                 **context.event_fields(),
                 status="finished",
-                stop_reason="subagent_independent_explicit_dogfood",
+                stop_reason="final",
             )
         )
 
@@ -454,9 +457,10 @@ async def _run_durable_restart_wait_dogfood(
         assert RESTART_CHILD_SENTINEL in completed_before_restart.summary
         await first.runtime_wiring.runtime_session.write_event(
             RunEndEvent(
+                **run_end_contract_fields(seed_context.run_id, status="finished"),
                 **seed_context.event_fields(),
                 status="finished",
-                stop_reason="restart_seed_complete",
+                stop_reason="final",
             )
         )
     except Exception:
@@ -612,9 +616,10 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
         )
         await wiring.runtime_wiring.runtime_session.write_event(
             RunEndEvent(
+                **run_end_contract_fields(seed_context.run_id, status="finished"),
                 **seed_context.event_fields(),
                 status="finished",
-                stop_reason="failed_dependency_seed_complete",
+                stop_reason="final",
             )
         )
 
@@ -1005,19 +1010,16 @@ async def _write_seed_run_start(wiring, context: EventContext, user_input: str) 
     await runtime_session.write_event(
         RunStartEvent(
             **context.event_fields(),
-            user_input_chars=len(user_input),
-            permission_snapshot_id=f"permission_snapshot:{context.run_id}",
-            permission_mode=PermissionMode.BYPASS_PERMISSIONS.value,
-            permission_policy=preset_to_policy(
-                PermissionMode.BYPASS_PERMISSIONS
-            ).to_dict(),
-            permission_snapshot_source="session_default",
-            model_target=wiring.agent_runtime.resolve_run_model_target().fact,
-            mcp_installation_id=runtime_session.mcp_installation_id,
-            mcp_installation_owner_runtime_session_id=(
-                runtime_session.mcp_installation_owner_runtime_session_id
+            **run_start_permission_fields(
+                context.run_id,
+                user_input=user_input,
+                mcp_installation_id=runtime_session.mcp_installation_id,
+                mcp_installation_owner_runtime_session_id=(
+                    runtime_session.mcp_installation_owner_runtime_session_id
+                ),
+                model_target=wiring.agent_runtime.resolve_run_model_target().fact,
             ),
-            metadata={"user_input": user_input},
+            user_input_chars=len(user_input),
         )
     )
 
@@ -1027,19 +1029,16 @@ def _prime_subagent_parent_capability_snapshot(wiring) -> None:
     subagent_runtime = agent.subagent_runtime
     assert subagent_runtime is not None
     policy = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
-    exposure = agent.capability_runtime.resolve_for_turn(
-        CapabilityResolveContext(
-            workspace_root=agent.runtime_session.workspace_root,
-            workspace_kind=agent.workspace_kind,
-            memory_domain=agent.memory_domain,
-            available_tool_names=frozenset(agent.tool_executor.registry.names()),
-            user_input="Programmatic real-LLM subagent dogfood setup.",
-            prior_messages=(),
-            active_skill_names=frozenset(),
-        ),
+    exposure = preview_capability_plan(
+        agent.capability_runtime,
+        workspace_root=agent.runtime_session.workspace_root,
+        workspace_kind=agent.workspace_kind,
+        memory_domain=agent.memory_domain,
         tool_registry=agent.tool_executor.registry,
-        permission_policy=policy,
-        plan_active=False,
+        archive=agent.runtime_session.archive,
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        mcp_installation_id=agent.runtime_session.mcp_installation_id,
+        user_input="Programmatic real-LLM subagent dogfood setup.",
     )
     subagent_runtime.refresh_parent_capability_snapshot(
         exposure=exposure,

@@ -8,7 +8,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
@@ -331,7 +331,12 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
                     run_id=state.run_id,
                     turn_id=state.turn_id,
                     reply_id=state.reply_id,
-                    **run_start_permission_fields(state.run_id),
+                    **run_start_permission_fields(
+                        state.run_id,
+                        user_input="Current request: inspect the just-finished tool output.",
+                        turn_id=state.turn_id,
+                        reply_id=state.reply_id,
+                    ),
                     user_input_chars=len(
                         "Current request: inspect the just-finished tool output."
                     ),
@@ -437,12 +442,16 @@ def _append_turn(
     )
     log.extend(
         [
-            RunStartEvent(
-                **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=len(user_input),
-                metadata={"user_input": user_input},
-            ),
+                RunStartEvent(
+                    **ctx.event_fields(),
+                    **run_start_permission_fields(
+                        ctx.run_id,
+                        user_input=user_input,
+                        turn_id=ctx.turn_id,
+                        reply_id=ctx.reply_id,
+                    ),
+                    user_input_chars=len(user_input),
+                ),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
             TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
             TextBlockDeltaEvent(
@@ -450,7 +459,12 @@ def _append_turn(
             ),
             TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{label}"),
             ReplyEndEvent(**ctx.event_fields()),
-            RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
+            RunEndEvent(
+                **run_end_contract_fields(ctx.run_id, status="finished"),
+                **ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
+            ),
         ]
     )
 

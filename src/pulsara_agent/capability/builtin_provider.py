@@ -16,8 +16,12 @@ from pulsara_agent.capability.descriptor import (
     CapabilityDescriptor,
     CapabilityProviderKind,
 )
-from pulsara_agent.capability.provider import CapabilityProviderOutput
-from pulsara_agent.capability.types import CapabilityResolveContext
+from pulsara_agent.capability.provider import (
+    CapabilityDescriptorSnapshotOutput,
+)
+from pulsara_agent.capability.types import (
+    CapabilityExecutionSurfaceSnapshotContext,
+)
 
 
 DEFAULT_ARTIFACT_READ_CHARS = 20_000
@@ -57,18 +61,17 @@ def object_schema(*, properties: dict[str, Any], required: list[str]) -> dict[st
 class BuiltinToolCapabilityProvider:
     provider_id: str = "builtin-tools"
 
-    def resolve(
+    def snapshot_descriptors(
         self,
-        context: CapabilityResolveContext,
-        *,
-        bound_tool_names: frozenset[str],
-    ) -> CapabilityProviderOutput:
-        del context
-        return CapabilityProviderOutput(descriptors=tuple(
-            descriptor
-            for name, descriptor in sorted(_BUILTIN_DESCRIPTORS.items())
-            if name in bound_tool_names
-        ))
+        context: CapabilityExecutionSurfaceSnapshotContext,
+    ) -> CapabilityDescriptorSnapshotOutput:
+        return CapabilityDescriptorSnapshotOutput(
+            descriptors=tuple(
+                descriptor
+                for name, descriptor in sorted(_BUILTIN_DESCRIPTORS.items())
+                if name in context.available_tool_names
+            )
+        )
 
 
 def builtin_tool_descriptors() -> tuple[CapabilityDescriptor, ...]:

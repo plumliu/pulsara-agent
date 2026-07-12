@@ -1,4 +1,9 @@
-"""Capability provider protocol and common output shape."""
+"""Split capability provider protocols.
+
+Execution descriptors are frozen before ``RunStart``. Model-visible catalog and
+active-skill projections are resolved only after that execution surface exists.
+There is intentionally no mixed ``resolve()`` protocol.
+"""
 
 from __future__ import annotations
 
@@ -9,23 +14,51 @@ from pulsara_agent.capability.descriptor import CapabilityDescriptor
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     CapabilityDiagnostic,
-    CapabilityResolveContext,
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
+    RenderedCapabilityPrompt,
     ResolvedSkillCatalogEntry,
 )
+from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityProviderOutput:
+class CapabilityDescriptorSnapshotOutput:
     descriptors: tuple[CapabilityDescriptor, ...] = ()
+    diagnostics: tuple[CapabilityDiagnostic, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityProjectionOutput:
     catalog_entries: tuple[ResolvedSkillCatalogEntry, ...] = ()
     active_injections: tuple[ActiveSkillInjection, ...] = ()
     diagnostics: tuple[CapabilityDiagnostic, ...] = ()
     catalog_prompt: str | None = None
     active_skill_prompt: str | None = None
+    catalog_rendered: RenderedCapabilityPrompt | None = None
+    active_skill_rendered: RenderedCapabilityPrompt | None = None
 
 
-class CapabilityProvider(Protocol):
+class CapabilityExecutionSurfaceProvider(Protocol):
     provider_id: str
 
-    def resolve(self, context: CapabilityResolveContext, *, bound_tool_names: frozenset[str]) -> CapabilityProviderOutput:
-        """Resolve descriptors and prompt capability projections for one turn."""
+    def snapshot_descriptors(
+        self,
+        context: CapabilityExecutionSurfaceSnapshotContext,
+    ) -> CapabilityDescriptorSnapshotOutput: ...
+
+
+class CapabilityProjectionProvider(Protocol):
+    provider_id: str
+
+    def resolve_projection(
+        self,
+        context: CapabilityProjectionResolveContext,
+        *,
+        execution_surface: CapabilityExecutionSurfaceIdentityFact,
+    ) -> CapabilityProjectionOutput: ...
+
+
+type CapabilityProviderComponent = (
+    CapabilityExecutionSurfaceProvider | CapabilityProjectionProvider
+)

@@ -10,7 +10,8 @@ import pytest
 
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.llm import ModelRole
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.settings import PulsaraSettings
 
 

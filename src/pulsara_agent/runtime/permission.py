@@ -13,6 +13,11 @@ from pulsara_agent.capability.call_classifier import (
 )
 from pulsara_agent.capability.descriptor import CapabilityAvailability
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.primitives.permission import (
+    DEFAULT_PERMISSION_MODE as _DEFAULT_PERMISSION_MODE,
+    PermissionMode as _PermissionMode,
+    preset_permission_payload,
+)
 from pulsara_agent.runtime.terminal_risk import (
     is_hardline_terminal_command,
     is_risky_terminal_command,
@@ -70,18 +75,6 @@ class TerminalAccess(StrEnum):
     ASK = "ask"
 
 
-class PermissionMode(StrEnum):
-    """Named permission presets. The main product path (see PERMISSION_POLICY_CONTRACT)."""
-
-    READ_ONLY = "read-only"
-    ASK_PERMISSIONS = "ask-permissions"
-    ACCEPT_EDITS = "accept-edits"
-    BYPASS_PERMISSIONS = "bypass-permissions"
-
-
-DEFAULT_PERMISSION_MODE = PermissionMode.BYPASS_PERMISSIONS
-
-
 @dataclass(frozen=True, slots=True)
 class EffectivePermissionPolicy:
     profile: PermissionProfile
@@ -130,51 +123,18 @@ READ_ONLY_ALLOWED_TOOL_NAMES = frozenset(
 )
 
 
-# Named presets are the main product path (PERMISSION_POLICY_CONTRACT §2).
-# read-only's approval is contractually n/a (inert because mutating tools are
-# blocked before approval is evaluated); ON_REQUEST is stored as a placeholder.
-_PRESET_POLICIES: dict[PermissionMode, EffectivePermissionPolicy] = {
-    PermissionMode.READ_ONLY: EffectivePermissionPolicy(
-        profile=PermissionProfile.READ_ONLY,
-        approval=ApprovalPolicy.ON_REQUEST,
-        terminal=TerminalAccess.OFF,
-    ),
-    PermissionMode.ASK_PERMISSIONS: EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.ON_REQUEST,
-        terminal=TerminalAccess.ASK,
-    ),
-    PermissionMode.ACCEPT_EDITS: EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.NEVER,
-        terminal=TerminalAccess.ASK,
-    ),
-    PermissionMode.BYPASS_PERMISSIONS: EffectivePermissionPolicy(
-        profile=PermissionProfile.TRUSTED_HOST,
-        approval=ApprovalPolicy.NEVER,
-        terminal=TerminalAccess.ALLOW,
-    ),
-}
+def preset_to_policy(mode: str | _PermissionMode) -> EffectivePermissionPolicy:
+    payload = preset_permission_payload(mode)
+    return EffectivePermissionPolicy(
+        profile=PermissionProfile(str(payload["profile"])),
+        approval=ApprovalPolicy(str(payload["approval_policy"])),
+        terminal=TerminalAccess(str(payload["terminal_access"])),
+        execution_boundary="host",
+        network_isolated=bool(payload["network_isolated"]),
+    )
 
 
-def parse_permission_mode(value: str | PermissionMode) -> PermissionMode:
-    if isinstance(value, PermissionMode):
-        return value
-    normalized = str(value).strip()
-    try:
-        return PermissionMode(normalized)
-    except ValueError as exc:
-        allowed = ", ".join(item.value for item in PermissionMode)
-        raise ValueError(
-            f"Invalid permission mode: {value!r} (expected one of: {allowed})"
-        ) from exc
-
-
-def preset_to_policy(mode: str | PermissionMode) -> EffectivePermissionPolicy:
-    return _PRESET_POLICIES[parse_permission_mode(mode)]
-
-
-def mode_for_policy(policy: EffectivePermissionPolicy) -> PermissionMode | None:
+def mode_for_policy(policy: EffectivePermissionPolicy) -> _PermissionMode | None:
     """Reverse-map a policy to its preset mode, or None for a custom policy.
 
     This intentionally compares the full serialized payload, not just the
@@ -183,8 +143,8 @@ def mode_for_policy(policy: EffectivePermissionPolicy) -> PermissionMode | None:
     part of the preset identity as well.
     """
     policy_payload = policy.to_dict()
-    for mode, preset in _PRESET_POLICIES.items():
-        if preset.to_dict() == policy_payload:
+    for mode in _PermissionMode:
+        if preset_permission_payload(mode) == policy_payload:
             return mode
     return None
 
@@ -196,7 +156,7 @@ class PermissionState:
     on the next turn. The frozen EffectivePermissionPolicy stays a value."""
 
     policy: EffectivePermissionPolicy
-    mode: PermissionMode | None = None
+    mode: _PermissionMode | None = None
 
     @classmethod
     def from_policy(cls, policy: EffectivePermissionPolicy) -> "PermissionState":
@@ -210,8 +170,8 @@ def default_permission_policy(
     # inspect is read-only diagnostics; run defaults to the most aggressive
     # preset (bypass-permissions). workspace_kind no longer influences this.
     if intent == "inspect":
-        return preset_to_policy(PermissionMode.READ_ONLY)
-    return preset_to_policy(DEFAULT_PERMISSION_MODE)
+        return preset_to_policy(_PermissionMode.READ_ONLY)
+    return preset_to_policy(_DEFAULT_PERMISSION_MODE)
 
 
 def resolve_permission_policy(
@@ -354,7 +314,7 @@ class PolicyPermissionGate:
         if exposure_decision is not None:
             return exposure_decision
         descriptor = exposure.descriptors_by_name[call.name]
-        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not PermissionMode.BYPASS_PERMISSIONS:
+        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS:
             return PermissionDecision(
                 kind=PermissionDecisionKind.DENY,
                 reason="subagent_requires_bypass_mode",
@@ -453,7 +413,7 @@ class PolicyPermissionGate:
                         }
                     ],
                 )
-        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not PermissionMode.BYPASS_PERMISSIONS:
+        if call.name in SUBAGENT_SYSTEM_TOOL_NAMES and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS:
             return PermissionDecision(
                 kind=PermissionDecisionKind.DENY,
                 reason="subagent_requires_bypass_mode",

@@ -10,8 +10,19 @@ from threading import RLock
 from typing import Any, Iterable, Literal
 from uuid import uuid4
 
-from pulsara_agent.event import AgentEvent
+from pulsara_agent.event import (
+    AgentEvent,
+    CapabilityExposureResolvedEvent,
+    ContextCompactionCompletedEvent,
+    ContextCompactionFailedEvent,
+    ContextCompactionStartedEvent,
+    McpCapabilitySnapshotInstalledEvent,
+    RunEndEvent,
+    RunInteractionResumeBoundaryEvent,
+    RunStartEvent,
+)
 from pulsara_agent.event_log import (
+    EventBatchConfirmation,
     EventIdConflict,
     EventLog,
     EventLogWriteConflict,
@@ -86,6 +97,12 @@ class EventWriteResult:
                 f"Committed reducer {reducer_id!r} did not apply through sequence {last_sequence}"
             )
         return self.committed_events
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEventSnapshot:
+    events: tuple[AgentEvent, ...]
+    through_sequence: int
 
 
 class EventCommitError(RuntimeError):
@@ -376,6 +393,73 @@ class RuntimeSession:
     def ledger_reconciliation_required(self) -> bool:
         return self._ledger_reconciliation_required
 
+    def latch_event_commit_outcome_unknown(self) -> None:
+        """Fail closed when stable event IDs cannot establish commit existence."""
+
+        with self.write_coordinator.lock:
+            self._latch_ledger_reconciliation_required()
+
+    def require_mutation_allowed(self) -> None:
+        """Fail before any safe-point side effect when the ledger is latched."""
+
+        if self.reconciliation_required:
+            raise EventReconciliationRequired(
+                "RuntimeSession ledger or committed reducer requires reconciliation"
+            )
+
+    def read_event_snapshot_through_current(self) -> RuntimeEventSnapshot:
+        """Read one contiguous ledger snapshot under the session write boundary."""
+
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            events = tuple(self.event_log.iter())
+            through_sequence = self.event_log.next_sequence() - 1
+            if events:
+                sequences = [_event_sequence(event) for event in events]
+                if sequences != list(range(1, through_sequence + 1)):
+                    self._latch_ledger_reconciliation_required()
+                    raise EventReconciliationRequired(
+                        "RuntimeSession event snapshot is not contiguous"
+                    )
+            elif through_sequence != 0:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "RuntimeSession empty snapshot has non-zero high-water"
+                )
+            return RuntimeEventSnapshot(
+                events=events,
+                through_sequence=through_sequence,
+            )
+
+    def confirm_event_batch(
+        self,
+        candidates: Sequence[AgentEvent],
+    ) -> EventBatchConfirmation:
+        """Confirm a stable candidate batch after cancellation/unknown ack.
+
+        Candidates are normalized with the same RuntimeSession metadata overlay
+        used for the original write.  A partial atomic batch is structural ledger
+        corruption and permanently latches mutation.
+        """
+
+        prepared = self._prepare_event_batch(candidates)
+        with self.write_coordinator.lock:
+            confirmation = self.event_log.confirm_batch(prepared)
+            committed = confirmation.committed_events
+            if committed and confirmation.missing_event_ids:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "Only part of an atomic event batch can be confirmed by id"
+                )
+            if committed:
+                sequences = [_event_sequence(event) for event in committed]
+                if sequences != list(range(sequences[0], sequences[-1] + 1)):
+                    self._latch_ledger_reconciliation_required()
+                    raise EventReconciliationRequired(
+                        f"Confirmed event batch is not contiguous: {sequences}"
+                    )
+            return confirmation
+
     def register_committed_reducer(
         self,
         *,
@@ -515,6 +599,191 @@ class RuntimeSession:
             prepared.append(self._with_default_metadata(event))
         return tuple(prepared)
 
+    def _validate_run_lifecycle_batch(
+        self, events: tuple[AgentEvent, ...]
+    ) -> None:
+        """Enforce the stable RunStart-to-RunEnd identity before commit."""
+
+        starts_in_batch = {
+            event.run_id: event for event in events if isinstance(event, RunStartEvent)
+        }
+        if len(starts_in_batch) != sum(
+            isinstance(event, RunStartEvent) for event in events
+        ):
+            raise ValueError("event batch contains duplicate RunStart facts")
+        ends_in_batch: set[str] = set()
+        for terminal in (
+            event for event in events if isinstance(event, RunEndEvent)
+        ):
+            if terminal.run_id in ends_in_batch:
+                raise ValueError("event batch contains duplicate RunEnd facts")
+            ends_in_batch.add(terminal.run_id)
+            existing = tuple(self.event_log.iter(run_id=terminal.run_id))
+            starts = [
+                event for event in existing if isinstance(event, RunStartEvent)
+            ]
+            candidate_start = starts_in_batch.get(terminal.run_id)
+            if candidate_start is not None:
+                matching = next(
+                    (event for event in starts if event.id == candidate_start.id),
+                    None,
+                )
+                if matching is None:
+                    starts.append(candidate_start)
+                elif not _same_event_candidate(matching, candidate_start):
+                    raise ValueError("RunStart retry payload conflicts with ledger")
+            if len(starts) != 1:
+                raise ValueError("RunEnd requires exactly one durable RunStart")
+            if terminal.id != starts[0].terminal_run_end_event_id:
+                raise ValueError("RunEnd id does not match RunStart terminal contract")
+            existing_ends = [
+                event for event in existing if isinstance(event, RunEndEvent)
+            ]
+            if existing_ends:
+                if len(existing_ends) != 1 or not _same_event_candidate(
+                    existing_ends[0], terminal
+                ):
+                    raise ValueError("run already has a conflicting durable RunEnd")
+
+        compaction_starts = {
+            event.id: event
+            for event in events
+            if isinstance(event, ContextCompactionStartedEvent)
+        }
+        existing_events = tuple(self.event_log.iter())
+        for terminal in (
+            event
+            for event in events
+            if isinstance(
+                event,
+                (ContextCompactionCompletedEvent, ContextCompactionFailedEvent),
+            )
+            and event.started_event_id is not None
+        ):
+            starts = [
+                event
+                for event in existing_events
+                if isinstance(event, ContextCompactionStartedEvent)
+                and event.id == terminal.started_event_id
+            ]
+            candidate_start = compaction_starts.get(terminal.started_event_id)
+            if candidate_start is not None:
+                starts.append(candidate_start)
+            if len(starts) != 1:
+                raise ValueError(
+                    "compaction terminal requires exactly one matching Started"
+                )
+            started = starts[0]
+            if (
+                terminal.id != started.terminal_event_id
+                or terminal.compaction_id != started.compaction_id
+                or terminal.host_boundary_id != started.host_boundary_id
+                or terminal.host_boundary_kind != started.host_boundary_kind
+            ):
+                raise ValueError("compaction terminal pairing contract mismatch")
+            existing_terminals = [
+                event
+                for event in existing_events
+                if isinstance(
+                    event,
+                    (ContextCompactionCompletedEvent, ContextCompactionFailedEvent),
+                )
+                and event.started_event_id == started.id
+            ]
+            if existing_terminals and not (
+                len(existing_terminals) == 1
+                and _same_event_candidate(existing_terminals[0], terminal)
+            ):
+                raise ValueError("compaction Started already has a terminal fact")
+
+        existing_by_id = {event.id: event for event in existing_events}
+        candidate_index = {event.id: index for index, event in enumerate(events)}
+        exposure_candidates = {
+            event.exposure.exposure_id: event
+            for event in events
+            if isinstance(event, CapabilityExposureResolvedEvent)
+        }
+        for boundary_event in (
+            event
+            for event in events
+            if isinstance(event, RunInteractionResumeBoundaryEvent)
+        ):
+            boundary = boundary_event.boundary
+            start = existing_by_id.get(boundary.original_run_start_event_id)
+            if (
+                not isinstance(start, RunStartEvent)
+                or start.sequence != boundary.original_run_start_sequence
+                or start.run_id != boundary_event.run_id
+            ):
+                raise ValueError("resume boundary does not reference its Host RunStart")
+            if (
+                start.permission_snapshot_id != boundary.permission_snapshot_id
+                or start.model_target.target_fingerprint
+                != boundary.model_target_fingerprint
+            ):
+                raise ValueError("resume boundary changed a run-frozen contract")
+            source_exposure = next(
+                (
+                    event
+                    for event in existing_events
+                    if isinstance(event, CapabilityExposureResolvedEvent)
+                    and event.run_id == boundary_event.run_id
+                    and event.exposure.exposure_id == boundary.source_exposure_id
+                ),
+                None,
+            )
+            if (
+                source_exposure is None
+                or source_exposure.exposure.exposure_semantic_fingerprint
+                != boundary.source_exposure_semantic_fingerprint
+                or source_exposure.exposure.exposure_fact_fingerprint
+                != boundary.source_exposure_fact_fingerprint
+            ):
+                raise ValueError("resume boundary source exposure is unavailable")
+            effective = exposure_candidates.get(boundary.effective_exposure_id)
+            if (
+                effective is None
+                or candidate_index[effective.id] >= candidate_index[boundary_event.id]
+                or effective.run_id != boundary_event.run_id
+                or effective.exposure.exposure_semantic_fingerprint
+                != boundary.effective_exposure_semantic_fingerprint
+                or effective.exposure.exposure_fact_fingerprint
+                != boundary.effective_exposure_fact_fingerprint
+                or effective.exposure.owner.owner_id
+                != boundary.identity.boundary_id
+            ):
+                raise ValueError(
+                    "resume boundary effective exposure must precede it in the batch"
+                )
+            _validate_continuation_exposure_subset(
+                source_exposure.exposure,
+                effective.exposure,
+            )
+            expected_transition = (
+                "reused"
+                if effective.exposure.resolution_kind == "continuation_reused"
+                else "narrowed"
+            )
+            if boundary.exposure_transition != expected_transition:
+                raise ValueError("resume boundary exposure transition mismatch")
+            for audit_id in boundary.committed_mcp_audit_event_ids:
+                audit = next(
+                    (
+                        event
+                        for event in events
+                        if event.id == audit_id
+                        and isinstance(event, McpCapabilitySnapshotInstalledEvent)
+                    ),
+                    None,
+                )
+                if (
+                    audit is None
+                    or candidate_index[audit.id] >= candidate_index[effective.id]
+                ):
+                    raise ValueError(
+                        "resume boundary MCP audits must precede its exposure"
+                    )
+
     def _commit_reduce_enqueue(
         self,
         events: tuple[AgentEvent, ...],
@@ -542,6 +811,7 @@ class RuntimeSession:
                 raise EventReconciliationRequired(
                     "RuntimeSession ledger or committed reducer requires reconciliation"
                 )
+            self._validate_run_lifecycle_batch(events)
             try:
                 committed = tuple(
                     self.event_log.extend(
@@ -1010,6 +1280,86 @@ def _event_sequence(event: AgentEvent) -> int:
     if event.sequence is None:
         raise ValueError("Committed event is missing canonical sequence")
     return event.sequence
+
+
+def _same_event_candidate(stored: AgentEvent, candidate: AgentEvent) -> bool:
+    return stored.model_dump(mode="json", exclude={"sequence"}) == candidate.model_dump(
+        mode="json", exclude={"sequence"}
+    )
+
+
+def _validate_continuation_exposure_subset(source: Any, effective: Any) -> None:
+    """Fail closed if a durable continuation reveals anything not in source."""
+
+    source_auth = {
+        entry.capability_name: entry for entry in source.authorization_entries
+    }
+    effective_auth = {
+        entry.capability_name: entry for entry in effective.authorization_entries
+    }
+    if set(source_auth) != set(effective_auth):
+        raise ValueError("continuation authorization name set changed")
+    rank = {"hidden": 0, "deferred": 1, "direct": 2}
+    for name, entry in effective_auth.items():
+        original = source_auth[name]
+        if (
+            entry.descriptor_fingerprint != original.descriptor_fingerprint
+            or entry.binding_fingerprint != original.binding_fingerprint
+            or rank[entry.disposition] > rank[original.disposition]
+        ):
+            raise ValueError("continuation authorization widened or changed")
+
+    source_surface = {
+        entry.capability_name: entry
+        for entry in source.semantic.execution_surface.entries
+    }
+    for entry in effective.semantic.execution_surface.entries:
+        original = source_surface.get(entry.capability_name)
+        if original is None or (
+            entry.provider_id != original.provider_id
+            or entry.descriptor_id != original.descriptor_id
+            or entry.descriptor_fingerprint != original.descriptor_fingerprint
+            or entry.binding_fingerprint != original.binding_fingerprint
+            or entry.binding_contract_id != original.binding_contract_id
+            or entry.binding_contract_version != original.binding_contract_version
+        ):
+            raise ValueError("continuation execution surface is not a source subset")
+
+    for source_projection, effective_projection in (
+        (
+            source.semantic.catalog_projection,
+            effective.semantic.catalog_projection,
+        ),
+        (
+            source.semantic.active_skill_projection,
+            effective.semantic.active_skill_projection,
+        ),
+    ):
+        source_entries = {
+            entry.projection_entry_id: entry
+            for entry in source_projection.visible_source_entries
+        }
+        for entry in effective_projection.visible_source_entries:
+            original = source_entries.get(entry.projection_entry_id)
+            if (
+                original is None
+                or original.content_fingerprint != entry.content_fingerprint
+            ):
+                raise ValueError("continuation projection contains a new source entry")
+        source_fragments = {
+            fragment.fragment_id: fragment
+            for fragment in source_projection.rendered_fragments
+        }
+        for fragment in effective_projection.rendered_fragments:
+            original = source_fragments.get(fragment.fragment_id)
+            if original is None or (
+                fragment.fragment_fingerprint != original.fragment_fingerprint
+                or fragment.fragment_artifact_id != original.fragment_artifact_id
+                or fragment.source_entry_id != original.source_entry_id
+                or fragment.source_content_fingerprint
+                != original.source_content_fingerprint
+            ):
+                raise ValueError("continuation projection contains a new fragment")
 
 
 def _contiguous_interval(

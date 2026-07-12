@@ -14,8 +14,16 @@ from pulsara_agent.capability.descriptor import (
     CapabilityProviderKind,
     CapabilityProvenance,
 )
-from pulsara_agent.capability.provider import CapabilityProviderOutput
-from pulsara_agent.capability.types import CapabilityDiagnostic, CapabilityResolveContext
+from pulsara_agent.capability.provider import (
+    CapabilityDescriptorSnapshotOutput,
+    CapabilityProjectionOutput,
+)
+from pulsara_agent.capability.types import (
+    CapabilityDiagnostic,
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
+)
+from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import (
     McpInstalledCapabilitySnapshot,
@@ -33,16 +41,33 @@ class McpCapabilityProvider:
     installation: McpInstalledCapabilitySnapshot
     provider_id: str = "mcp"
 
-    def resolve(
+    def snapshot_descriptors(
         self,
-        context: CapabilityResolveContext,
+        context: CapabilityExecutionSurfaceSnapshotContext,
+    ) -> CapabilityDescriptorSnapshotOutput:
+        if context.mcp_installation_id != self.installation.installation_id:
+            raise ValueError("MCP descriptor snapshot installation mismatch")
+        available = context.available_tool_names
+        return CapabilityDescriptorSnapshotOutput(
+            descriptors=tuple(
+                descriptor
+                for descriptor in self.installation.descriptors
+                if descriptor.name in available
+            ),
+            diagnostics=tuple(self.installation.diagnostics),
+        )
+
+    def resolve_projection(
+        self,
+        context: CapabilityProjectionResolveContext,
         *,
-        bound_tool_names: frozenset[str],
-    ) -> CapabilityProviderOutput:
-        del context, bound_tool_names
-        return CapabilityProviderOutput(
-            descriptors=tuple(self.installation.descriptors),  # type: ignore[arg-type]
-            diagnostics=tuple(self.installation.diagnostics),  # type: ignore[arg-type]
+        execution_surface: CapabilityExecutionSurfaceIdentityFact,
+    ) -> CapabilityProjectionOutput:
+        del context
+        if execution_surface.mcp_installation_id != self.installation.installation_id:
+            raise ValueError("MCP projection installation mismatch")
+        return CapabilityProjectionOutput(
+            diagnostics=tuple(self.installation.diagnostics),
             catalog_prompt=_render_mcp_lifecycle_prompt(self.installation),
         )
 

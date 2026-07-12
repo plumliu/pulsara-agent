@@ -116,6 +116,14 @@ Compaction summary 必须带 no-write-back fence，并明确区分:
 - Compact model 不得获得工具 schema；compact prompt 必须强制 text-only/no-tools。
 - Compact model stream 中出现 `RUN_ERROR` 必须使本次 compaction 失败，即便此前已经产生部分文本。
 - Malformed compact output（例如未闭合的 `<analysis>` 或 `<summary>`）不得写入 summary artifact。
+- Started durable后必须由service-owned bounded terminalization owner持有到Completed/Failed确认提交；普通函数栈不是owner。
+- cancellation不得无界等待writer。stable candidate confirmation为full时收口；none保留candidate；partial/conflict/unknown fail closed。
+- Host close必须bounded drain pending compaction terminal owners；失败时停止session/lease/workspace teardown。
+- caller取消时若Started write仍在运行且当前confirmation为missing，write ownership必须转交service-owned pending commit；
+  迟到full commit必须使用Started冻结的terminal ID补terminal fact，确认none才可删除provisional owner。
+- confirmation读取自身抛错时同样必须转移pending owner；不得把unknown confirmation降格为raw cancellation并遗忘后台write。
+- session/recovery发现orphan Started时，使用Started冻结的terminal ID和模型/预算事实写
+  `recovery_terminalization/recovered_interrupted` Failed event，不重新resolve模型或重新规划window。
 
 ## 7. Inspector
 
@@ -149,3 +157,10 @@ Inspector 必须能解释:
 - inspector windows 显示 mid-turn phase/safe-point metadata;
 - inspector windows/diagnostics;
 - real LLM dogfood 覆盖 long-session compact/resume。
+
+## 9. Host boundary pairing
+
+preflight compaction Started/Completed/Failed 必须携带同一个 `host_boundary_id` 与 `host_boundary_kind=pre_run`；manual与
+mid-turn两字段均为空。Started预生成稳定 terminal event ID；所有 terminal fact必须引用唯一 Started。Inspector只按该
+boundary identity join到随后RunStart，不按“最近event”或run attribution猜测。Started后取消也必须写稳定 cancelled Failed；
+terminal commit outcome未知时阻止破坏性close，不能留下静默dangling Started。

@@ -21,8 +21,11 @@ from tests.support.settings import compatibility_storage_config
 
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityExposureResolvedEvent,
     EventContext,
     RunEndEvent,
+    RunInteractionResumeBoundaryEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -47,11 +50,8 @@ from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime import AbortKind, ApprovalResolution, ToolApprovalDecision
-from pulsara_agent.runtime.permission import (
-    EffectivePermissionPolicy,
-    PermissionMode,
-    preset_to_policy,
-)
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.runtime.terminal import (
     BorrowedWorkspaceTerminalRuntime,
     PendingTerminalCompletionError,
@@ -1233,12 +1233,15 @@ def test_close_active_streaming_run_emits_auditable_host_teardown(
         owned = s._active_task is not None  # the HostSession owns the streaming task
         await core.close_session("host:stream")
         await consumer
-        return owned, events, s.closed
+        return owned, events, s.replay_events(), s.closed
 
-    owned, events, closed = asyncio.run(run())
+    owned, _streamed_events, ledger_events, closed = asyncio.run(run())
     assert owned  # streaming turn is drainable via the owned handle (P0-6)
     assert closed
-    run_ends = [e for e in events if isinstance(e, RunEndEvent)]
+    # Close first detaches the transport observer so a full queue cannot block
+    # terminalization. The terminal fact remains durable even when the detached
+    # stream does not observe it.
+    run_ends = [e for e in ledger_events if isinstance(e, RunEndEvent)]
     assert run_ends and run_ends[-1].status == "aborted"
     assert run_ends[-1].abort_kind == "host_teardown"  # not masqueraded as user_stop
 
@@ -1310,6 +1313,7 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
         )
         await s.run_turn("do x")  # suspends on terminal-ask approval
         pending = s.get_pending_approval()
+        suspended_boundary = s.summary()["boundary"]
         events: list[AgentEvent] = []
 
         async def consume():
@@ -1325,14 +1329,148 @@ def test_streaming_resume_is_owned_by_host_session(tmp_path, monkeypatch) -> Non
                 events.append(event)
 
         resume_task = asyncio.create_task(consume())
-        await asyncio.sleep(0.05)
+        for _ in range(100):
+            if s._active_task is not None:
+                break
+            await asyncio.sleep(0.005)
         owned = s._active_task is not None  # resume runs under the same owned handle
+        active_boundary = s.summary()["boundary"]
         await resume_task
         await core.shutdown()
-        return owned
+        return owned, events, suspended_boundary, active_boundary
 
-    owned = asyncio.run(run())
+    owned, events, suspended_boundary, active_boundary = asyncio.run(run())
     assert owned
+    assert suspended_boundary["state"] == "committed"
+    assert suspended_boundary["active_segment_id"] is None
+    assert active_boundary["active_segment_generation"] == 2
+    assert active_boundary["active_segment_owner_kind"] == "host_resume_boundary"
+    continuation_exposures = [
+        event
+        for event in events
+        if isinstance(event, CapabilityExposureResolvedEvent)
+        and event.exposure_revision == 2
+    ]
+    resume_boundaries = [
+        event
+        for event in events
+        if isinstance(event, RunInteractionResumeBoundaryEvent)
+    ]
+    assert len(continuation_exposures) == 1
+    assert len(resume_boundaries) == 1
+    assert (
+        resume_boundaries[0].boundary.effective_exposure_id
+        == continuation_exposures[0].exposure.exposure_id
+    )
+
+
+def test_cancel_after_run_start_commit_terminalizes_stable_run(
+    tmp_path, monkeypatch
+) -> None:
+    core = _core(monkeypatch, ScriptedTransport([{"text": "unused"}]))
+
+    async def run():
+        session = await _open(core, tmp_path, host_session_id="host:cancel-start")
+        runtime = session.wiring.runtime_wiring.runtime_session
+        original = type(runtime).emit_many
+        injected = False
+
+        async def commit_then_cancel(self, events, *, state=None):
+            nonlocal injected
+            stored = await original(self, events, state=state)
+            if not injected and any(
+                isinstance(event, RunStartEvent) for event in events
+            ):
+                injected = True
+                raise asyncio.CancelledError
+            return stored
+
+        monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await session.run_turn("cancel after commit")
+        events = session.replay_events()
+        started = next(event for event in events if isinstance(event, RunStartEvent))
+        ended = next(event for event in events if isinstance(event, RunEndEvent))
+        await core.shutdown()
+        return started, ended
+
+    started, ended = asyncio.run(run())
+    assert ended.id == started.terminal_run_end_event_id
+    assert ended.status == "failed"
+
+
+def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
+    tmp_path, monkeypatch
+) -> None:
+    core = _core(
+        monkeypatch,
+        ScriptedTransport(
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "call:ask-cancel",
+                            "name": "terminal",
+                            "arguments": json.dumps({"command": "printf ok"}),
+                        }
+                    ]
+                },
+                {"text": "unused"},
+            ]
+        ),
+    )
+
+    async def run():
+        session = await _open(
+            core,
+            tmp_path,
+            host_session_id="host:cancel-resume",
+            policy=_trusted_terminal_ask_policy(),
+        )
+        await session.run_turn("suspend")
+        pending = session.get_pending_approval()
+        assert pending is not None
+        runtime = session.wiring.runtime_wiring.runtime_session
+        original = type(runtime).emit_many
+        injected = False
+
+        async def commit_then_cancel(self, events, *, state=None):
+            nonlocal injected
+            stored = await original(self, events, state=state)
+            if not injected and any(
+                isinstance(event, RunInteractionResumeBoundaryEvent)
+                for event in events
+            ):
+                injected = True
+                raise asyncio.CancelledError
+            return stored
+
+        monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await session.resolve_approval(
+                ApprovalResolution(
+                    approval_id=pending.approval_id,
+                    decisions=tuple(
+                        ToolApprovalDecision(tool_call_id=call.id, confirmed=True)
+                        for call in pending.tool_calls
+                    ),
+                )
+            )
+        events = session.replay_events()
+        started = next(event for event in events if isinstance(event, RunStartEvent))
+        boundary = next(
+            event
+            for event in events
+            if isinstance(event, RunInteractionResumeBoundaryEvent)
+        )
+        ended = next(event for event in events if isinstance(event, RunEndEvent))
+        await core.shutdown()
+        return started, boundary, ended
+
+    started, boundary, ended = asyncio.run(run())
+    assert boundary.boundary.original_run_start_event_id == started.id
+    assert ended.id == started.terminal_run_end_event_id
+    assert ended.status == "failed"
 
 
 def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(

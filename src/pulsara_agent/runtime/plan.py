@@ -9,7 +9,8 @@ from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent, PlanQuestionOption
 from pulsara_agent.runtime.approval import PendingApproval
-from pulsara_agent.runtime.permission import EffectivePermissionPolicy, PermissionMode, parse_permission_mode
+from pulsara_agent.primitives.permission import PermissionMode, parse_permission_mode
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy
 from pulsara_agent.runtime.permission_snapshot import validate_preset_policy_payload
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 PLAN_ENTRY_INSTRUCTION_NAME = "plan_entry_instruction"

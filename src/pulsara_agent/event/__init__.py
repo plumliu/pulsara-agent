@@ -15,6 +15,7 @@ from pulsara_agent.event.candidates import (
 from pulsara_agent.event.events import (
     AgentEvent,
     CapabilityGateDecisionEvent,
+    CapabilityExposureResolvedEvent,
     ConfirmResult,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
@@ -63,6 +64,7 @@ from pulsara_agent.event.events import (
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
+    RunInteractionResumeBoundaryEvent,
     RunStartEvent,
     SubagentEdgeRecordedEvent,
     SubagentBudgetSnapshotEvent,
@@ -107,6 +109,7 @@ from pulsara_agent.event.events import (
 __all__ = [
     "AgentEvent",
     "CapabilityGateDecisionEvent",
+    "CapabilityExposureResolvedEvent",
     "ActionBoundaryCandidate",
     "CandidatePayload",
     "ClaimCandidate",
@@ -165,6 +168,7 @@ __all__ = [
     "RequireUserConfirmEvent",
     "RunEndEvent",
     "RunErrorEvent",
+    "RunInteractionResumeBoundaryEvent",
     "RunStartEvent",
     "SubagentEdgeRecordedEvent",
     "SubagentBudgetSnapshotEvent",

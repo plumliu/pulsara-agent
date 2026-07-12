@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any
 
-from pulsara_agent.memory.foundation.records import ArtifactRecord, ArtifactTextSlice, ArtifactWriteResult
+from pulsara_agent.memory.foundation.records import (
+    ArtifactContentConflict,
+    ArtifactPutConfirmation,
+    ArtifactRecord,
+    ArtifactTextSlice,
+    ArtifactWriteResult,
+)
+from pulsara_agent.primitives.model_call import canonical_json_bytes
 
 
 @dataclass(slots=True)
@@ -28,6 +37,7 @@ class ArchiveBlob:
 @dataclass(slots=True)
 class InMemoryArchiveStore:
     blobs: dict[str, ArchiveBlob] = field(default_factory=dict)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def put_text(
         self,
@@ -124,6 +134,60 @@ class InMemoryArchiveStore:
             size_bytes=len(content),
         )
 
+    def put_text_if_absent_or_confirm_identical(
+        self,
+        blob_id: str,
+        content: str,
+        *,
+        session_id: str | None,
+        run_id: str | None,
+        media_type: str,
+        semantic_metadata: dict[str, Any],
+    ) -> ArtifactPutConfirmation:
+        metadata = canonical_artifact_semantic_metadata(semantic_metadata)
+        encoded = content.encode("utf-8")
+        digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        stored_at = f"archive://{blob_id}"
+        with self._lock:
+            existing = self.blobs.get(blob_id)
+            if existing is None:
+                self.blobs[blob_id] = ArchiveBlob(
+                    id=blob_id,
+                    text_content=content,
+                    binary_content=None,
+                    digest=digest,
+                    stored_at=stored_at,
+                    media_type=media_type,
+                    size_bytes=len(encoded),
+                    created_at=_utc_now(),
+                    metadata=metadata,
+                    session_id=session_id,
+                    run_id=run_id,
+                )
+                status = "inserted"
+            else:
+                _validate_deterministic_text_identity(
+                    existing,
+                    content=content,
+                    digest=digest,
+                    size_bytes=len(encoded),
+                    media_type=media_type,
+                    session_id=session_id,
+                    run_id=run_id,
+                    semantic_metadata=metadata,
+                )
+                status = "confirmed_identical"
+                stored_at = existing.stored_at
+        return ArtifactPutConfirmation(
+            status=status,
+            result=ArtifactWriteResult(
+                id=blob_id,
+                digest=digest,
+                stored_at=stored_at,
+                size_bytes=len(encoded),
+            ),
+        )
+
     def get_info(self, blob_id: str, *, session_id: str | None = None) -> ArtifactRecord:
         blob = self._blob(blob_id, session_id=session_id)
         return _record(blob)
@@ -207,6 +271,44 @@ def _validate_identity(
         raise ValueError(f"artifact {blob.id!r} already belongs to runtime session {blob.session_id!r}")
     if run_id is not None and blob.run_id != run_id:
         raise ValueError(f"artifact {blob.id!r} already belongs to run {blob.run_id!r}")
+
+
+def canonical_artifact_semantic_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(canonical_json_bytes(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("artifact semantic metadata must be strict JSON") from exc
+
+
+def _validate_deterministic_text_identity(
+    blob: ArchiveBlob,
+    *,
+    content: str,
+    digest: str,
+    size_bytes: int,
+    media_type: str,
+    session_id: str | None,
+    run_id: str | None,
+    semantic_metadata: dict[str, Any],
+) -> None:
+    conflicts: list[str] = []
+    if (
+        blob.text_content != content
+        or blob.binary_content is not None
+        or blob.digest != digest
+        or blob.size_bytes != size_bytes
+    ):
+        conflicts.append("content")
+    if blob.media_type != media_type:
+        conflicts.append("media_type")
+    if blob.session_id != session_id or blob.run_id != run_id:
+        conflicts.append("ownership")
+    if canonical_artifact_semantic_metadata(blob.metadata) != semantic_metadata:
+        conflicts.append("semantic_metadata")
+    if conflicts:
+        raise ArtifactContentConflict(
+            f"artifact {blob.id!r} deterministic identity conflict: {','.join(conflicts)}"
+        )
 
 
 def _utc_now() -> str:

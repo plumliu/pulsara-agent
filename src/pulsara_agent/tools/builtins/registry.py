@@ -43,7 +43,10 @@ from pulsara_agent.tools.builtins.subagent import (
 from pulsara_agent.tools.builtins.terminal import TerminalTool
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
-from pulsara_agent.tools.registry import ToolRegistry
+from pulsara_agent.tools.registry import (
+    ToolRegistry,
+    build_tool_binding_contract,
+)
 
 
 def build_core_tool_registry(
@@ -61,18 +64,51 @@ def build_core_tool_registry(
         raise TypeError("build_core_tool_registry requires a RuntimeSession")
     root = runtime_session.workspace_root
     registry = ToolRegistry()
+
+    def register(
+        tool: Tool | AsyncTool,
+        *,
+        origin: str = "builtin",
+    ) -> None:
+        binding_identity = getattr(tool, "binding_identity", None)
+        binding_attributes = None
+        if binding_identity is not None:
+            binding_attributes = {
+                "server_id": getattr(binding_identity, "server_id", None),
+                "slot_id": getattr(binding_identity, "slot_id", None),
+                "snapshot_id": getattr(binding_identity, "snapshot_id", None),
+                "discovery_generation": getattr(
+                    binding_identity, "discovery_generation", None
+                ),
+            }
+        contract_id = str(
+            getattr(tool, "binding_contract_id", f"pulsara.{origin}.{tool.name}")
+        )
+        contract_version = str(
+            getattr(tool, "binding_contract_version", "v1")
+        )
+        registry.register(
+            tool,
+            binding_contract=build_tool_binding_contract(
+                tool_name=tool.name,
+                origin=origin,  # type: ignore[arg-type]
+                contract_id=contract_id,
+                contract_version=contract_version,
+                binding_attributes=binding_attributes,
+            ),
+        )
     # PERMISSION_POLICY_CONTRACT: gate is the sole authority. All tools are
     # registered unconditionally and stay visible across every mode; the
     # PolicyPermissionGate denies disallowed calls at evaluation time
     # (visible-but-blocked). This keeps the tools array constant across mode
     # switches so the prompt prefix cache stays stable.
-    registry.register(ArtifactReadTool(runtime_session))
-    registry.register(EnterPlanTool())
-    registry.register(AskPlanQuestionTool())
-    registry.register(ExitPlanTool())
-    registry.register(ReadFileTool(root))
-    registry.register(SearchFilesTool(root))
-    registry.register(
+    register(ArtifactReadTool(runtime_session))
+    register(EnterPlanTool(), origin="workflow")
+    register(AskPlanQuestionTool(), origin="workflow")
+    register(ExitPlanTool(), origin="workflow")
+    register(ReadFileTool(root))
+    register(SearchFilesTool(root))
+    register(
         TerminalTool(
             root,
             runtime_session.terminal_sessions,
@@ -81,7 +117,7 @@ def build_core_tool_registry(
             permission_state=permission_state,
         )
     )
-    registry.register(
+    register(
         TerminalProcessTool(
             root,
             runtime_session.terminal_sessions,
@@ -89,11 +125,11 @@ def build_core_tool_registry(
             permission_state=permission_state,
         )
     )
-    registry.register(EditFileTool(root))
-    registry.register(WriteFileTool(root))
-    registry.register(TodoTool())
+    register(EditFileTool(root))
+    register(WriteFileTool(root))
+    register(TodoTool())
     if memory_recall_service is not None:
-        registry.register(
+        register(
             MemorySearchTool(
                 recall=memory_recall_service,
                 graph_id=graph_id,
@@ -101,14 +137,14 @@ def build_core_tool_registry(
             )
         )
     if memory_query is not None:
-        registry.register(
+        register(
             MemoryGetTool(
                 memory_query=memory_query,
                 graph_id=graph_id,
                 read_scopes=memory_read_scopes,
             )
         )
-        registry.register(
+        register(
             MemoryExplainTool(
                 memory_query=memory_query,
                 graph_id=graph_id,
@@ -116,25 +152,32 @@ def build_core_tool_registry(
             )
         )
     if memory_proposal_sink is not None:
-        registry.register(RememberClaimTool(sink=memory_proposal_sink))
-        registry.register(RememberPreferenceTool(sink=memory_proposal_sink))
-        registry.register(RememberObservationTool(sink=memory_proposal_sink))
-        registry.register(RememberActionBoundaryTool(sink=memory_proposal_sink))
-        registry.register(RememberDecisionTool(sink=memory_proposal_sink))
+        register(RememberClaimTool(sink=memory_proposal_sink))
+        register(RememberPreferenceTool(sink=memory_proposal_sink))
+        register(RememberObservationTool(sink=memory_proposal_sink))
+        register(RememberActionBoundaryTool(sink=memory_proposal_sink))
+        register(RememberDecisionTool(sink=memory_proposal_sink))
     subagent_context = runtime_session.default_event_metadata.get("subagent")
     if runtime_session.subagent_runtime is not None and isinstance(subagent_context, dict):
         subagent_run_id = subagent_context.get("subagent_run_id")
         if isinstance(subagent_run_id, str) and subagent_run_id:
-            registry.register(ReportAgentPhaseTool(runtime_session.subagent_runtime, subagent_run_id))
-            registry.register(ReportAgentResultTool(runtime_session.subagent_runtime, subagent_run_id))
+            register(
+                ReportAgentPhaseTool(runtime_session.subagent_runtime, subagent_run_id),
+                origin="subagent_system",
+            )
+            register(
+                ReportAgentResultTool(runtime_session.subagent_runtime, subagent_run_id),
+                origin="subagent_system",
+            )
     elif runtime_session.subagent_runtime is not None:
-        registry.register(SpawnAgentTool(runtime_session.subagent_runtime))
-        registry.register(WaitAgentTool(runtime_session.subagent_runtime))
-        registry.register(StopAgentTool(runtime_session.subagent_runtime))
-        registry.register(ListAgentsTool(runtime_session.subagent_runtime))
-        registry.register(CreateAgentTasksTool(runtime_session.subagent_runtime))
-        registry.register(WaitAgentTasksTool(runtime_session.subagent_runtime))
-        registry.register(StopAgentTaskTool(runtime_session.subagent_runtime))
+        register(SpawnAgentTool(runtime_session.subagent_runtime), origin="subagent_system")
+        register(WaitAgentTool(runtime_session.subagent_runtime), origin="subagent_system")
+        register(StopAgentTool(runtime_session.subagent_runtime), origin="subagent_system")
+        register(ListAgentsTool(runtime_session.subagent_runtime), origin="subagent_system")
+        register(CreateAgentTasksTool(runtime_session.subagent_runtime), origin="subagent_system")
+        register(WaitAgentTasksTool(runtime_session.subagent_runtime), origin="subagent_system")
+        register(StopAgentTaskTool(runtime_session.subagent_runtime), origin="subagent_system")
     for tool in extra_tools:
-        registry.register(tool)
+        origin = "mcp" if hasattr(tool, "binding_identity") else "custom"
+        register(tool, origin=origin)
     return registry

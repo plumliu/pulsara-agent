@@ -256,6 +256,10 @@ permission mode 有两层身份：
 - **tools 数组在 read-only / ask / accept-edits / bypass 下集合完全相同（前缀缓存稳定）。**
 - **`RunStartEvent` 必须记录 non-null preset `permission_snapshot_id` / `permission_mode` / `permission_policy` / `permission_snapshot_source`。**
 - **`RunStartEvent.permission_policy == preset_to_policy(permission_mode).to_dict()`；缺失、自定义或 mode/policy 不一致均为 contract error。**
+- `PermissionMode`、`PresetPermissionPolicyFact` 与唯一 preset expansion mapping 的定义归
+  `primitives.permission`；runtime permission 模块只能消费这些低层事实，不得复制或兼容 re-export 第二真源。
+- PRE_INTERACTION_RESUME 必须从原 `RunStartEvent` 重建 permission snapshot；当前 Host default 的变化不能改写
+  suspended run，LoopState 中与原 RunStart 不一致的 snapshot 必须 fail closed。
 - **Plan workflow 的 previous/restored permission facts 也必须是 preset mode + preset policy 展开。**
 - **`set_permission_mode` 在轮边界成功切换 stored default，切后新 run gate 行为随新 snapshot 变化。**
 - **运行中 / pending approval / stopping 时 `set_permission_mode` 被拒，mode 不变。**

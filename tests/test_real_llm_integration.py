@@ -10,7 +10,7 @@ import pytest
 from tests.support import bind_test_context, run_agent_task, test_llm_context
 import psycopg
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 
 from pulsara_agent.event import (
     EventContext,
@@ -94,11 +94,8 @@ from pulsara_agent.runtime import (
 )
 from pulsara_agent.runtime.context import msg_to_llm_messages
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
-from pulsara_agent.runtime.permission import (
-    EffectivePermissionPolicy,
-    PermissionMode,
-    preset_to_policy,
-)
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.retrieval.runtime import build_retrieval_runtime_resources
 from pulsara_agent.retrieval.tokenizer.factory import build_tokenizer
@@ -1349,6 +1346,7 @@ async def _run_real_flash_smoke() -> dict:
 async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
     settings = _load_settings_for_real_llm()
     runtime_session_id = f"runtime:real-aborted-unfinished:{uuid4().hex}"
+    user_input = "remove generated files"
     ctx = EventContext(
         run_id=f"run:real-aborted-unfinished:{uuid4().hex}",
         turn_id=f"turn:real-aborted-unfinished:{uuid4().hex}",
@@ -1360,12 +1358,19 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
     try:
         log.extend(
             [
-                RunStartEvent(
-                    **ctx.event_fields(),
-                    **run_start_permission_fields(ctx.run_id),
-                    user_input_chars=20,
-                    metadata={"user_input": "remove generated files"},
-                ),
+                    RunStartEvent(
+                        **ctx.event_fields(),
+                        **run_start_permission_fields(
+                            ctx.run_id,
+                            user_input=user_input,
+                            turn_id=ctx.turn_id,
+                            reply_id=ctx.reply_id,
+                            mcp_installation_owner_runtime_session_id=(
+                                runtime_session_id
+                            ),
+                        ),
+                        user_input_chars=len(user_input),
+                    ),
                 ToolCallStartEvent(
                     **ctx.event_fields(),
                     tool_call_id="call:danger",
@@ -1388,7 +1393,13 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
                 ),
                 ReplyEndEvent(**ctx.event_fields()),
                 RunEndEvent(
-                    **ctx.event_fields(), status="aborted", stop_reason="aborted"
+                    **run_end_contract_fields(
+                        ctx.run_id, status="aborted", abort_kind="user_stop"
+                    ),
+                    **ctx.event_fields(),
+                    status="aborted",
+                    stop_reason="aborted",
+                    abort_kind="user_stop",
                 ),
             ]
         )

@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from typing import Any, cast
 
 import pytest
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.runtime import EventCommitError
+from pulsara_agent.runtime.execution_handles import (
+    BoundaryExecutionHandles,
+    CapabilityExecutionBorrowUnavailable,
+)
 from pulsara_agent.runtime.subagent import (
     ChildExecutionRegistry,
     InMemoryEventLogLocator,
@@ -65,6 +70,47 @@ def test_partial_reservation_release_keeps_attached_closing_slot_occupied(
     registry.release_handle("subagent_run:partial-reservation")
     assert reservation.released is True
     assert registry.occupied_run_ids(parent_run_id=CTX.run_id) == frozenset()
+
+
+def test_child_registry_owns_and_retires_child_execution_authority(tmp_path) -> None:
+    registry = ChildExecutionRegistry()
+    session = in_memory_runtime_session(
+        tmp_path,
+        runtime_session_id="runtime:child:authority",
+    )
+    registry.register_prepared(
+        subagent_run_id="subagent_run:authority",
+        child_runtime_session_id=session.runtime_session_id,
+        child_session=session,
+        reservation=None,
+    )
+    handles = BoundaryExecutionHandles(
+        handle_id="child_execution_handles:test",
+        handle_generation=1,
+        owner_id="subagent_run:authority",
+        state="run_owned",
+        mcp_installation="mcp_installation:test",
+        capability_runtime=object(),
+        tool_registry=object(),
+        frozen_execution_surface=cast(Any, object()),
+    )
+    registry.attach_execution_handles("subagent_run:authority", handles)
+    authority = handles.borrow_authority
+
+    authority.borrow_child_tool_call()
+    registry.release_handle("subagent_run:authority")
+
+    retained = registry.get("subagent_run:authority")
+    assert retained is not None
+    assert retained.phase == "closing"
+    assert handles.state == "retiring"
+
+    authority.release_child_tool_call()
+
+    assert handles.state == "closed"
+    assert registry.get("subagent_run:authority") is None
+    with pytest.raises(CapabilityExecutionBorrowUnavailable):
+        authority.borrow_child_tool_call()
 
 
 def test_reservation_released_when_event_commit_fails(tmp_path) -> None:

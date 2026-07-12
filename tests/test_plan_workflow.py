@@ -25,6 +25,7 @@ def test_plan_workflow_reducer_tracks_active_and_exited_state() -> None:
                 restored_permission_policy=run_start_permission_fields("run:plan")["permission_policy"],
                 accepted_plan_summary="accepted summary",
                 accepted_plan_artifact_id=accepted_artifact_id,
+                transition_owner="agent_run",
             ),
         ]
     )

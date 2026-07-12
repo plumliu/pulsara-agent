@@ -11,7 +11,13 @@ from pulsara_agent.capability.providers.mcp import (
     build_mcp_installation,
     empty_mcp_installation,
 )
-from pulsara_agent.capability.types import CapabilityResolveContext
+from pulsara_agent.capability.types import (
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
+)
+from pulsara_agent.primitives.capability import (
+    build_capability_execution_surface_identity,
+)
 from pulsara_agent.primitives.mcp import (
     McpInstalledServerSnapshotFact,
     McpReconcileAttemptSummaryFact,
@@ -365,20 +371,35 @@ def test_installation_builds_descriptor_and_exact_binding() -> None:
     assert isinstance(tool, McpCapabilityTool)
     assert tool.binding_identity == slot.binding_identity
     assert not hasattr(tool, "installation_id")
-    output = McpCapabilityProvider(installation).resolve(
-            CapabilityResolveContext(
-                workspace_root=Path.cwd(),
-                workspace_kind="project",
-                memory_domain=None,
-                available_tool_names=frozenset({tool.name}),
-                user_input="lookup",
-            ),
-        bound_tool_names=frozenset({tool.name}),
+    provider = McpCapabilityProvider(installation)
+    descriptors = provider.snapshot_descriptors(
+        CapabilityExecutionSurfaceSnapshotContext(
+            workspace_root=Path.cwd(),
+            workspace_kind="project",
+            available_tool_names=frozenset({tool.name}),
+            mcp_installation_id=installation.installation_id,
+        )
     )
-    assert output.descriptors == installation.descriptors
-    assert output.catalog_prompt is not None
-    assert "server=docs; status=ready; installed_tool_count=1" in output.catalog_prompt
-    assert "actual tool schema remains the sole authority" in output.catalog_prompt
+    projection = provider.resolve_projection(
+        CapabilityProjectionResolveContext(
+            workspace_root=Path.cwd(),
+            workspace_kind="project",
+            memory_domain=None,
+            user_input="lookup",
+        ),
+        execution_surface=build_capability_execution_surface_identity(
+            surface_contract_version="test:v1",
+            entries=(),
+            mcp_installation_id=installation.installation_id,
+        ),
+    )
+    assert descriptors.descriptors == installation.descriptors
+    assert projection.catalog_prompt is not None
+    assert (
+        "server=docs; status=ready; installed_tool_count=1"
+        in projection.catalog_prompt
+    )
+    assert "actual tool schema remains the sole authority" in projection.catalog_prompt
     asyncio.run(supervisor.aclose(timeout_seconds=1))
 
 
@@ -411,18 +432,30 @@ def test_starting_mcp_prompt_strongly_freezes_current_run_availability() -> None
         slots_by_server={},
         installation_id="mcp_installation:starting",
     )
-    output = McpCapabilityProvider(installation).resolve(
-        CapabilityResolveContext(
+    provider = McpCapabilityProvider(installation)
+    descriptors = provider.snapshot_descriptors(
+        CapabilityExecutionSurfaceSnapshotContext(
+            workspace_root=Path.cwd(),
+            workspace_kind="project",
+            available_tool_names=frozenset(),
+            mcp_installation_id=installation.installation_id,
+        )
+    )
+    output = provider.resolve_projection(
+        CapabilityProjectionResolveContext(
             workspace_root=Path.cwd(),
             workspace_kind="project",
             memory_domain=None,
-            available_tool_names=frozenset(),
             user_input="Can you see MCP?",
         ),
-        bound_tool_names=frozenset(),
+        execution_surface=build_capability_execution_surface_identity(
+            surface_contract_version="test:v1",
+            entries=(),
+            mcp_installation_id=installation.installation_id,
+        ),
     )
 
-    assert output.descriptors == ()
+    assert descriptors.descriptors == ()
     prompt = output.catalog_prompt
     assert prompt is not None
     assert "server=docs; status=starting; installed_tool_count=0" in prompt

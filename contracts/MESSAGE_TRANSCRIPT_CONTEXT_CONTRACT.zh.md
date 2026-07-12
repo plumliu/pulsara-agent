@@ -92,7 +92,8 @@ Tool result artifact refs 必须使用 `ToolResultArtifactRef`。如果 artifact
 
 - 从 event log 读取 events；
 - 若存在最新有效 completed compaction boundary，先注入 summary system message，再只 replay boundary 后 events；
-- 每个 `RUN_START.metadata.user_input` 生成 user message；
+- 每个 `RunStartEvent.current_user_message` 生成 user message；该 required typed fact 的 text/hash/observed_at
+  是唯一 durable truth，`metadata.user_input` 不再是 supported fallback；
 - 每个 completed reply 通过 `event_log.replay(reply_id)` 重建 assistant message；
 - failed/aborted recoverable last run 注入 recovery system note；
 - terminal process completion after last run start 注入 lifecycle-only note；
@@ -167,7 +168,9 @@ Model context 中不得直接内联任意 binary/data body。
 - event stream folds into text/thinking/tool call/tool result blocks。
 - usage from multiple model calls aggregates on reply message。
 - missing start event does not crash assembler。
-- prior transcript injects user messages from `RUN_START.metadata.user_input`。
+- prior transcript injects user messages from required
+  `RunStartEvent.current_user_message`；缺失、hash 不一致或 attribution 不一致均为 contract error，不能回退到
+  legacy metadata。
 - failed/aborted last run injects recovery note。
 - unfinished tool call is stripped from aborted/failed replay。
 - terminal completion note is lifecycle-only and capped。

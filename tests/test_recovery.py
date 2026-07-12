@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support import test_resolved_call
 
 from pulsara_agent.event import (
@@ -49,8 +49,8 @@ def test_project_recovery_from_events_failed_run_uses_run_failed_guidance() -> N
     events = [
         RunStartEvent(
             **CTX.event_fields(),
-            **run_start_permission_fields(CTX.run_id),
-            user_input_chars=12,
+            **run_start_permission_fields(CTX.run_id, user_input="do work"),
+            user_input_chars=len("do work"),
             metadata={"user_input": "do work"},
         ),
         ToolCallStartEvent(
@@ -59,7 +59,12 @@ def test_project_recovery_from_events_failed_run_uses_run_failed_guidance() -> N
         ToolResultStartEvent(
             **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
         ),
-        RunEndEvent(**CTX.event_fields(), status="failed", stop_reason="tool_error"),
+        RunEndEvent(
+            **run_end_contract_fields(CTX.run_id, status="failed"),
+            **CTX.event_fields(),
+            status="failed",
+            stop_reason="tool_error_budget",
+        ),
     ]
 
     projection = project_recovery_from_events(events)
@@ -87,12 +92,15 @@ def test_project_recovery_from_events_aborted_plan_turn_uses_plan_aborted_guidan
         ),
         RunStartEvent(
             **CTX.event_fields(),
-            **run_start_permission_fields(CTX.run_id),
-            user_input_chars=4,
+            **run_start_permission_fields(CTX.run_id, user_input="ask"),
+            user_input_chars=len("ask"),
             metadata={"user_input": "ask"},
         ),
         ReplyEndEvent(**CTX.event_fields()),
         RunEndEvent(
+            **run_end_contract_fields(
+                CTX.run_id, status="aborted", abort_kind="user_stop"
+            ),
             **CTX.event_fields(),
             status="aborted",
             stop_reason="aborted",
@@ -119,8 +127,8 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
     events = [
         RunStartEvent(
             **CTX.event_fields(),
-            **run_start_permission_fields(CTX.run_id),
-            user_input_chars=10,
+            **run_start_permission_fields(CTX.run_id, user_input="run command"),
+            user_input_chars=len("run command"),
             metadata={"user_input": "run command"},
         ),
         ToolCallStartEvent(
@@ -134,6 +142,9 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
             tool_call_name="terminal",
         ),
         RunEndEvent(
+            **run_end_contract_fields(
+                CTX.run_id, status="aborted", abort_kind="user_stop"
+            ),
             **CTX.event_fields(),
             status="aborted",
             stop_reason="aborted",
@@ -160,11 +171,14 @@ def test_host_teardown_has_distinct_recovery_guidance() -> None:
     events = [
         RunStartEvent(
             **CTX.event_fields(),
-            **run_start_permission_fields(CTX.run_id),
-            user_input_chars=4,
+            **run_start_permission_fields(CTX.run_id, user_input="work"),
+            user_input_chars=len("work"),
             metadata={"user_input": "work"},
         ),
         RunEndEvent(
+            **run_end_contract_fields(
+                CTX.run_id, status="aborted", abort_kind="host_teardown"
+            ),
             **CTX.event_fields(),
             status="aborted",
             stop_reason="aborted",

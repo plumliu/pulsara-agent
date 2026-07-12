@@ -17,13 +17,15 @@ from pulsara_agent.event import (
     SubagentEdgeRecordedEvent,
     SubagentResultDeliveredEvent,
     SubagentRunCompletedEvent,
+    SubagentRunFailedEvent,
     SubagentRunStartedEvent,
     ToolCallStartEvent,
 )
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.runtime import LoopBudget
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings
 
@@ -185,6 +187,11 @@ async def _run_subagent_spawn_wait_dogfood(
             for event in parent_events
             if isinstance(event, SubagentRunCompletedEvent)
         ]
+        failed = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentRunFailedEvent)
+        ]
         wait_edges = [
             event
             for event in parent_events
@@ -241,6 +248,15 @@ async def _run_subagent_spawn_wait_dogfood(
             ],
             "subagent_started_count": len(started),
             "subagent_completed_count": len(completed),
+            "subagent_failures": [
+                {
+                    "subagent_run_id": event.subagent_run_id,
+                    "reason_code": event.reason_code,
+                    "reason_message": event.reason_message,
+                    "diagnostics": list(event.diagnostics),
+                }
+                for event in failed
+            ],
             "wait_edge_count": len(wait_edges),
             "started_parent_context_id": started[0].parent_context_id
             if started

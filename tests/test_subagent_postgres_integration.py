@@ -9,7 +9,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 
 from pulsara_agent.event import (
     EventContext,
@@ -88,7 +88,12 @@ async def _start_parent_run(parent: RuntimeSession, context: EventContext) -> No
     await parent.write_event(
         RunStartEvent(
             **context.event_fields(),
-            **run_start_permission_fields(context.run_id),
+            **run_start_permission_fields(
+                context.run_id,
+                user_input="delegate",
+                turn_id=context.turn_id,
+                reply_id=context.reply_id,
+            ),
             user_input_chars=8,
             metadata={"user_input": "delegate"},
         )
@@ -116,10 +121,19 @@ def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
                 (
                     RunStartEvent(
                         **child_context.event_fields(),
-                        **run_start_permission_fields(child_context.run_id),
+                        **run_start_permission_fields(
+                            child_context.run_id,
+                            source="child_profile",
+                            user_input="x" * 5,
+                            turn_id=child_context.turn_id,
+                            reply_id=child_context.reply_id,
+                        ),
                         user_input_chars=5,
                     ),
                     RunEndEvent(
+                        **run_end_contract_fields(
+                            child_context.run_id, status="finished"
+                        ),
                         **child_context.event_fields(),
                         status="finished",
                         stop_reason="final",
@@ -167,7 +181,13 @@ def test_postgres_child_report_events_keep_parent_spawn_context(
             await child_session.write_event(
                 RunStartEvent(
                     **child_context.event_fields(),
-                    **run_start_permission_fields(child_context.run_id, source="child_profile"),
+                    **run_start_permission_fields(
+                        child_context.run_id,
+                        source="child_profile",
+                        user_input="x" * 5,
+                        turn_id=child_context.turn_id,
+                        reply_id=child_context.reply_id,
+                    ),
                     user_input_chars=5,
                 )
             )
@@ -257,10 +277,19 @@ def test_postgres_fresh_locator_hydrates_child_native_run_id(tmp_path: Path) -> 
                 (
                     RunStartEvent(
                         **native_context.event_fields(),
-                        **run_start_permission_fields(native_run_id),
+                        **run_start_permission_fields(
+                            native_run_id,
+                            source="child_profile",
+                            user_input="x" * 5,
+                            turn_id=native_context.turn_id,
+                            reply_id=native_context.reply_id,
+                        ),
                         user_input_chars=5,
                     ),
                     RunEndEvent(
+                        **run_end_contract_fields(
+                            native_context.run_id, status="finished"
+                        ),
                         **native_context.event_fields(),
                         status="finished",
                         stop_reason="final",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import pytest
+
 from pydantic import ValidationError
 
 from pulsara_agent.event import (
@@ -20,7 +21,8 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import dump_agent_event, load_agent_event
 from pulsara_agent.event_log import AGENT_EVENT_SCHEMA_VERSION
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.subagent import SubagentBudget
 
 
@@ -70,6 +72,7 @@ def _budget_snapshot(**overrides: object) -> dict[str, object]:
         "child_timeout_seconds": None,
         "max_total_child_runs_per_parent_run": 16,
         "max_result_summary_chars_per_child": 4_000,
+        "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
     }
     value.update(overrides)
@@ -127,6 +130,7 @@ def test_subagent_budget_snapshot_rejects_non_finite_timeout(timeout: float) -> 
         ("max_total_child_runs_per_parent_run", 0),
         ("max_subagent_results_per_parent_compile", 0),
         ("max_result_summary_chars_per_child", -1),
+        ("max_result_artifact_refs_per_child", -1),
         ("max_spawn_depth_from_root", 1),
     ],
 )

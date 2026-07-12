@@ -73,7 +73,11 @@ from pulsara_agent.memory.recall.service import (
     RecallStatus,
     RecallTrigger,
 )
-from pulsara_agent.memory.foundation.records import ArtifactWriteResult
+from pulsara_agent.memory.foundation.records import (
+    ArtifactContentConflict,
+    ArtifactPutConfirmation,
+    ArtifactWriteResult,
+)
 from pulsara_agent.memory.recall.rerank import direct_relation_rerank
 from pulsara_agent.memory.scope import (
     CTX_USER,
@@ -125,6 +129,8 @@ from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, Mem
 
 __all__ = [
     "ArtifactStore",
+    "ArtifactContentConflict",
+    "ArtifactPutConfirmation",
     "ArtifactWriteResult",
     "CandidateOrigin",
     "CandidateRelatedness",

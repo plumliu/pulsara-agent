@@ -9,6 +9,7 @@ from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.llm import ModelRole
 from tests.support import test_llm_config
+from tests.support.capability import preview_capability_plan
 from pulsara_agent.llm.request import LLMOptions
 from pulsara_agent.memory import load_run_timeline, summarize_run_timeline
 from pulsara_agent.memory.candidates.pool import (
@@ -32,7 +33,6 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.capability import (
     BuiltinToolCapabilityProvider,
-    CapabilityResolveContext,
     LocalSkillCapabilityProvider,
 )
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
@@ -238,18 +238,16 @@ required_binaries: [terminal-only, missing-cli]
             model_role=ModelRole.FLASH,
         )
 
-    exposure = wiring.agent_runtime.capability_runtime.resolve_for_turn(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="transient",
-            memory_domain=wiring.agent_runtime.memory_domain,
-            available_tool_names=frozenset(
-                wiring.agent_runtime.tool_executor.registry.names()
-            ),
-            user_input="$terminal-cli",
-        ),
+    exposure = preview_capability_plan(
+        wiring.agent_runtime.capability_runtime,
+        workspace_root=tmp_path,
+        workspace_kind="transient",
+        memory_domain=wiring.agent_runtime.memory_domain,
         tool_registry=wiring.agent_runtime.tool_executor.registry,
-        permission_policy=wiring.agent_runtime.permission_policy,
+        archive=wiring.agent_runtime.runtime_session.archive,
+        runtime_session_id=wiring.agent_runtime.runtime_session.runtime_session_id,
+        mcp_installation_id=wiring.agent_runtime.runtime_session.mcp_installation_id,
+        user_input="$terminal-cli",
     )
 
     missing = [

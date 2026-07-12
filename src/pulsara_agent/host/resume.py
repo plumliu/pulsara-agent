@@ -14,8 +14,12 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from pulsara_agent.event import RunEndEvent
+from pulsara_agent.event import RunEndEvent, RunStartEvent
 from pulsara_agent.event_log import PostgresEventLog
+from pulsara_agent.primitives.run_lifecycle import (
+    RunStopReason,
+    RunTerminalizationKind,
+)
 from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
 
@@ -75,13 +79,24 @@ def repair_dangling_runs_for_resume(
         if _run_has_end_event(dsn, runtime_session_id, run_id):
             skipped.append(run_id)
             continue
+        starts = [
+            event
+            for event in log.iter(run_id=run_id)
+            if isinstance(event, RunStartEvent)
+        ]
+        if len(starts) != 1:
+            skipped.append(run_id)
+            continue
+        started = starts[0]
         log.append(
             RunEndEvent(
+                id=started.terminal_run_end_event_id,
                 run_id=run_id,
                 turn_id=turn_id,
                 reply_id=reply_id,
                 status="aborted",
-                stop_reason="aborted",
+                stop_reason=RunStopReason.ABORTED,
+                terminalization_kind=RunTerminalizationKind.RECOVERED_INTERRUPTED,
                 abort_kind=AbortKind.HOST_TEARDOWN.value,
                 metadata={
                     "recovered_by": "resume",

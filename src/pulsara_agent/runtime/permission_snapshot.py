@@ -13,12 +13,11 @@ from typing import Any, Literal
 
 from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,
-    PermissionMode,
     PermissionState,
     mode_for_policy,
-    parse_permission_mode,
     preset_to_policy,
 )
+from pulsara_agent.primitives.permission import PermissionMode, parse_permission_mode
 
 RunPermissionSnapshotSource = Literal["session_default", "plan_mode", "child_profile"]
 

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, replace
 from typing import AsyncIterator
 
 import pytest
+
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
@@ -34,9 +36,12 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.capability import (
-    CapabilityResolveContext,
     LocalSkillCapabilityProvider,
     LocalSkillProvider,
+)
+from pulsara_agent.capability.types import (
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
 )
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.capability.descriptor import (
@@ -44,7 +49,9 @@ from pulsara_agent.capability.descriptor import (
     CapabilityProviderKind,
 )
 from pulsara_agent.capability.builtin_provider import builtin_tool_descriptors
-from pulsara_agent.capability.provider import CapabilityProviderOutput
+from pulsara_agent.capability.provider import (
+    CapabilityDescriptorSnapshotOutput,
+)
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.llm import LLMRuntime, MessageRole
 from pulsara_agent.llm.errors import ModelContextIdentityMismatch
@@ -55,6 +62,7 @@ from pulsara_agent.primitives.mcp import (
     McpReconcileAttemptSummaryFact,
     McpServerLifecycleTimingFact,
 )
+from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
 from pulsara_agent.memory.recall.service import RecallResult, RecallStatus
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
@@ -94,14 +102,15 @@ from pulsara_agent.runtime import (
 )
 from pulsara_agent.runtime.context import msg_to_llm_messages as _msg_to_llm_messages
 from pulsara_agent.runtime.compaction.inline import MidTurnCompactionResult
+from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,
-    PermissionMode,
     PermissionDecision,
     PermissionDecisionKind,
     preset_to_policy,
 )
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
@@ -110,7 +119,12 @@ from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactRecord
 from pulsara_agent.runtime.tool_loop import _tool_result_from_event_slice
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.ontology import memory, runtime as rt
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolRuntimeContext
+from pulsara_agent.tools.base import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolExecutionSuspended,
+    ToolRuntimeContext,
+)
 from pulsara_agent.tools.registry import ToolRegistry
 from pulsara_agent.tools.builtins.memory_query import MemorySearchTool
 
@@ -607,6 +621,230 @@ def test_mcp_terminal_post_commit_failure_folds_state_and_releases_lease(
     assert supervisor.close_calls == 1
 
 
+def test_cancel_during_mcp_suspension_publication_wait_confirms_and_preserves_lease(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+
+    class LeaseSupervisor:
+        def __init__(self) -> None:
+            self.confirmed: list[tuple[str, str]] = []
+            self.aborted: list[tuple[str, str]] = []
+
+        def confirm_pending_lease(
+            self, interaction_id: str, reservation_id: str
+        ) -> None:
+            self.confirmed.append((interaction_id, reservation_id))
+
+        def abort_pending_lease(
+            self, interaction_id: str, reservation_id: str
+        ) -> None:
+            self.aborted.append((interaction_id, reservation_id))
+
+    supervisor = LeaseSupervisor()
+    runtime_session.mcp_supervisor = supervisor
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([])),
+    )
+    state = agent.new_state()
+    committed = asyncio.Event()
+
+    async def commit_then_wait(self, event, *, state=None):
+        assert self is runtime_session
+        del state
+        prepared = runtime_session._prepare_event_batch((event,))
+        stored = runtime_session.event_log.append(prepared[0])
+        committed.set()
+        await asyncio.Event().wait()
+        return stored
+
+    monkeypatch.setattr(type(runtime_session), "emit", commit_then_wait)
+    suspended = ToolExecutionSuspended(
+        tool_call_id="call:mcp-suspend-cancel",
+        tool_name="mcp__docs__lookup",
+        interaction_kind="mcp_input_required",
+        payload={
+            "interaction_id": "mcp_input_required:suspend-cancel",
+            "mcp_pending_lease_reservation_id": "reservation:suspend-cancel",
+        },
+    )
+
+    async def run() -> None:
+        async def consume() -> None:
+            async for _ in agent._suspend_tool_execution(state, suspended):
+                pass
+
+        task = asyncio.create_task(consume())
+        await committed.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+    suspension_events = [
+        event
+        for event in runtime_session.event_log.iter()
+        if getattr(event, "name", None) == "tool_execution_suspended"
+    ]
+    assert len(suspension_events) == 1
+    assert supervisor.confirmed == [
+        (
+            "mcp_input_required:suspend-cancel",
+            "reservation:suspend-cancel",
+        )
+    ]
+    assert supervisor.aborted == []
+    assert state.status is LoopStatus.WAITING_USER
+    assert state.pending_interaction_kind == "mcp_input_required"
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expect_terminal", "expect_latched"),
+    [
+        ("precommit", False, False),
+        ("cancel_after_commit", True, False),
+        ("confirmation_unknown", False, True),
+    ],
+)
+def test_mcp_resume_terminal_precommit_full_unknown_and_cancel_after_commit(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+    expect_terminal: bool,
+    expect_latched: bool,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+
+    class LeaseSupervisor:
+        def __init__(self) -> None:
+            self.completed: list[str] = []
+
+        def complete_pending_lease(self, interaction_id: str) -> None:
+            self.completed.append(interaction_id)
+
+        async def close_retiring_slots(self, **_kwargs) -> None:
+            return None
+
+    supervisor = LeaseSupervisor()
+    runtime_session.mcp_supervisor = supervisor
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([])),
+    )
+    interaction_id = f"mcp_input_required:{failure_mode}"
+    tool_call_id = f"call:mcp-{failure_mode}"
+    state = agent.new_state()
+    state.status = LoopStatus.WAITING_USER
+    state.stop_reason = "waiting_user"
+    state.pending_interaction_kind = "mcp_input_required"
+    state.pending_interaction_payload = {
+        "interaction_id": interaction_id,
+        "tool_call_id": tool_call_id,
+        "tool_name": "mcp__docs__lookup",
+    }
+
+    async def terminal_result(self, current_state, _resolution):
+        current_state.pending_interaction_kind = None
+        current_state.pending_interaction_payload = {}
+        current_state.status = LoopStatus.RUNNING
+        current_state.stop_reason = None
+        async for event in self._emit_tool_result_and_record(
+            current_state,
+            tool_call_id=tool_call_id,
+            tool_call_name="mcp__docs__lookup",
+            output="terminal result",
+            result_state=ToolResultState.ERROR,
+        ):
+            yield event
+
+    monkeypatch.setattr(
+        AgentRuntime,
+        "_stream_mcp_input_required_resolution",
+        terminal_result,
+    )
+    committed = asyncio.Event()
+
+    if failure_mode == "precommit":
+        async def fail_before_commit(self, _events, *, state=None):
+            assert self is runtime_session
+            del state
+            raise RuntimeError("synthetic precommit failure")
+
+        monkeypatch.setattr(type(runtime_session), "emit_many", fail_before_commit)
+    elif failure_mode == "cancel_after_commit":
+        async def commit_then_wait(self, events, *, state=None):
+            assert self is runtime_session
+            del state
+            prepared = runtime_session._prepare_event_batch(tuple(events))
+            stored = runtime_session.event_log.extend(prepared)
+            committed.set()
+            await asyncio.Event().wait()
+            return stored
+
+        monkeypatch.setattr(type(runtime_session), "emit_many", commit_then_wait)
+    else:
+        async def fail_before_unknown_confirmation(self, _events, *, state=None):
+            assert self is runtime_session
+            del state
+            raise RuntimeError("synthetic unknown commit acknowledgement")
+
+        def fail_confirmation(self, _events):
+            assert self is runtime_session
+            raise RuntimeError("synthetic confirmation read failure")
+
+        monkeypatch.setattr(
+            type(runtime_session),
+            "emit_many",
+            fail_before_unknown_confirmation,
+        )
+        monkeypatch.setattr(
+            type(runtime_session), "confirm_event_batch", fail_confirmation
+        )
+
+    resolution = McpInputRequiredInteractionResolution(
+        interaction_id=interaction_id,
+        responses={},
+    )
+
+    async def run() -> None:
+        async def consume() -> None:
+            async for _ in agent.stream_after_mcp_input_required(state, resolution):
+                pass
+
+        task = asyncio.create_task(consume())
+        if failure_mode == "cancel_after_commit":
+            await committed.wait()
+            task.cancel()
+        with pytest.raises((RuntimeError, asyncio.CancelledError)):
+            await task
+
+    asyncio.run(run())
+
+    terminal_events = [
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, ToolResultEndEvent)
+        and event.tool_call_id == tool_call_id
+    ]
+    assert bool(terminal_events) is expect_terminal
+    assert runtime_session.reconciliation_required is expect_latched
+    if expect_terminal:
+        assert state.pending_interaction_kind is None
+        assert [result.id for result in state.tool_results] == [tool_call_id]
+        assert supervisor.completed == [interaction_id]
+    else:
+        assert state.status is LoopStatus.WAITING_USER
+        assert state.pending_interaction_kind == "mcp_input_required"
+        assert state.pending_interaction_payload["interaction_id"] == interaction_id
+        assert state.tool_results == []
+        assert supervisor.completed == []
+
+
 def test_model_call_rejected_event_is_inspectable(tmp_path) -> None:
     transport = ScriptedTransport([{"text": "must not run"}])
     agent = AgentRuntime(
@@ -708,6 +946,16 @@ def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(
     )
     state = LoopState(session_id=runtime_session.runtime_session_id)
     state.run_model_target = agent.resolve_run_model_target()
+    run_start_fields = run_start_permission_fields(
+        state.run_id,
+        user_input="continue after pressure",
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        model_target=state.run_model_target.fact,
+    )
+    state.scratchpad["terminal_run_end_event_id"] = run_start_fields[
+        "terminal_run_end_event_id"
+    ]
     user = UserMsg(
         name="user",
         content="continue after pressure",
@@ -763,7 +1011,20 @@ def test_agent_runtime_retries_after_recoverable_context_pressure_compaction(
         diagnostics=(),
     )
 
-    events = asyncio.run(_collect_async(agent._stream_model_loop(state, exposure)))
+    async def run_loop() -> list[AgentEvent]:
+        await runtime_session.emit(
+            RunStartEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                **run_start_fields,
+                user_input_chars=len("continue after pressure"),
+            ),
+            state=state,
+        )
+        return await _collect_async(agent._stream_model_loop(state, exposure))
+
+    events = asyncio.run(run_loop())
 
     compiled_events = [
         event for event in events if isinstance(event, ContextCompiledEvent)
@@ -1383,6 +1644,18 @@ def test_agent_runtime_injects_runtime_context_prompt(tmp_path) -> None:
 def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     state = LoopState(session_id=runtime_session.runtime_session_id)
+    run_start = RunStartEvent(
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        **run_start_permission_fields(
+            state.run_id,
+            user_input="",
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        ),
+        user_input_chars=0,
+    )
     delivered: list[AgentEvent] = []
 
     class Subscriber:
@@ -1397,6 +1670,9 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
         except asyncio.CancelledError:
             await runtime_session.emit(
                 RunEndEvent(
+                    **run_end_contract_fields(
+                        state.run_id, status="aborted", abort_kind="user_stop"
+                    ),
                     **EventContext(
                         run_id=state.run_id,
                         turn_id=state.turn_id,
@@ -1404,11 +1680,13 @@ def test_runtime_emit_from_single_cancelled_task_reaches_subscriber(tmp_path) ->
                     ).event_fields(),
                     status="aborted",
                     stop_reason="aborted",
+                    abort_kind="user_stop",
                 ),
                 state=state,
             )
 
     async def run() -> None:
+        await runtime_session.emit(run_start, state=state)
         task = asyncio.create_task(run_and_emit_after_cancel())
         await asyncio.sleep(0)
         task.cancel()
@@ -2577,17 +2855,21 @@ class RecordingHooks(NoopMemoryHooks):
 class CountingCapabilityProvider:
     def __init__(self, delegate: LocalSkillCapabilityProvider) -> None:
         self.delegate = delegate
-        self.calls: list[CapabilityResolveContext] = []
+        self.calls: list[CapabilityProjectionResolveContext] = []
+        self.execution_surfaces: list[CapabilityExecutionSurfaceIdentityFact] = []
         self.provider_id = "counting-local-skills"
 
-    def resolve(
+    def resolve_projection(
         self,
-        context: CapabilityResolveContext,
+        context: CapabilityProjectionResolveContext,
         *,
-        bound_tool_names: frozenset[str],
-    ) -> CapabilityProviderOutput:
+        execution_surface,
+    ):
         self.calls.append(context)
-        return self.delegate.resolve(context, bound_tool_names=bound_tool_names)
+        self.execution_surfaces.append(execution_surface)
+        return self.delegate.resolve_projection(
+            context, execution_surface=execution_surface
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2595,14 +2877,11 @@ class StaticCapabilityProvider:
     descriptors: tuple[CapabilityDescriptor, ...]
     provider_id: str = "static-test"
 
-    def resolve(
-        self,
-        context: CapabilityResolveContext,
-        *,
-        bound_tool_names: frozenset[str],
-    ) -> CapabilityProviderOutput:
-        del context, bound_tool_names
-        return CapabilityProviderOutput(descriptors=self.descriptors)
+    def snapshot_descriptors(
+        self, context: CapabilityExecutionSurfaceSnapshotContext
+    ) -> CapabilityDescriptorSnapshotOutput:
+        del context
+        return CapabilityDescriptorSnapshotOutput(descriptors=self.descriptors)
 
 
 def _test_tool_descriptor(name: str) -> CapabilityDescriptor:
@@ -2685,6 +2964,76 @@ def test_memory_hooks_and_projection_events_are_used(tmp_path) -> None:
     assert "Recalled Memory" in context_text
 
 
+def test_run_end_known_precommit_failure_retries_stable_candidate_once(
+    tmp_path,
+) -> None:
+    class FailOnceRunEndLog(InMemoryEventLog):
+        def __init__(self) -> None:
+            super().__init__()
+            self.run_end_attempts = 0
+
+        def extend(self, events, *, expected_last_sequence=None):
+            batch = tuple(events)
+            if any(isinstance(event, RunEndEvent) for event in batch):
+                self.run_end_attempts += 1
+                if self.run_end_attempts == 1:
+                    raise RuntimeError("synthetic precommit RunEnd failure")
+            return super().extend(
+                batch,
+                expected_last_sequence=expected_last_sequence,
+            )
+
+    event_log = FailOnceRunEndLog()
+    runtime_session = in_memory_runtime_session(tmp_path, event_log=event_log)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
+    )
+    state = agent.new_state()
+
+    result = asyncio.run(run_agent_task(agent, "finish", state=state))
+
+    assert result.status is LoopStatus.FINISHED
+    assert state.finalized is True
+    assert state.scratchpad["run_end_commit_state"] == "committed"
+    assert event_log.run_end_attempts == 2
+    terminal = [event for event in event_log.iter() if isinstance(event, RunEndEvent)]
+    assert len(terminal) == 1
+    assert terminal[0].id == state.scratchpad["terminal_run_end_event_id"]
+
+
+def test_run_end_postcommit_publication_failure_folds_committed_terminal(
+    tmp_path,
+) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
+
+    class FailRunEndObserver:
+        async def on_published_event(self, published: RuntimePublishedEvent) -> None:
+            if isinstance(published.event, RunEndEvent):
+                raise RuntimeError("synthetic RunEnd observer failure")
+
+    runtime_session.publisher.subscribe(FailRunEndObserver())
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
+    )
+    state = agent.new_state()
+
+    with pytest.raises(EventPublicationAfterCommitError):
+        asyncio.run(run_agent_task(agent, "finish", state=state))
+
+    terminal = [
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, RunEndEvent)
+    ]
+    assert len(terminal) == 1
+    assert state.finalized is True
+    assert state.scratchpad["run_end_commit_state"] == "committed"
+
+
 def test_capability_runtime_resolves_once_per_user_message_and_exposure_is_stable(
     tmp_path,
 ) -> None:
@@ -2736,7 +3085,10 @@ Use the review checklist.
     assert provider.calls[0].workspace_root == tmp_path
     assert provider.calls[0].workspace_kind == "project"
     assert provider.calls[0].memory_domain == domain
-    assert provider.calls[0].available_tool_names == frozenset({"noop"})
+    assert {
+        entry.capability_name
+        for entry in provider.execution_surfaces[0].entries
+    } == {"noop"}
     assert len(transport.contexts) == 2
     assert _without_context_timing_lines(
         transport.contexts[0].system_prompt or ""
@@ -3423,6 +3775,103 @@ def test_tool_result_start_hook_dispatches_before_tool_finishes(tmp_path) -> Non
     assert "not released" not in tool_output
 
 
+def test_cancelled_tool_batch_waits_for_sync_worker_before_releasing_borrow(
+    tmp_path,
+) -> None:
+    started = threading.Event()
+    release_worker = threading.Event()
+
+    @dataclass(slots=True)
+    class BlockingSyncTool:
+        name: str = "blocking_sync_tool"
+        description: str = "Block in a real worker thread."
+        parameters: dict = field(
+            default_factory=lambda: {"type": "object", "properties": {}}
+        )
+        is_read_only: bool = True
+        is_concurrency_safe: bool = True
+
+        def execute(self, call: ToolCall) -> ToolExecutionResult:
+            started.set()
+            release_worker.wait()
+            return ToolExecutionResult(
+                call_id=call.id,
+                tool_name=call.name,
+                status=ToolResultState.SUCCESS,
+                output="done",
+            )
+
+    runtime_session = in_memory_runtime_session(tmp_path)
+    registry = ToolRegistry()
+    registry.register(BlockingSyncTool())
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "unused"}])),
+    )
+    _install_registry_with_explicit_test_descriptors(agent, registry)
+    descriptor = _test_tool_descriptor("blocking_sync_tool")
+    exposure = CapabilityExposurePlan(
+        registry_generation=1,
+        direct_tool_specs=(),
+        direct_names=frozenset({descriptor.name}),
+        deferred_names=frozenset(),
+        hidden_names=frozenset(),
+        callable_names=frozenset({descriptor.name}),
+        descriptors_by_name={descriptor.name: descriptor},
+        catalog_entries=(),
+        active_injections=(),
+        catalog_prompt=None,
+        active_skill_prompt=None,
+        diagnostics=(),
+    )
+    state = agent.new_state()
+    state.permission_snapshot = agent._capture_run_permission_snapshot(state)
+    handles = BoundaryExecutionHandles(
+        handle_id="handles:sync-tool-test",
+        handle_generation=1,
+        owner_id=state.run_id,
+        state="run_owned",
+        mcp_installation=object(),
+        capability_runtime=agent.capability_runtime,
+        tool_registry=registry,
+        frozen_execution_surface=object(),  # type: ignore[arg-type]
+    )
+    state.scratchpad["capability_execution_borrow_authority"] = (
+        handles.borrow_authority
+    )
+
+    async def scenario() -> None:
+        async def consume() -> None:
+            async for _event in agent._stream_tool_batch_events(
+                state,
+                [
+                    ToolCall(
+                        id="call:blocking-sync",
+                        name="blocking_sync_tool",
+                        arguments={},
+                    )
+                ],
+                [],
+                exposure=exposure,
+            ):
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.to_thread(started.wait)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert task.done() is False
+        assert handles.borrow_tracker.active_parent_tool_call_borrows == 1
+
+        release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert handles.borrow_tracker.active_parent_tool_call_borrows == 0
+
+    asyncio.run(scenario())
+
+
 def test_duplicate_tool_call_id_becomes_error_observation_without_execution(
     tmp_path,
 ) -> None:
@@ -3742,7 +4191,7 @@ def test_concurrent_tool_observer_hooks_see_canonical_sequence_order(tmp_path) -
     registry = ToolRegistry()
     registry.register(SleepTool("sleep_a", delay=0.2))
     registry.register(SleepTool("sleep_b", delay=0.2))
-    agent.tool_executor.registry = registry
+    _install_registry_with_explicit_test_descriptors(agent, registry)
     seen_sequences: list[int] = []
 
     def record_tool_result_sequences(context, event) -> None:

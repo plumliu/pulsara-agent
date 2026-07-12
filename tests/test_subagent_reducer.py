@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+from tests.conftest import run_end_contract_fields, subagent_result_handoff_fields
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
@@ -29,7 +31,9 @@ from pulsara_agent.event import (
     SubagentTaskScheduledEvent,
     SubagentTaskStartedEvent,
 )
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.model_call import ModelTokenUsageFact
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.subagent.facts import (
     SubagentGraphDiagnostic,
     SubagentGraphState,
@@ -90,6 +94,7 @@ def _budget() -> dict[str, object]:
         "child_timeout_seconds": None,
         "max_total_child_runs_per_parent_run": 16,
         "max_result_summary_chars_per_child": 4_000,
+        "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
     }
 
@@ -151,12 +156,23 @@ def _message(run_id: str, *, artifact_id: str) -> SubagentMessageSentEvent:
 
 def _completed(run_id: str, result_id: str) -> SubagentRunCompletedEvent:
     artifact_id = f"artifact:{result_id}"
+    child_runtime_session_id = f"runtime:child:{run_id}"
+    child_run_id = f"child-run:{run_id}"
     return SubagentRunCompletedEvent(
+        **subagent_result_handoff_fields(
+            subagent_run_id=run_id,
+            child_runtime_session_id=child_runtime_session_id,
+            child_run_id=child_run_id,
+            result_id=result_id,
+            summary="done",
+            result_artifact_id=artifact_id,
+            artifact_ids=(artifact_id,),
+        ),
         **CTX.event_fields(),
         subagent_run_id=run_id,
         parent_runtime_session_id="runtime:parent",
-        child_runtime_session_id=f"runtime:child:{run_id}",
-        child_run_id=f"child-run:{run_id}",
+        child_runtime_session_id=child_runtime_session_id,
+        child_run_id=child_run_id,
         result_id=result_id,
         summary="done",
         result_artifact_id=artifact_id,
@@ -219,6 +235,7 @@ def _full_task_stream() -> list[AgentEvent]:
                 summary="done",
                 result_artifact_id=f"artifact:{result_id}",
                 artifact_ids=[f"artifact:{result_id}"],
+                source_tool_call_id="call:report-result",
             )
         ),
         stored(_completed(run_id, result_id)),
@@ -419,6 +436,7 @@ def _generated_legal_subagent_streams(*, seed: int) -> tuple[list[AgentEvent], .
                         summary="explicit",
                         result_artifact_id=f"artifact:{result_id}",
                         artifact_ids=[f"artifact:{result_id}"],
+                        source_tool_call_id="call:report-result",
                     )
                 )
             )
@@ -426,6 +444,7 @@ def _generated_legal_subagent_streams(*, seed: int) -> tuple[list[AgentEvent], .
             independent.append(
                 stored(
                     RunEndEvent(
+                        **run_end_contract_fields(CTX.run_id, status="finished"),
                         **CTX.event_fields(),
                         status="finished",
                         stop_reason="final",
@@ -761,6 +780,7 @@ def test_reducer_completion_cannot_replace_explicit_result_identity_or_body() ->
                 output_preview="explicit preview",
                 result_artifact_id=explicit_artifact_id,
                 artifact_ids=[explicit_artifact_id],
+                source_tool_call_id="call:report-result",
                 diagnostics=[{"code": "explicit", "nested": {"kept": True}}],
             )
         ),
@@ -777,10 +797,21 @@ def test_reducer_completion_cannot_replace_explicit_result_identity_or_body() ->
     )
 
     same_id_different_body = SubagentRunCompletedEvent(
+        **subagent_result_handoff_fields(
+            subagent_run_id=run_id,
+            child_runtime_session_id=f"runtime:child:{run_id}",
+            child_run_id=f"child-run:{run_id}",
+            result_id=explicit_result_id,
+            summary="replacement body",
+            result_artifact_id=explicit_artifact_id,
+            artifact_ids=(explicit_artifact_id,),
+            result_source="explicit",
+        ),
         **CTX.event_fields(),
         subagent_run_id=run_id,
         parent_runtime_session_id="runtime:parent",
         child_runtime_session_id=f"runtime:child:{run_id}",
+        child_run_id=f"child-run:{run_id}",
         result_id=explicit_result_id,
         summary="replacement body",
         result_artifact_id=explicit_artifact_id,
@@ -795,15 +826,32 @@ def test_reducer_completion_cannot_replace_explicit_result_identity_or_body() ->
     )
 
     matching_completion = SubagentRunCompletedEvent(
+        **subagent_result_handoff_fields(
+            subagent_run_id=run_id,
+            child_runtime_session_id=f"runtime:child:{run_id}",
+            child_run_id=f"child-run:{run_id}",
+            result_id=explicit_result_id,
+            summary="explicit body",
+            result_artifact_id=explicit_artifact_id,
+            artifact_ids=(explicit_artifact_id,),
+            result_source="explicit",
+            tool_call_count=3,
+            token_usage=ModelTokenUsageFact(
+                input_tokens=17,
+                output_tokens=0,
+                total_tokens=17,
+            ),
+        ),
         **CTX.event_fields(),
         subagent_run_id=run_id,
         parent_runtime_session_id="runtime:parent",
         child_runtime_session_id=f"runtime:child:{run_id}",
+        child_run_id=f"child-run:{run_id}",
         result_id=explicit_result_id,
         summary="explicit body",
         result_artifact_id=explicit_artifact_id,
         artifact_ids=[explicit_artifact_id],
-        token_usage={"input_tokens": 17},
+        token_usage={"input_tokens": 17, "output_tokens": 0, "total_tokens": 17},
         tool_call_count=3,
     ).model_copy(update={"sequence": different_id.sequence})
     completed_state = fold_subagent_graph([*prefix, matching_completion])
@@ -814,7 +862,11 @@ def test_reducer_completion_cannot_replace_explicit_result_identity_or_body() ->
     assert result.output_preview == "explicit preview"
     assert result.final_message_artifact_id == explicit_artifact_id
     assert result.diagnostics[0]["nested"]["kept"] is True
-    assert result.token_usage == {"input_tokens": 17}
+    assert result.token_usage == {
+        "input_tokens": 17,
+        "output_tokens": 0,
+        "total_tokens": 17,
+    }
     assert result.tool_call_count == 3
 
 

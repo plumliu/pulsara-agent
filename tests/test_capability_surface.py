@@ -6,6 +6,7 @@ from typing import AsyncIterator
 
 import pytest
 
+from tests.conftest import run_start_permission_fields
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.capability import (
@@ -22,19 +23,26 @@ from pulsara_agent.capability.descriptor import (
 )
 from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
 from pulsara_agent.capability.exposure import build_exposure_plan
-from pulsara_agent.capability.provider import CapabilityProviderOutput
+from pulsara_agent.capability.provider import (
+    CapabilityDescriptorSnapshotOutput,
+    CapabilityProjectionOutput,
+)
+from pulsara_agent.capability.render import render_active_skill_prompt
 from pulsara_agent.capability.registry import CapabilityRegistry
 from pulsara_agent.capability.runtime import CapabilityRuntime
+from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
-    CapabilityResolveContext,
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
 )
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityExposureResolvedEvent,
     CapabilityGateDecisionEvent,
-    CustomEvent,
     EventContext,
     PlanModeEnteredEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -62,20 +70,26 @@ from pulsara_agent.runtime.permission import (
     EffectivePermissionPolicy,
     PermissionDecision,
     PermissionDecisionKind,
-    PermissionMode,
     PermissionProfile,
     PolicyPermissionGate,
     TerminalAccess,
     preset_to_policy,
 )
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.permission import preset_permission_policy_fact
+from pulsara_agent.primitives.capability import build_capability_resolve_basis
+from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
+from pulsara_agent.primitives.run_entry import CapabilityExposureOwnerFact
+from pulsara_agent.host.run_boundary import CapabilityResolveBasis, derive_continuation_basis
 from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
+from pulsara_agent.runtime.run_entry import RunWorkingSet
 from pulsara_agent.runtime.tool_artifacts import (
     InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
     ToolResultArtifactService,
 )
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
-from pulsara_agent.tools.registry import ToolRegistry
+from pulsara_agent.tools.registry import ToolRegistry, build_tool_binding_contract
 
 
 @dataclass(slots=True)
@@ -105,16 +119,25 @@ class StaticCapabilityProvider:
     active_injections: tuple[ActiveSkillInjection, ...] = ()
     provider_id: str = "static-test"
 
-    def resolve(
+    def snapshot_descriptors(
+        self, context: CapabilityExecutionSurfaceSnapshotContext
+    ) -> CapabilityDescriptorSnapshotOutput:
+        del context
+        return CapabilityDescriptorSnapshotOutput(descriptors=self.descriptors)
+
+    def resolve_projection(
         self,
-        context: CapabilityResolveContext,
+        context: CapabilityProjectionResolveContext,
         *,
-        bound_tool_names: frozenset[str],
-    ) -> CapabilityProviderOutput:
-        del context, bound_tool_names
-        return CapabilityProviderOutput(
-            descriptors=self.descriptors,
+        execution_surface,
+    ) -> CapabilityProjectionOutput:
+        del context, execution_surface
+        rendered = render_active_skill_prompt(self.active_injections)
+        return CapabilityProjectionOutput(
             active_injections=self.active_injections,
+            active_skill_prompt=rendered.text,
+            active_skill_rendered=rendered,
+            diagnostics=rendered.diagnostics,
         )
 
 
@@ -174,7 +197,7 @@ def _exposure_for_descriptors(
         registry.register(descriptor)
     return build_exposure_plan(
         registry.snapshot(),
-        provider_output=CapabilityProviderOutput(),
+        provider_output=CapabilityProjectionOutput(),
         bound_tool_names=bound_tool_names,
     )
 
@@ -206,16 +229,266 @@ def _firecrawl_active_injection(tmp_path: Path) -> ActiveSkillInjection:
     )
 
 
+def test_child_profile_filter_preserves_split_provider_protocol_shapes() -> None:
+    from types import SimpleNamespace
+
+    from pulsara_agent.capability.runtime import CapabilityRuntime
+    from pulsara_agent.runtime.agent import _profile_filtered_capability_runtime
+
+    class ExecutionOnly:
+        provider_id = "execution-only"
+
+        def snapshot_descriptors(self, _context):
+            return CapabilityDescriptorSnapshotOutput()
+
+    class ProjectionOnly:
+        provider_id = "projection-only"
+
+        def resolve_projection(self, _context, *, execution_surface):
+            del execution_surface
+            return CapabilityProjectionOutput()
+
+    child = _profile_filtered_capability_runtime(
+        CapabilityRuntime(providers=(ExecutionOnly(), ProjectionOnly())),
+        SimpleNamespace(
+            allowed_tool_names=("report_agent_result",),
+            allowed_descriptor_ids=(),
+            allowed_skill_names=("example-skill",),
+        ),
+    )
+
+    assert len(child.providers) == 2
+    execution, projection = child.providers
+    assert hasattr(execution, "snapshot_descriptors")
+    assert not hasattr(execution, "resolve_projection")
+    assert hasattr(projection, "resolve_projection")
+    assert not hasattr(projection, "snapshot_descriptors")
+
+
+def test_continuation_narrows_revoked_active_skill_with_unchanged_mcp(
+    tmp_path,
+) -> None:
+    descriptor = _descriptor("alpha")
+    tool = DummyTool(name="alpha", is_read_only=True, is_concurrency_safe=True)
+    registry = ToolRegistry()
+    registry.register(
+        tool,
+        binding_contract=build_tool_binding_contract(
+            tool_name="alpha",
+            origin="builtin",
+            contract_id="test.alpha",
+            contract_version="v1",
+        ),
+    )
+    active = _firecrawl_active_injection(tmp_path)
+    initial_runtime = _runtime_for_provider(
+        StaticCapabilityProvider((descriptor,), active_injections=(active,))
+    )
+    current_runtime = _runtime_for_provider(StaticCapabilityProvider((descriptor,)))
+    archive = InMemoryArchiveStore()
+    initial_owner = CapabilityExposureOwnerFact(
+        owner_kind="host_boundary",
+        owner_id="boundary:initial",
+        host_boundary_kind="pre_run",
+        runtime_session_id="runtime:1",
+        run_id="run:1",
+    )
+    initial_surface = initial_runtime.freeze_execution_surface(
+        CapabilityExecutionSurfaceSnapshotContext(
+            workspace_root=tmp_path,
+            workspace_kind="project",
+            available_tool_names=frozenset({"alpha"}),
+            mcp_installation_id="mcp:same",
+        ),
+        tool_registry=registry,
+        archive=archive,
+        runtime_session_id="runtime:1",
+        owner_id=initial_owner.owner_id,
+    )
+    initial_basis_fact = build_capability_resolve_basis(
+        basis_id="basis:initial",
+        basis_kind="initial",
+        source_basis_id=None,
+        source_basis_fingerprint=None,
+        owner=initial_owner,
+        workspace_identity_fingerprint="workspace:1",
+        memory_domain_id="memory:1",
+        permission_snapshot_id="permission:1",
+        plan_active=False,
+        active_skill_names=(active.name,),
+        user_intent_fingerprint="intent:1",
+        prior_transcript_fingerprint="transcript:1",
+        mcp_installation_id="mcp:same",
+        execution_surface_identity=initial_surface.identity,
+    )
+    raw_basis = CapabilityResolveBasis(
+        fact=initial_basis_fact,
+        user_input="use firecrawl",
+        prior_messages=(),
+        active_skill_names=frozenset({active.name}),
+        workspace_root=tmp_path,
+        memory_domain_id="memory:1",
+    )
+    context = CapabilityProjectionResolveContext(
+        workspace_root=tmp_path,
+        workspace_kind="project",
+        memory_domain=None,
+        user_input=raw_basis.user_input,
+        active_skill_names=raw_basis.active_skill_names,
+    )
+    initial = initial_runtime.resolve_exposure_projection(
+        context,
+        frozen_surface=initial_surface,
+        archive=archive,
+        runtime_session_id="runtime:1",
+        owner=initial_owner,
+        resolve_basis=initial_basis_fact,
+        exposure_id="exposure:initial",
+    )
+    assert initial.fact.semantic.active_skill_projection.rendered_entry_count == 1
+
+    resume_owner = CapabilityExposureOwnerFact(
+        owner_kind="host_boundary",
+        owner_id="boundary:resume",
+        host_boundary_kind="pre_interaction_resume",
+        runtime_session_id="runtime:1",
+        run_id="run:1",
+    )
+    current_surface = current_runtime.freeze_execution_surface(
+        CapabilityExecutionSurfaceSnapshotContext(
+            workspace_root=tmp_path,
+            workspace_kind="project",
+            available_tool_names=frozenset({"alpha"}),
+            mcp_installation_id="mcp:same",
+        ),
+        tool_registry=registry,
+        archive=archive,
+        runtime_session_id="runtime:1",
+        owner_id=resume_owner.owner_id,
+    )
+    continuation_basis = derive_continuation_basis(
+        raw_basis,
+        continuation_owner=resume_owner,
+        current_execution_surface=current_surface,
+        basis_id="basis:resume",
+    )
+    continuation = current_runtime.resolve_continuation_exposure(
+        context,
+        frozen_surface=current_surface,
+        original_plan=initial.plan,
+        original_fact=initial.fact,
+        archive=archive,
+        runtime_session_id="runtime:1",
+        owner=resume_owner,
+        resolve_basis=continuation_basis.fact,
+        exposure_id="exposure:resume",
+    )
+    assert continuation.fact.resolution_kind == "continuation_narrowed"
+    assert continuation.fact.semantic.active_skill_projection.rendered_entry_count == 0
+    assert continuation.plan.active_skill_prompt is None
+    assert continuation.fact.direct_names == initial.fact.direct_names
+
+
+def test_projection_semantic_fingerprint_ignores_exposure_scoped_artifact_ids(
+    tmp_path,
+) -> None:
+    descriptor = _descriptor("alpha")
+    provider = StaticCapabilityProvider(
+        (descriptor,),
+        active_injections=(_firecrawl_active_injection(tmp_path),),
+    )
+    runtime = _runtime_for_provider(provider)
+    registry = ToolRegistry()
+    registry.register(
+        DummyTool("alpha", is_read_only=True, is_concurrency_safe=True)
+    )
+    registry.bind_contract(
+        build_tool_binding_contract(
+            tool_name="alpha",
+            origin="custom",
+            contract_id="test.alpha",
+            contract_version="v1",
+        )
+    )
+    archive = InMemoryArchiveStore()
+
+    def resolve(owner_id: str, exposure_id: str):
+        owner = CapabilityExposureOwnerFact(
+            owner_kind="host_boundary",
+            owner_id=owner_id,
+            host_boundary_kind="pre_run",
+            runtime_session_id="runtime:semantic",
+            run_id="run:semantic",
+        )
+        surface = runtime.freeze_execution_surface(
+            CapabilityExecutionSurfaceSnapshotContext(
+                workspace_root=tmp_path,
+                workspace_kind="project",
+                available_tool_names=frozenset({"alpha"}),
+                mcp_installation_id="mcp:same",
+            ),
+            tool_registry=registry,
+            archive=archive,
+            runtime_session_id="runtime:semantic",
+            owner_id=owner_id,
+        )
+        basis = build_capability_resolve_basis(
+            basis_id=f"basis:{owner_id}",
+            basis_kind="initial",
+            source_basis_id=None,
+            source_basis_fingerprint=None,
+            owner=owner,
+            workspace_identity_fingerprint="workspace:same",
+            memory_domain_id="memory:same",
+            permission_snapshot_id="permission:same",
+            plan_active=False,
+            active_skill_names=("firecrawl",),
+            user_intent_fingerprint="intent:same",
+            prior_transcript_fingerprint="transcript:same",
+            mcp_installation_id="mcp:same",
+            execution_surface_identity=surface.identity,
+        )
+        return runtime.resolve_exposure_projection(
+            CapabilityProjectionResolveContext(
+                workspace_root=tmp_path,
+                workspace_kind="project",
+                memory_domain=None,
+                user_input="use firecrawl",
+                active_skill_names=frozenset({"firecrawl"}),
+            ),
+            frozen_surface=surface,
+            archive=archive,
+            runtime_session_id="runtime:semantic",
+            owner=owner,
+            resolve_basis=basis,
+            exposure_id=exposure_id,
+        )
+
+    first = resolve("boundary:first", "exposure:first")
+    second = resolve("boundary:second", "exposure:second")
+    first_projection = first.fact.semantic.active_skill_projection
+    second_projection = second.fact.semantic.active_skill_projection
+    assert first.plan.active_skill_prompt == second.plan.active_skill_prompt
+    assert (
+        first_projection.rendered_prompt_artifact_id
+        != second_projection.rendered_prompt_artifact_id
+    )
+    assert (
+        first.fact.exposure_semantic_fingerprint
+        == second.fact.exposure_semantic_fingerprint
+    )
+
+
 def test_builtin_provider_uses_explicit_descriptor_truth_for_bound_core_tools() -> None:
-    output = BuiltinToolCapabilityProvider().resolve(
-        CapabilityResolveContext(
+    output = BuiltinToolCapabilityProvider().snapshot_descriptors(
+        CapabilityExecutionSurfaceSnapshotContext(
             workspace_root=Path("."),
             workspace_kind="transient",
-            memory_domain=None,
-            available_tool_names=frozenset(),
-            user_input="",
+            available_tool_names=frozenset(
+                {"artifact_read", "terminal_process", "exit_plan"}
+            ),
+            mcp_installation_id="mcp_installation:empty",
         ),
-        bound_tool_names=frozenset({"artifact_read", "terminal_process", "exit_plan"}),
     )
     descriptors = {descriptor.name: descriptor for descriptor in output.descriptors}
 
@@ -267,7 +540,7 @@ def test_exposure_plan_hides_direct_descriptor_without_execution_binding() -> No
 
     exposure = build_exposure_plan(
         registry.snapshot(),
-        provider_output=CapabilityProviderOutput(),
+        provider_output=CapabilityProjectionOutput(),
         bound_tool_names=frozenset({"real_tool"}),
     )
 
@@ -810,24 +1083,22 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(
     assert [
         [tool.name for tool in context.tools] for context in transport.contexts
     ] == [["noop"], ["noop"]]
-    custom_events = [
+    exposure_events = [
         event
         for event in agent.runtime_session.event_log.iter()
-        if isinstance(event, CustomEvent)
+        if isinstance(event, CapabilityExposureResolvedEvent)
     ]
-    assert [event.name for event in custom_events] == ["capability_exposure_resolved"]
-    assert custom_events[0].value["direct_names"] == ["noop"]
-    assert custom_events[0].value["callable_names"] == ["noop"]
+    assert len(exposure_events) == 1
+    authorization = exposure_events[0].exposure.authorization_entries
+    assert [entry.capability_name for entry in authorization if entry.disposition == "direct"] == ["noop"]
+    assert [entry.capability_name for entry in authorization if entry.callable] == ["noop"]
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.tool_call_id == "call:noop"
     assert gate_decision.descriptor_id == "builtin:noop"
     assert gate_decision.decision == "allow"
     assert gate_decision.reason_code is None
     assert gate_decision.permission_policy
-    assert (
-        gate_decision.exposure_generation
-        == custom_events[0].value["registry_generation"]
-    )
+    assert gate_decision.exposure_generation is not None
     assert gate_decision.availability == "available"
     assert gate_decision.permission_category == "general"
     assert gate_decision.effective_permission_category == "general"
@@ -1051,13 +1322,12 @@ Use `hf` commands through the terminal when the user asks for Hugging Face local
     assert "Required binaries: hf" in system_prompt
     assert "Skill CLI hints are guidance only" in system_prompt
     exposure_event = next(
-        event.value
+        event.exposure
         for event in agent.runtime_session.event_log.iter()
-        if isinstance(event, CustomEvent)
-        and event.name == "capability_exposure_resolved"
+        if isinstance(event, CapabilityExposureResolvedEvent)
     )
     assert "skill_required_binary_missing" in [
-        diagnostic["code"] for diagnostic in exposure_event["diagnostics"]
+        diagnostic.code for diagnostic in exposure_event.diagnostics
     ]
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.capability_context["active_skill_names"] == [
@@ -1143,9 +1413,76 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             state=ToolCallState.ASKING,
         )
     ]
+    run_start_fields = run_start_permission_fields(
+        state.run_id,
+        user_input="original request",
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+        model_target=state.run_model_target.fact,
+    )
+    state.scratchpad["terminal_run_end_event_id"] = run_start_fields[
+        "terminal_run_end_event_id"
+    ]
+    exposure = build_exposure_plan(
+        CapabilityRegistry().snapshot(),
+        provider_output=CapabilityProjectionOutput(),
+        bound_tool_names=frozenset(agent.tool_executor.registry.names()),
+    )
 
-    result = asyncio.run(
-        agent.resume_after_approval(
+    async def resume():
+        stored_start = await agent.runtime_session.emit(
+            RunStartEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                **run_start_fields,
+                user_input_chars=len("original request"),
+            ),
+            state=state,
+        )
+        assert isinstance(stored_start, RunStartEvent)
+        assert stored_start.sequence is not None
+        boundary = stored_start.new_run_boundary
+        assert boundary is not None
+        state.run_working_set = RunWorkingSet(
+            run_start_event_id=stored_start.id,
+            run_start_sequence=stored_start.sequence,
+            run_model_target=state.run_model_target,
+            permission_snapshot=state.permission_snapshot,
+            plan_snapshot=PlanWorkflowStateFact(
+                workflow_id=None,
+                active=False,
+                revision=0,
+                entered_event_id=None,
+                entered_event_sequence=None,
+                entry_run_id=None,
+                entry_turn_id=None,
+                entry_reply_id=None,
+                stored_default_permission=preset_permission_policy_fact(
+                    PermissionMode.BYPASS_PERMISSIONS
+                ),
+                accepted_plan_artifact_id=None,
+            ),
+            capability_resolve_basis=CapabilityResolveBasis(
+                fact=boundary.capability_basis,
+                user_input="original request",
+                prior_messages=(),
+                active_skill_names=frozenset(),
+                workspace_root=tmp_path,
+                memory_domain_id=boundary.capability_basis.memory_domain_id,
+            ),
+            frozen_execution_surface=FrozenCapabilityExecutionSurface(
+                identity=boundary.capability_basis.execution_surface_identity,
+                descriptors=(),
+                diagnostics=(),
+            ),
+            original_exposure_plan=exposure,
+            original_exposure_fact=None,
+            effective_exposure_plan=exposure,
+            effective_exposure_fact=None,
+            latest_committed_resume_boundary=None,
+        )
+        return await agent.resume_after_approval(
             state,
             ApprovalResolution(
                 approval_id="approval:test",
@@ -1154,7 +1491,8 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
                 ),
             ),
         )
-    )
+
+    result = asyncio.run(resume())
 
     assert result.status is LoopStatus.FINISHED
     assert not (tmp_path / "review_tmp.txt").exists()
@@ -1193,20 +1531,13 @@ def test_agent_runtime_workflow_control_fails_closed_without_descriptor(
         capability_runtime=CapabilityRuntime(providers=()),
     )
 
-    result = asyncio.run(run_agent_task(agent, "enter plan"))
+    with pytest.raises(
+        ValueError, match="execution bindings lack capability descriptors"
+    ):
+        asyncio.run(run_agent_task(agent, "enter plan"))
 
-    assert result.status is LoopStatus.FINISHED
     assert not any(
         isinstance(event, PlanModeEnteredEvent)
         for event in agent.runtime_session.event_log.iter()
     )
-    assert not agent._plan_state(result.state).active
-    gate_decision = _gate_decisions(agent)[0]
-    assert gate_decision.tool_call_id == "call:plan"
-    assert gate_decision.decision == "deny"
-    assert gate_decision.reason_code == "capability_descriptor_missing"
-    assert (
-        gate_decision.reason_message
-        == "Unknown tool: enter_plan (capability_descriptor_missing)"
-    )
-    assert gate_decision.result_state is ToolResultState.ERROR
+    assert not _gate_decisions(agent)

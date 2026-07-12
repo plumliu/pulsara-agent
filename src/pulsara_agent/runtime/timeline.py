@@ -21,6 +21,8 @@ from pulsara_agent.event import (
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
+    RunInteractionResumeBoundaryEvent,
+    RunStartEvent,
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
     ToolCallDeltaEvent,
@@ -34,6 +36,8 @@ from pulsara_agent.event import (
 )
 
 TimelineItemKind = Literal[
+    "run_boundary",
+    "continuation_boundary",
     "reply",
     "model_call",
     "assistant_text",
@@ -154,6 +158,63 @@ def build_run_timeline(
     terminal_status: str | None = None
 
     for event in ordered:
+        if isinstance(event, RunStartEvent):
+            if event.new_run_boundary is not None:
+                boundary = event.new_run_boundary
+                metadata = {
+                    "run_entry_kind": "host",
+                    "boundary_id": boundary.identity.boundary_id,
+                    "boundary_kind": boundary.identity.kind.value,
+                    "permission_snapshot_id": boundary.permission_snapshot_id,
+                    "model_target_fingerprint": boundary.model_target_fingerprint,
+                    "mcp_installation_id": boundary.mcp_installation_id,
+                    "capability_basis_fingerprint": (
+                        boundary.capability_basis.basis_fingerprint
+                    ),
+                }
+                title = "Host run boundary"
+            else:
+                entry = event.subagent_run_entry
+                metadata = {
+                    "run_entry_kind": "subagent_child",
+                    "subagent_run_id": (
+                        entry.subagent_run_id if entry is not None else None
+                    ),
+                    "subagent_task_id": (
+                        entry.subagent_task_id if entry is not None else None
+                    ),
+                }
+                title = "Subagent run entry"
+            item = _item(
+                "run_boundary",
+                title,
+                event,
+                status="committed",
+                metadata=metadata,
+            )
+            _finish(item, event, status="committed")
+            items.append(item)
+            continue
+        if isinstance(event, RunInteractionResumeBoundaryEvent):
+            boundary = event.boundary
+            item = _item(
+                "continuation_boundary",
+                f"Interaction resume: {boundary.interaction_kind}",
+                event,
+                status="committed",
+                metadata={
+                    "boundary_id": boundary.identity.boundary_id,
+                    "interaction_id": boundary.interaction_id,
+                    "interaction_kind": boundary.interaction_kind,
+                    "exposure_transition": boundary.exposure_transition,
+                    "source_exposure_id": boundary.source_exposure_id,
+                    "effective_exposure_id": boundary.effective_exposure_id,
+                    "mcp_installation_id": boundary.mcp_installation_id,
+                },
+            )
+            _finish(item, event, status="committed")
+            items.append(item)
+            continue
         if isinstance(event, ReplyStartEvent):
             item = _item(
                 "reply",

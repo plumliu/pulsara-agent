@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import subagent_result_handoff_fields
+
 from pulsara_agent.event import (
     EventContext,
     SubagentEdgeRecordedEvent,
@@ -19,7 +21,8 @@ from pulsara_agent.event import (
     SubagentTaskScheduledEvent,
     SubagentTaskStartedEvent,
 )
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.subagent.commands import (
     PlannedChildReservation,
     PlannedSubagentWrite,
@@ -95,14 +98,26 @@ def test_command_planner_rejects_explicit_result_replacement_before_commit() -> 
         summary="explicit body",
         result_artifact_id="artifact:explicit",
         artifact_ids=["artifact:explicit"],
+        source_tool_call_id="call:report-result",
     )
     state = _fold(task, started, message, task_started, submitted)
 
     replacement = SubagentRunCompletedEvent(
+        **subagent_result_handoff_fields(
+            subagent_run_id=started.subagent_run_id,
+            child_runtime_session_id=started.child_runtime_session_id,
+            child_run_id=f"child-run:{started.subagent_run_id}",
+            result_id="result:replacement",
+            summary="replacement",
+            result_artifact_id="artifact:replacement",
+            artifact_ids=("artifact:replacement",),
+            result_source="explicit",
+        ),
         **CTX.event_fields(),
         subagent_run_id=started.subagent_run_id,
         parent_runtime_session_id=started.parent_runtime_session_id,
         child_runtime_session_id=started.child_runtime_session_id,
+        child_run_id=f"child-run:{started.subagent_run_id}",
         result_id="result:replacement",
         summary="replacement",
         result_artifact_id="artifact:replacement",
@@ -231,6 +246,7 @@ def test_command_planner_rejects_result_submitted_for_another_tasks_run() -> Non
         summary="wrong task",
         result_artifact_id="artifact:wrong-task",
         artifact_ids=["artifact:wrong-task"],
+        source_tool_call_id="call:report-result",
     )
 
     with pytest.raises(SubagentCommandPlanError, match="result task/run attribution"):
@@ -337,12 +353,24 @@ def test_command_planner_reducer_guard_rejects_result_cross_event_drift() -> Non
         summary="canonical summary",
         result_artifact_id="artifact:cross-event",
         artifact_ids=["artifact:cross-event"],
+        source_tool_call_id="call:report-result",
     )
     completed = SubagentRunCompletedEvent(
+        **subagent_result_handoff_fields(
+            subagent_run_id=started.subagent_run_id,
+            child_runtime_session_id=started.child_runtime_session_id,
+            child_run_id=f"child-run:{started.subagent_run_id}",
+            result_id=submitted.result_id,
+            summary=submitted.summary,
+            result_artifact_id=submitted.result_artifact_id,
+            artifact_ids=tuple(submitted.artifact_ids),
+            result_source="explicit",
+        ),
         **CTX.event_fields(),
         subagent_run_id=started.subagent_run_id,
         parent_runtime_session_id=started.parent_runtime_session_id,
         child_runtime_session_id=started.child_runtime_session_id,
+        child_run_id=f"child-run:{started.subagent_run_id}",
         result_id=submitted.result_id,
         summary=submitted.summary,
         result_artifact_id=submitted.result_artifact_id,
@@ -466,6 +494,7 @@ def _start_batch(key: str = "planner") -> tuple[
             "child_timeout_seconds": None,
             "max_total_child_runs_per_parent_run": 16,
             "max_result_summary_chars_per_child": 4_000,
+            "max_result_artifact_refs_per_child": 32,
             "max_subagent_results_per_parent_compile": 8,
         },
     )
@@ -498,11 +527,22 @@ def _completion(
     result_id: str,
 ) -> SubagentRunCompletedEvent:
     artifact_id = f"artifact:{result_id}"
+    child_run_id = f"child-run:{started.subagent_run_id}"
     return SubagentRunCompletedEvent(
+        **subagent_result_handoff_fields(
+            subagent_run_id=started.subagent_run_id,
+            child_runtime_session_id=started.child_runtime_session_id,
+            child_run_id=child_run_id,
+            result_id=result_id,
+            summary="done",
+            result_artifact_id=artifact_id,
+            artifact_ids=(artifact_id,),
+        ),
         **CTX.event_fields(),
         subagent_run_id=started.subagent_run_id,
         parent_runtime_session_id=started.parent_runtime_session_id,
         child_runtime_session_id=started.child_runtime_session_id,
+        child_run_id=child_run_id,
         result_id=result_id,
         summary="done",
         result_artifact_id=artifact_id,

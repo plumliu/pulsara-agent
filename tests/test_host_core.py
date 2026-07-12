@@ -3,7 +3,7 @@ import json
 from typing import AsyncIterator
 
 import pytest
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -68,11 +68,11 @@ from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
-    PermissionMode,
     PermissionProfile,
     TerminalAccess,
     preset_to_policy,
 )
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.settings import PulsaraSettings
@@ -291,8 +291,8 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(ctx.run_id, user_input="first user"),
+                user_input_chars=len("first user"),
                 metadata={"user_input": "first user"},
             ),
             ModelCallStartEvent(**ctx.event_fields(), **model_call_start_fields()),
@@ -309,10 +309,14 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
             ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(
+                    ctx.run_id,
+                    status="failed",
+                    error_message="model error budget exceeded with sk-secret",
+                ),
                 **ctx.event_fields(),
                 status="failed",
                 stop_reason="model_error",
-                error_message="model error budget exceeded with sk-secret",
             ),
         ]
     )
@@ -346,7 +350,7 @@ def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> Non
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input="first user"),
                 user_input_chars=10,
                 metadata={"user_input": "first user"},
             ),
@@ -361,6 +365,7 @@ def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> Non
             ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(ctx.run_id, status="failed"),
                 **ctx.event_fields(), status="failed", stop_reason="model_error"
             ),
         ]
@@ -388,8 +393,10 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
         [
             RunStartEvent(
                 **failed_ctx.event_fields(),
-                **run_start_permission_fields(failed_ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(
+                    failed_ctx.run_id, user_input="failed user"
+                ),
+                user_input_chars=len("failed user"),
                 metadata={"user_input": "failed user"},
             ),
             RunErrorEvent(
@@ -399,12 +406,13 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
             ),
             ReplyEndEvent(**failed_ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(failed_ctx.run_id, status="failed"),
                 **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
             ),
             RunStartEvent(
                 **done_ctx.event_fields(),
-                **run_start_permission_fields(done_ctx.run_id),
-                user_input_chars=8,
+                **run_start_permission_fields(done_ctx.run_id, user_input="done user"),
+                user_input_chars=len("done user"),
                 metadata={"user_input": "done user"},
             ),
             TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
@@ -414,6 +422,7 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
             TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
             ReplyEndEvent(**done_ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(done_ctx.run_id, status="finished"),
                 **done_ctx.event_fields(), status="finished", stop_reason="final"
             ),
         ]
@@ -448,8 +457,8 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(ctx.run_id, user_input="long user task"),
+                user_input_chars=len("long user task"),
                 metadata={"user_input": "long user task"},
             ),
             TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
@@ -457,7 +466,15 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
                 **ctx.event_fields(), block_id="text:1", delta="partial answer"
             ),
             ReplyEndEvent(**ctx.event_fields()),
-            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            RunEndEvent(
+                **run_end_contract_fields(
+                    ctx.run_id, status="aborted", abort_kind="user_stop"
+                ),
+                **ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
+            ),
         ]
     )
 
@@ -496,12 +513,17 @@ def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active(
             ),
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(
+                    ctx.run_id, user_input="ask plan question"
+                ),
+                user_input_chars=len("ask plan question"),
                 metadata={"user_input": "ask plan question"},
             ),
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(
+                    ctx.run_id, status="aborted", abort_kind="user_stop"
+                ),
                 **ctx.event_fields(),
                 status="aborted",
                 stop_reason="aborted",
@@ -528,8 +550,8 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(ctx.run_id, user_input="dangerous task"),
+                user_input_chars=len("dangerous task"),
                 metadata={"user_input": "dangerous task"},
             ),
             ToolCallStartEvent(
@@ -554,7 +576,15 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
                 ],
             ),
             ReplyEndEvent(**ctx.event_fields()),
-            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            RunEndEvent(
+                **run_end_contract_fields(
+                    ctx.run_id, status="aborted", abort_kind="user_stop"
+                ),
+                **ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
+            ),
         ]
     )
 
@@ -581,8 +611,8 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(ctx.run_id, user_input="run command"),
+                user_input_chars=len("run command"),
                 metadata={"user_input": "run command"},
             ),
             ToolCallStartEvent(
@@ -602,7 +632,8 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
                 tool_call_name="terminal",
             ),
             RunEndEvent(
-                **ctx.event_fields(), status="failed", stop_reason="tool_error"
+                **run_end_contract_fields(ctx.run_id, status="failed"),
+                **ctx.event_fields(), status="failed", stop_reason="tool_error_budget"
             ),
         ]
     )
@@ -628,8 +659,8 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(ctx.run_id, user_input="run command"),
+                user_input_chars=len("run command"),
                 metadata={"user_input": "run command"},
             ),
             ToolCallStartEvent(
@@ -649,7 +680,15 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
                 tool_call_id="call:terminal",
                 tool_call_name="terminal",
             ),
-            RunEndEvent(**ctx.event_fields(), status="aborted", stop_reason="aborted"),
+            RunEndEvent(
+                **run_end_contract_fields(
+                    ctx.run_id, status="aborted", abort_kind="user_stop"
+                ),
+                **ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
+            ),
             ToolResultTextDeltaEvent(
                 **ctx.event_fields(), tool_call_id="call:terminal", delta="done"
             ),
@@ -690,8 +729,8 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(ctx.run_id, user_input="change files"),
+                user_input_chars=len("change files"),
                 metadata={"user_input": "change files"},
             ),
             ToolCallStartEvent(
@@ -717,6 +756,7 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
             ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:term"),
             RunEndEvent(
+                **run_end_contract_fields(ctx.run_id, status="failed"),
                 **ctx.event_fields(), status="failed", stop_reason="model_error"
             ),
         ]
@@ -750,8 +790,10 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
         [
             RunStartEvent(
                 **aborted_ctx.event_fields(),
-                **run_start_permission_fields(aborted_ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(
+                    aborted_ctx.run_id, user_input="dangerous task"
+                ),
+                user_input_chars=len("dangerous task"),
                 metadata={"user_input": "dangerous task"},
             ),
             ToolCallStartEvent(
@@ -777,12 +819,20 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
             ),
             ReplyEndEvent(**aborted_ctx.event_fields()),
             RunEndEvent(
-                **aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"
+                **run_end_contract_fields(
+                    aborted_ctx.run_id, status="aborted", abort_kind="user_stop"
+                ),
+                **aborted_ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
             ),
             RunStartEvent(
                 **failed_ctx.event_fields(),
-                **run_start_permission_fields(failed_ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(
+                    failed_ctx.run_id, user_input="failed follow-up"
+                ),
+                user_input_chars=len("failed follow-up"),
                 metadata={"user_input": "failed follow-up"},
             ),
             RunErrorEvent(
@@ -791,6 +841,7 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
                 code="openai_responses_error",
             ),
             RunEndEvent(
+                **run_end_contract_fields(failed_ctx.run_id, status="failed"),
                 **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
             ),
         ]
@@ -823,18 +874,26 @@ def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succ
         [
             RunStartEvent(
                 **aborted_ctx.event_fields(),
-                **run_start_permission_fields(aborted_ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(
+                    aborted_ctx.run_id, user_input="aborted user"
+                ),
+                user_input_chars=len("aborted user"),
                 metadata={"user_input": "aborted user"},
             ),
             ReplyEndEvent(**aborted_ctx.event_fields()),
             RunEndEvent(
-                **aborted_ctx.event_fields(), status="aborted", stop_reason="aborted"
+                **run_end_contract_fields(
+                    aborted_ctx.run_id, status="aborted", abort_kind="user_stop"
+                ),
+                **aborted_ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
             ),
             RunStartEvent(
                 **done_ctx.event_fields(),
-                **run_start_permission_fields(done_ctx.run_id),
-                user_input_chars=8,
+                **run_start_permission_fields(done_ctx.run_id, user_input="done user"),
+                user_input_chars=len("done user"),
                 metadata={"user_input": "done user"},
             ),
             TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
@@ -844,6 +903,7 @@ def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succ
             TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
             ReplyEndEvent(**done_ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(done_ctx.run_id, status="finished"),
                 **done_ctx.event_fields(), status="finished", stop_reason="final"
             ),
         ]
@@ -880,7 +940,7 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input="first user"),
                 user_input_chars=10,
                 metadata={"user_input": "first user"},
             ),
@@ -890,6 +950,7 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
                 code="model_stream_error",
             ),
             RunEndEvent(
+                **run_end_contract_fields(ctx.run_id, status="failed"),
                 **ctx.event_fields(), status="failed", stop_reason="model_error"
             ),
         ]
@@ -917,12 +978,13 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
         [
             RunStartEvent(
                 **first_ctx.event_fields(),
-                **run_start_permission_fields(first_ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(first_ctx.run_id, user_input="run tests"),
+                user_input_chars=len("run tests"),
                 metadata={"user_input": "run tests"},
             ),
             ReplyEndEvent(**first_ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(first_ctx.run_id, status="finished"),
                 **first_ctx.event_fields(), status="finished", stop_reason="final"
             ),
             TerminalProcessCompletedEvent(
@@ -949,12 +1011,13 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
         [
             RunStartEvent(
                 **second_ctx.event_fields(),
-                **run_start_permission_fields(second_ctx.run_id),
-                user_input_chars=8,
+                **run_start_permission_fields(second_ctx.run_id, user_input="continue"),
+                user_input_chars=len("continue"),
                 metadata={"user_input": "continue"},
             ),
             ReplyEndEvent(**second_ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(second_ctx.run_id, status="finished"),
                 **second_ctx.event_fields(), status="finished", stop_reason="final"
             ),
         ]
@@ -986,18 +1049,21 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
         [
             RunStartEvent(
                 **first_ctx.event_fields(),
-                **run_start_permission_fields(first_ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(first_ctx.run_id, user_input="start server"),
+                user_input_chars=len("start server"),
                 metadata={"user_input": "start server"},
             ),
             ReplyEndEvent(**first_ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(first_ctx.run_id, status="finished"),
                 **first_ctx.event_fields(), status="finished", stop_reason="final"
             ),
             RunStartEvent(
                 **second_ctx.event_fields(),
-                **run_start_permission_fields(second_ctx.run_id),
-                user_input_chars=8,
+                **run_start_permission_fields(
+                    second_ctx.run_id, user_input="do other work"
+                ),
+                user_input_chars=len("do other work"),
                 metadata={"user_input": "do other work"},
             ),
             TerminalProcessCompletedEvent(
@@ -1012,6 +1078,7 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
             ),
             ReplyEndEvent(**second_ctx.event_fields()),
             RunEndEvent(
+                **run_end_contract_fields(second_ctx.run_id, status="finished"),
                 **second_ctx.event_fields(), status="finished", stop_reason="final"
             ),
         ]
@@ -1035,12 +1102,19 @@ def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_proje
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
-                user_input_chars=10,
+                **run_start_permission_fields(
+                    ctx.run_id, user_input="start background"
+                ),
+                user_input_chars=len("start background"),
                 metadata={"user_input": "start background"},
             ),
             ReplyEndEvent(**ctx.event_fields()),
-            RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
+            RunEndEvent(
+                **run_end_contract_fields(ctx.run_id, status="finished"),
+                **ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
+            ),
             TerminalProcessCompletedEvent(
                 **ctx.event_fields(),
                 process_id="proc_projection",
@@ -1083,12 +1157,17 @@ def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processe
     events = [
         RunStartEvent(
             **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id),
-            user_input_chars=10,
+            **run_start_permission_fields(ctx.run_id, user_input="start background"),
+            user_input_chars=len("start background"),
             metadata={"user_input": "start background"},
         ),
         ReplyEndEvent(**ctx.event_fields()),
-        RunEndEvent(**ctx.event_fields(), status="finished", stop_reason="final"),
+        RunEndEvent(
+            **run_end_contract_fields(ctx.run_id, status="finished"),
+            **ctx.event_fields(),
+            status="finished",
+            stop_reason="final",
+        ),
     ]
     for index in range(4):
         events.append(
@@ -2624,6 +2703,10 @@ def test_force_exit_plan_exits_without_pending_exit(tmp_path, monkeypatch) -> No
     assert session.current_permission_mode is PermissionMode.BYPASS_PERMISSIONS
     exited = [event for event in events if isinstance(event, PlanModeExitedEvent)]
     assert exited[-1].source == "user_force_exit"
+    assert exited[-1].transition_owner == "host_workflow"
+    assert exited[-1].host_workflow_operation_id is not None
+    assert session.active_run_id is None
+    assert not any(isinstance(event, RunStartEvent) for event in events)
 
 
 def test_workflow_tool_batch_barrier_does_not_execute_sibling_write(

@@ -103,6 +103,49 @@ class McpFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class McpBindingIdentityFact(McpFact):
+    server_id: str
+    slot_id: str
+    snapshot_id: str
+    discovery_generation: int
+
+    @model_validator(mode="after")
+    def _binding_generation(self) -> "McpBindingIdentityFact":
+        if self.discovery_generation < 0:
+            raise ValueError("MCP binding discovery_generation must be non-negative")
+        if not self.server_id or not self.slot_id or not self.snapshot_id:
+            raise ValueError("MCP binding identity fields must be non-empty")
+        return self
+
+
+class McpInstallationReferenceFact(McpFact):
+    installation_id: str
+    owner_runtime_session_id: str
+    config_epoch: int
+    event_safe_config_set_fingerprint: str
+    server_snapshot_semantic_fingerprints: tuple[tuple[str, str], ...]
+    binding_identities: tuple[McpBindingIdentityFact, ...]
+
+    @model_validator(mode="after")
+    def _installation_reference(self) -> "McpInstallationReferenceFact":
+        if self.config_epoch < 0:
+            raise ValueError("MCP installation config_epoch must be non-negative")
+        server_pairs = self.server_snapshot_semantic_fingerprints
+        if server_pairs != tuple(sorted(set(server_pairs))):
+            raise ValueError("MCP server semantic fingerprints must be sorted and unique")
+        binding_keys = [
+            (item.server_id, item.slot_id, item.snapshot_id, item.discovery_generation)
+            for item in self.binding_identities
+        ]
+        if binding_keys != sorted(binding_keys) or len(binding_keys) != len(
+            set(binding_keys)
+        ):
+            raise ValueError("MCP binding identities must be sorted and unique")
+        if not self.installation_id or not self.owner_runtime_session_id:
+            raise ValueError("MCP installation reference identity is required")
+        return self
+
+
 class McpDiagnosticFact(McpFact):
     severity: Literal["info", "warning", "error"] = "warning"
     code: str
@@ -399,6 +442,8 @@ __all__ = [
     "McpDiscoveredResourceTemplateFact",
     "McpDiscoveredToolFact",
     "McpInstalledServerSnapshotFact",
+    "McpBindingIdentityFact",
+    "McpInstallationReferenceFact",
     "McpReconcileAttemptSummaryFact",
     "McpReconcileTriggerValue",
     "McpServerInfoFact",

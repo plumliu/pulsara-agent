@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import AsyncIterator
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 from tests.conftest import run_start_permission_fields
 
 from pulsara_agent.event import (
+    CapabilityExposureResolvedEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
@@ -62,6 +64,8 @@ from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
 from pulsara_agent.ontology import memory
 from pulsara_agent.capability.runtime import CapabilityRuntime
+from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
+from pulsara_agent.capability.types import CapabilityProjectionResolveContext
 from pulsara_agent.message import (
     AssistantMsg,
     Msg,
@@ -86,6 +90,14 @@ from pulsara_agent.runtime.compaction.candidates import (
     parse_compaction_memory_candidates,
 )
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
+from pulsara_agent.runtime.compaction.commit import (
+    CompactionCommitPendingAfterCancellation,
+    CompactionEventCommitResult,
+    DirectEventLogCompactionEventCommitPort,
+    PendingCompactionEventCommit,
+    RuntimeSessionCompactionEventCommitPort,
+)
+from pulsara_agent.runtime.session import EventWriteResult
 from pulsara_agent.runtime.context_engine.tool_results import (
     render_segmented_llm_messages,
 )
@@ -175,19 +187,97 @@ class CompactErrorAfterTextTransport(CompactScriptedTransport):
         )
 
 
-def _seed_suspended_run_model_contract(agent, runtime_wiring, state: LoopState) -> None:
-    target = agent.resolve_run_model_target()
-    state.run_model_target = target
-    fields = run_start_permission_fields(state.run_id)
-    fields["model_target"] = target.fact
-    runtime_wiring.event_log.append(
-        RunStartEvent(
-            run_id=state.run_id,
-            turn_id=state.turn_id,
-            reply_id=state.reply_id,
-            **fields,
-            user_input_chars=0,
+class BlockingCompactTransport(CompactScriptedTransport):
+    def __init__(self) -> None:
+        super().__init__("")
+        self.entered = asyncio.Event()
+
+    async def stream(
+        self,
+        *,
+        call,
+        context: LLMContext,
+        event_context: EventContext,
+    ) -> AsyncIterator:
+        del call, context, event_context
+        self.entered.set()
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover - keeps this an async generator
+            yield None
+
+
+async def _seed_suspended_run_model_contract(
+    agent,
+    runtime_wiring,
+    session: HostSession,
+    state: LoopState,
+) -> None:
+    """Create a real committed Host entry, then stop before continuation.
+
+    Resume tests must not manufacture a bare ``RunStartEvent``: production
+    PRE_RESUME requires the committed run owner, typed ``RunWorkingSet`` and
+    initial capability exposure that a genuine PRE_RUN establishes.
+    """
+
+    identity = session._new_run_boundary_identity(state)
+
+    async def prepare():
+        async with session._run_lock:
+            return await session._prepare_and_commit_new_run_boundary(
+                user_input="",
+                active_skill_names=frozenset(),
+                state=state,
+                identity=identity,
+            )
+
+    draft, _committed, _stored = await session._create_owned_boundary_task(
+        prepare,
+        preparing_state=state,
+        preparing_identity=identity,
+    )
+    async with session._run_lock:
+        frozen_surface = state.scratchpad.get(
+            "frozen_capability_execution_surface"
         )
+        if not isinstance(frozen_surface, FrozenCapabilityExecutionSurface):
+            raise AssertionError("test PRE_RUN did not freeze a capability surface")
+        resolved = agent.capability_runtime.resolve_exposure_projection(
+            CapabilityProjectionResolveContext(
+                workspace_root=session.workspace.workspace_root,
+                workspace_kind=session.workspace.workspace_kind,
+                memory_domain=session.workspace.memory_domain,
+                user_input="",
+                prior_messages=draft.prior_messages,
+                active_skill_names=frozenset(),
+                plan_active=False,
+            ),
+            frozen_surface=frozen_surface,
+            archive=runtime_wiring.archive,
+            runtime_session_id=session.runtime_session_id,
+            owner=draft.capability_basis.owner,
+            resolve_basis=draft.capability_basis,
+            exposure_id=f"capability_exposure:test:{uuid4().hex}",
+            resolution_kind="initial",
+        )
+        stored_exposure = await runtime_wiring.runtime_session.emit(
+            CapabilityExposureResolvedEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                exposure=resolved.fact,
+                exposure_revision=1,
+            ),
+            state=state,
+        )
+        assert isinstance(stored_exposure, CapabilityExposureResolvedEvent)
+        assert state.run_working_set is not None
+        state.run_working_set.install_initial_exposure(
+            plan=resolved.plan,
+            fact=resolved.fact,
+        )
+    state.status = LoopStatus.WAITING_USER
+    state.scratchpad["suspended_state_token"] = (
+        f"suspended_state:test:{uuid4().hex}"
     )
 
 
@@ -232,7 +322,7 @@ def _append_turn(
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input=user_input),
                 user_input_chars=len(user_input),
                 metadata={"user_input": user_input},
             ),
@@ -254,7 +344,7 @@ async def _emit_turn(
     for event in [
         RunStartEvent(
             **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id),
+            **run_start_permission_fields(ctx.run_id, user_input=user_input),
             user_input_chars=len(user_input),
             metadata={"user_input": user_input},
         ),
@@ -366,7 +456,12 @@ def _llm_runtime(
     )
 
 
-class _FakeHostCompactionService:
+class _FakeCompactionServiceBase:
+    async def drain_pending_terminalizations(self, *, timeout_seconds: float) -> None:
+        del timeout_seconds
+
+
+class _FakeHostCompactionService(_FakeCompactionServiceBase):
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
@@ -384,8 +479,7 @@ class _FakeHostCompactionService:
         self.calls.append({"method": "compact_if_needed", **kwargs})
         return False
 
-
-class _FakeFailingAutoCompactionService:
+class _FakeFailingAutoCompactionService(_FakeCompactionServiceBase):
     def __init__(self, event_log: InMemoryEventLog) -> None:
         self.event_log = event_log
 
@@ -409,8 +503,7 @@ class _FakeFailingAutoCompactionService:
         )
         return False
 
-
-class _FakeWritingAutoCompactionService:
+class _FakeWritingAutoCompactionService(_FakeCompactionServiceBase):
     def __init__(self, event_log: InMemoryEventLog) -> None:
         self.event_log = event_log
 
@@ -455,7 +548,7 @@ class _FakeWritingAutoCompactionService:
         return True
 
 
-class _FakeWritingManualCompactionService:
+class _FakeWritingManualCompactionService(_FakeCompactionServiceBase):
     def __init__(self, event_log: InMemoryEventLog) -> None:
         self.event_log = event_log
 
@@ -506,7 +599,7 @@ class _FakeWritingManualCompactionService:
         )
 
 
-class _FakeFailingManualCompactionService:
+class _FakeFailingManualCompactionService(_FakeCompactionServiceBase):
     def __init__(self, event_log: InMemoryEventLog) -> None:
         self.event_log = event_log
 
@@ -548,7 +641,7 @@ class _FakeFailingManualCompactionService:
         raise RuntimeError("manual compact exploded")
 
 
-class _FakePreflightBoundaryCompactionService:
+class _FakePreflightBoundaryCompactionService(_FakeCompactionServiceBase):
     def __init__(
         self,
         event_log: InMemoryEventLog,
@@ -946,6 +1039,252 @@ def test_manual_context_compaction_writes_summary_artifact_and_events() -> None:
     assert transport.contexts
     assert transport.contexts[0].tools == ()
     assert "Do NOT call any tools" in (transport.contexts[0].messages[0].content[0])
+
+
+def test_cancelled_compaction_after_started_commits_stable_failed_terminal() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    _append_turn(log, "cancel", "first request", "first reply")
+    transport = BlockingCompactTransport()
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(transport),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            _compact(service, trigger="manual", reason="user_requested", force=True)
+        )
+        await transport.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    started = next(
+        event for event in log.iter() if isinstance(event, ContextCompactionStartedEvent)
+    )
+    failed = next(
+        event for event in log.iter() if isinstance(event, ContextCompactionFailedEvent)
+    )
+    assert failed.id == started.terminal_event_id
+    assert failed.started_event_id == started.id
+    assert failed.termination_kind == "cancelled"
+
+
+def test_cancelled_started_write_that_commits_late_remains_service_owned() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    _append_turn(log, "late-started", "first request", "first reply")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    base_port = DirectEventLogCompactionEventCommitPort(log)
+
+    class LateStartedCommitPort:
+        async def commit_event(self, event, *, state=None):
+            if not isinstance(event, ContextCompactionStartedEvent):
+                return await base_port.commit_event(event, state=state)
+
+            async def write_late():
+                entered.set()
+                await release.wait()
+                return log.append(event)
+
+            task = asyncio.create_task(write_late())
+            try:
+                committed = await asyncio.shield(task)
+            except asyncio.CancelledError as cancelled:
+                raise CompactionCommitPendingAfterCancellation(
+                    PendingCompactionEventCommit(
+                        candidate_event=event,
+                        task=task,
+                        event_log=log,
+                    )
+                ) from cancelled
+            assert committed.sequence is not None
+            return CompactionEventCommitResult(
+                candidate_event_id=event.id,
+                committed_event=committed,
+                committed_through_sequence=committed.sequence,
+                publication_status="unavailable",
+                publication_errors=(),
+            )
+
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
+        event_commit_port=LateStartedCommitPort(),
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            _compact(service, trigger="manual", reason="user_requested", force=True)
+        )
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert service.pending_terminalization_count == 1
+        assert not any(
+            isinstance(event, ContextCompactionStartedEvent) for event in log.iter()
+        )
+
+        release.set()
+        await service.drain_pending_terminalizations(timeout_seconds=1.0)
+
+    asyncio.run(scenario())
+    assert service.pending_terminalization_count == 0
+    started = [
+        event for event in log.iter() if isinstance(event, ContextCompactionStartedEvent)
+    ]
+    failed = [
+        event for event in log.iter() if isinstance(event, ContextCompactionFailedEvent)
+    ]
+    assert len(started) == 1
+    assert len(failed) == 1
+    assert failed[0].started_event_id == started[0].id
+    assert failed[0].id == started[0].terminal_event_id
+
+
+def test_compaction_confirmation_failure_transfers_late_commit_owner() -> None:
+    log = InMemoryEventLog()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class ConfirmationUnavailableRuntime:
+        async def write_event(self, event, *, state=None):
+            del state
+            entered.set()
+            await release.wait()
+            stored = log.append(event)
+            return EventWriteResult(
+                committed_events=(stored,),
+                commit_status="committed",
+                reducer_high_waters={},
+                reconciliation_required=False,
+                reducer_errors=(),
+                publication_status="completed",
+                publisher_enqueued_through_sequence=stored.sequence,
+                publication_errors=(),
+            )
+
+        def confirm_event_batch(self, _events):
+            raise RuntimeError("confirmation store unavailable")
+
+    event = CustomEvent(
+        **_ctx("compaction:confirmation-unknown").event_fields(),
+        name="compaction_confirmation_unknown_probe",
+    )
+    port = RuntimeSessionCompactionEventCommitPort(ConfirmationUnavailableRuntime())
+
+    async def scenario() -> None:
+        task = asyncio.create_task(port.commit_event(event))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(CompactionCommitPendingAfterCancellation) as raised:
+            await task
+        assert log.get_by_id(event.id) is None
+        release.set()
+        result = await raised.value.pending.resolve(timeout_seconds=1.0)
+        assert result.committed_event.id == event.id
+
+    asyncio.run(scenario())
+    assert log.get_by_id(event.id) is not None
+
+
+def test_orphan_compaction_started_is_owned_and_recovered_before_reuse() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    started_fields = compaction_started_contract_fields()
+    started_fields["terminal_event_id"] = "context_compaction_terminal:orphan"
+    started = ContextCompactionStartedEvent(
+        id="context_compaction_started:orphan",
+        **_ctx("compaction:orphan").event_fields(),
+        **started_fields,
+        compaction_id="context_compaction:orphan",
+        trigger="auto",
+        reason="preflight_context_threshold",
+        window_number=1,
+        window_id="context_window:orphan",
+        threshold_tokens=100,
+        through_sequence=1,
+        keep_after_sequence=1,
+    )
+    log.append(started)
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
+        runtime_session_id="runtime:test",
+    )
+    assert service.pending_terminalization_count == 1
+
+    asyncio.run(service.drain_pending_terminalizations(timeout_seconds=1.0))
+
+    assert service.pending_terminalization_count == 0
+    failed = next(
+        event for event in log.iter() if isinstance(event, ContextCompactionFailedEvent)
+    )
+    assert failed.id == started.terminal_event_id
+    assert failed.started_event_id == started.id
+    assert failed.failure_stage == "recovery_terminalization"
+    assert failed.termination_kind == "recovered_interrupted"
+
+
+def test_terminal_commit_failure_keeps_bounded_compaction_owner_for_drain() -> None:
+    log = InMemoryEventLog()
+    archive = InMemoryArchiveStore()
+    _append_turn(log, "owner", "first request", "first reply")
+    base_port = DirectEventLogCompactionEventCommitPort(log)
+
+    class FailTerminalPort:
+        async def commit_event(self, event, *, state=None):
+            if isinstance(
+                event,
+                (ContextCompactionCompletedEvent, ContextCompactionFailedEvent),
+            ):
+                raise RuntimeError("terminal store unavailable")
+            return await base_port.commit_event(event, state=state)
+
+    service = ContextCompactionService(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(
+            CompactScriptedTransport("<summary>stable summary</summary>")
+        ),
+        runtime_session_id="runtime:test",
+        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
+        event_commit_port=FailTerminalPort(),
+    )
+
+    with pytest.raises(RuntimeError, match="terminal store unavailable"):
+        asyncio.run(
+            _compact(service, trigger="manual", reason="user_requested", force=True)
+        )
+    assert service.pending_terminalization_count == 1
+    assert any(
+        isinstance(event, ContextCompactionStartedEvent) for event in log.iter()
+    )
+    assert not any(
+        isinstance(event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent))
+        for event in log.iter()
+    )
+
+    service.event_commit_port = base_port
+    asyncio.run(service.drain_pending_terminalizations(timeout_seconds=1.0))
+    assert service.pending_terminalization_count == 0
+    terminals = [
+        event
+        for event in log.iter()
+        if isinstance(event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent))
+    ]
+    assert len(terminals) == 1
 
 
 def test_context_compaction_appends_pending_memory_candidate() -> None:
@@ -1547,7 +1886,9 @@ def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_r
     current_start = log.append(
         RunStartEvent(
             **current.event_fields(),
-            **run_start_permission_fields(current.run_id),
+            **run_start_permission_fields(
+                current.run_id, user_input="current request"
+            ),
             user_input_chars=len("current request"),
             metadata={"user_input": "current request"},
         )
@@ -1619,7 +1960,12 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
                 run_id=state.run_id,
                 turn_id=state.turn_id,
                 reply_id=state.reply_id,
-                **run_start_permission_fields(state.run_id),
+                **run_start_permission_fields(
+                    state.run_id,
+                    user_input="current request",
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                ),
                 user_input_chars=len("current request"),
                 metadata={"user_input": "current request"},
             ),
@@ -1729,7 +2075,12 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
                 run_id=state.run_id,
                 turn_id=state.turn_id,
                 reply_id=state.reply_id,
-                **run_start_permission_fields(state.run_id),
+                **run_start_permission_fields(
+                    state.run_id,
+                    user_input="current request",
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                ),
                 user_input_chars=len("current request"),
                 metadata={"user_input": "current request"},
             ),
@@ -1931,7 +2282,7 @@ def test_auto_context_compaction_uses_model_visible_messages_not_raw_streaming_e
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input="short"),
                 user_input_chars=5,
                 metadata={"user_input": "short"},
             ),
@@ -2035,7 +2386,7 @@ def test_auto_context_compaction_can_use_context_compiled_estimate() -> None:
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input="hello"),
                 user_input_chars=5,
                 metadata={"user_input": "hello"},
             ),
@@ -2113,7 +2464,7 @@ def test_auto_context_compaction_uses_recorded_compiled_baseline_without_reestim
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input="hello"),
                 user_input_chars=5,
                 metadata={"user_input": "hello"},
             ),
@@ -2176,7 +2527,7 @@ def test_auto_context_compaction_compiled_estimate_includes_post_model_output() 
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input="hello"),
                 user_input_chars=5,
                 metadata={"user_input": "hello"},
             ),
@@ -2236,7 +2587,7 @@ def test_compaction_input_coalesces_deltas_and_clips_large_tool_result() -> None
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(ctx.run_id, user_input="search news"),
                 user_input_chars=11,
                 metadata={"user_input": "search news"},
             ),
@@ -2487,6 +2838,12 @@ def test_host_session_invokes_compaction_at_preflight_only(tmp_path) -> None:
         if isinstance(event, RunStartEvent)
     )
     assert preflight["target_model_target"].fact == run_start.model_target
+    assert run_start.new_run_boundary is not None
+    assert (
+        preflight["host_boundary_id"]
+        == run_start.new_run_boundary.identity.boundary_id
+    )
+    assert preflight["host_boundary_kind"] == "pre_run"
 
 
 def test_host_resolves_target_before_preflight_compaction(tmp_path) -> None:
@@ -2654,21 +3011,24 @@ def test_host_session_publishes_directly_written_preflight_compaction_events_to_
             await runtime_wiring.runtime_session.emit(
                 RunStartEvent(
                     **_ctx("before-gap").event_fields(),
-                    **run_start_permission_fields(_ctx("before-gap").run_id),
+                    **run_start_permission_fields(
+                        _ctx("before-gap").run_id, user_input="x"
+                    ),
                     user_input_chars=1,
                 )
             )
-            assert (
-                await session._compact_if_needed_and_notify(
-                    fake, reason="preflight_context_threshold"
-                )
-                is True
+            compacted, terminal = await session._compact_if_needed_and_notify(
+                fake, reason="preflight_context_threshold"
             )
+            assert compacted is True
+            assert isinstance(terminal, ContextCompactionCompletedEvent)
             await asyncio.wait_for(
                 runtime_wiring.runtime_session.emit(
                     RunStartEvent(
                         **_ctx("after-gap").event_fields(),
-                        **run_start_permission_fields(_ctx("after-gap").run_id),
+                        **run_start_permission_fields(
+                            _ctx("after-gap").run_id, user_input="x"
+                        ),
                         user_input_chars=1,
                     )
                 ),
@@ -2711,7 +3071,9 @@ def test_host_session_compact_now_publishes_directly_written_events_without_noti
             await runtime_wiring.runtime_session.emit(
                 RunStartEvent(
                     **_ctx("manual-before-gap").event_fields(),
-                    **run_start_permission_fields(_ctx("manual-before-gap").run_id),
+                    **run_start_permission_fields(
+                        _ctx("manual-before-gap").run_id, user_input="x"
+                    ),
                     user_input_chars=1,
                 )
             )
@@ -2720,7 +3082,9 @@ def test_host_session_compact_now_publishes_directly_written_events_without_noti
                 runtime_wiring.runtime_session.emit(
                     RunStartEvent(
                         **_ctx("manual-after-gap").event_fields(),
-                        **run_start_permission_fields(_ctx("manual-after-gap").run_id),
+                        **run_start_permission_fields(
+                            _ctx("manual-after-gap").run_id, user_input="x"
+                        ),
                         user_input_chars=1,
                     )
                 ),
@@ -2766,7 +3130,7 @@ def test_host_session_compact_now_failure_publishes_events_to_avoid_sequence_gap
                 RunStartEvent(
                     **_ctx("manual-fail-before-gap").event_fields(),
                     **run_start_permission_fields(
-                        _ctx("manual-fail-before-gap").run_id
+                        _ctx("manual-fail-before-gap").run_id, user_input="x"
                     ),
                     user_input_chars=1,
                 )
@@ -2782,7 +3146,7 @@ def test_host_session_compact_now_failure_publishes_events_to_avoid_sequence_gap
                     RunStartEvent(
                         **_ctx("manual-fail-after-gap").event_fields(),
                         **run_start_permission_fields(
-                            _ctx("manual-fail-after-gap").run_id
+                            _ctx("manual-fail-after-gap").run_id, user_input="x"
                         ),
                         user_input_chars=1,
                     )
@@ -2822,8 +3186,6 @@ def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
     state = agent.new_state()
-    _seed_suspended_run_model_contract(agent, runtime_wiring, state)
-    state.status = LoopStatus.WAITING_USER
     pending = PendingApproval(
         approval_id="approval:test",
         host_session_id=session.host_session_id,
@@ -2835,10 +3197,6 @@ def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
             ToolCallBlock(id="call:test", name="terminal", state=ToolCallState.ASKING),
         ),
     )
-    session.pending_interaction = pending
-    session._suspended_state = state
-    session.suspended_run_id = state.run_id
-
     async def fake_resume(resume_state, resolution):
         resume_state.status = LoopStatus.FINISHED
         resume_state.stop_reason = "final"
@@ -2854,6 +3212,13 @@ def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
 
     async def run() -> None:
         try:
+            await _seed_suspended_run_model_contract(
+                agent, runtime_wiring, session, state
+            )
+            fake.calls.clear()
+            session.pending_interaction = pending
+            session._suspended_state = state
+            session.suspended_run_id = state.run_id
             await session.resolve_approval(
                 ApprovalResolution(
                     approval_id="approval:test",
@@ -2888,8 +3253,6 @@ def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
     state = agent.new_state()
-    _seed_suspended_run_model_contract(agent, runtime_wiring, state)
-    state.status = LoopStatus.WAITING_USER
     state.pending_interaction_kind = "plan"
     state.pending_interaction_payload = {
         "interaction_id": "plan:test",
@@ -2907,10 +3270,6 @@ def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
         tool_call_id="call:plan",
         question="choose",
     )
-    session.pending_interaction = pending
-    session._suspended_state = state
-    session.suspended_run_id = state.run_id
-
     async def fake_resume(resume_state, resolution):
         resume_state.status = LoopStatus.FINISHED
         resume_state.stop_reason = "final"
@@ -2926,6 +3285,13 @@ def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
 
     async def run() -> None:
         try:
+            await _seed_suspended_run_model_contract(
+                agent, runtime_wiring, session, state
+            )
+            fake.calls.clear()
+            session.pending_interaction = pending
+            session._suspended_state = state
+            session.suspended_run_id = state.run_id
             await session.resolve_plan_interaction(
                 PlanQuestionResolution(interaction_id="plan:test", answer_text="A")
             )
@@ -2955,8 +3321,6 @@ def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
         wiring=AgentRuntimeWiring(agent_runtime=agent, runtime_wiring=runtime_wiring),
     )
     state = agent.new_state()
-    _seed_suspended_run_model_contract(agent, runtime_wiring, state)
-    state.status = LoopStatus.WAITING_USER
     state.pending_interaction_kind = "mcp_input_required"
     state.pending_interaction_payload = {
         "interaction_id": "mcp:test",
@@ -2992,10 +3356,6 @@ def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
             "arguments": {},
         },
     )
-    session.pending_interaction = pending
-    session._suspended_state = state
-    session.suspended_run_id = state.run_id
-
     async def fake_resume(resume_state, resolution):
         resume_state.status = LoopStatus.FINISHED
         resume_state.stop_reason = "final"
@@ -3011,6 +3371,13 @@ def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
 
     async def run() -> None:
         try:
+            await _seed_suspended_run_model_contract(
+                agent, runtime_wiring, session, state
+            )
+            fake.calls.clear()
+            session.pending_interaction = pending
+            session._suspended_state = state
+            session.suspended_run_id = state.run_id
             await session.resolve_mcp_input_required(
                 McpInputRequiredInteractionResolution(
                     interaction_id="mcp:test",
@@ -3448,6 +3815,8 @@ def _failed_event_after_summary(
         keep_after_sequence=10,
         error_type="RuntimeError",
         message="synthetic failure",
+        started_event_id="context_compaction_started:synthetic",
+        termination_kind="failed",
     )
 
 
@@ -3988,7 +4357,7 @@ def test_compaction_terminal_event_preserves_usage_or_missing_status() -> None:
     )
 
 
-def _resume_contract_fixture(tmp_path):
+async def _resume_contract_fixture(tmp_path):
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
@@ -4007,8 +4376,9 @@ def _resume_contract_fixture(tmp_path):
         ),
     )
     state = agent.new_state()
-    _seed_suspended_run_model_contract(agent, runtime_wiring, state)
-    state.status = LoopStatus.WAITING_USER
+    await _seed_suspended_run_model_contract(
+        agent, runtime_wiring, session, state
+    )
     pending = PendingApproval(
         approval_id="approval:model-contract",
         host_session_id=session.host_session_id,
@@ -4025,28 +4395,56 @@ def _resume_contract_fixture(tmp_path):
 
 
 def test_resume_rebinds_original_run_target(tmp_path) -> None:
-    session, _agent, state, pending = _resume_contract_fixture(tmp_path)
-    durable_target = next(
-        event.model_target
-        for event in session.wiring.runtime_wiring.event_log.iter()
-        if isinstance(event, RunStartEvent) and event.run_id == state.run_id
-    )
-    state.run_model_target = None
-    resumed = session._resume_active_state(pending)
-    assert resumed.run_model_target is not None
-    assert resumed.run_model_target.fact == durable_target
-    session.close()
+    async def run() -> None:
+        session, _agent, state, pending = await _resume_contract_fixture(tmp_path)
+        try:
+            durable_target = next(
+                event.model_target
+                for event in session.wiring.runtime_wiring.event_log.iter()
+                if isinstance(event, RunStartEvent) and event.run_id == state.run_id
+            )
+            state.run_model_target = None
+            identity = session._new_resume_boundary_identity(
+                state,
+                interaction_id=pending.approval_id,
+            )
+            resumed, _committed, _stored = (
+                await session._prepare_and_commit_resume_boundary(
+                    pending=pending,
+                    interaction_kind="approval",
+                    identity=identity,
+                )
+            )
+            assert resumed.run_model_target is not None
+            assert resumed.run_model_target.fact == durable_target
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
 
 
 def test_resume_rejects_changed_model_target(tmp_path) -> None:
-    session, agent, _state, pending = _resume_contract_fixture(tmp_path)
-    agent.llm_runtime._config = replace(
-        agent.llm_runtime._config,
-        pro=test_model_slot("changed-pro-model"),
-    )
-    with pytest.raises(ModelTargetBindingMismatch):
-        session._resume_active_state(pending)
-    session.close()
+    async def run() -> None:
+        session, agent, _state, pending = await _resume_contract_fixture(tmp_path)
+        agent.llm_runtime._config = replace(
+            agent.llm_runtime._config,
+            pro=test_model_slot("changed-pro-model"),
+        )
+        try:
+            identity = session._new_resume_boundary_identity(
+                _state,
+                interaction_id=pending.approval_id,
+            )
+            with pytest.raises(ModelTargetBindingMismatch):
+                await session._prepare_and_commit_resume_boundary(
+                    pending=pending,
+                    interaction_kind="approval",
+                    identity=identity,
+                )
+        finally:
+            await session.aclose()
+
+    asyncio.run(run())
 
 
 def test_resume_does_not_use_current_config_as_fallback(tmp_path) -> None:

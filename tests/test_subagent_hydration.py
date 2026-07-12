@@ -10,7 +10,7 @@ from pulsara_agent.runtime.subagent import (
     SubagentRuntime,
     fold_subagent_graph,
 )
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support.runtime_session import in_memory_runtime_session
 
 
@@ -93,12 +93,15 @@ def test_child_log_hydrates_native_run_id(tmp_path) -> None:
         await session.emit(
             RunStartEvent(
                 **child_ctx.event_fields(),
-                **run_start_permission_fields(child_ctx.run_id, source="child_profile"),
+                **run_start_permission_fields(
+                    child_ctx.run_id, source="child_profile", user_input="x" * 7
+                ),
                 user_input_chars=7,
             )
         )
         await session.emit(
             RunEndEvent(
+                **run_end_contract_fields(child_ctx.run_id, status="finished"),
                 **child_ctx.event_fields(),
                 status="finished",
                 stop_reason="final",
@@ -137,7 +140,9 @@ def test_child_log_multiple_native_runs_is_v1_error(tmp_path) -> None:
             await session.emit(
                 RunStartEvent(
                     **child_ctx.event_fields(),
-                    **run_start_permission_fields(child_ctx.run_id, source="child_profile"),
+                    **run_start_permission_fields(
+                        child_ctx.run_id, source="child_profile", user_input="x"
+                    ),
                     user_input_chars=1,
                 )
             )
@@ -172,7 +177,9 @@ def test_reported_and_native_child_run_id_must_match(tmp_path) -> None:
         await session.emit(
             RunStartEvent(
                 **child_ctx.event_fields(),
-                **run_start_permission_fields(child_ctx.run_id, source="child_profile"),
+                **run_start_permission_fields(
+                    child_ctx.run_id, source="child_profile", user_input="x"
+                ),
                 user_input_chars=1,
             )
         )

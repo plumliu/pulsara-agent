@@ -65,6 +65,9 @@ from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.compaction import ContextCompactionPolicy, ContextCompactionService
 from pulsara_agent.runtime.compaction.candidates import CandidatePoolCompactionMemoryCandidateSink
+from pulsara_agent.runtime.compaction.commit import (
+    RuntimeSessionCompactionEventCommitPort,
+)
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, default_permission_policy
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
@@ -505,6 +508,9 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
             llm_runtime=llm_runtime,
             runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
             policy=ContextCompactionPolicy(),
+            event_commit_port=RuntimeSessionCompactionEventCommitPort(
+                runtime_wiring.runtime_session
+            ),
             candidate_sink=(
                 CandidatePoolCompactionMemoryCandidateSink(
                     candidate_pool=runtime_wiring.candidate_pool,

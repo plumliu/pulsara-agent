@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from pulsara_agent.event import AgentEvent
-from pulsara_agent.memory.foundation.records import ArtifactRecord, ArtifactTextSlice, ArtifactWriteResult
+from pulsara_agent.memory.foundation.records import (
+    ArtifactPutConfirmation,
+    ArtifactRecord,
+    ArtifactTextSlice,
+    ArtifactWriteResult,
+)
 
 
 class ArtifactStore(Protocol):
@@ -32,6 +37,17 @@ class ArtifactStore(Protocol):
         media_type: str,
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactWriteResult: ...
+
+    def put_text_if_absent_or_confirm_identical(
+        self,
+        blob_id: str,
+        content: str,
+        *,
+        session_id: str | None,
+        run_id: str | None,
+        media_type: str,
+        semantic_metadata: dict[str, Any],
+    ) -> ArtifactPutConfirmation: ...
 
     def get_info(self, blob_id: str, *, session_id: str | None = None) -> ArtifactRecord: ...
 

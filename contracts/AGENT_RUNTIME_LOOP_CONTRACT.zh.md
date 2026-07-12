@@ -160,7 +160,7 @@ V1 有三类 waiting user 状态：
 进入 pending 状态时：
 
 - `state.status = WAITING_USER`；
-- `state.stop_reason = "waiting_user"`；
+- `state.stop_reason = RunStopReason.WAITING_USER`；production state不得赋自由字符串；
 - run 不 emit terminal `RUN_END`；
 - HostSession 必须暴露 typed pending interaction object；
 - 后续普通 `run_turn` 必须拒绝，直到 pending 被 resolve/cancel/abort。
@@ -270,3 +270,33 @@ Abort / host teardown / stop request 必须通过 typed abort state，而不是 
 - pending approval/plan/MCP 下不触发 auto compact。
 - mid-turn compact 保留 current run tail。
 - abort / host teardown run finalization exactly-once。
+
+---
+
+## 15. Committed run entry 与 Host interaction continuation
+
+生产 run 只能通过 `CommittedRunEntry` 进入 AgentRuntime：Host 使用已原子提交的
+`RunStartEvent.new_run_boundary`，child 使用已提交的 `RunStartEvent.subagent_run_entry`。AgentRuntime 不拥有
+`RunStartEvent` 写权限，也不得根据 caller 类型伪造 entry。
+
+一个 durable run 由稳定 `CommittedRunExecutionOwner` 持有；每个 initial/resume activation 使用独立、单调递增的
+`RunExecutionSegmentOwner`。Host run 正常进入 `WAITING_USER` 只结束当前 segment，不写 RunEnd；child V1 不支持
+WAITING_USER，必须先终结 child ledger，再终结 parent graph。
+
+`CurrentUserMessageFact`是run draft的唯一current-user真源；`UserMsg`的text/id/observed time与
+`RunStart.user_input_chars`必须从同一fact派生，不允许并行`user_input`参数。Agent exposure只消费
+`AgentRunDraft.frozen_execution_surface`，禁止回读scratchpad或current live wiring。
+
+同步tool的execution ownership以真实worker thread completion为终点。取消awaiting coroutine不得提前释放borrow；
+tool-batch driver必须等待shielded thread task收口，Host stop/close在deadline耗尽时保留run/session owner并fail closed，
+不得先写RunEnd或释放workspace/binding后让线程继续产生副作用/事件。
+
+approval、plan、MCP input-required 的 live continuation 必须在执行前原子提交：
+
+1. pending MCP installation audits；
+2. `CapabilityExposureResolvedEvent(resolution_kind=continuation_*)`；
+3. `RunInteractionResumeBoundaryEvent`。
+
+continuation 始终重绑原 RunStart 的 model target 与 permission snapshot，只允许 capability exposure 语义完全复用或
+单调收窄。commit FULL 后才可安装新的 segment；commit NONE 保留原 pending/token/lease；partial/unknown 必须 latch，
+不得用 bool 压成“未提交”。stop/close 在取消 segment 前必须先 CAS 安装 typed termination intent。

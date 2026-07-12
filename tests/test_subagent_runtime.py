@@ -6,10 +6,12 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.support.capability import preview_capability_plan
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.event import (
+    CapabilityExposureResolvedEvent,
     AgentEvent,
     CapabilityGateDecisionEvent,
     CustomEvent,
@@ -43,7 +45,6 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.event_log import InMemoryEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.capability.types import CapabilityResolveContext
 from pulsara_agent.host.identity import HostWorkspaceInput, resolve_workspace
 from pulsara_agent.host.session import HostSession
 from pulsara_agent.llm import LLMRuntime
@@ -66,7 +67,8 @@ from pulsara_agent.runtime import (
     LoopStatus,
     RuntimeSession,
 )
-from pulsara_agent.runtime.permission import PermissionMode, preset_to_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.wiring import (
     AgentRuntimeWiring,
     build_in_memory_runtime_wiring,
@@ -908,8 +910,10 @@ def test_report_agent_result_submits_explicit_result_before_completion(
             for event in parent.event_log.iter()
         )
 
-        result = await runtime.complete_submitted_result(
-            subagent.subagent_run_id, event_context=CTX
+        result = await runtime.complete_fake(
+            subagent.subagent_run_id,
+            summary="explicit child result",
+            event_context=CTX,
         )
 
         events = parent.event_log.iter()
@@ -940,6 +944,34 @@ def test_report_agent_result_submits_explicit_result_before_completion(
         )
         assert waited.summary == "explicit child result"
         assert waited.result_source == "explicit"
+
+    asyncio.run(run())
+
+
+def test_production_explicit_completion_rejects_missing_native_child_ledger(
+    tmp_path,
+) -> None:
+    parent, _locator, _child_logs, runtime = _runtime(tmp_path)
+
+    async def run() -> None:
+        child = await runtime.spawn_fake(task="child task", event_context=CTX)
+        await runtime.submit_result(
+            child.subagent_run_id,
+            summary="forged explicit result",
+            event_context=CTX,
+            source_tool_call_id="tool:report-result",
+        )
+        with pytest.raises(
+            Exception, match="exactly one child RunStart/RunEnd"
+        ):
+            await runtime.complete_submitted_result(
+                child.subagent_run_id,
+                event_context=CTX,
+            )
+        assert not any(
+            isinstance(event, SubagentRunCompletedEvent)
+            for event in parent.event_log.iter()
+        )
 
     asyncio.run(run())
 
@@ -989,15 +1021,16 @@ def test_builtin_profiles_compute_child_tool_boundaries(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     parent.subagent_runtime = runtime
     executor = parent.create_tool_executor()
-    exposure = CapabilityRuntime().resolve_for_turn(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="project",
-            memory_domain=None,
-            available_tool_names=frozenset(executor.registry.names()),
-            user_input="profile test",
-        ),
+    exposure = preview_capability_plan(
+        CapabilityRuntime(),
+        workspace_root=tmp_path,
+        workspace_kind="project",
+        memory_domain=None,
         tool_registry=executor.registry,
+        archive=parent.archive,
+        runtime_session_id=parent.runtime_session_id,
+        mcp_installation_id=parent.mcp_installation_id,
+        user_input="profile test",
     )
     runtime.refresh_parent_capability_snapshot(
         exposure=exposure,
@@ -1056,15 +1089,16 @@ def test_create_agent_tasks_starts_independent_batch(tmp_path) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
     parent.subagent_runtime = runtime
     executor = parent.create_tool_executor()
-    exposure = CapabilityRuntime().resolve_for_turn(
-        CapabilityResolveContext(
-            workspace_root=tmp_path,
-            workspace_kind="project",
-            memory_domain=None,
-            available_tool_names=frozenset(executor.registry.names()),
-            user_input="create tasks",
-        ),
+    exposure = preview_capability_plan(
+        CapabilityRuntime(),
+        workspace_root=tmp_path,
+        workspace_kind="project",
+        memory_domain=None,
         tool_registry=executor.registry,
+        archive=parent.archive,
+        runtime_session_id=parent.runtime_session_id,
+        mcp_installation_id=parent.mcp_installation_id,
+        user_input="create tasks",
     )
     runtime.refresh_parent_capability_snapshot(
         exposure=exposure,
@@ -1981,9 +2015,11 @@ def test_wait_agent_serializes_nested_explicit_result_diagnostics(tmp_path) -> N
             summary="done",
             event_context=CTX,
             diagnostics=({"outer": {"inner": ["value"]}},),
+            source_tool_call_id="tool:explicit-result",
         )
-        await runtime.complete_submitted_result(
+        await runtime.complete_fake(
             child.subagent_run_id,
+            summary="done",
             event_context=CTX,
         )
 
@@ -2594,7 +2630,7 @@ def test_restart_active_run_without_handle_repairs_fail_closed(tmp_path) -> None
             for event in parent.event_log.iter()
             if isinstance(event, SubagentRunFailedEvent)
         ]
-        assert failed[-1].reason_code == "subagent_dangling_repaired"
+        assert failed[-1].reason_code == "child_run_start_not_committed"
 
     asyncio.run(run())
 
@@ -3105,13 +3141,18 @@ def test_parent_transcript_rebuild_ignores_subagent_graph_events_after_run_end(
         await parent.emit(
             RunStartEvent(
                 **CTX.event_fields(),
-                **run_start_permission_fields(CTX.run_id),
+                **run_start_permission_fields(CTX.run_id, user_input="hello"),
                 user_input_chars=5,
                 metadata={"user_input": "hello"},
             )
         )
         await parent.emit(
-            RunEndEvent(**CTX.event_fields(), status="finished", stop_reason="final")
+            RunEndEvent(
+                **run_end_contract_fields(CTX.run_id, status="finished"),
+                **CTX.event_fields(),
+                status="finished",
+                stop_reason="final",
+            )
         )
         subagent = await runtime.spawn_fake(task="child task", event_context=CTX)
         await runtime.complete_fake(subagent.subagent_run_id, summary="child done")
@@ -3147,7 +3188,7 @@ class _SubagentScriptedTransport:
                 event_context, "child says: the moon is bright"
             ):
                 yield event
-        elif '"result_id"' in text and "child says: the moon is bright" in text:
+        elif '"result_id"' in text:
             async for event in _text_reply(
                 event_context, "parent received child result"
             ):
@@ -3352,7 +3393,7 @@ def test_agent_runtime_repairs_dangling_subagent_before_turn(tmp_path) -> None:
         for event in parent.event_log.iter()
         if isinstance(event, SubagentRunFailedEvent)
     ]
-    assert failed[-1].reason_code == "subagent_dangling_repaired"
+    assert failed[-1].reason_code == "child_run_start_not_committed"
 
 
 def test_child_enter_plan_finalizes_without_parent_pending_slot(tmp_path) -> None:
@@ -3474,14 +3515,98 @@ def test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path) ->
         for name in allowed_tool_names
     )
     child_exposures = [
-        event.value
+        event.exposure
         for event in child_events
-        if isinstance(event, CustomEvent)
-        and event.name == "capability_exposure_resolved"
+        if isinstance(event, CapabilityExposureResolvedEvent)
     ]
     assert child_exposures
-    assert "spawn_agent" not in child_exposures[0]["callable_names"]
-    assert "report_agent_result" in child_exposures[0]["callable_names"]
+    callable_names = {
+        entry.capability_name
+        for entry in child_exposures[0].authorization_entries
+        if entry.callable
+    }
+    assert "spawn_agent" not in callable_names
+    assert "report_agent_result" in callable_names
+
+
+def test_inferred_child_result_repair_reproduces_non_default_policy_payload(
+    tmp_path,
+) -> None:
+    transport = _SubagentScriptedTransport()
+    registry = LLMTransportRegistry()
+    registry.register(transport)
+    parent = in_memory_runtime_session(
+        tmp_path, runtime_session_id="runtime:parent:deterministic-child"
+    )
+    agent = AgentRuntime(
+        runtime_session=parent,
+        llm_runtime=LLMRuntime(
+            config=test_llm_config(
+                api_key="sk-test",
+                base_url="https://example.test/v1",
+                pro_model="pro",
+                flash_model="flash",
+                api="subagent-scripted",
+            ),
+            registry=registry,
+        ),
+        capability_runtime=CapabilityRuntime(),
+    )
+    assert agent.subagent_runtime is not None
+    budget = SubagentBudget(
+        max_result_summary_chars_per_child=7,
+        max_result_artifact_refs_per_child=1,
+    )
+
+    agent.subagent_runtime.default_budget = budget
+    result = asyncio.run(run_agent_task(agent, "Parent: delegate the moon summary."))
+    assert result.status is LoopStatus.FINISHED
+    subagent_run_id = agent.subagent_runtime.runs[0].subagent_run_id
+    original = next(
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentRunCompletedEvent)
+        and event.subagent_run_id == subagent_run_id
+    )
+    assert original.summary == "child …"
+    assert len(original.artifact_ids) == 1
+
+    truncated_log = InMemoryEventLog()
+    assert original.sequence is not None
+    truncated_log.extend(
+        event.model_copy(update={"sequence": None})
+        for event in parent.event_log.iter()
+        if event.sequence is not None and event.sequence < original.sequence
+    )
+    resumed_parent = RuntimeSession(
+        parent.workspace_root,
+        event_log=truncated_log,
+        archive=parent.archive,
+        tool_result_artifacts=parent.tool_result_artifacts,
+        runtime_session_id=parent.runtime_session_id,
+        terminal_binding=parent.terminal_binding,
+        extra_tool_bindings=parent.extra_tool_bindings,
+    )
+    resumed = SubagentRuntime(
+        parent_runtime_session=resumed_parent,
+        child_event_log_factory=lambda runtime_session_id: (
+            agent.subagent_runtime.event_log_locator.event_log_for_runtime_session(
+                runtime_session_id
+            )
+        ),
+        event_log_locator=agent.subagent_runtime.event_log_locator,
+    )
+
+    repaired = asyncio.run(resumed.repair_dangling_children())
+    assert repaired[0].status == "completed"
+    replayed = next(
+        event
+        for event in truncated_log.iter()
+        if isinstance(event, SubagentRunCompletedEvent)
+    )
+    assert replayed.model_dump(exclude={"sequence"}, mode="json") == original.model_dump(
+        exclude={"sequence"}, mode="json"
+    )
 
 
 def test_subagent_child_run_records_model_target(tmp_path) -> None:

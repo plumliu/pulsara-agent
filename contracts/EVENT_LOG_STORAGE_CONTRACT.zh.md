@@ -212,3 +212,30 @@ Memory canonical substrate schema 不属于本契约；见 [MEMORY_SURFACES_CONT
 - `iter()` filters by run/turn/reply/after_sequence。
 - `replay(reply_id)` reconstructs assistant message blocks and usage。
 - inspector detects sequence gaps and stale run projection。
+
+---
+
+## 11. Run-boundary atomic ledger contract
+
+新 schema 中 `RunStartEvent` 必须且只能携带一种 entry：Host 的 `new_run_boundary` 或 child 的
+`subagent_run_entry`；同时 required `current_user_message` 与预生成的 `terminal_run_end_event_id`。Host current user
+正文只从 typed carrier replay，不从 metadata fallback。
+
+Host new run 的 `RunStartEvent` 与其首次引用的 pending MCP installation audits 是同一原子 batch。live interaction
+resume 的 pending audits、continuation exposure 与 `RunInteractionResumeBoundaryEvent` 也是同一原子 batch，且顺序必须为
+audit -> exposure -> boundary。
+
+所有 boundary batch 在调用前生成稳定 event IDs。commit await 遇到任何 `BaseException` 时，caller 必须通过
+`RuntimeSession.confirm_event_batch()` 判定 none/full/partial：full 进入 committed repair/terminalization；none 才能安全
+重试；partial 永久 latch ledger。commit 后 publication failure 不是 commit failure。
+
+Boundary attempt必须保留完整候选event payload及payload fingerprint，不能只保存ID。confirmation必须区分
+`none/full/partial/conflict/unknown`；同ID不同payload是conflict并latch。confirmation自身异常也必须解析Host-owned
+attempt completion，禁止stop/close无界等待。
+
+RunStart full commit后，process owner安装与失败terminalizer仍属于同一个commit owner：owner安装失败必须先用RunStart
+冻结的terminal ID写RunEnd。Host不得仅凭LoopStatus确认run结束；只有RunEnd durable confirmation才能解析run completion、
+清理active pointer并退休execution handles。RunEnd持续失败时session保留owner与stable candidate并fail closed。
+
+`RunEndEvent.id` 必须等于唯一 RunStart 冻结的 terminal ID。Context compaction Started 也必须冻结唯一 terminal ID，
+Completed/Failed 与 Started、boundary attribution一一对应。

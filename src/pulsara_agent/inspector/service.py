@@ -8,13 +8,13 @@ from typing import Any, Iterable
 
 from pulsara_agent.event import (
     AgentEvent,
+    CapabilityExposureResolvedEvent,
     CapabilityGateDecisionEvent,
     ContextCompiledEvent,
     ContextCompactionCompletedEvent,
     ContextCompactionFailedEvent,
     ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
-    CustomEvent,
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
     McpCapabilitySnapshotInstalledEvent,
@@ -23,7 +23,9 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     ProjectionReadyEvent,
     ReplyStartEvent,
+    RunInteractionResumeBoundaryEvent,
     RunStartEvent,
+    SubagentRunCompletedEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog, dump_agent_event
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
@@ -91,6 +93,16 @@ class InspectorService:
         diagnostics.extend(_compaction_diagnostics(events, self.store))
         model_contracts = _model_contract_projection(events)
         diagnostics.extend(model_contracts["diagnostics"])
+        boundary_projections = [
+            _run_boundary_projection(start, events, self.store)
+            for start in events
+            if isinstance(start, RunStartEvent)
+        ]
+        diagnostics.extend(
+            diagnostic
+            for projection in boundary_projections
+            for diagnostic in projection.get("diagnostics", [])
+        )
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -114,6 +126,7 @@ class InspectorService:
                 self.store,
             ),
             "mcp_installations": _mcp_installation_events_projection(events),
+            "run_boundaries": boundary_projections,
             "events": _event_summaries(
                 events[:limit_events], include_payload=include_payload
             ),
@@ -194,6 +207,13 @@ class InspectorService:
                     },
                 }
             )
+        boundary_projection = (
+            _run_boundary_projection(run_start, session_events, self.store)
+            if run_start is not None
+            else None
+        )
+        if boundary_projection is not None:
+            diagnostics.extend(boundary_projection.get("diagnostics", []))
 
         return {
             "inspect_kind": "run",
@@ -207,6 +227,17 @@ class InspectorService:
                 "permission_snapshot": _run_permission_snapshot(run_start),
                 "mcp_installation": mcp_installation,
             },
+            "run_boundary": boundary_projection,
+            "continuation_boundaries": (
+                boundary_projection.get("continuation_boundaries", [])
+                if boundary_projection is not None
+                else []
+            ),
+            "child_run_entry": (
+                boundary_projection.get("child_run_entry")
+                if boundary_projection is not None
+                else None
+            ),
             "timeline": timeline.to_dict(),
             "compaction_boundary_as_seen": compaction_boundary,
             "prior_messages_as_seen": [
@@ -540,6 +571,305 @@ def _mcp_run_installation_projection(
     }
 
 
+def _run_boundary_projection(
+    run_start: RunStartEvent,
+    session_events: Iterable[AgentEvent],
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    """Project only durable run-entry/continuation facts; never query live Host state."""
+
+    events = list(session_events)
+    run_events = [event for event in events if event.run_id == run_start.run_id]
+    exposures = sorted(
+        (
+            event
+            for event in run_events
+            if isinstance(event, CapabilityExposureResolvedEvent)
+        ),
+        key=lambda event: event.sequence or 0,
+    )
+    diagnostics: list[dict[str, Any]] = []
+    initial_exposure = next(
+        (event for event in exposures if event.exposure_revision == 1),
+        None,
+    )
+    current_user = run_start.current_user_message
+
+    continuation_events = sorted(
+        (
+            event
+            for event in run_events
+            if isinstance(event, RunInteractionResumeBoundaryEvent)
+        ),
+        key=lambda event: event.sequence or 0,
+    )
+    exposure_by_id = {
+        event.exposure.exposure_id: event for event in exposures
+    }
+    continuations: list[dict[str, Any]] = []
+    for event in continuation_events:
+        boundary = event.boundary
+        effective = exposure_by_id.get(boundary.effective_exposure_id)
+        source = exposure_by_id.get(boundary.source_exposure_id)
+        status = "committed"
+        if source is None or effective is None:
+            status = "contract_error"
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "resume_boundary_exposure_join_missing",
+                    "message": "Resume boundary source/effective exposure cannot be joined.",
+                    "details": {
+                        "boundary_id": boundary.identity.boundary_id,
+                        "source_exposure_id": boundary.source_exposure_id,
+                        "effective_exposure_id": boundary.effective_exposure_id,
+                    },
+                }
+            )
+        continuations.append(
+            {
+                "status": status,
+                "boundary_id": boundary.identity.boundary_id,
+                "interaction_id": boundary.interaction_id,
+                "interaction_kind": boundary.interaction_kind,
+                "original_run_start_event_id": (
+                    boundary.original_run_start_event_id
+                ),
+                "original_run_start_sequence": (
+                    boundary.original_run_start_sequence
+                ),
+                "mcp_installation_id": boundary.mcp_installation_id,
+                "source_exposure_id": boundary.source_exposure_id,
+                "source_exposure_semantic_fingerprint": (
+                    boundary.source_exposure_semantic_fingerprint
+                ),
+                "source_exposure_fact_fingerprint": (
+                    boundary.source_exposure_fact_fingerprint
+                ),
+                "effective_exposure_id": boundary.effective_exposure_id,
+                "effective_exposure_semantic_fingerprint": (
+                    boundary.effective_exposure_semantic_fingerprint
+                ),
+                "effective_exposure_fact_fingerprint": (
+                    boundary.effective_exposure_fact_fingerprint
+                ),
+                "exposure_transition": boundary.exposure_transition,
+                "committed_audit_event_ids": list(
+                    boundary.committed_mcp_audit_event_ids
+                ),
+                "sequence": event.sequence,
+                "created_at": event.created_at,
+            }
+        )
+
+    if run_start.new_run_boundary is not None:
+        boundary = run_start.new_run_boundary
+        identity = boundary.identity
+        if (
+            initial_exposure is None
+            or initial_exposure.exposure.owner.owner_id != identity.boundary_id
+        ):
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "initial_capability_exposure_missing_or_mismatched",
+                    "message": "Host RunStart has no matching initial capability exposure.",
+                    "details": {"boundary_id": identity.boundary_id},
+                }
+            )
+        exposure = initial_exposure.exposure if initial_exposure is not None else None
+        compaction_events = [
+            event
+            for event in events
+            if isinstance(
+                event,
+                (
+                    ContextCompactionStartedEvent,
+                    ContextCompactionCompletedEvent,
+                    ContextCompactionFailedEvent,
+                ),
+            )
+            and event.host_boundary_id == identity.boundary_id
+        ]
+        return {
+            "boundary_id": identity.boundary_id,
+            "kind": identity.kind.value,
+            "run_entry_kind": "host",
+            "status": "committed",
+            "durable_run_existence": "full",
+            "observed_at_utc": identity.observed_at_utc,
+            "current_user_message_id": current_user.message_id,
+            "current_user_chars": len(current_user.text),
+            "current_user_content_sha256": current_user.content_sha256,
+            "source_through_sequence": boundary.transcript.source_through_sequence,
+            "preflight_compaction": (
+                {
+                    "compaction_id": boundary.transcript.preflight_compaction_id,
+                    "terminal_event_id": (
+                        boundary.transcript.preflight_compaction_terminal_event_id
+                    ),
+                    "terminal_sequence": (
+                        boundary.transcript.preflight_compaction_terminal_sequence
+                    ),
+                    "events": [
+                        {
+                            "type": event.type.value,
+                            "event_id": event.id,
+                            "sequence": event.sequence,
+                        }
+                        for event in compaction_events
+                    ],
+                }
+                if boundary.transcript.preflight_compaction_id is not None
+                else None
+            ),
+            "permission_snapshot_id": boundary.permission_snapshot_id,
+            "target_fingerprint": boundary.model_target_fingerprint,
+            "mcp_installation_id": boundary.mcp_installation_id,
+            "capability_basis_fingerprint": (
+                boundary.capability_basis.basis_fingerprint
+            ),
+            "execution_surface_fingerprint": (
+                boundary.capability_basis.execution_surface_identity.execution_surface_fingerprint
+            ),
+            "descriptor_set_fingerprint": (
+                boundary.capability_basis.execution_surface_identity.descriptor_set_fingerprint
+            ),
+            "execution_binding_set_fingerprint": (
+                boundary.capability_basis.execution_surface_identity.execution_binding_set_fingerprint
+            ),
+            "catalog_projection_fingerprint": (
+                exposure.semantic.catalog_projection.projection_semantic_fingerprint
+                if exposure is not None
+                else None
+            ),
+            "active_skill_projection_fingerprint": (
+                exposure.semantic.active_skill_projection.projection_semantic_fingerprint
+                if exposure is not None
+                else None
+            ),
+            "exposure_semantic_fingerprint": (
+                exposure.exposure_semantic_fingerprint
+                if exposure is not None
+                else None
+            ),
+            "exposure_fact_fingerprint": (
+                exposure.exposure_fact_fingerprint
+                if exposure is not None
+                else None
+            ),
+            "run_start_event_id": run_start.id,
+            "run_start_sequence": run_start.sequence,
+            "continuation_boundaries": continuations,
+            "child_run_entry": None,
+            "diagnostics": diagnostics,
+        }
+
+    entry = run_start.subagent_run_entry
+    if entry is None:
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "run_entry_fact_missing",
+                "message": "RunStart has neither Host nor subagent entry fact.",
+                "details": {"run_start_event_id": run_start.id},
+            }
+        )
+        return {
+            "status": "contract_error",
+            "run_entry_kind": str(run_start.run_entry_kind),
+            "run_start_event_id": run_start.id,
+            "run_start_sequence": run_start.sequence,
+            "continuation_boundaries": continuations,
+            "child_run_entry": None,
+            "diagnostics": diagnostics,
+        }
+
+    parent_events = store.events_for_session(entry.parent_runtime_session_id)
+    parent_terminal = next(
+        (
+            event
+            for event in parent_events
+            if isinstance(event, SubagentRunCompletedEvent)
+            and event.subagent_run_id == entry.subagent_run_id
+            and event.child_run_id == run_start.run_id
+        ),
+        None,
+    )
+    handoff = parent_terminal.result_handoff if parent_terminal is not None else None
+    terminal_ref = handoff.child_terminal_reference if handoff is not None else None
+    if terminal_ref is not None:
+        child_terminal = next(
+            (
+                event
+                for event in run_events
+                if event.id == terminal_ref.terminal_event_id
+                and event.sequence == terminal_ref.terminal_sequence
+            ),
+            None,
+        )
+        if child_terminal is None:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "child_terminal_reference_missing",
+                    "message": "Parent child-result handoff references a missing child terminal.",
+                    "details": {
+                        "terminal_event_id": terminal_ref.terminal_event_id,
+                    },
+                }
+            )
+    child_projection = {
+        "run_entry_kind": "subagent_child",
+        "subagent_run_id": entry.subagent_run_id,
+        "subagent_task_id": entry.subagent_task_id,
+        "entry_mode": (
+            "task_backed" if entry.subagent_task_id is not None else "primitive_run"
+        ),
+        "parent_runtime_session_id": entry.parent_runtime_session_id,
+        "parent_run_id": entry.parent_run_id,
+        "task_artifact_id": entry.task_artifact_id,
+        "child_result_render_policy": (
+            entry.child_result_render_policy.model_dump(mode="json")
+        ),
+        "current_user_message_id": current_user.message_id,
+        "current_user_content_sha256": current_user.content_sha256,
+        "exposure_owner_kind": (
+            initial_exposure.exposure.owner.owner_kind
+            if initial_exposure is not None
+            else None
+        ),
+        "child_terminal_reference": (
+            terminal_ref.model_dump(mode="json") if terminal_ref is not None else None
+        ),
+        "child_result_handoff": (
+            {
+                **handoff.model_dump(mode="json"),
+                "max_summary_chars": entry.child_result_render_policy.max_summary_chars,
+                "max_artifact_refs": entry.child_result_render_policy.max_artifact_refs,
+                "explicit_source_tool_call_id": (
+                    handoff.explicit_evidence.source_tool_call_id
+                    if handoff.explicit_evidence is not None
+                    else None
+                ),
+            }
+            if handoff is not None
+            else None
+        ),
+        "run_start_event_id": run_start.id,
+        "run_start_sequence": run_start.sequence,
+    }
+    return {
+        "status": "committed",
+        "run_entry_kind": "subagent_child",
+        "run_start_event_id": run_start.id,
+        "run_start_sequence": run_start.sequence,
+        "continuation_boundaries": continuations,
+        "child_run_entry": child_projection,
+        "diagnostics": diagnostics,
+    }
+
+
 def _subagent_graph_projection(
     session_id: str,
     events: Iterable[AgentEvent],
@@ -648,11 +978,19 @@ def _capability_surface_projection(events: Iterable[AgentEvent]) -> dict[str, An
     exposures: list[dict[str, Any]] = []
     gate_decisions: list[dict[str, Any]] = []
     for event in events:
-        if (
-            isinstance(event, CustomEvent)
-            and event.name == "capability_exposure_resolved"
-        ):
-            value = dict(event.value)
+        if isinstance(event, CapabilityExposureResolvedEvent):
+            value = event.exposure.model_dump(mode="json")
+            value["direct_names"] = sorted(
+                entry.capability_name
+                for entry in event.exposure.authorization_entries
+                if entry.disposition == "direct"
+            )
+            value["callable_names"] = sorted(
+                entry.capability_name
+                for entry in event.exposure.authorization_entries
+                if entry.callable
+            )
+            value["exposure_revision"] = event.exposure_revision
             value["sequence"] = event.sequence
             value["run_id"] = event.run_id
             value["turn_id"] = event.turn_id
@@ -1549,6 +1887,9 @@ def _compaction_windows(
                 "trigger": event.trigger,
                 "reason": event.reason,
                 "phase": event.metadata.get("phase", _phase_from_reason(event.reason)),
+                "host_boundary_id": event.host_boundary_id,
+                "host_boundary_kind": event.host_boundary_kind,
+                "started_event_id": event.started_event_id,
                 "safe_point": event.metadata.get("safe_point"),
                 "current_run_id": event.metadata.get("current_run_id"),
                 "max_compactable_sequence": event.metadata.get(
@@ -1787,11 +2128,19 @@ def _summarize_working_context(row: dict[str, Any]) -> dict[str, Any]:
     return _json_safe(payload)
 
 
-def _run_user_input(event: RunStartEvent | None) -> str | None:
+def _run_user_input(event: RunStartEvent | None) -> dict[str, Any] | None:
     if event is None:
         return None
-    value = event.metadata.get("user_input")
-    return value if isinstance(value, str) else None
+    current = event.current_user_message
+    return {
+        "message_id": current.message_id,
+        "source_kind": current.source_kind,
+        "chars": len(current.text),
+        "content_sha256": current.content_sha256,
+        "observed_at_utc": current.observed_at_utc,
+        "source_artifact_id": current.source_artifact_id,
+        "text_redacted": True,
+    }
 
 
 def _run_permission_snapshot(event: RunStartEvent | None) -> dict[str, Any] | None:

@@ -8,7 +8,9 @@ _Created: 2026-06-27_
 
 - **一个词汇,两个 producer。** `RecoveryProjection` 是唯一恢复词汇;cross-run(从 event log)与 in-run(从 live `LoopState`)是两个独立 producer。统一的是语义与文案真源,不统一的是数据通路。
 - **guidance 文案两张表、同义不同口吻。** transcript(事后说明)与 runtime prompt(操作提示)共享 `GuidanceKind`,但各有一张文案表;不强制逐字共享。
-- **abort 类型是 typed、可审计的事实。** 用 `AbortKind` 表达,持久化到 `RunEndEvent.abort_kind`;不再走 `scratchpad` 的 stringly-typed 暗线。
+- **终结语义是 typed、可审计的事实。** 运行中用 `AbortKind` 表达 stop authority；durable
+  `RunEndEvent` 同时保存 low-level `RunStopReason`、`RunTerminalizationKind` 与按分支要求的
+  `abort_kind`，不再走 `scratchpad` 或自由字符串暗线。
 - **plan 被中止 ≠ 任务失败。** 在 active plan 中被 stop 的 run,恢复口吻是"规划仍在继续",不能渲染成"任务失败,去恢复"。
 - **completion note 不属于恢复契约。** terminal 后台进程完成是生命周期投影,与 failed/aborted 正交,不并入。
 
@@ -83,7 +85,11 @@ class AbortKind(StrEnum):
 ```
 
 - `LoopState.abort_kind: AbortKind | None`,在 `stream_abort_run` 设置。
-- **持久化到 `RunEndEvent.abort_kind: str | None`**(additive 字段,旧事件 load 不受影响)。cross-run producer 从事件读 abort_kind,而非靠 scratchpad(scratchpad 不进 log)。
+- **持久化到 hard-cut `RunEndEvent` contract**：`stop_reason` 必须属于
+  `primitives.run_lifecycle.RunStopReason`，`terminalization_kind` 必须属于
+  `RunTerminalizationKind`；只有 user-stop/host-teardown 分支携带 matching `abort_kind`。旧的缺字段
+  RunEnd payload 不属于 supported replay schema。cross-run producer只从 durable terminal fact读取，不从
+  scratchpad推断。
 - `abort_run` / `stop_current_turn` 链路上的 `reason` 参数类型为 `AbortKind`(不是 str),确保不会有裸字符串流入 `state.abort_kind`。
 
 V1 运行级 abort 有两个成员：`USER_STOP` 表示用户显式停止；`HOST_TEARDOWN` 表示 HostSession/application 生命周期关闭。二者不得共享“用户停止”的恢复文案。terminal process 的 teardown / watchdog 仍是 process 级原因，不进入这个 run 枚举。

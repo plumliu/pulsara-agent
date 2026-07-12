@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, Usage
+from pulsara_agent.primitives.run_lifecycle import RunStopReason
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
 
 if TYPE_CHECKING:
@@ -17,18 +18,7 @@ if TYPE_CHECKING:
         InRunRecoveryState,
         StopRequest,
     )
-
-StopReason: TypeAlias = Literal[
-    "final",
-    "max_turns",
-    "model_error",
-    "tool_error_budget",
-    "plan_interaction_budget",
-    "memory_hook_error",
-    "waiting_user",
-    "aborted",
-]
-
+    from pulsara_agent.runtime.run_entry import RunWorkingSet
 
 class LoopStatus(StrEnum):
     RUNNING = "running"
@@ -103,13 +93,14 @@ class LoopState:
     stop_request: StopRequest | None = None
     abort_kind: AbortKind | None = None
     compacted: bool = False
-    stop_reason: StopReason | None = None
+    stop_reason: RunStopReason | None = None
     error_message: str | None = None
     finalized: bool = False
     scratchpad: dict[str, Any] = field(default_factory=dict)
     budget: LoopBudget = field(default_factory=LoopBudget)
     permission_snapshot: RunPermissionSnapshot | None = None
     run_model_target: ResolvedModelTarget | None = None
+    run_working_set: RunWorkingSet | None = None
 
     def begin_next_turn(self) -> None:
         self.turn_index += 1

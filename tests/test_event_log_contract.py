@@ -10,7 +10,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support import (
     compaction_completed_contract_fields,
     context_compiled_contract_fields,
@@ -170,10 +170,13 @@ def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> 
     ctx = _ctx("contract:lifecycle")
     started = RunStartEvent(
         **ctx.event_fields(),
-        **run_start_permission_fields(ctx.run_id),
+        **run_start_permission_fields(ctx.run_id, user_input="x" * 7),
         user_input_chars=7,
     )
     ended = RunEndEvent(
+        **run_end_contract_fields(
+            ctx.run_id, status="aborted", abort_kind="user_stop"
+        ),
         **ctx.event_fields(),
         status="aborted",
         stop_reason="aborted",
@@ -186,7 +189,9 @@ def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> 
 
 def test_run_start_permission_policy_equals_preset_expansion() -> None:
     ctx = _ctx("contract:lifecycle-permission-preset")
-    fields = run_start_permission_fields(ctx.run_id, mode="accept-edits")
+    fields = run_start_permission_fields(
+        ctx.run_id, mode="accept-edits", user_input="x" * 7
+    )
 
     event = RunStartEvent(**ctx.event_fields(), **fields, user_input_chars=7)
 
@@ -200,7 +205,7 @@ def test_run_start_rejects_missing_or_custom_permission_mode() -> None:
     with pytest.raises(ValueError):
         RunStartEvent(**ctx.event_fields(), user_input_chars=7)
 
-    fields = run_start_permission_fields(ctx.run_id)
+    fields = run_start_permission_fields(ctx.run_id, user_input="x" * 7)
     with pytest.raises(ValueError):
         RunStartEvent(
             **ctx.event_fields(),
@@ -250,6 +255,7 @@ def test_plan_workflow_permission_facts_are_required_preset_expansions() -> None
             exit_request_id="plan_exit:test",
             restored_permission_mode="bypass-permissions",
             restored_permission_policy={**policy, "terminal_access": "ask"},
+            transition_owner="agent_run",
         )
 
 
@@ -277,7 +283,7 @@ def test_postgres_event_log_updates_runs_projection_on_run_lifecycle(
         ctx = _ctx(f"postgres:run-projection:{status}:{uuid4().hex}")
         started = RunStartEvent(
             **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id),
+            **run_start_permission_fields(ctx.run_id, user_input="x" * 12),
             user_input_chars=12,
             created_at="2026-01-02T03:04:05+00:00",
         )
@@ -290,9 +296,15 @@ def test_postgres_event_log_updates_runs_projection_on_run_lifecycle(
         assert row["started_at"] == datetime.fromisoformat(started.created_at)
 
         ended = RunEndEvent(
+            **run_end_contract_fields(
+                ctx.run_id,
+                status=status,
+                abort_kind="user_stop" if status == "aborted" else None,
+            ),
             **ctx.event_fields(),
             status=status,
             stop_reason=stop_reason,
+            abort_kind="user_stop" if status == "aborted" else None,
             created_at="2026-01-02T03:05:06+00:00",
         )
         event_log.append(ended)
@@ -317,6 +329,7 @@ def test_postgres_event_log_repairs_stale_runs_projection(tmp_path: Path) -> Non
         ended_ctx = _ctx(f"postgres:run-repair-ended:{uuid4().hex}")
         running_ctx = _ctx(f"postgres:run-repair-running:{uuid4().hex}")
         ended = RunEndEvent(
+            **run_end_contract_fields(ended_ctx.run_id, status="failed"),
             **ended_ctx.event_fields(),
             status="failed",
             stop_reason="model_error",
@@ -326,14 +339,18 @@ def test_postgres_event_log_repairs_stale_runs_projection(tmp_path: Path) -> Non
             [
                 RunStartEvent(
                     **ended_ctx.event_fields(),
-                    **run_start_permission_fields(ended_ctx.run_id),
+                    **run_start_permission_fields(
+                        ended_ctx.run_id, user_input="x" * 8
+                    ),
                     user_input_chars=8,
                     created_at="2026-01-02T03:04:05+00:00",
                 ),
                 ended,
                 RunStartEvent(
                     **running_ctx.event_fields(),
-                    **run_start_permission_fields(running_ctx.run_id),
+                    **run_start_permission_fields(
+                        running_ctx.run_id, user_input="x" * 9
+                    ),
                     user_input_chars=9,
                     created_at="2026-01-03T04:05:06+00:00",
                 ),
@@ -551,6 +568,7 @@ def test_capability_gate_decision_event_round_trips_through_agent_event_serializ
                 "run:contract:plan-exited"
             )["permission_policy"],
             accepted_plan_summary="Thing plan",
+            transition_owner="agent_run",
         ),
     ],
 )
@@ -760,7 +778,9 @@ def test_postgres_event_log_batch_failure_rolls_back_prior_event_and_projection(
                 (
                     RunStartEvent(
                         **first_context.event_fields(),
-                        **run_start_permission_fields(first_context.run_id),
+                        **run_start_permission_fields(
+                            first_context.run_id, user_input="x"
+                        ),
                         user_input_chars=1,
                     ),
                     TextBlockDeltaEvent(
@@ -1139,8 +1159,9 @@ def test_compaction_double_limits_round_trip() -> None:
 def test_postgres_model_call_facts_round_trip(event_log: EventLog) -> None:
     ctx = _ctx(f"postgres:model-facts:{uuid4().hex}")
     call = test_resolved_call_fact()
-    permission = run_start_permission_fields(ctx.run_id)
-    permission["model_target"] = call.target
+    permission = run_start_permission_fields(
+        ctx.run_id, user_input="x" * 3, model_target=call.target
+    )
     event_log.extend(
         (
             RunStartEvent(
@@ -1186,8 +1207,9 @@ def test_postgres_json_payload_contains_no_secret(
 ) -> None:
     ctx = _ctx(f"postgres:model-secret:{uuid4().hex}")
     call = test_resolved_call_fact()
-    permission = run_start_permission_fields(ctx.run_id)
-    permission["model_target"] = call.target
+    permission = run_start_permission_fields(
+        ctx.run_id, user_input="x", model_target=call.target
+    )
     event_log.append(
         RunStartEvent(
             **ctx.event_fields(),

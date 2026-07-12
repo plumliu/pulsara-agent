@@ -198,6 +198,10 @@ canonical pending fact已经成立，必须confirm reservation并保留pending o
 interaction id borrow原lease，不得按当前tool name重新
 acquire可能已变化的slot。
 
+`McpServerSupervisor`是该pending interaction及exact lease的唯一process-local owner。Capability execution handle及其
+borrow tracker不得保存、镜像或等待pending lease；它们只保护真实在途parent/child tool call。Resume先用当前
+capability/permission surface重新gate，ALLOW后才按interaction identity从Supervisor借用原exact lease。
+
 Safe point required失败按原因分支：
 
 - pending所属binding被disable/remove/reconfigure：提交terminal deny/error tool result后释放lease；
@@ -207,10 +211,23 @@ Safe point required失败按原因分支：
 Resume safe point产生的新installation audit必须在state恢复和model continuation前durable commit；失败保留原pending
 state/lease，成功后才清pending audit。该路径不伪造第二条RunStart。
 
+Resume candidate的`FrozenCapabilityExecutionSurface`与incoming execution handles必须在continuation batch commit前
+由boundary attempt捕获。FULL commit后CAS swap只消费该incoming carrier；不得在fold阶段重新读取当前Host wiring。
+surface/handles未变化时关闭未采用的attempt-owned carrier；发生变化时old handles进入retiring barrier。
+
 用户cancel、session close、round/deadline cap或最终resume result都必须在对应durable terminal fact提交后调用
 `complete_pending_lease()`。若fact已commit但observer publication失败，runtime先从committed slice折叠state并完成
 lease，再向上传播publication failure。Close drain失败必须保留HostSession/supervisor ownership供同一close retry，不能删除
 session后留下孤儿slot。
+
+Host close顺序冻结为：停止并drain active run/tool call；提交suspended interaction的terminal tool/run facts；按durable
+commit acknowledgement完成或abort exact Supervisor lease；bounded drain pending ledger；关闭MCP supervisor；关闭
+RuntimeSession；最后由HostCore释放terminal lease、workspace与session ownership。commit outcome unknown时停在pending
+ledger并阻止后续破坏性teardown。
+
+Suspension/resume写入等待publication期间被取消时仍按stable candidate batch确认：`NONE`恢复写前state并保留或abort
+对应reservation；`FULL`折叠canonical fact并推进唯一Supervisor lease owner；`PARTIAL/UNKNOWN`恢复可定位的pending carrier、
+latch ledger并保留lease。Host close不得把“state已被提前clear”解释为没有pending owner。
 
 ---
 
@@ -240,3 +257,15 @@ session后留下孤儿slot。
 - no resumable session returns friendly CLI error。
 - closed/archived sessions are excluded by default.
 - resumed turn still resolves fresh capability exposure and permission gate.
+
+---
+
+## 12. Live interaction resume 与 process reopen 的边界
+
+本文件的 durable session reopen 不恢复旧 pending interaction。仅同一 live HostSession 的 approval、plan、MCP
+input-required 使用 `PRE_INTERACTION_RESUME`：从原 RunStart 重绑 target/permission，保留原 user/prior/skill basis，
+安装 current MCP candidate后提交 typed continuation exposure/boundary。它不是第二条 RunStart，也不是新 run。
+
+continuation commit前失败保留原 pending/token/lease；FULL 后无论 observer publication是否失败，都不得恢复成
+“尚未 resume”。binding 被撤销时 exposure只能收窄；MCP pending自身binding被 reconfigure时 terminal deny，unrelated
+required failure则保留pending供重试。

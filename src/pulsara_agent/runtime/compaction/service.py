@@ -77,6 +77,14 @@ from pulsara_agent.runtime.compaction.candidates import (
     ContextCompactionMemoryCandidatePolicy,
     parse_compaction_memory_candidates,
 )
+from pulsara_agent.runtime.compaction.commit import (
+    CompactionCommitCancelledAfterCommit,
+    CompactionCommitPendingAfterCancellation,
+    CompactionEventCommitPort,
+    CompactionPendingCommitNotDurable,
+    DirectEventLogCompactionEventCommitPort,
+    PendingCompactionEventCommit,
+)
 
 ContextCompactionTrigger = Literal["manual", "auto"]
 
@@ -139,6 +147,22 @@ class CompactionSummaryReplayTemplate:
 
 
 @dataclass(slots=True)
+class CompactionTerminalizationOwner:
+    started_event: ContextCompactionStartedEvent
+    terminal_event_id: str
+    terminal_candidate: ContextCompactionCompletedEvent | ContextCompactionFailedEvent | None
+    started_committed: bool = True
+    pending_started_commit: PendingCompactionEventCommit | None = None
+    state: Literal[
+        "started_commit_pending", "started", "candidate_frozen", "committing"
+    ] = "started"
+
+
+class PendingCompactionTerminalizationError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
 class ContextCompactionService:
     event_log: EventLog
     archive: ArtifactStore
@@ -147,7 +171,221 @@ class ContextCompactionService:
     policy: ContextCompactionPolicy = ContextCompactionPolicy()
     model_role: ModelRole = ModelRole.FLASH
     candidate_sink: CompactionMemoryCandidateSink | None = None
+    event_commit_port: CompactionEventCommitPort | None = None
     _consecutive_failures: int = 0
+    _pending_terminalizations: dict[str, CompactionTerminalizationOwner] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.event_commit_port is None:
+            self.event_commit_port = DirectEventLogCompactionEventCommitPort(
+                self.event_log
+            )
+        self._recover_pending_terminalization_owners()
+
+    @property
+    def pending_terminalization_count(self) -> int:
+        return len(self._pending_terminalizations)
+
+    def _recover_pending_terminalization_owners(self) -> None:
+        events = tuple(self.event_log.iter())
+        terminal_started_ids = {
+            event.started_event_id
+            for event in events
+            if isinstance(
+                event,
+                (ContextCompactionCompletedEvent, ContextCompactionFailedEvent),
+            )
+            and event.started_event_id is not None
+        }
+        for event in events:
+            if (
+                isinstance(event, ContextCompactionStartedEvent)
+                and event.id not in terminal_started_ids
+            ):
+                owner = CompactionTerminalizationOwner(
+                    started_event=event,
+                    terminal_event_id=event.terminal_event_id,
+                    terminal_candidate=None,
+                )
+                owner.terminal_candidate = self._recovery_terminal_candidate(event)
+                owner.state = "candidate_frozen"
+                self._pending_terminalizations[event.id] = owner
+
+    def _register_started_owner(
+        self,
+        started: ContextCompactionStartedEvent,
+        *,
+        committed: bool,
+    ) -> None:
+        self._pending_terminalizations[started.id] = CompactionTerminalizationOwner(
+            started_event=started,
+            terminal_event_id=started.terminal_event_id,
+            terminal_candidate=None,
+            started_committed=committed,
+            state="started" if committed else "started_commit_pending",
+        )
+
+    def _acknowledge_started_commit(
+        self,
+        committed: ContextCompactionStartedEvent,
+    ) -> None:
+        owner = self._pending_terminalizations.get(committed.id)
+        if owner is None:
+            raise RuntimeError("committed compaction Started has no process owner")
+        if committed.terminal_event_id != owner.terminal_event_id:
+            raise RuntimeError("committed compaction Started identity mismatch")
+        owner.started_event = committed
+        owner.started_committed = True
+        owner.pending_started_commit = None
+        owner.state = "started"
+
+    def _freeze_terminal_candidate(
+        self,
+        started_event_id: str,
+        candidate: ContextCompactionCompletedEvent | ContextCompactionFailedEvent,
+    ) -> None:
+        owner = self._pending_terminalizations.get(started_event_id)
+        if owner is None:
+            raise RuntimeError("compaction terminal candidate has no Started owner")
+        if candidate.id != owner.terminal_event_id:
+            raise RuntimeError("compaction terminal candidate identity mismatch")
+        if owner.terminal_candidate is not None and owner.terminal_candidate != candidate:
+            stored = self.event_log.get_by_id(owner.terminal_event_id)
+            if stored is not None:
+                raise RuntimeError("compaction terminal candidate payload conflict")
+        owner.terminal_candidate = candidate
+        owner.state = "candidate_frozen"
+
+    def _acknowledge_terminal_candidate(self, event: AgentEvent) -> None:
+        started_event_id = getattr(event, "started_event_id", None)
+        if not isinstance(started_event_id, str):
+            return
+        owner = self._pending_terminalizations.get(started_event_id)
+        if owner is None:
+            return
+        if event.id != owner.terminal_event_id:
+            raise RuntimeError("committed compaction terminal identity mismatch")
+        self._pending_terminalizations.pop(started_event_id, None)
+
+    def _recovery_terminal_candidate(
+        self,
+        started: ContextCompactionStartedEvent,
+    ) -> ContextCompactionFailedEvent:
+        return ContextCompactionFailedEvent(
+            id=started.terminal_event_id,
+            created_at=started.created_at,
+            run_id=started.run_id,
+            turn_id=started.turn_id,
+            reply_id=started.reply_id,
+            compaction_id=started.compaction_id,
+            trigger=started.trigger,
+            reason=started.reason,
+            window_number=started.window_number,
+            window_id=started.window_id,
+            target_model_target=started.target_model_target,
+            target_input_budget_tokens=started.target_input_budget_tokens,
+            threshold_tokens=started.threshold_tokens,
+            post_compaction_target_tokens=started.post_compaction_target_tokens,
+            failure_stage="recovery_terminalization",
+            target_estimate=started.target_estimate,
+            summarizer_target=started.summarizer_call.target,
+            summarizer_call=started.summarizer_call,
+            summarizer_context_id=started.summarizer_context_id,
+            summarizer_input_estimated_tokens=(
+                started.summarizer_input_estimated_tokens
+            ),
+            summarizer_input_budget_tokens=started.summarizer_input_budget_tokens,
+            summarizer_usage_status="missing",
+            summarizer_usage=None,
+            summarizer_estimated_input_tokens=(
+                started.summarizer_input_estimated_tokens
+            ),
+            through_sequence=started.through_sequence,
+            keep_after_sequence=started.keep_after_sequence,
+            error_type="RecoveredInterruptedCompaction",
+            message="compaction Started had no durable terminal fact",
+            started_event_id=started.id,
+            termination_kind="recovered_interrupted",
+            host_boundary_id=started.host_boundary_id,
+            host_boundary_kind=started.host_boundary_kind,
+            metadata={**started.metadata, "recovery": True},
+        )
+
+    async def drain_pending_terminalizations(
+        self,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        if not self._pending_terminalizations:
+            return
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        errors: list[BaseException] = []
+        for started_event_id, owner in tuple(self._pending_terminalizations.items()):
+            if not owner.started_committed:
+                pending = owner.pending_started_commit
+                if pending is None:
+                    self._pending_terminalizations.pop(started_event_id, None)
+                    continue
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    started_result = await pending.resolve(
+                        timeout_seconds=remaining
+                    )
+                except CompactionPendingCommitNotDurable:
+                    self._pending_terminalizations.pop(started_event_id, None)
+                    continue
+                except BaseException as exc:
+                    errors.append(exc)
+                    continue
+                committed_started = started_result.committed_event
+                if not isinstance(
+                    committed_started, ContextCompactionStartedEvent
+                ):
+                    errors.append(
+                        RuntimeError(
+                            "pending compaction Started returned wrong event type"
+                        )
+                    )
+                    continue
+                self._acknowledge_started_commit(committed_started)
+            candidate = owner.terminal_candidate
+            if candidate is None:
+                candidate = self._recovery_terminal_candidate(owner.started_event)
+                self._freeze_terminal_candidate(started_event_id, candidate)
+            owner.state = "committing"
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                committed = await asyncio.wait_for(
+                    self._commit_event(candidate),
+                    timeout=remaining,
+                )
+            except CompactionCommitCancelledAfterCommit as exc:
+                committed = exc.result.committed_event
+            except BaseException as exc:
+                owner.state = "candidate_frozen"
+                errors.append(exc)
+                continue
+            self._acknowledge_terminal_candidate(committed)
+        if self._pending_terminalizations:
+            raise PendingCompactionTerminalizationError(
+                "pending compaction terminal facts were not durably confirmed: "
+                f"{len(self._pending_terminalizations)}"
+            ) from (errors[-1] if errors else None)
+
+    async def _commit_event(self, event: AgentEvent) -> AgentEvent:
+        port = self.event_commit_port
+        if port is None:  # pragma: no cover - guarded by __post_init__
+            raise RuntimeError("compaction event commit port is unavailable")
+        result = await port.commit_event(event)
+        return result.committed_event
 
     def should_auto_compact(
         self,
@@ -196,6 +434,8 @@ class ContextCompactionService:
         max_compactable_sequence: int | None = None,
         keep_recent_runs_override: int | None = None,
         event_metadata: dict[str, object] | None = None,
+        host_boundary_id: str | None = None,
+        host_boundary_kind: Literal["pre_run"] | None = None,
     ) -> bool:
         if not self.should_auto_compact(
             target_model_target=target_model_target,
@@ -225,6 +465,8 @@ class ContextCompactionService:
                 max_compactable_sequence=max_compactable_sequence,
                 keep_recent_runs_override=keep_recent_runs_override,
                 event_metadata=event_metadata,
+                host_boundary_id=host_boundary_id,
+                host_boundary_kind=host_boundary_kind,
             )
             is not None
         )
@@ -242,7 +484,11 @@ class ContextCompactionService:
         max_compactable_sequence: int | None = None,
         keep_recent_runs_override: int | None = None,
         event_metadata: dict[str, object] | None = None,
+        host_boundary_id: str | None = None,
+        host_boundary_kind: Literal["pre_run"] | None = None,
     ) -> ContextCompactionCompletedEvent | None:
+        if self._pending_terminalizations:
+            await self.drain_pending_terminalizations(timeout_seconds=2.0)
         if not self.policy.enabled:
             return None
         if trigger == "manual" and not self.policy.manual_enabled:
@@ -257,6 +503,8 @@ class ContextCompactionService:
 
         events = self.event_log.iter()
         compaction_id = f"context_compaction:{uuid4().hex}"
+        started_event_id = f"context_compaction_started:{uuid4().hex}"
+        terminal_event_id = f"context_compaction_terminal:{uuid4().hex}"
         context = _event_context_for_compaction(events)
         try:
             plan = self._build_plan(
@@ -305,9 +553,13 @@ class ContextCompactionService:
                 failure_stage="planning",
                 error_type=type(exc).__name__,
                 message=str(exc),
+                started_event_id=None,
+                termination_kind="failed",
+                host_boundary_id=host_boundary_id,
+                host_boundary_kind=host_boundary_kind,
                 metadata=dict(event_metadata or {}),
             )
-            await asyncio.to_thread(self.event_log.append, failed)
+            await self._commit_event(failed)
             if trigger == "manual":
                 raise
             return None
@@ -336,6 +588,8 @@ class ContextCompactionService:
         call_result: DirectModelCallResult | None = None
         completed_target_estimate = plan.target_estimate
         observed_after_measurement: CompactionObservedAfterMeasurementFact | None = None
+        started_committed: ContextCompactionStartedEvent | None = None
+        terminal_committed = False
         try:
             summarizer_target = self.llm_runtime.resolve_target(
                 role=self.model_role,
@@ -355,6 +609,7 @@ class ContextCompactionService:
                 )
             )
             started = ContextCompactionStartedEvent(
+                id=started_event_id,
                 **context.event_fields(),
                 compaction_id=compaction_id,
                 trigger=trigger,
@@ -377,10 +632,38 @@ class ContextCompactionService:
                 through_sequence=plan.through_sequence,
                 keep_after_sequence=plan.keep_after_sequence,
                 force=force,
+                terminal_event_id=terminal_event_id,
+                host_boundary_id=host_boundary_id,
+                host_boundary_kind=host_boundary_kind,
                 metadata=metadata,
             )
             failure_stage = "started_append"
-            await asyncio.to_thread(self.event_log.append, started)
+            self._register_started_owner(started, committed=False)
+            try:
+                committed_started = await self._commit_event(started)
+            except CompactionCommitPendingAfterCancellation as pending_commit:
+                owner = self._pending_terminalizations[started.id]
+                owner.pending_started_commit = pending_commit.pending
+                owner.state = "started_commit_pending"
+                raise
+            except CompactionCommitCancelledAfterCommit as cancelled_commit:
+                committed_started = cancelled_commit.result.committed_event
+                if not isinstance(
+                    committed_started, ContextCompactionStartedEvent
+                ):
+                    raise RuntimeError(
+                        "compaction Started cancellation confirmation type mismatch"
+                    )
+                started_committed = committed_started
+                self._acknowledge_started_commit(committed_started)
+                raise
+            except BaseException:
+                self._pending_terminalizations.pop(started.id, None)
+                raise
+            if not isinstance(committed_started, ContextCompactionStartedEvent):
+                raise RuntimeError("compaction Started commit returned wrong event type")
+            started_committed = committed_started
+            self._acknowledge_started_commit(committed_started)
 
             failure_stage = "model_stream"
             call_result = await self._summarize(
@@ -492,6 +775,7 @@ class ContextCompactionService:
                 },
             )
             completed = ContextCompactionCompletedEvent(
+                id=terminal_event_id,
                 **context.event_fields(),
                 compaction_id=compaction_id,
                 trigger=trigger,
@@ -522,10 +806,31 @@ class ContextCompactionService:
                 keep_after_sequence=plan.keep_after_sequence,
                 included_run_ids=list(plan.included_run_ids),
                 included_artifact_ids=list(plan.included_artifact_ids),
+                started_event_id=started_event_id,
+                host_boundary_id=host_boundary_id,
+                host_boundary_kind=host_boundary_kind,
                 metadata=metadata,
             )
             failure_stage = "completed_append"
-            stored = await asyncio.to_thread(self.event_log.append, completed)
+            self._freeze_terminal_candidate(started_event_id, completed)
+            try:
+                stored_event = await self._commit_event(completed)
+            except CompactionCommitCancelledAfterCommit as cancelled_commit:
+                stored_event = cancelled_commit.result.committed_event
+                if not isinstance(
+                    stored_event, ContextCompactionCompletedEvent
+                ):
+                    raise RuntimeError(
+                        "compaction Completed cancellation confirmation type mismatch"
+                    )
+                terminal_committed = True
+                self._acknowledge_terminal_candidate(stored_event)
+                raise
+            if not isinstance(stored_event, ContextCompactionCompletedEvent):
+                raise RuntimeError("compaction Completed commit returned wrong event type")
+            stored = stored_event
+            terminal_committed = True
+            self._acknowledge_terminal_candidate(stored)
             await self._append_memory_candidate_proposals_if_enabled(
                 raw_summary=raw_summary,
                 summary=summary,
@@ -535,7 +840,14 @@ class ContextCompactionService:
             )
             self._consecutive_failures = 0
             return stored
-        except Exception as exc:
+        except BaseException as exc:
+            if isinstance(exc, CompactionCommitPendingAfterCancellation):
+                # The service now owns the still-running Started write.  Close or
+                # the next safe point will resolve it and, if committed, append
+                # the stable recovery terminal fact.
+                raise
+            if terminal_committed:
+                raise
             self._consecutive_failures += 1
             if failure_stage == "model_stream" and isinstance(
                 exc,
@@ -550,6 +862,7 @@ class ContextCompactionService:
                 failure_stage = "model_validation"
             estimate = getattr(exc, "estimate", None)
             failed = ContextCompactionFailedEvent(
+                id=(terminal_event_id if started_committed is not None else uuid4().hex),
                 **context.event_fields(),
                 compaction_id=compaction_id,
                 trigger=trigger,
@@ -591,7 +904,7 @@ class ContextCompactionService:
                     if call_result is not None
                     else estimate.total_input_tokens
                     if estimate is not None
-                    else None
+                    else summarizer_input_estimated_tokens
                 ),
                 summarizer_reported_model_id=(
                     call_result.reported_model_id if call_result is not None else None
@@ -600,9 +913,31 @@ class ContextCompactionService:
                 keep_after_sequence=plan.keep_after_sequence,
                 error_type=type(exc).__name__,
                 message=str(exc),
+                started_event_id=(
+                    started_event_id if started_committed is not None else None
+                ),
+                termination_kind=(
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+                ),
+                host_boundary_id=host_boundary_id,
+                host_boundary_kind=host_boundary_kind,
                 metadata=metadata,
             )
-            await asyncio.to_thread(self.event_log.append, failed)
+            if started_committed is not None:
+                self._freeze_terminal_candidate(started_event_id, failed)
+            try:
+                committed_failed = await self._commit_event(failed)
+            except CompactionCommitCancelledAfterCommit as cancelled_failed:
+                # The stable terminal fact is durable; preserve the original
+                # cancellation/architecture exception after ownership closes.
+                self._acknowledge_terminal_candidate(
+                    cancelled_failed.result.committed_event
+                )
+                raise exc
+            if started_committed is not None:
+                self._acknowledge_terminal_candidate(committed_failed)
+            if not isinstance(exc, Exception):
+                raise
             if trigger == "manual":
                 raise
             return None
@@ -780,7 +1115,7 @@ class ContextCompactionService:
             ],
         )
         try:
-            await asyncio.to_thread(self.event_log.append, event)
+            await self._commit_event(event)
         except Exception:
             return
 
@@ -1230,17 +1565,15 @@ def model_visible_messages_from_events(
     assembler = BlockAssembler()
     for event in events:
         if isinstance(event, RunStartEvent):
-            user_input = event.metadata.get("user_input")
-            if isinstance(user_input, str):
-                messages.append(
-                    UserMsg(
-                        name="user",
-                        content=user_input,
-                        id=f"user-message:{event.run_id}",
-                        created_at=event.created_at,
-                        metadata={"run_id": event.run_id},
-                    )
+            messages.append(
+                UserMsg(
+                    name="user",
+                    content=event.current_user_message.text,
+                    id=event.current_user_message.message_id,
+                    created_at=event.current_user_message.observed_at_utc,
+                    metadata={"run_id": event.run_id},
                 )
+            )
             continue
         for completion in assembler.append(event).completed:
             block = completion.block
@@ -1271,12 +1604,7 @@ def build_compaction_observation_text(
     assembler = BlockAssembler()
     for event in events:
         if isinstance(event, RunStartEvent):
-            user_input = event.metadata.get("user_input")
-            rendered = (
-                user_input
-                if isinstance(user_input, str)
-                else f"[user_input_chars={event.user_input_chars}]"
-            )
+            rendered = event.current_user_message.text
             lines.append(
                 f"[user run_id={event.run_id}] {_clip_text(rendered, _COMPACTION_TEXT_CLIP_CHARS)}"
             )

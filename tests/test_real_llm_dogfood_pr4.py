@@ -13,12 +13,11 @@ from uuid import uuid4
 
 import pytest
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support import bind_test_context, test_llm_context
+from tests.support.capability import preview_capability_plan
 
 from pulsara_agent.capability import (
-    CapabilityResolveContext,
-    LocalSkillCapabilityProvider,
     sync_bundled_skills,
 )
 from pulsara_agent.event import (
@@ -551,15 +550,18 @@ async def _run_real_pr4_dogfood_llm_user_long_session(
 def _verify_round0_inspect_baseline(session, evidence: DogfoodEvidence) -> None:
     registry_names = sorted(session.wiring.agent_runtime.tool_executor.registry.names())
     evidence.registry_names = registry_names
-    provider = LocalSkillCapabilityProvider()
-    context = CapabilityResolveContext(
+    agent = session.wiring.agent_runtime
+    resolved = preview_capability_plan(
+        agent.capability_runtime,
         workspace_root=session.workspace.workspace_root,
         workspace_kind="project",
         memory_domain=session.wiring.runtime_wiring.memory_domain,
-        available_tool_names=frozenset(registry_names),
+        tool_registry=agent.tool_executor.registry,
+        archive=agent.runtime_session.archive,
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        mcp_installation_id=agent.runtime_session.mcp_installation_id,
         user_input="inspect dogfood baseline",
     )
-    resolved = provider.resolve(context, bound_tool_names=context.available_tool_names)
     catalog_names = sorted(entry.name for entry in resolved.catalog_entries)
     evidence.skill_catalog_names = catalog_names
     round_evidence = {
@@ -1780,16 +1782,18 @@ async def _wait_for_active_run_start(session, task, evidence: DogfoodEvidence) -
 def _verify_skill_catalog_contains(
     session, skill_name: str, round_name: str, evidence: DogfoodEvidence
 ) -> None:
-    registry_names = sorted(session.wiring.agent_runtime.tool_executor.registry.names())
-    provider = LocalSkillCapabilityProvider()
-    context = CapabilityResolveContext(
+    agent = session.wiring.agent_runtime
+    resolved = preview_capability_plan(
+        agent.capability_runtime,
         workspace_root=session.workspace.workspace_root,
         workspace_kind="project",
         memory_domain=session.wiring.runtime_wiring.memory_domain,
-        available_tool_names=frozenset(registry_names),
+        tool_registry=agent.tool_executor.registry,
+        archive=agent.runtime_session.archive,
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        mcp_installation_id=agent.runtime_session.mcp_installation_id,
         user_input=f"inspect {skill_name}",
     )
-    resolved = provider.resolve(context, bound_tool_names=context.available_tool_names)
     catalog_names = sorted(entry.name for entry in resolved.catalog_entries)
     evidence.turns.append(
         {
@@ -1815,15 +1819,19 @@ async def _inject_controlled_failed_run(session, user_input: str) -> None:
     events = (
         RunStartEvent(
             **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id),
+            **run_start_permission_fields(ctx.run_id, user_input=user_input),
             user_input_chars=len(user_input),
             metadata={"user_input": user_input},
         ),
         RunEndEvent(
+            **run_end_contract_fields(
+                ctx.run_id,
+                status="failed",
+                error_message="controlled dogfood provider failure",
+            ),
             **ctx.event_fields(),
             status="failed",
             stop_reason="model_error",
-            error_message="controlled dogfood provider failure",
         ),
     )
     # This synthetic failure is still part of the runtime ledger.  Commit and

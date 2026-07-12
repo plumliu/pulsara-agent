@@ -10,6 +10,7 @@ from typing import Literal
 from uuid import uuid4
 
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
 from pulsara_agent.runtime.mcp.types import McpBindingIdentity
 from pulsara_agent.runtime.subagent.facts import SubagentGraphState
 
@@ -49,6 +50,7 @@ class ChildExecutionHandle:
     phase: Literal["prepared", "started", "closing", "released"] = "prepared"
     release_requested: bool = False
     mcp_binding_identities: frozenset[McpBindingIdentity] = frozenset()
+    execution_handles: BoundaryExecutionHandles | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +137,26 @@ class ChildExecutionRegistry:
             if session.runtime_session_id != handle.child_runtime_session_id:
                 raise ValueError("child runtime session identity mismatch")
             handle.child_session = session
+
+    def attach_execution_handles(
+        self,
+        subagent_run_id: str,
+        execution_handles: BoundaryExecutionHandles,
+    ) -> None:
+        with self._lock:
+            handle = self._handles[subagent_run_id]
+            if handle.execution_handles is not None:
+                raise ValueError("child execution handles are already attached")
+            if execution_handles.state != "run_owned":
+                raise ValueError("child execution handles must already be run-owned")
+            if execution_handles.owner_id != subagent_run_id:
+                raise ValueError("child execution handle owner mismatch")
+            handle.execution_handles = execution_handles
+            execution_handles.borrow_tracker.on_change = (
+                lambda run_id=subagent_run_id, exact=execution_handles: (
+                    self._execution_borrow_changed(run_id, exact)
+                )
+            )
 
     def attach_coroutine(self, subagent_run_id: str, coroutine: asyncio.Task[None]) -> None:
         with self._lock:
@@ -311,6 +333,17 @@ class ChildExecutionRegistry:
                 handle.release_requested = True
                 handle.phase = "closing"
                 return
+            execution_handles = handle.execution_handles
+            if execution_handles is not None:
+                if execution_handles.state == "run_owned":
+                    execution_handles.mark_retiring()
+                if not execution_handles.borrow_tracker.can_retire():
+                    handle.release_requested = True
+                    handle.phase = "closing"
+                    return
+                if execution_handles.state == "retiring":
+                    execution_handles.mark_closed()
+                execution_handles.borrow_tracker.on_change = None
             self._handles.pop(subagent_run_id, None)
             for identity in handle.mcp_binding_identities:
                 run_ids = self._child_ids_by_mcp_binding_identity.get(identity)
@@ -333,6 +366,27 @@ class ChildExecutionRegistry:
                     self._reservations.pop(reservation.reservation_id, None)
         if child_session is not None:
             child_session.close()
+
+    def _execution_borrow_changed(
+        self,
+        subagent_run_id: str,
+        exact_handles: BoundaryExecutionHandles,
+    ) -> None:
+        """Retry release only for the exact closing child/handle generation."""
+
+        with self._lock:
+            handle = self._handles.get(subagent_run_id)
+            if (
+                handle is None
+                or handle.execution_handles is not exact_handles
+                or handle.phase != "closing"
+                or not handle.release_requested
+            ):
+                return
+            task = handle.coroutine
+            if task is not None and not task.done():
+                return
+        self._finalize_release(subagent_run_id, expected_task=task)
 
     def reconcile(self, graph: SubagentGraphState) -> tuple[ChildExecutionDiagnostic, ...]:
         diagnostics: list[ChildExecutionDiagnostic] = []

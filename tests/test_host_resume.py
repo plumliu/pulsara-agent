@@ -36,11 +36,11 @@ from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
     EffectivePermissionPolicy,
-    PermissionMode,
     PermissionProfile,
     TerminalAccess,
     preset_to_policy,
 )
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.recovery import HOST_TEARDOWN_NOTE_TEXT
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
@@ -370,7 +370,12 @@ def test_resume_repairs_dangling_running_run_before_replay(
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id),
+                **run_start_permission_fields(
+                    ctx.run_id,
+                    user_input="dangling user",
+                    turn_id=ctx.turn_id,
+                    reply_id=ctx.reply_id,
+                ),
                 user_input_chars=13,
                 metadata={"user_input": "dangling user"},
             ),

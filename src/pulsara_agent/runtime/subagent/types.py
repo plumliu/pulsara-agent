@@ -66,6 +66,7 @@ class SubagentBudget:
     child_timeout_seconds: float | None = None
     max_total_child_runs_per_parent_run: int = 16
     max_result_summary_chars_per_child: int = 4_000
+    max_result_artifact_refs_per_child: int = 32
     max_subagent_results_per_parent_compile: int = 8
 
     @classmethod
@@ -89,6 +90,9 @@ class SubagentBudget:
             max_result_summary_chars_per_child=int(
                 getattr(snapshot, "max_result_summary_chars_per_child")
             ),
+            max_result_artifact_refs_per_child=int(
+                getattr(snapshot, "max_result_artifact_refs_per_child")
+            ),
             max_subagent_results_per_parent_compile=int(
                 getattr(snapshot, "max_subagent_results_per_parent_compile")
             ),
@@ -102,6 +106,7 @@ class SubagentBudget:
             "child_timeout_seconds": self.child_timeout_seconds,
             "max_total_child_runs_per_parent_run": self.max_total_child_runs_per_parent_run,
             "max_result_summary_chars_per_child": self.max_result_summary_chars_per_child,
+            "max_result_artifact_refs_per_child": self.max_result_artifact_refs_per_child,
             "max_subagent_results_per_parent_compile": self.max_subagent_results_per_parent_compile,
         }
 

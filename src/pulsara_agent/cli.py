@@ -13,7 +13,8 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 from pulsara_agent import __version__
 from pulsara_agent.capability import (
     BUNDLED_OPT_OUT_MARKER_NAME,
-    CapabilityResolveContext,
+    CapabilityExecutionSurfaceSnapshotContext,
+    CapabilityProjectionResolveContext,
     LocalSkillCapabilityProvider,
     SkillBinaryLookupPath,
     SkillHealthResolver,
@@ -35,6 +36,7 @@ from pulsara_agent.host import (
 from pulsara_agent.event import ContextCompactionCompletedEvent, ContextCompactionFailedEvent
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
+from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime import (
     ApprovalResolution,
     McpInputRequiredInteractionResolution,
@@ -60,12 +62,14 @@ from pulsara_agent.runtime.mcp.store import (
     mcp_config_sources,
 )
 from pulsara_agent.runtime.permission import (
-    DEFAULT_PERMISSION_MODE,
-    PermissionMode,
     PermissionState,
     mode_for_policy,
-    parse_permission_mode,
     preset_to_policy,
+)
+from pulsara_agent.primitives.permission import (
+    DEFAULT_PERMISSION_MODE,
+    PermissionMode,
+    parse_permission_mode,
 )
 from pulsara_agent.repl import ReplPrompt, build_repl_prompt
 from pulsara_agent.settings import PulsaraSettings, load_env_file
@@ -855,8 +859,33 @@ async def _host_repl(args) -> None:
                 result = await session.stop_current_turn()
                 if result is None:
                     print("No active turn to stop.")
+                elif isinstance(result, AgentRunResult) or not hasattr(
+                    result, "boundary_id"
+                ):
+                    status = result.status
+                    print(
+                        json.dumps(
+                            {
+                                "status": getattr(status, "value", status),
+                                "stop_reason": result.stop_reason,
+                            },
+                            indent=2,
+                        )
+                    )
                 else:
-                    print(json.dumps({"status": result.status.value, "stop_reason": result.stop_reason}, indent=2))
+                    print(
+                        json.dumps(
+                            {
+                                "status": result.status,
+                                "boundary_id": result.boundary_id,
+                                "draft_run_id": result.draft_run_id,
+                                "durable_run_existence": (
+                                    result.durable_run_existence.value
+                                ),
+                            },
+                            indent=2,
+                        )
+                    )
                 continue
             if command == ":compact":
                 try:
@@ -1083,17 +1112,26 @@ async def _host_inspect(args) -> dict[str, object]:
                 )
             )
         )
-        exposure = capability_runtime.resolve_for_turn(
-            CapabilityResolveContext(
+        frozen_surface = capability_runtime.freeze_execution_surface(
+            CapabilityExecutionSurfaceSnapshotContext(
+                workspace_root=workspace.workspace_root,
+                workspace_kind=workspace.workspace_kind,
+                available_tool_names=frozenset(registry.names()),
+                mcp_installation_id=runtime_session.mcp_installation_id,
+            ),
+            tool_registry=registry,
+            archive=runtime_session.archive,
+            runtime_session_id=runtime_session.runtime_session_id,
+            owner_id=f"static_inspect:{runtime_session.runtime_session_id}",
+        )
+        exposure = capability_runtime.preview_exposure_plan(
+            CapabilityProjectionResolveContext(
                 workspace_root=workspace.workspace_root,
                 workspace_kind=workspace.workspace_kind,
                 memory_domain=workspace.memory_domain,
-                available_tool_names=frozenset(registry.names()),
                 user_input="",
             ),
-            tool_registry=registry,
-            permission_policy=permission_policy,
-            plan_active=False,
+            frozen_surface=frozen_surface,
         )
     finally:
         runtime_session.close()

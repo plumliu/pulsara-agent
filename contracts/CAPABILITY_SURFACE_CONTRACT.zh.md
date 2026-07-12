@@ -287,3 +287,43 @@ Inspector 必须从 event log 投影这些事件，而不是依赖 transient scr
 - skill catalog progressive disclosure 保证所有 prompt-visible skill 至少进入 compact index。
 - active skill terminal attribution 只在 active skill turn 出现。
 - inspector 能解释 latest exposure 与 gate decisions。
+
+---
+
+## 13. Execution surface / projection split 与 continuation narrowing
+
+production provider API 拆成两个单向阶段：RunStart 前的 `snapshot_descriptors()` 只产 descriptor execution surface；
+RunStart 后的 `resolve_projection()` 只产 catalog/active-skill/provider prompt projection。context-dependent descriptor
+provider 与 descriptor+projection 混合 `resolve()` 不是生产协议。Local skill 是 projection-only。
+
+durable exposure identity分别保存完整 descriptor/binding entries、authorization entries、catalog projection、active-skill
+projection，以及 semantic/fact 两类 fingerprint。authorization name set不得静默截断；超过安全上限直接 fail closed。
+projection entry/fragment/prompt artifact ID是exposure-scoped persistence attribution，只进入fact fingerprint，不进入semantic
+fingerprint；相同模型可见文本与source identity在不同exposure ID下必须得到相同semantic fingerprint。
+
+live continuation 每次使用 initial raw resolve basis 和 current surface 生成 comparison candidate。只有完整 semantic
+fingerprint 相等才 reuse；否则执行 monotonic narrowing：
+
+- authorization 只保留相同 name + descriptor fingerprint + binding fingerprint，且 disposition 不得更宽；
+- projection 只保留相同 `projection_entry_id + content_fingerprint`；
+- 新 descriptor、binding、catalog entry、active injection 一律忽略；
+- 模型可见 prompt 只拼接 original exact fragment artifacts。删除 entry 时同步删除空 container/projection wrappers；
+  禁止重新 render 后把 index/name 提升为 detail。
+
+continuation fact必须引用 source exposure；runtime/event validator必须证明 effective exposure 是 source 的内容子集。
+
+Run boundary冻结的`FrozenCapabilityExecutionSurface`必须同时进入`AgentRunDraft`、`RunWorkingSet`与
+`BoundaryExecutionHandles`。initial/resume handles在对应durable batch commit前捕获exact MCP installation、
+CapabilityRuntime、ToolRegistry与surface identity；commit fold和Agent model loop不得从scratchpad/current wiring重新取值。
+
+process-local borrow authority必须包含handle ID/generation并读取同一handle state；`retiring/closed`后禁止新borrow，
+已取得borrow仍可在finally release。tracker只记录`active_parent_tool_call_borrows`与
+`active_child_tool_call_borrows`两类真实在途tool call，不记录MCP pending interaction。MCP pending lease完全由
+`McpServerSupervisor`拥有；execution handle退休不得查询或等待该lease，MCP slot/manager退休也不得依赖execution-handle
+borrow tracker。detached child使用`ChildExecutionRegistry`持有的child-owned frozen execution handles，
+不得引用已可退休的parent authority；immediate与dependency-scheduled child必须走同一个安装入口。child lifetime本身
+不是borrow，只有tool call执行的try/finally区间增加`active_child_tool_call_borrows`。最后一个deferred parent borrow归零
+后必须同时close handle并retire confirmed run owner。
+
+child handle进入closing时，borrow归零callback必须校验exact child ID、handle identity/generation、release_requested与
+coroutine done，随后才能释放child session/capacity/MCP reverse index；active child的普通borrow变化不得触发release。

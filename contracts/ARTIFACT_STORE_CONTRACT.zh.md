@@ -232,3 +232,11 @@ Production wiring 必须使用 `PostgresArtifactStore`。
 - binary artifact rejected in text mode。
 - tool result artifact service writes primary preview ref and index metadata consistently。
 - old artifact refs without preview still replay/inspect/compact.
+
+## 12. Deterministic semantic idempotency
+
+cross-ledger repair等需要预生成artifact ID的生产路径必须调用
+`put_text_if_absent_or_confirm_identical()`。只有同 ID、相同bytes、media type、ownership和完整semantic metadata都一致时
+才视为幂等成功；metadata-only差异也是`ArtifactContentConflict`。PostgreSQL并发writer必须在同一事务/锁边界确认，不能
+先查后写产生TOCTOU。child inferred result的normal与repair路径必须共享同一policy fingerprint、artifact ID、正文和
+semantic metadata builder。

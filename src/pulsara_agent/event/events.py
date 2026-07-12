@@ -43,73 +43,36 @@ from pulsara_agent.primitives.mcp import (
     McpReconcileAttemptSummaryFact,
     McpReconcileTriggerValue,
 )
-
-_PRESET_PERMISSION_MODES = frozenset(
-    {
-        "read-only",
-        "ask-permissions",
-        "accept-edits",
-        "bypass-permissions",
-    }
+from pulsara_agent.primitives.permission import (
+    parse_permission_mode,
+    preset_permission_payload,
 )
+from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
+from pulsara_agent.primitives.run_boundary import (
+    InteractionResumeBoundaryFact,
+    NewRunBoundaryFact,
+)
+from pulsara_agent.primitives.run_entry import (
+    CurrentUserMessageFact,
+    RunEntryKind,
+    SubagentRunEntryFact,
+    canonical_utc_timestamp,
+    validate_host_current_user_attribution,
+    validate_subagent_current_user_attribution,
+)
+from pulsara_agent.primitives.run_lifecycle import (
+    FAILURE_STOP_REASONS,
+    RunStopReason,
+    RunTerminalizationKind,
+)
+from pulsara_agent.primitives.subagent import (
+    ChildNativeTerminalReferenceFact,
+    ChildResultHandoffFact,
+)
+
 _RUN_PERMISSION_SNAPSHOT_SOURCES = frozenset(
     {"session_default", "plan_mode", "child_profile"}
 )
-
-_PRESET_PERMISSION_POLICIES: dict[str, dict[str, Any]] = {
-    "read-only": {
-        "profile": "read_only",
-        "approval_policy": "on_request",
-        "terminal_access": "off",
-        "execution_boundary": "host",
-        "network_isolated": False,
-        "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "off",
-        },
-    },
-    "ask-permissions": {
-        "profile": "trusted_host",
-        "approval_policy": "on_request",
-        "terminal_access": "ask",
-        "execution_boundary": "host",
-        "network_isolated": False,
-        "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "host_shell",
-        },
-    },
-    "accept-edits": {
-        "profile": "trusted_host",
-        "approval_policy": "never",
-        "terminal_access": "ask",
-        "execution_boundary": "host",
-        "network_isolated": False,
-        "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "host_shell",
-        },
-    },
-    "bypass-permissions": {
-        "profile": "trusted_host",
-        "approval_policy": "never",
-        "terminal_access": "allow",
-        "execution_boundary": "host",
-        "network_isolated": False,
-        "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "host_shell",
-        },
-    },
-}
 
 
 def _validate_model_usage(
@@ -133,10 +96,11 @@ def _validate_preset_permission_payload(
     policy: dict[str, Any],
     context: str,
 ) -> None:
-    if mode not in _PRESET_PERMISSION_MODES:
-        allowed = ", ".join(sorted(_PRESET_PERMISSION_MODES))
-        raise ValueError(f"{context} permission mode must be one of: {allowed}")
-    expected = _PRESET_PERMISSION_POLICIES[mode]
+    try:
+        parsed = parse_permission_mode(mode)
+    except ValueError as exc:
+        raise ValueError(f"{context} permission mode is invalid") from exc
+    expected = preset_permission_payload(parsed)
     if dict(policy) != expected:
         raise ValueError(f"{context} permission policy must match preset mode {mode!r}")
 
@@ -154,6 +118,8 @@ class EventType(StrEnum):
     MODEL_CALL_REJECTED = "MODEL_CALL_REJECTED"
     CONTEXT_COMPILED = "CONTEXT_COMPILED"
     CAPABILITY_GATE_DECISION = "CAPABILITY_GATE_DECISION"
+    CAPABILITY_EXPOSURE_RESOLVED = "CAPABILITY_EXPOSURE_RESOLVED"
+    RUN_INTERACTION_RESUME_BOUNDARY = "RUN_INTERACTION_RESUME_BOUNDARY"
     MCP_CAPABILITY_SNAPSHOT_INSTALLED = "MCP_CAPABILITY_SNAPSHOT_INSTALLED"
 
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
@@ -237,7 +203,7 @@ class EventType(StrEnum):
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +327,16 @@ class RunStartEvent(EventBase):
     model_target: ResolvedModelTargetFact
     mcp_installation_id: str
     mcp_installation_owner_runtime_session_id: str
+    run_entry_kind: RunEntryKind
+    current_user_message: CurrentUserMessageFact
+    terminal_run_end_event_id: str = Field(min_length=1)
+    new_run_boundary: NewRunBoundaryFact | None
+    subagent_run_entry: SubagentRunEntryFact | None
+
+    @field_validator("created_at")
+    @classmethod
+    def _canonical_created_at(cls, value: str) -> str:
+        return canonical_utc_timestamp(value)
 
     @model_validator(mode="after")
     def _validate_permission_snapshot(self) -> "RunStartEvent":
@@ -371,6 +347,55 @@ class RunStartEvent(EventBase):
             policy=self.permission_policy,
             context="RunStartEvent",
         )
+        if self.user_input_chars != len(self.current_user_message.text):
+            raise ValueError("RunStartEvent user_input_chars mismatch")
+        created_at = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
+        observed_at = datetime.fromisoformat(
+            self.current_user_message.observed_at_utc.replace("Z", "+00:00")
+        )
+        if created_at < observed_at:
+            raise ValueError("RunStartEvent cannot predate current user observation")
+        if self.run_entry_kind is RunEntryKind.HOST:
+            if self.new_run_boundary is None or self.subagent_run_entry is not None:
+                raise ValueError("host RunStart requires only new_run_boundary")
+            boundary = self.new_run_boundary
+            identity = boundary.identity
+            if (
+                identity.run_id != self.run_id
+                or identity.turn_id != self.turn_id
+                or identity.reply_id != self.reply_id
+                or identity.runtime_session_id
+                != self.mcp_installation_owner_runtime_session_id
+            ):
+                raise ValueError("host RunStart boundary identity mismatch")
+            validate_host_current_user_attribution(
+                boundary=identity,
+                current_user=self.current_user_message,
+            )
+            if (
+                boundary.model_target_fingerprint
+                != self.model_target.target_fingerprint
+                or boundary.permission_snapshot_id != self.permission_snapshot_id
+                or boundary.mcp_installation_id != self.mcp_installation_id
+            ):
+                raise ValueError("host RunStart contract identity mismatch")
+        elif self.subagent_run_entry is None or self.new_run_boundary is not None:
+            raise ValueError("child RunStart requires only subagent_run_entry")
+        else:
+            entry = self.subagent_run_entry
+            validate_subagent_current_user_attribution(
+                entry=entry,
+                current_user=self.current_user_message,
+            )
+            if (
+                entry.permission_snapshot_id != self.permission_snapshot_id
+                or entry.model_target_fingerprint
+                != self.model_target.target_fingerprint
+                or entry.mcp_installation_id != self.mcp_installation_id
+                or entry.mcp_installation_owner_runtime_session_id
+                != self.mcp_installation_owner_runtime_session_id
+            ):
+                raise ValueError("child RunStart contract identity mismatch")
         return self
 
 
@@ -430,12 +455,91 @@ class McpCapabilitySnapshotInstalledEvent(EventBase):
         return self
 
 
+class RunInteractionResumeBoundaryEvent(EventBase):
+    type: Literal[EventType.RUN_INTERACTION_RESUME_BOUNDARY] = (
+        EventType.RUN_INTERACTION_RESUME_BOUNDARY
+    )
+    boundary: InteractionResumeBoundaryFact
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> "RunInteractionResumeBoundaryEvent":
+        identity = self.boundary.identity
+        if (
+            identity.run_id != self.run_id
+            or identity.turn_id != self.turn_id
+            or identity.reply_id != self.reply_id
+        ):
+            raise ValueError("resume boundary event context mismatch")
+        return self
+
+
+class CapabilityExposureResolvedEvent(EventBase):
+    type: Literal[EventType.CAPABILITY_EXPOSURE_RESOLVED] = (
+        EventType.CAPABILITY_EXPOSURE_RESOLVED
+    )
+    exposure: CapabilityExposureSnapshotFact
+    exposure_revision: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> "CapabilityExposureResolvedEvent":
+        owner = self.exposure.owner
+        if owner.run_id != self.run_id:
+            raise ValueError("capability exposure event run mismatch")
+        if self.exposure.resolution_kind == "initial":
+            if self.exposure_revision != 1:
+                raise ValueError("initial capability exposure revision must be 1")
+        elif self.exposure_revision < 2:
+            raise ValueError("continuation capability exposure revision must be >= 2")
+        return self
+
+
 class RunEndEvent(EventBase):
     type: Literal[EventType.RUN_END] = EventType.RUN_END
-    status: str
-    stop_reason: str | None = None
-    abort_kind: str | None = None
+    status: Literal["finished", "failed", "aborted"]
+    stop_reason: RunStopReason
+    terminalization_kind: RunTerminalizationKind
+    abort_kind: Literal["user_stop", "host_teardown"] | None = None
     error_message: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_terminal_matrix(self) -> "RunEndEvent":
+        kind = self.terminalization_kind
+        if kind is RunTerminalizationKind.NORMAL:
+            valid = (
+                self.status == "finished"
+                and self.stop_reason is RunStopReason.FINAL
+                and self.abort_kind is None
+                and self.error_message is None
+            )
+        elif kind is RunTerminalizationKind.USER_STOP:
+            valid = (
+                self.status == "aborted"
+                and self.stop_reason is RunStopReason.ABORTED
+                and self.abort_kind == "user_stop"
+                and self.error_message is None
+            )
+        elif kind in {
+            RunTerminalizationKind.HOST_TEARDOWN,
+            RunTerminalizationKind.RECOVERED_INTERRUPTED,
+        }:
+            valid = (
+                self.status == "aborted"
+                and self.stop_reason is RunStopReason.ABORTED
+                and self.abort_kind == "host_teardown"
+                and self.error_message is None
+            )
+        else:
+            valid = (
+                self.status == "failed"
+                and self.stop_reason in FAILURE_STOP_REASONS
+                and self.abort_kind is None
+                and isinstance(self.error_message, str)
+                and bool(self.error_message.strip())
+                and len(self.error_message) <= 4096
+            )
+        if not valid:
+            raise ValueError("RunEndEvent violates terminalization matrix")
+        return self
 
 
 class ReplyStartEvent(EventBase):
@@ -943,6 +1047,8 @@ class PlanModeExitedEvent(EventBase):
     restored_permission_policy: dict[str, Any]
     accepted_plan_summary: str = ""
     accepted_plan_artifact_id: str | None = None
+    transition_owner: Literal["agent_run", "host_workflow"]
+    host_workflow_operation_id: str | None = None
 
     @model_validator(mode="after")
     def _validate_restored_permission(self) -> "PlanModeExitedEvent":
@@ -951,6 +1057,11 @@ class PlanModeExitedEvent(EventBase):
             policy=self.restored_permission_policy,
             context="PlanModeExitedEvent.restored",
         )
+        if self.transition_owner == "host_workflow":
+            if not self.host_workflow_operation_id:
+                raise ValueError("host workflow plan exit requires operation id")
+        elif self.host_workflow_operation_id is not None:
+            raise ValueError("agent-run plan exit cannot carry host workflow operation id")
         return self
 
 
@@ -1172,6 +1283,16 @@ def _validate_compaction_summarizer_contract(
         raise ValueError("started summarizer input exceeds resolved budget")
 
 
+def _validate_compaction_boundary_attribution(
+    host_boundary_id: str | None,
+    host_boundary_kind: Literal["pre_run"] | None,
+) -> None:
+    if (host_boundary_id is None) != (host_boundary_kind is None):
+        raise ValueError("compaction host boundary attribution is all-or-none")
+    if host_boundary_id is not None and not host_boundary_id:
+        raise ValueError("compaction host boundary id cannot be empty")
+
+
 class ContextCompactionStartedEvent(EventBase):
     type: Literal[EventType.CONTEXT_COMPACTION_STARTED] = (
         EventType.CONTEXT_COMPACTION_STARTED
@@ -1193,9 +1314,15 @@ class ContextCompactionStartedEvent(EventBase):
     through_sequence: int
     keep_after_sequence: int
     force: bool = False
+    terminal_event_id: str = Field(min_length=1)
+    host_boundary_id: str | None = None
+    host_boundary_kind: Literal["pre_run"] | None = None
 
     @model_validator(mode="after")
     def _validate_compaction_contract(self) -> "ContextCompactionStartedEvent":
+        _validate_compaction_boundary_attribution(
+            self.host_boundary_id, self.host_boundary_kind
+        )
         _validate_compaction_target_contract(
             target=self.target_model_target,
             target_input_budget_tokens=self.target_input_budget_tokens,
@@ -1250,9 +1377,15 @@ class ContextCompactionCompletedEvent(EventBase):
     keep_after_sequence: int
     included_run_ids: list[str] = Field(default_factory=list)
     included_artifact_ids: list[str] = Field(default_factory=list)
+    started_event_id: str = Field(min_length=1)
+    host_boundary_id: str | None = None
+    host_boundary_kind: Literal["pre_run"] | None = None
 
     @model_validator(mode="after")
     def _validate_compaction_contract(self) -> "ContextCompactionCompletedEvent":
+        _validate_compaction_boundary_attribution(
+            self.host_boundary_id, self.host_boundary_kind
+        )
         _validate_model_usage(self.summarizer_usage_status, self.summarizer_usage)
         _validate_reported_model_id(self.summarizer_reported_model_id)
         if (
@@ -1355,6 +1488,7 @@ class ContextCompactionFailedEvent(EventBase):
         "summary_validation",
         "artifact_write",
         "completed_append",
+        "recovery_terminalization",
     ]
     target_estimate: CompactionTargetEstimateFact | None = None
     observed_after_measurement: CompactionObservedAfterMeasurementFact | None = None
@@ -1371,9 +1505,28 @@ class ContextCompactionFailedEvent(EventBase):
     keep_after_sequence: int | None = None
     error_type: str
     message: str
+    started_event_id: str | None = None
+    termination_kind: Literal["failed", "cancelled", "recovered_interrupted"]
+    host_boundary_id: str | None = None
+    host_boundary_kind: Literal["pre_run"] | None = None
 
     @model_validator(mode="after")
     def _validate_failure_stage(self) -> "ContextCompactionFailedEvent":
+        _validate_compaction_boundary_attribution(
+            self.host_boundary_id, self.host_boundary_kind
+        )
+        if self.termination_kind in {"cancelled", "recovered_interrupted"}:
+            if self.started_event_id is None:
+                raise ValueError(
+                    "cancelled/recovered compaction requires started event attribution"
+                )
+        elif self.started_event_id is None and self.failure_stage not in {
+            "planning",
+            "summarizer_resolution",
+            "summarizer_input_build",
+            "started_append",
+        }:
+            raise ValueError("post-start compaction failure requires started event id")
         _validate_model_usage(self.summarizer_usage_status, self.summarizer_usage)
         _validate_reported_model_id(self.summarizer_reported_model_id)
         if (
@@ -1391,6 +1544,7 @@ class ContextCompactionFailedEvent(EventBase):
             "summary_validation",
             "artifact_write",
             "completed_append",
+            "recovery_terminalization",
         ]
         stage_index = stages.index(self.failure_stage)
         if (
@@ -1426,7 +1580,7 @@ class ContextCompactionFailedEvent(EventBase):
                 target_estimate=self.target_estimate,
             )
             has_actual_after = self.target_estimate.estimated_tokens_after is not None
-            if stage_index >= stages.index("artifact_write") and not has_actual_after:
+            if self.failure_stage in {"artifact_write", "completed_append"} and not has_actual_after:
                 raise ValueError(
                     "post-summary persistence failure requires actual after measurements"
                 )
@@ -1634,6 +1788,7 @@ class SubagentBudgetSnapshotEvent(BaseModel):
     child_timeout_seconds: float | None
     max_total_child_runs_per_parent_run: int
     max_result_summary_chars_per_child: int
+    max_result_artifact_refs_per_child: int
     max_subagent_results_per_parent_compile: int
 
     @model_validator(mode="after")
@@ -1649,8 +1804,11 @@ class SubagentBudgetSnapshotEvent(BaseModel):
                 raise ValueError(f"{field_name} must be >= 1")
         if self.max_spawn_depth_from_root != 0:
             raise ValueError("V1 subagent budget max_spawn_depth_from_root must be 0")
-        if self.max_result_summary_chars_per_child < 0:
-            raise ValueError("max_result_summary_chars_per_child must be >= 0")
+        if (
+            self.max_result_summary_chars_per_child < 0
+            or self.max_result_artifact_refs_per_child < 0
+        ):
+            raise ValueError("subagent result summary/artifact caps must be >= 0")
         if self.child_timeout_seconds is not None:
             if (
                 not math.isfinite(self.child_timeout_seconds)
@@ -1743,13 +1901,14 @@ class SubagentRunCompletedEvent(EventBase):
     subagent_run_id: str
     parent_runtime_session_id: str
     child_runtime_session_id: str
-    child_run_id: str | None = None
+    child_run_id: str
     result_id: str
     summary: str
     result_artifact_id: str
     artifact_ids: list[str] = Field(default_factory=list)
     token_usage: dict[str, Any] | None = None
     tool_call_count: int | None = None
+    result_handoff: ChildResultHandoffFact
 
     @model_validator(mode="after")
     def _validate_result_artifact(self) -> SubagentRunCompletedEvent:
@@ -1757,6 +1916,24 @@ class SubagentRunCompletedEvent(EventBase):
             raise ValueError("result_artifact_id must be present in artifact_ids")
         if len(self.artifact_ids) != len(set(self.artifact_ids)):
             raise ValueError("artifact_ids must be unique")
+        handoff = self.result_handoff
+        terminal = handoff.child_terminal_reference
+        event_usage = (
+            ModelTokenUsageFact.model_validate(self.token_usage)
+            if self.token_usage is not None
+            else None
+        )
+        if (
+            terminal.child_runtime_session_id != self.child_runtime_session_id
+            or terminal.child_run_id != self.child_run_id
+            or handoff.result_id != self.result_id
+            or handoff.summary != self.summary
+            or handoff.result_artifact_id != self.result_artifact_id
+            or handoff.artifact_ids != tuple(self.artifact_ids)
+            or handoff.token_usage != event_usage
+            or handoff.tool_call_count != (self.tool_call_count or 0)
+        ):
+            raise ValueError("SubagentRunCompletedEvent result handoff mismatch")
         return self
 
 
@@ -1771,6 +1948,7 @@ class SubagentRunFailedEvent(EventBase):
     batch_id: str | None = None
     create_tool_call_id: str | None = None
     repair_id: str | None = None
+    child_terminal_reference: ChildNativeTerminalReferenceFact | None = None
 
     @model_validator(mode="after")
     def _validate_creation_attribution(self) -> SubagentRunFailedEvent:
@@ -1778,6 +1956,12 @@ class SubagentRunFailedEvent(EventBase):
             raise ValueError(
                 "batch_id and create_tool_call_id must be provided together"
             )
+        if (
+            self.child_terminal_reference is not None
+            and self.child_terminal_reference.child_runtime_session_id
+            != self.child_runtime_session_id
+        ):
+            raise ValueError("failed child terminal reference attribution mismatch")
         return self
 
 
@@ -1792,6 +1976,7 @@ class SubagentRunCancelledEvent(EventBase):
     batch_id: str | None = None
     create_tool_call_id: str | None = None
     repair_id: str | None = None
+    child_terminal_reference: ChildNativeTerminalReferenceFact | None = None
 
     @model_validator(mode="after")
     def _validate_creation_attribution(self) -> SubagentRunCancelledEvent:
@@ -1799,6 +1984,12 @@ class SubagentRunCancelledEvent(EventBase):
             raise ValueError(
                 "batch_id and create_tool_call_id must be provided together"
             )
+        if (
+            self.child_terminal_reference is not None
+            and self.child_terminal_reference.child_runtime_session_id
+            != self.child_runtime_session_id
+        ):
+            raise ValueError("cancelled child terminal reference attribution mismatch")
         return self
 
 
@@ -2034,7 +2225,7 @@ class SubagentResultSubmittedEvent(EventBase):
     result_artifact_id: str
     artifact_ids: list[str] = Field(default_factory=list)
     result_source: Literal["explicit"] = "explicit"
-    source_tool_call_id: str | None = None
+    source_tool_call_id: str = Field(min_length=1)
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -2086,6 +2277,8 @@ class CustomEvent(EventBase):
 AgentEvent: TypeAlias = (
     RunStartEvent
     | McpCapabilitySnapshotInstalledEvent
+    | RunInteractionResumeBoundaryEvent
+    | CapabilityExposureResolvedEvent
     | RunEndEvent
     | ReplyStartEvent
     | ReplyEndEvent
