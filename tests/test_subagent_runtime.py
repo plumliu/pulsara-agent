@@ -14,6 +14,7 @@ from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     AgentEvent,
     CapabilityGateDecisionEvent,
+    ContextCompiledEvent,
     CustomEvent,
     EventContext,
     ModelCallStartEvent,
@@ -74,6 +75,11 @@ from pulsara_agent.runtime.wiring import (
     build_in_memory_runtime_wiring,
 )
 from pulsara_agent.runtime.transcript import rebuild_prior_messages
+from pulsara_agent.runtime.context_input import (
+    ContextEventSlice,
+    load_context_input_manifest,
+    replay_compiled_context,
+)
 from pulsara_agent.tools.base import ToolCall, ToolRuntimeContext
 from pulsara_agent.tools.builtins.subagent import (
     CreateAgentTasksTool,
@@ -158,9 +164,7 @@ def test_child_runtime_mcp_installation_owner_points_to_parent_session(
     tmp_path,
 ) -> None:
     parent, _locator, _child_logs, runtime = _runtime(tmp_path)
-    parent.set_mcp_installation_contract(
-        installation_id="mcp_installation:parent"
-    )
+    parent.set_mcp_installation_contract(installation_id="mcp_installation:parent")
 
     child = runtime._create_child_runtime_session(  # noqa: SLF001
         child_runtime_session_id="runtime:child:mcp-owner",
@@ -961,9 +965,7 @@ def test_production_explicit_completion_rejects_missing_native_child_ledger(
             event_context=CTX,
             source_tool_call_id="tool:report-result",
         )
-        with pytest.raises(
-            Exception, match="exactly one child RunStart/RunEnd"
-        ):
+        with pytest.raises(Exception, match="exactly one child RunStart/RunEnd"):
             await runtime.complete_submitted_result(
                 child.subagent_run_id,
                 event_context=CTX,
@@ -2461,6 +2463,23 @@ def test_restart_preserves_run_budget_after_default_config_change(tmp_path) -> N
     assert resumed.default_budget != original_budget
 
 
+def test_pending_results_zero_cap_selects_nothing(tmp_path) -> None:
+    _parent, _locator, _child_logs, runtime = _runtime(tmp_path)
+
+    async def seed() -> None:
+        run = await runtime.spawn_fake(task="zero cap", event_context=CTX)
+        await runtime.complete_fake(
+            run.subagent_run_id,
+            summary="must remain pending",
+            event_context=CTX,
+        )
+
+    asyncio.run(seed())
+
+    assert runtime.pending_result_delivery_count() == 1
+    assert runtime.pending_results_for_delivery(max_results=0) == ()
+
+
 def test_restart_preserves_consumed_and_delivered_sets_from_facts(tmp_path) -> None:
     parent, locator, child_logs, runtime = _runtime(tmp_path)
 
@@ -3527,6 +3546,47 @@ def test_agent_runtime_can_spawn_real_child_runtime_and_wait_result(tmp_path) ->
     }
     assert "spawn_agent" not in callable_names
     assert "report_agent_result" in callable_names
+    child_compiled = next(
+        event for event in child_events if isinstance(event, ContextCompiledEvent)
+    )
+    assert child_compiled.input_audit is not None
+    manifest = load_context_input_manifest(
+        audit=child_compiled.input_audit,
+        archive=parent_session.archive,
+    )
+    assert len(manifest.snapshot.named_event_ranges) == 1
+    parent_range = manifest.snapshot.named_event_ranges[0]
+    assert parent_range.runtime_session_id == parent_session.runtime_session_id
+    assert parent_range.first_sequence == 1
+    assert parent_range.through_sequence >= started_event.sequence
+    child_log = agent.subagent_runtime.child_event_log(graph.nodes[0].subagent_run_id)
+    child_read = child_log.read_range_snapshot(
+        minimum_sequence=child_compiled.input_audit.authority_from_sequence,
+        through_sequence=child_compiled.input_audit.source_through_sequence,
+    )
+    child_slice = ContextEventSlice.from_read_snapshot(
+        runtime_session_id=child_compiled.input_audit.source_runtime_session_id,
+        minimum_sequence=child_compiled.input_audit.authority_from_sequence,
+        snapshot=child_read,
+    )
+    parent_read = parent_session.event_log.read_range_snapshot(
+        minimum_sequence=parent_range.first_sequence,
+        through_sequence=parent_range.through_sequence,
+    )
+    parent_slice = ContextEventSlice.from_read_snapshot(
+        runtime_session_id=parent_range.runtime_session_id,
+        minimum_sequence=parent_range.first_sequence,
+        snapshot=parent_read,
+    )
+    assert (
+        replay_compiled_context(
+            event=child_compiled,
+            archive=parent_session.archive,
+            event_slice=child_slice,
+            named_slices=(parent_slice,),
+        ).status.value
+        == "exact_replay"
+    )
 
 
 def test_inferred_child_result_repair_reproduces_non_default_policy_payload(
@@ -3604,9 +3664,9 @@ def test_inferred_child_result_repair_reproduces_non_default_policy_payload(
         for event in truncated_log.iter()
         if isinstance(event, SubagentRunCompletedEvent)
     )
-    assert replayed.model_dump(exclude={"sequence"}, mode="json") == original.model_dump(
+    assert replayed.model_dump(
         exclude={"sequence"}, mode="json"
-    )
+    ) == original.model_dump(exclude={"sequence"}, mode="json")
 
 
 def test_subagent_child_run_records_model_target(tmp_path) -> None:
@@ -3760,6 +3820,7 @@ class _BackgroundSubagentResultTransport:
         text = _context_text(context)
         assert "## Subagent Results" in text
         assert "background child summary" in text
+        assert "[context timing: freshness=subagent_result;" in text
         async for event in _text_reply(
             event_context, "parent used background child result"
         ):
@@ -3820,6 +3881,29 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(
     assert delivered[0].context_id == transport.contexts[0].context_id
     assert delivered[0].model_call_index == transport.contexts[0].model_call_index
     assert delivered[0].section_id == "subagent:results"
+    completed = next(
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentRunCompletedEvent)
+    )
+    compiled = next(
+        event
+        for event in parent.event_log.iter(run_id=result.state.run_id)
+        if isinstance(event, ContextCompiledEvent)
+    )
+    subagent_section = next(
+        section for section in compiled.sections if section["id"] == "subagent:results"
+    )
+    assert subagent_section["metadata"]["source_timing"]["freshness"] == (
+        "subagent_result"
+    )
+    assert subagent_section["metadata"]["source_timing"]["clock_source"] == (
+        "event_created_at"
+    )
+    assert (
+        subagent_section["metadata"]["source_timing"]["source_sequence_start"]
+        == completed.sequence
+    )
     graph = subagent_runtime.graph()
     assert graph.nodes[0].delivered is True
     assert graph.nodes[0].consumed_by_wait is False

@@ -10,7 +10,7 @@ _Created: 2026-07-04_
 - [src/pulsara_agent/message/assembler.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/message/assembler.py)
 - [src/pulsara_agent/message/reducer.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/message/reducer.py)
 - [src/pulsara_agent/runtime/transcript.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/transcript.py)
-- [src/pulsara_agent/runtime/context.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/context.py)
+- [src/pulsara_agent/runtime/context_input](/Users/plumliu/Desktop/python_workspace/pulsara_agent/src/pulsara_agent/runtime/context_input)
 - [tests/test_event_message_system.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_event_message_system.py)
 - [tests/test_host_core.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_host_core.py)
 
@@ -18,13 +18,14 @@ _Created: 2026-07-04_
 
 ## 1. 核心立场
 
-Pulsara 有三层不同对象：
+Pulsara 有四层不同对象：
 
 - `AgentEvent`：durable truth。
 - `Msg` / content blocks：runtime replay/projection。
+- `ContextFactSnapshotFact`、`TranscriptCompileInput`、`ToolResultRenderUnit`：immutable compiler input。
 - `LLMContext` / `LLMMessage`：provider-neutral model request。
 
-三者不得混用。Event log 是事实；message 是重放结果；LLM context 是当前模型调用视图。
+四者不得混用。Event log 是事实；message 是UI/runtime投影；normalized input是可重放的compiler authority；LLM context是当前模型调用视图。
 
 ---
 
@@ -86,7 +87,7 @@ Tool result artifact refs 必须使用 `ToolResultArtifactRef`。如果 artifact
 
 ## 5. Prior transcript reconstruction
 
-`rebuild_prior_messages()` 是 normal resume/preflight prior transcript 的唯一入口。
+`rebuild_prior_messages()` 只用于Host prior-view、recovery与compaction服务，不是context compiler输入入口。
 
 规则：
 
@@ -99,39 +100,90 @@ Tool result artifact refs 必须使用 `ToolResultArtifactRef`。如果 artifact
 - terminal process completion after last run start 注入 lifecycle-only note；
 - 对 aborted/failed terminal runs，必须 strip unfinished tool calls，避免 provider tool-call ordering 违法。
 
-`rebuild_prior_messages_before_sequence()` 是 mid-turn inline compaction 的 prefix-only replay helper；它必须严格 replay `sequence < before_sequence`，并保留 current run tail 给 in-memory `LoopState.messages`。
+`rebuild_prior_messages_before_sequence()` 是 mid-turn inline compaction 的 prefix-only replay helper；它必须严格 replay `sequence < before_sequence`。Compiler本身不得消费该`Msg`结果。
 
 ---
 
 ## 6. Model context assembly
 
-`build_llm_context()` 是把 `LoopState.messages` 转成 `LLMContext` 的入口。
+生产编译入口只接受：
 
-必须包含：
+- `ContextFactSnapshot`（event-safe fact加resolved call/tool-schema invocation binding）；
+- `TranscriptCompileInput`；
+- ordered `ToolResultRenderUnit`；
+- `PreparedContextCandidateSet`。
 
-- system prompt + memory projection；
-- replayed messages；
-- recovery prompt note（若 in-run recovery active）；
-- current tool specs。
+live与replay分别收集同形状的`ContextSnapshotBuildInput`，再调用同一个pure builder。Compiler不得读取
+`LoopState`、`scratchpad`、live MCP supervisor、session defaults、`Msg`或EventLog。
 
-Thinking/tool-call provider metadata 不应作为 natural-language text 混入 user/system messages；assistant turn 应保留 structured tool calls。
+`TranscriptCompileInput`必须保留message order、assistant tool-call原始arguments JSON、tool-call/result pairing、artifact与
+segment attribution。Malformed/non-object arguments作为typed status保留，不能通过重新序列化“修复”。Thinking与structured
+tool calls不得混入natural-language user/system text。
+
+Tool-result renderer只返回按`unit_id`索引的rendered fragments与canonical decisions，不得构造`LLMMessage`或完整message
+sequence。最终assistant tool call/result pairing、message order与provider-neutral lowering只由compiler根据
+`TranscriptCompileInput`完成；compiler不得接受预先lowering的transcript。
+
+每个tool result在DTO validation、render preparation与compiler lowering三层都必须执行四方identity join：
+`TranscriptToolResultRefFact`、`ToolInteractionPairFact`、`ToolResultRenderUnit`、`RenderedToolResultFragment`的call/unit ID、
+call/result message ID、block index、global position与segment完全一致。跨call替换或只匹配unit ID均fail closed。
+
+每个non-transcript candidate必须精确匹配`ContextFactSnapshotFact.candidate_authorities`中同source的正文hash/chars、event/artifact
+refs、priority/required/stability、channel/lowering与dependency fingerprint。schema与compiler共同执行固定
+source/channel/lowering矩阵；合法artifact ID不能为伪造inline正文提供authority。
 
 ---
 
 ## 7. Tool result context budget
 
-`LoopBudget.tool_result_context_chars` 是一次 context render 内所有 tool result 的 aggregate char budget，不是每个 tool result 的独立预算。
+每次compile先把`LoopBudget`解析为完整`ResolvedToolResultRenderPolicyFact`；renderer只消费最终派生policy，不回读
+`LoopBudget`。`tool_result_context_chars`仍是aggregate hard boundary，body/envelope/prior/current-tail/per-tool/per-message/latest
+reserve等分池由同一个resolved policy统一约束。
 
 规则：
 
+- `ToolResultEndEvent`必须持久化actual render profile、typed essential result与timing；renderer不得从tool name或output JSON反推。
 - 普通 tool result text 按剩余额度裁剪。
 - 含 artifact 的 tool result 必须渲染 parseable JSON envelope：
   - `output_preview`
   - `output_truncated`
   - `artifacts`
 - 若 aggregate budget 耗尽，必须保留 bounded compact envelope，而不是无限塞入所有 artifact refs。
-- compact envelope 必须优先保留带 `preview` 的 primary artifact ref；没有 preview 时才退回第一个 ref。
-- compact artifact payload 必须保留 `artifact_id`、role、size、read_more；不得丢失可读取完整输出的入口。
+- compact envelope 的primary必须优先选择带preview的text-like artifact；没有preview时退回第一个text-like ref；完全没有
+  text-like artifact时primary保持为空。
+- primary只能从text/JSON/XML/YAML artifact选择；binary/image不得成为`primary_artifact_id`。decision、compact/minimal payload与
+  fallback必须使用同一selected primary；compact把primary置前，非primary refs不携带`read_more`，minimal只保留primary。
+- primary compact artifact payload 必须保留 `artifact_id`、role、size、read_more；不得丢失可读取完整输出的入口。
+- render cache只允许作为immutable hint输入；fresh render必须重新验证完全相等，hint不能成为语义真源。
+- generic body被clip时仍必须保留universal observation timing：优先使用timed header，空间不足则使用含
+  `pulsara_tool_observation`的compact envelope，不得无条件降成无timing basic header。
+- renderer必须从structured payload builder取得observation/terminal-timing inclusion flags；不得扫描工具正文中的
+  `observed_at=`、`pulsara_tool_observation`或`timing`字符串来决定是否省略真实timing。
+
+Candidate priority数值越小越优先。`required=True`是唯一must-keep标志；system source不自动成为required。collection、allocation
+和lowering使用同一stable priority order，degrade/omit从最低优先级optional candidate开始。
+
+Render cache归RuntimeSession bounded owner。prepare阶段只读immutable hints；只有matching
+`ContextCompiledEvent(status="compiled")`取得durable FULL acknowledgement后才提交write candidates。pressure、failed、
+NONE/UNKNOWN/PARTIAL confirmation均不写cache。
+
+Render cache只接纳`full_visible + full_envelope + within_budget + payload_preserved`结果；任何clip、omit、artifact preview、
+compact/minimal envelope或budget exhaustion都不得写入。read/write异常只记录process-local operational diagnostic，不能改变
+provider payload或阻止model call。Candidate lifecycle cache必须是entry count与aggregate chars双上界LRU，eviction只影响命中率。
+
+Candidate authority required只持有唯一model-visible text、source timing与归因；selected/omitted由独立snapshot selection fact
+拥有。Collector只消费selection/authority，
+不再接收并行source字符串。Memory先join最新request的唯一terminal：Ready才从event重建，Failed表示本次没有memory candidate，
+不得回退旧Ready；subagent正文/timing从`SubagentRunCompletedEvent`及其frozen created-at/sequence重建。Plan revision必须引用并
+渲染latest durable revise event。Runtime context必须由environment/timing facts确定性渲染；memory hook prompt必须引用versioned
+static instruction artifact/hash。Candidate cache read failure的canonical lifecycle仍等同普通miss；异常不得进入candidate-set或
+manifest fingerprint。Oversized lifecycle entry在mutation前skip，不得清空已有LRU。
+
+Pending subagent result选择先执行`max_results <= 0 -> empty`，snapshot schema再验证selected count不超过frozen candidate policy。
+无pending与cap=0全省略必须产生不同selection fact；后者即使没有projection/authority，也必须在prepared set和manifest保存
+`selected=(), omitted=N, reason=policy_limit`。禁止用空正文authority表达selection audit。
+Selection只能从同一canonical parent event slice的pure subagent reducer派生；其source from/through必须等于被审计range。
+Exact replay必须从ledger重建selection、projection、authority与prepared candidate/decision facts，不能直接信任manifest payload。
 
 ---
 
@@ -153,11 +205,14 @@ Model context 中不得直接内联任意 binary/data body。
 ## 9. 禁止事项
 
 - 不允许把 `Msg` 当 durable truth。
+- 不允许把`Msg`、`LoopState.messages`或scratchpad作为compiler输入。
+- 不允许从tool-result JSON推断terminal variant、essential envelope或terminal timing。
 - 不允许 context renderer 无界内联大 tool result。
 - 不允许 compact envelope 只保留第一个 artifact 而丢掉 primary preview artifact。
 - 不允许 unfinished assistant tool call 在 transcript replay 中喂给 provider。
 - 不允许 compaction summary 替代系统提示词/skill active injection。
 - 不允许 message reducer承担 recovery/compaction/terminal completion note 的职责。
+- 不允许恢复已删除的`build_llm_context`、`msg_to_llm_messages`或state-based compile facade。
 
 ---
 
@@ -178,3 +233,6 @@ Model context 中不得直接内联任意 binary/data body。
 - mid-turn prefix replay excludes current run tail。
 - aggregate tool result context budget applies across multiple results。
 - compact artifact envelope keeps primary preview artifact.
+- live/replay生成相同snapshot/transcript/unit/manifest fingerprint。
+- malformed arguments、parallel pairing、typed terminal deny/execute/process variants均可exact replay。
+- 修改display JSON不能改变typed execution semantics；缺少typed terminal semantics必须fail closed。

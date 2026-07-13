@@ -45,7 +45,11 @@ from pulsara_agent.runtime.subagent.runtime import (
     SubagentRuntime,
     SubagentRuntimeError,
 )
-from pulsara_agent.runtime.subagent.reducer import apply_subagent_event, fold_subagent_graph
+from pulsara_agent.runtime.subagent.reducer import (
+    apply_subagent_event,
+    fold_subagent_graph,
+    pending_subagent_result_ids,
+)
 from pulsara_agent.runtime.subagent.store import (
     SubagentGraphStateStore,
     SubagentReducerApplyError,
@@ -122,5 +126,6 @@ __all__ = [
     "project_subagent_graph",
     "apply_subagent_event",
     "fold_subagent_graph",
+    "pending_subagent_result_ids",
     "validate_planned_transitions",
 ]

@@ -223,6 +223,20 @@ Workflow control tools 不走普通 permission approval 流，但不能绕过 ca
 `CapabilityGateDecisionEvent(decision="deny", reason_code="workflow_control_batch_suppressed")`
 以及对应 denied tool result，避免 inspector 将这类 Pulsara-owned runtime deny 解释成普通权限失败。
 
+### 9.1 Tool-result semantics contract
+
+每个descriptor必须冻结`CapabilityResultRenderContractFact`，其中variant table显式约束result state、execution phase、
+operational kind、essential envelope kind与terminal timing requirement。Execution boundary使用run-frozen
+`ToolResultSemanticsBuilderRegistry`精确rebind builder ID/version/declarative contract fingerprint。
+
+正常执行只接受tool提供的typed runtime semantics input；pre-execution deny使用descriptor denial variant；external delayed
+result使用原committed requirement中的contract与capture policy。三条路径都不得根据tool name或serialized result JSON另写
+classifier。Builder implementation build fingerprint仅是process-local diagnostic，不进入durable identity或允许判断。
+
+known descriptor的normal、exposure/permission/policy deny、workflow、MCP resume与external ingress必须实际调用同一个resolved
+builder binding；不得只解析binding后手工构造profile/essential。只有descriptor确实缺失时允许unknown/generic semantics。
+Per-batch executor必须继承原run-frozen semantics registry与essential capture policy，不能重新取得system default。
+
 ---
 
 ## 10. Events / observability
@@ -269,6 +283,7 @@ Inspector 必须从 event log 投影这些事件，而不是依赖 transient scr
 - 不允许 hidden/unavailable/deferred capability 被模型幻觉调用时直接执行。
 - 不允许 workflow control tools 在 descriptor 缺失时仍改变 plan state。
 - 不允许把 skill 当作 typed tool provider；CLI 使用 V1 路径是“skill/docs/prompt guidance + terminal”。
+- 不允许从tool-result output JSON推断variant、essential result或terminal timing。
 
 ---
 
@@ -300,6 +315,10 @@ durable exposure identity分别保存完整 descriptor/binding entries、authori
 projection，以及 semantic/fact 两类 fingerprint。authorization name set不得静默截断；超过安全上限直接 fail closed。
 projection entry/fragment/prompt artifact ID是exposure-scoped persistence attribution，只进入fact fingerprint，不进入semantic
 fingerprint；相同模型可见文本与source identity在不同exposure ID下必须得到相同semantic fingerprint。
+
+Context snapshot引用catalog/active-skill projection时，必须从该durable exposure冻结candidate authority，包含original exposure
+event ref、projection semantic fingerprint、rendered prompt artifact ID、raw content hash/chars以及固定channel/lowering。
+Candidate materialization与compiler再次逐字段join；只匹配artifact ID或当前live exposure不足以授权model-visible正文。
 
 live continuation 每次使用 initial raw resolve basis 和 current surface 生成 comparison candidate。只有完整 semantic
 fingerprint 相等才 reuse；否则执行 monotonic narrowing：

@@ -28,6 +28,7 @@ from tests.support import test_llm_config, test_model_limits
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.result import TransportUsageReport
+from tests.conftest import tool_result_end_contract_fields
 from pulsara_agent.memory import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
@@ -435,6 +436,9 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
                 run_id="run:source:audit",
                 turn_id=candidate.source_turn_id,
                 reply_id=candidate.source_reply_id,
+                **tool_result_end_contract_fields(
+                    "call:remember", tool_name="remember"
+                ),
                 tool_call_id="call:remember",
                 state=ToolResultState.SUCCESS,
                 metadata={

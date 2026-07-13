@@ -55,6 +55,7 @@ Session inspection 必须展示：
 - event counts；
 - current working context summaries；
 - capability surface as seen；
+- context input manifest/replay status as seen；
 - compaction windows；
 - event summaries；
 - diagnostics。
@@ -80,6 +81,21 @@ Run inspection 必须展示：
 - outbox rows；
 - diagnostics。
 
+Context compile projection必须区分full `input_audit`与pre-manifest `input_failure`，展示stable `failure_stage`、reason code、
+已经形成的component fingerprints、manifest acknowledgement（若已尝试）及outer context/call/index join状态。不得把
+“没有ContextCompiledEvent”当成普通compile failure；该情况只允许由ledger untrusted/latch解释并显示为reconciliation blocker。
+Render cache hit/miss属于本次process operational fact，不得伪装成historical semantic truth。
+
+Compiled section projection必须保留`metadata.timing`中的compiled time、source timing、freshness、age与sequence范围，并区分
+structured timing metadata和实际model-visible `timing_header_text`。Inspector不得从section正文反向搜索时间字符串。
+Candidate authority join结果至少展示source、content fingerprint、event/artifact attribution与channel/lowering；join失败属于
+input contract failure，不得按普通section omission解释。Process-local cache read/write failure、LRU entry/chars/eviction只放在
+runtime diagnostics，不回填历史compile fact。
+
+Candidate source timing必须来自authority本身并能回指source event wrapper；memory/subagent的observed time/sequence分别对应
+ProjectionReady/SubagentRunCompleted，而不是current-user observation。Runtime diagnostics可展示cache read/write error与
+oversized-skip count，但同一compile的historical candidate-set/manifest不得因cache可用性不同而变化。
+
 `prior_messages_as_seen` 必须用同一条 `rebuild_prior_messages()` 路径重建，不能另写 transcript reducer。
 
 Run permission snapshot 必须来自该 run 的 `RunStartEvent`，展示 `permission_snapshot_id`、`permission_mode`、`permission_policy`、`permission_snapshot_source`；Inspector 不得从 live HostSession default 或 session manifest 反推历史 run 权限。
@@ -99,6 +115,25 @@ session，Inspector通过durable store/EventLog locator跨session join。Canonic
 
 Historical projection不得读取`McpServerSupervisor`、live manager、当前config或当前时间，不得触发network、refresh、
 retry、artifact write或任何repair。
+
+### 4.2 Context input replay attribution
+
+每个`ContextCompiledEvent`必须投影`input_audit`或`input_failure`二选一。存在confirmed manifest时，Inspector从artifact、
+named event ranges与durable descriptor/tool-result semantics重建snapshot、transcript、tool-result units、prepared candidates，
+并报告`exact_replay|fact_replay_only|artifact_missing|contract_mismatch|ledger_untrusted`五种typed status；
+不得保留`partial`、`missing_artifact`或`untrusted_slice`兼容别名。
+
+Inspector不得读取live `LoopState`、scratchpad、当前capability exposure、当前capture policy或当前tool-result JSON来补造历史
+input。Manifest缺失或fingerprint不一致必须显示diagnostic，不能退回旧message renderer。当前进程的builder build fingerprint只
+能作为诊断值显示，不得伪装成historical durable fact。
+
+`input_replay.candidates`必须bounded投影`source_selections`与`collection_decisions`，而不只展示最终entry count。
+Inspector必须明确区分：
+
+- `no_eligible_sources`：eligible=0、selected/omitted均为空；
+- `policy_limit`：eligible=N、selected可为空、omitted>0；cap=0时即`selected=(), omitted=N`。
+
+两组列表分别带truncated标志；不得以空authority/entry伪造selection，也不得把上述两种状态折叠成同一个`count=0`。
 
 ---
 

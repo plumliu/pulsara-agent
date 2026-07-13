@@ -56,6 +56,7 @@ from pulsara_agent.primitives.mcp import (
 )
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+from pulsara_agent.runtime.context_input import event_reference_from_stored
 from pulsara_agent.primitives.permission import (
     PermissionMode,
     parse_permission_mode,
@@ -260,12 +261,16 @@ def _mcp_pending_audit(
             retry_attempt=candidate.retry_attempt if candidate is not None else 0,
             request_count=candidate.request_count if candidate is not None else 0,
             page_count=candidate.page_count if candidate is not None else 0,
-            cache_outcome=(candidate.cache_outcome if candidate is not None else "not_applicable"),  # type: ignore[arg-type]
+            cache_outcome=(
+                candidate.cache_outcome if candidate is not None else "not_applicable"
+            ),  # type: ignore[arg-type]
             stale_candidates_discarded_since_previous_install=(
                 stale_discard_counts.get(snapshot.server_id, 0)
             ),
         )
-        diagnostics = tuple(_mcp_diagnostic_fact(item) for item in snapshot.diagnostics[:16])
+        diagnostics = tuple(
+            _mcp_diagnostic_fact(item) for item in snapshot.diagnostics[:16]
+        )
         timing = snapshot.timing
         if timing is None:
             raise ValueError("MCP installed snapshot requires lifecycle timing")
@@ -299,7 +304,9 @@ def _mcp_pending_audit(
         event_id=f"mcp_installation_event:{uuid4().hex}",
         installation_id=new.installation_id,
         previous_installation_id=(
-            None if old.installation_id == "mcp_installation:empty" else old.installation_id
+            None
+            if old.installation_id == "mcp_installation:empty"
+            else old.installation_id
         ),
         config_epoch=new.config_epoch,
         event_safe_config_set_fingerprint=new.event_safe_config_set_fingerprint,
@@ -316,9 +323,9 @@ def _mcp_pending_audit(
         diagnostics=tuple(
             McpDiagnosticFact(
                 severity=getattr(item, "severity", "warning"),
-                code=str(
-                    getattr(item, "code", "mcp_installation_diagnostic")
-                )[:MAX_MCP_DIAGNOSTIC_CODE_CHARS],
+                code=str(getattr(item, "code", "mcp_installation_diagnostic"))[
+                    :MAX_MCP_DIAGNOSTIC_CODE_CHARS
+                ],
                 message=redact_mcp_error_message(
                     getattr(item, "message", "MCP installation diagnostic")
                 )[:MAX_MCP_DIAGNOSTIC_MESSAGE_CHARS],
@@ -345,9 +352,7 @@ def _mcp_diagnostic_fact(item: dict[str, Any]) -> McpDiagnosticFact:
             :MAX_MCP_DIAGNOSTIC_CODE_CHARS
         ],
         message=redact_mcp_error_message(
-            item.get("message")
-            or item.get("error_type")
-            or "MCP server diagnostic"
+            item.get("message") or item.get("error_type") or "MCP server diagnostic"
         )[:MAX_MCP_DIAGNOSTIC_MESSAGE_CHARS],
         metadata=metadata,
     )
@@ -613,8 +618,7 @@ class HostSession:
                 changed_server_ids.add(snapshot.server_id)
 
         new_snapshots = tuple(
-            snapshots_by_server[server_id]
-            for server_id in sorted(snapshots_by_server)
+            snapshots_by_server[server_id] for server_id in sorted(snapshots_by_server)
         )
         semantic_changed = _mcp_surface_semantic_key(old_installation.snapshots) != (
             _mcp_surface_semantic_key(new_snapshots)
@@ -696,9 +700,7 @@ class HostSession:
                     mcp_installation=new_installation,
                 ),
             )
-            self.wiring.agent_runtime.refresh_capability_runtime(
-                new_capability_runtime
-            )
+            self.wiring.agent_runtime.refresh_capability_runtime(new_capability_runtime)
             runtime_session.set_mcp_installation_contract(
                 installation_id=new_installation.installation_id,
                 pending_audit=pending_audit,
@@ -950,11 +952,9 @@ class HostSession:
         self,
         *,
         preflight_terminal: AgentEvent | None,
+        source_through_sequence: int,
+        source_event_count: int,
     ) -> BoundaryTranscriptSnapshotFact:
-        snapshot = (
-            self.wiring.runtime_wiring.runtime_session
-            .read_event_snapshot_through_current()
-        )
         if isinstance(
             preflight_terminal,
             (ContextCompactionCompletedEvent, ContextCompactionFailedEvent),
@@ -975,8 +975,8 @@ class HostSession:
             terminal_sequence = None
             compacted_window_id = None
         return BoundaryTranscriptSnapshotFact(
-            source_through_sequence=snapshot.through_sequence,
-            source_event_count=len(snapshot.events),
+            source_through_sequence=source_through_sequence,
+            source_event_count=source_event_count,
             compacted_window_id=compacted_window_id,
             preflight_compaction_id=compaction_id,
             preflight_compaction_terminal_event_id=terminal_id,
@@ -1051,10 +1051,14 @@ class HostSession:
         permission_snapshot,
         prior_messages: list,
         preflight_terminal: AgentEvent | None,
+        transcript_source_through_sequence: int,
+        transcript_source_event_count: int,
         frozen_surface,
     ) -> None:
         transcript_fact = self._transcript_snapshot_fact(
-            preflight_terminal=preflight_terminal
+            preflight_terminal=preflight_terminal,
+            source_through_sequence=transcript_source_through_sequence,
+            source_event_count=transcript_source_event_count,
         )
         basis = self._capability_basis(
             identity=identity,
@@ -1088,9 +1092,7 @@ class HostSession:
             transcript=transcript_fact,
             model_target_fingerprint=run_model_target.fact.target_fingerprint,
             permission_snapshot_id=permission_snapshot.snapshot_id,
-            mcp_installation_id=(
-                frozen_surface.identity.mcp_installation_id
-            ),
+            mcp_installation_id=(frozen_surface.identity.mcp_installation_id),
             capability_basis=basis.fact,
             degraded_reason_codes=(),
         )
@@ -1122,9 +1124,7 @@ class HostSession:
         self._set_boundary_phase(HostRunBoundaryPhase.DURABLE_COMMIT)
         self._set_boundary_commit_state("commit_in_flight")
         try:
-            stored = tuple(
-                await runtime_session.emit_many(candidates, state=state)
-            )
+            stored = tuple(await runtime_session.emit_many(candidates, state=state))
         except BaseException as exc:
             if isinstance(exc, EventPublicationAfterCommitError):
                 self._set_boundary_commit_state("publication_failed")
@@ -1136,9 +1136,7 @@ class HostSession:
                     raise
                 self._set_boundary_commit_state("committed")
                 confirmed = tuple(confirmation.committed_events)
-            runtime_session.acknowledge_committed_mcp_installation_audits(
-                confirmed
-            )
+            runtime_session.acknowledge_committed_mcp_installation_audits(confirmed)
             committed = self._committed_host_entry_from_stored(
                 confirmed,
                 publication_status="failed_after_commit",
@@ -1151,9 +1149,7 @@ class HostSession:
             if isinstance(exc, asyncio.CancelledError):
                 _clear_current_task_cancellation()
             if state.stop_request is not None:
-                self._install_run_termination_intent(
-                    state, state.stop_request.reason
-                )
+                self._install_run_termination_intent(state, state.stop_request.reason)
                 await self._terminalize_committed_run_after_boundary_failure(
                     state=state,
                     abort_reason=state.stop_request.reason,
@@ -1382,7 +1378,12 @@ class HostSession:
             )
         )
         self._set_boundary_phase(HostRunBoundaryPhase.PREFLIGHT_COMPACTION)
-        prior_messages, preflight_terminal = await self._prepare_prior_messages_for_turn(
+        (
+            prior_messages,
+            preflight_terminal,
+            transcript_source_through_sequence,
+            transcript_source_event_count,
+        ) = await self._prepare_prior_messages_for_turn(
             user_input,
             target_model_target=run_model_target,
             host_boundary_id=identity.boundary_id,
@@ -1398,6 +1399,8 @@ class HostSession:
             permission_snapshot=permission_snapshot,
             prior_messages=prior_messages,
             preflight_terminal=preflight_terminal,
+            transcript_source_through_sequence=(transcript_source_through_sequence),
+            transcript_source_event_count=transcript_source_event_count,
             frozen_surface=frozen_surface,
         )
         plan_snapshot = state.scratchpad.get("host_run_boundary_plan")
@@ -1431,9 +1434,7 @@ class HostSession:
             capability_basis=capability_basis,
             current_user_message=state.scratchpad["current_user_message_fact"],
             run_start_event_id=f"run_start:{uuid4().hex}",
-            terminal_run_end_event_id=state.scratchpad[
-                "terminal_run_end_event_id"
-            ],
+            terminal_run_end_event_id=state.scratchpad["terminal_run_end_event_id"],
             new_run_boundary=state.scratchpad["new_run_boundary_fact"],
             frozen_execution_surface=frozen_surface,
             pending_mcp_audits=pending_audits,
@@ -1492,13 +1493,15 @@ class HostSession:
     ) -> AgentRunResult:
         async with self._run_lock:
             try:
-                draft, committed, _stored = (
-                    await self._prepare_and_commit_new_run_boundary(
-                        user_input=boundary_input.user_input,
-                        active_skill_names=boundary_input.active_skill_names,
-                        state=state,
-                        identity=boundary_input.identity,
-                    )
+                (
+                    draft,
+                    committed,
+                    _stored,
+                ) = await self._prepare_and_commit_new_run_boundary(
+                    user_input=boundary_input.user_input,
+                    active_skill_names=boundary_input.active_skill_names,
+                    state=state,
+                    identity=boundary_input.identity,
                 )
                 self._activate_committed_state(state, committed)
                 self._complete_boundary_attempt_after_activation()
@@ -1551,13 +1554,15 @@ class HostSession:
     ) -> AsyncIterator[AgentEvent]:
         async with self._run_lock:
             try:
-                draft, committed, stored = (
-                    await self._prepare_and_commit_new_run_boundary(
-                        user_input=boundary_input.user_input,
-                        active_skill_names=boundary_input.active_skill_names,
-                        state=state,
-                        identity=boundary_input.identity,
-                    )
+                (
+                    draft,
+                    committed,
+                    stored,
+                ) = await self._prepare_and_commit_new_run_boundary(
+                    user_input=boundary_input.user_input,
+                    active_skill_names=boundary_input.active_skill_names,
+                    state=state,
+                    identity=boundary_input.identity,
                 )
                 self._activate_committed_state(state, committed)
                 self._complete_boundary_attempt_after_activation()
@@ -1593,10 +1598,7 @@ class HostSession:
                 if isinstance(exc, EventPublicationAfterCommitError)
                 else RunStopReason.RUNTIME_EXECUTION_ERROR
             ),
-            error_message=(
-                "committed Host run pipeline failed: "
-                f"{type(exc).__name__}"
-            ),
+            error_message=(f"committed Host run pipeline failed: {type(exc).__name__}"),
         )
         if state.finalized:
             self._finish_active_run()
@@ -1755,12 +1757,14 @@ class HostSession:
                 interaction_id=resolution.approval_id,
                 interaction_kind="approval",
             )
-            _state, _committed, boundary_events = (
-                await self._prepare_and_commit_resume_boundary(
-                    pending=pending,
-                    interaction_kind="approval",
-                    identity=boundary_input.identity,
-                )
+            (
+                _state,
+                _committed,
+                boundary_events,
+            ) = await self._prepare_and_commit_resume_boundary(
+                pending=pending,
+                interaction_kind="approval",
+                identity=boundary_input.identity,
             )
             state = self._resume_active_state(pending)
             self._complete_boundary_attempt_after_activation()
@@ -1794,8 +1798,10 @@ class HostSession:
             lambda: self._resolve_interaction_pipeline(
                 pending=pending,
                 boundary_input=boundary_input,
-                router=lambda state: self.wiring.agent_runtime.resume_after_plan_interaction(
-                    state, resolution
+                router=lambda state: (
+                    self.wiring.agent_runtime.resume_after_plan_interaction(
+                        state, resolution
+                    )
                 ),
                 prepare_plan_state=True,
             ),
@@ -1824,8 +1830,10 @@ class HostSession:
             lambda: self._resolve_interaction_pipeline(
                 pending=pending,
                 boundary_input=boundary_input,
-                router=lambda state: self.wiring.agent_runtime.resume_after_mcp_input_required(
-                    state, resolution
+                router=lambda state: (
+                    self.wiring.agent_runtime.resume_after_mcp_input_required(
+                        state, resolution
+                    )
                 ),
                 recover_pending_on_publication_failure=True,
             ),
@@ -1993,12 +2001,14 @@ class HostSession:
                 interaction_id=resolution.interaction_id,
                 interaction_kind="plan",
             )
-            _state, _committed, boundary_events = (
-                await self._prepare_and_commit_resume_boundary(
-                    pending=pending,
-                    interaction_kind="plan",
-                    identity=boundary_input.identity,
-                )
+            (
+                _state,
+                _committed,
+                boundary_events,
+            ) = await self._prepare_and_commit_resume_boundary(
+                pending=pending,
+                interaction_kind="plan",
+                identity=boundary_input.identity,
             )
             state = self._resume_active_state(pending)
             self._complete_boundary_attempt_after_activation()
@@ -2058,10 +2068,11 @@ class HostSession:
                 if preparing_state is not None:
                     if preparing_state.finalized:
                         return self.wiring.agent_runtime._run_result(preparing_state)
-                    if self._run_execution_owners.get(preparing_state.run_id) is not None:
-                        self._install_run_termination_intent(
-                            preparing_state, reason
-                        )
+                    if (
+                        self._run_execution_owners.get(preparing_state.run_id)
+                        is not None
+                    ):
+                        self._install_run_termination_intent(preparing_state, reason)
                         result = await self.wiring.agent_runtime.abort_run(
                             preparing_state, reason=reason
                         )
@@ -2074,10 +2085,7 @@ class HostSession:
                         return result
                 if boundary_attempt is None or boundary_outcome is None:
                     return None
-                if (
-                    boundary_outcome.durable_run_existence
-                    is DurableRunExistence.NONE
-                ):
+                if boundary_outcome.durable_run_existence is DurableRunExistence.NONE:
                     return HostBoundaryStoppedBeforeCommit(
                         status="cancelled_before_run_start",
                         boundary_id=boundary_attempt.boundary_id,
@@ -2103,15 +2111,11 @@ class HostSession:
                         ),
                         boundary_id=boundary_attempt.boundary_id,
                         draft_run_id=boundary_attempt.draft_run_id,
-                        durable_run_existence=(
-                            boundary_outcome.durable_run_existence
-                        ),
+                        durable_run_existence=(boundary_outcome.durable_run_existence),
                         commit_confirmation=confirmation,
                         diagnostics=boundary_outcome.diagnostics,
                     )
-                raise RuntimeError(
-                    "committed boundary stop lost its durable run owner"
-                )
+                raise RuntimeError("committed boundary stop lost its durable run owner")
             if self.pending_interaction is not None and (task is None or task.done()):
                 if self._run_lock.locked():
                     raise HostSessionBusyError("host session already has an active run")
@@ -2221,9 +2225,7 @@ class HostSession:
                 else "candidate_frozen"
             )
             return
-        stored = self.wiring.runtime_wiring.event_log.get_by_id(
-            owner.terminal_event_id
-        )
+        stored = self.wiring.runtime_wiring.event_log.get_by_id(owner.terminal_event_id)
         if isinstance(stored, RunEndEvent):
             owner.terminal_candidate = stored
         owner.terminal_state = "confirmed"
@@ -2321,6 +2323,14 @@ class HostSession:
             reason=reason, timeout_seconds=drain_timeout_seconds
         )
         await self._finalize_suspended_run(reason)
+        runtime_session = self.wiring.runtime_wiring.runtime_session
+        await runtime_session.context_input_io_service.drain_pending(
+            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+        )
+        manifest_service = runtime_session.context_input_manifest_service
+        await manifest_service.drain_pending(
+            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+        )
         compaction_service = self.wiring.runtime_wiring.compaction_service
         if compaction_service is not None:
             await compaction_service.drain_pending_terminalizations(
@@ -2337,9 +2347,7 @@ class HostSession:
                 timeout_seconds=drain_timeout_seconds,
             )
         if self.mcp_supervisor is not None:
-            await self.mcp_supervisor.aclose(
-                timeout_seconds=drain_timeout_seconds
-            )
+            await self.mcp_supervisor.aclose(timeout_seconds=drain_timeout_seconds)
         self.close()
 
     async def drain_active_run(
@@ -2459,6 +2467,7 @@ class HostSession:
 
     def summary(self) -> dict[str, object]:
         installation = self.wiring.runtime_wiring.mcp_installation
+        runtime_session = self.wiring.runtime_wiring.runtime_session
         starting = (
             self.mcp_supervisor.current_starting_snapshots()
             if self.mcp_supervisor is not None
@@ -2489,6 +2498,14 @@ class HostSession:
             "has_live_processes": self.has_live_processes,
             "terminal": self.terminal_summary,
             "boundary": self._live_boundary_projection(),
+            "context_input": {
+                "candidate_lifecycle_cache": (
+                    runtime_session.context_candidate_lifecycle_cache.stats()
+                ),
+                "cache_diagnostics": list(
+                    runtime_session.context_input_cache_diagnostics()
+                ),
+            },
             "mcp": {
                 "installation_id": installation.installation_id,
                 "config_epoch": installation.config_epoch,
@@ -2519,9 +2536,7 @@ class HostSession:
     def _live_boundary_projection(self) -> dict[str, object]:
         state = self._active_state or self._suspended_state or self._preparing_state
         run_owner = (
-            self._run_execution_owners.get(state.run_id)
-            if state is not None
-            else None
+            self._run_execution_owners.get(state.run_id) if state is not None else None
         )
         segment = run_owner.active_segment if run_owner is not None else None
         latest_boundary = (
@@ -2641,9 +2656,7 @@ class HostSession:
                 segment.activation_owner_id if segment is not None else None
             ),
             "current_execution_handle_id": (
-                run_owner.execution_handles.handle_id
-                if run_owner is not None
-                else None
+                run_owner.execution_handles.handle_id if run_owner is not None else None
             ),
             "retiring_execution_handle_count": (
                 len(run_owner.retiring_execution_handles)
@@ -2726,7 +2739,9 @@ class HostSession:
                 actual_last_sequence=None,
             )
         committed = confirmation.committed_events
-        sequences = tuple(event.sequence for event in committed if event.sequence is not None)
+        sequences = tuple(
+            event.sequence for event in committed if event.sequence is not None
+        )
         status = (
             BoundaryBatchCommitStatus.FULL
             if not confirmation.missing_event_ids
@@ -2760,7 +2775,10 @@ class HostSession:
         )
         if owner is not None:
             durable_existence = DurableRunExistence.FULL
-        elif confirmation is None or confirmation.status is BoundaryBatchCommitStatus.NONE:
+        elif (
+            confirmation is None
+            or confirmation.status is BoundaryBatchCommitStatus.NONE
+        ):
             durable_existence = DurableRunExistence.NONE
         elif confirmation.status is BoundaryBatchCommitStatus.FULL:
             durable_existence = DurableRunExistence.FULL
@@ -2988,10 +3006,8 @@ class HostSession:
         if state.run_working_set is None:
             raise RuntimeError("ACTIVE transition requires a committed RunWorkingSet")
         if (
-            state.run_working_set.run_start_event_id
-            != committed.run_start_event.id
-            or state.run_working_set.run_start_sequence
-            != committed.run_start_sequence
+            state.run_working_set.run_start_event_id != committed.run_start_event.id
+            or state.run_working_set.run_start_sequence != committed.run_start_sequence
         ):
             raise RuntimeError("ACTIVE transition run-entry identity mismatch")
         self._run_execution_owners.require(state.run_id)
@@ -3004,12 +3020,9 @@ class HostSession:
     def _resume_active_state(self, pending: PendingInteraction) -> LoopState:
         state = self._require_suspended_state(pending)
         working_set = state.run_working_set
-        if (
-            working_set is None
-            or not isinstance(
-                working_set.latest_committed_resume_boundary,
-                InteractionResumeBoundaryFact,
-            )
+        if working_set is None or not isinstance(
+            working_set.latest_committed_resume_boundary,
+            InteractionResumeBoundaryFact,
         ):
             raise RuntimeError(
                 "suspended run must commit a typed continuation boundary before activation"
@@ -3076,9 +3089,7 @@ class HostSession:
             and state.run_model_target.fact.target_fingerprint
             != rebound_target.fact.target_fingerprint
         ):
-            raise RuntimeError(
-                "suspended model target differs from durable RunStart"
-            )
+            raise RuntimeError("suspended model target differs from durable RunStart")
 
         original_basis = working_set.capability_resolve_basis
         source_plan = working_set.effective_exposure_plan
@@ -3163,10 +3174,13 @@ class HostSession:
             for event in self.wiring.runtime_wiring.event_log.iter(run_id=state.run_id)
             if isinstance(event, CapabilityExposureResolvedEvent)
         ]
-        exposure_revision = max(
-            (event.exposure_revision for event in exposure_events),
-            default=0,
-        ) + 1
+        exposure_revision = (
+            max(
+                (event.exposure_revision for event in exposure_events),
+                default=0,
+            )
+            + 1
+        )
         if exposure_revision < 2:
             raise RuntimeError("resume requires a durable initial capability exposure")
         exposure_event = CapabilityExposureResolvedEvent(
@@ -3214,6 +3228,7 @@ class HostSession:
         )
         boundary_event = RunInteractionResumeBoundaryEvent(
             **event_context.event_fields(),
+            id=identity.boundary_id,
             boundary=boundary_fact,
         )
         run_owner = self._run_execution_owners.require(state.run_id)
@@ -3271,9 +3286,7 @@ class HostSession:
             if isinstance(exc, asyncio.CancelledError):
                 _clear_current_task_cancellation()
             if state.stop_request is not None:
-                self._install_run_termination_intent(
-                    state, state.stop_request.reason
-                )
+                self._install_run_termination_intent(state, state.stop_request.reason)
                 await self._terminalize_committed_run_after_boundary_failure(
                     state=state,
                     abort_reason=state.stop_request.reason,
@@ -3312,9 +3325,7 @@ class HostSession:
         state: LoopState,
         prepared: PreparedInteractionResumeBoundary,
         stored: tuple[AgentEvent, ...],
-        publication_status: Literal[
-            "completed", "failed_after_commit", "unavailable"
-        ],
+        publication_status: Literal["completed", "failed_after_commit", "unavailable"],
     ) -> CommittedInteractionResumeBoundary:
         exposure_event = next(
             (
@@ -3332,8 +3343,7 @@ class HostSession:
                 event
                 for event in stored
                 if isinstance(event, RunInteractionResumeBoundaryEvent)
-                and event.boundary.identity.boundary_id
-                == prepared.identity.boundary_id
+                and event.boundary.identity.boundary_id == prepared.identity.boundary_id
             ),
             None,
         )
@@ -3355,7 +3365,9 @@ class HostSession:
         )
         incoming = prepared.incoming_execution_handles
         if incoming.frozen_execution_surface is not prepared.frozen_execution_surface:
-            raise RuntimeError("committed resume execution surface drifted after freeze")
+            raise RuntimeError(
+                "committed resume execution surface drifted after freeze"
+            )
         current_runtime_handles_unchanged = (
             current_handles.mcp_installation is incoming.mcp_installation
             and current_handles.capability_runtime is incoming.capability_runtime
@@ -3406,8 +3418,23 @@ class HostSession:
                 permission_snapshot=prepared.permission_snapshot,
                 plan=prepared.owned_continuation_exposure_plan,
                 fact=prepared.continuation_exposure_fact,
+                event_ref=event_reference_from_stored(
+                    exposure_event,
+                    runtime_session_id=(
+                        self.wiring.runtime_wiring.runtime_session.runtime_session_id
+                    ),
+                ),
                 boundary=boundary_event.boundary,
+                boundary_ref=event_reference_from_stored(
+                    boundary_event,
+                    runtime_session_id=(
+                        self.wiring.runtime_wiring.runtime_session.runtime_session_id
+                    ),
+                ),
                 frozen_execution_surface=prepared.frozen_execution_surface,
+                validated_suspended_state_token_fingerprint=(
+                    boundary_event.boundary.suspended_state_token_fingerprint
+                ),
             )
         state.scratchpad.pop("suspended_state_token", None)
         return CommittedInteractionResumeBoundary(
@@ -3419,9 +3446,7 @@ class HostSession:
             committed_audit_event_ids=tuple(
                 event.id
                 for event in stored
-                if event.id in {
-                    audit.id for audit in prepared.pending_mcp_audits
-                }
+                if event.id in {audit.id for audit in prepared.pending_mcp_audits}
             ),
             committed_through_sequence=through_sequence,
             publication_status=publication_status,
@@ -3433,9 +3458,7 @@ class HostSession:
         state: LoopState,
         prepared: PreparedInteractionResumeBoundary,
         stored: tuple[AgentEvent, ...],
-        publication_status: Literal[
-            "completed", "failed_after_commit", "unavailable"
-        ],
+        publication_status: Literal["completed", "failed_after_commit", "unavailable"],
     ) -> CommittedInteractionResumeBoundary:
         try:
             return self._fold_committed_resume_boundary(
@@ -3452,8 +3475,7 @@ class HostSession:
                     state=state,
                     stop_reason=RunStopReason.RUNTIME_EXECUTION_ERROR,
                     error_message=(
-                        "committed resume fold failed: "
-                        f"{type(fold_error).__name__}"
+                        f"committed resume fold failed: {type(fold_error).__name__}"
                     ),
                 )
             except BaseException:
@@ -3672,6 +3694,7 @@ class HostSession:
         target_model_target,
         host_boundary_id: str,
     ):
+        source_snapshot = self.wiring.runtime_wiring.runtime_session.read_event_snapshot_through_current()
         prior_messages = self._prior_messages()
         terminal_event: AgentEvent | None = None
         service = self.wiring.runtime_wiring.compaction_service
@@ -3686,8 +3709,14 @@ class HostSession:
                 host_boundary_kind="pre_run",
             )
             if compacted:
+                source_snapshot = self.wiring.runtime_wiring.runtime_session.read_event_snapshot_through_current()
                 prior_messages = self._prior_messages()
-        return prior_messages, terminal_event
+        return (
+            prior_messages,
+            terminal_event,
+            source_snapshot.through_sequence,
+            len(source_snapshot.events),
+        )
 
     def _prior_messages(self):
         runtime_wiring = self.wiring.runtime_wiring
@@ -3940,7 +3969,9 @@ class HostSession:
         restored_policy = self._pre_plan_policy()
         restored_mode_value = parse_permission_mode(restored_mode).value
         context = event_context or (
-            EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+            EventContext(
+                run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
+            )
             if state is not None
             else None
         )

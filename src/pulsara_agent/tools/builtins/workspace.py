@@ -4,10 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
+from pulsara_agent.tools.base import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolResultArtifactCandidate,
+)
+from pulsara_agent.primitives.tool_result import TerminalPayloadTimingFact
+from pulsara_agent.primitives.context import FrozenJsonObjectFact
+
+if TYPE_CHECKING:
+    from pulsara_agent.capability.result_semantics import (
+        ToolResultSemanticsRuntimeInput,
+    )
 
 
 @dataclass(slots=True)
@@ -29,7 +40,10 @@ class WorkspaceTool:
         if not path.is_absolute():
             path = self.workspace_root / path
         resolved = path.resolve()
-        if resolved != self.workspace_root and self.workspace_root not in resolved.parents:
+        if (
+            resolved != self.workspace_root
+            and self.workspace_root not in resolved.parents
+        ):
             raise ValueError(f"path escapes workspace root: {raw_path}")
         return resolved
 
@@ -52,6 +66,9 @@ class WorkspaceTool:
         output: str,
         metadata: dict[str, Any] | None = None,
         artifact_candidates: tuple[ToolResultArtifactCandidate, ...] = (),
+        display_payload: FrozenJsonObjectFact | None = None,
+        semantics_input: "ToolResultSemanticsRuntimeInput | None" = None,
+        terminal_payload_timing: TerminalPayloadTimingFact | None = None,
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
             call_id=call.id,
@@ -60,4 +77,7 @@ class WorkspaceTool:
             output=output,
             metadata=metadata or {},
             artifact_candidates=artifact_candidates,
+            display_payload=display_payload,
+            semantics_input=semantics_input,
+            terminal_payload_timing=terminal_payload_timing,
         )

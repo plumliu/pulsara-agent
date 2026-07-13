@@ -31,7 +31,185 @@ from pulsara_agent.primitives.subagent import (
 from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
+from pulsara_agent.capability.result_semantics import (
+    build_unknown_result_semantics,
+)
+from pulsara_agent.capability.result_contracts import generic_result_render_contract
+from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.primitives.tool_result import (
+    ExternalExecutionRequirementReferenceFact,
+    ExternalToolCallRequirementFact,
+    ExternalToolResultIngressFact,
+    FrozenToolResultBlockFact,
+    ToolResultExecutionSemanticsFact,
+    ToolResultRenderProfileFact,
+    ToolResultRenderVariantCode,
+    ToolResultStateFact,
+)
+from pulsara_agent.primitives.context import (
+    CapabilityDescriptorRenderAttributionFact,
+    context_fingerprint,
+    freeze_json,
+)
+from pulsara_agent.message import ToolResultBlock, ToolResultState
 from tests.support import test_resolved_target_fact
+
+
+def tool_result_end_contract_fields(
+    tool_call_id: str,
+    *,
+    tool_name: str = "test_tool",
+    state: ToolResultState | str = ToolResultState.SUCCESS,
+    observed_at_utc: str = "2026-01-01T00:00:00Z",
+) -> dict[str, object]:
+    parsed_state = (
+        state if isinstance(state, ToolResultState) else ToolResultState(state)
+    )
+    semantics = build_unknown_result_semantics(
+        result_state=ToolResultStateFact(parsed_state.value)
+    )
+    return {
+        "observation_timing": ToolObservationTimingFact(
+            observed_at_utc=observed_at_utc,
+            source_started_at_utc=observed_at_utc,
+            source_ended_at_utc=observed_at_utc,
+            observation_duration_seconds=0,
+            freshness="current_tool_observation",
+            clock_source="tool_result_events",
+            tool_origin="unknown",
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+        ),
+        "render_profile": semantics.render_profile,
+        "essential_capture_policy": semantics.essential_capture_policy,
+        "essential_result": semantics.essential_result,
+        "terminal_payload_timing": semantics.terminal_payload_timing,
+    }
+
+
+def external_tool_call_requirement_fact(
+    tool_call_id: str,
+    *,
+    tool_name: str,
+    raw_arguments_json: str = "{}",
+) -> ExternalToolCallRequirementFact:
+    contract = generic_result_render_contract()
+    attribution_payload = {
+        "owner_runtime_session_id": "runtime:test",
+        "exposure_id": "capability-exposure:test",
+        "exposure_fact_fingerprint": "exposure-fact:test",
+        "descriptor_set_fingerprint": "descriptor-set:test",
+        "descriptor_id": f"descriptor:test:{tool_name}",
+        "descriptor_fingerprint": f"descriptor-fingerprint:test:{tool_name}",
+        "result_render_contract_fingerprint": contract.contract_fingerprint,
+        "descriptor_source_event_id": "capability-exposure-event:test",
+        "descriptor_source_sequence": 1,
+        "descriptor_source_payload_fingerprint": "sha256:" + "1" * 64,
+    }
+    attribution = CapabilityDescriptorRenderAttributionFact(
+        **attribution_payload,
+        attribution_fingerprint=context_fingerprint(
+            "capability-descriptor-render-attribution:v1", attribution_payload
+        ),
+    )
+    payload = {
+        "tool_call_id": tool_call_id,
+        "model_tool_name": tool_name,
+        "raw_arguments_json": raw_arguments_json,
+        "tool_origin": "custom",
+        "descriptor_attribution": attribution,
+        "result_render_contract": contract,
+        "essential_capture_policy": None,
+    }
+    return ExternalToolCallRequirementFact(
+        **payload,
+        requirement_fingerprint=context_fingerprint(
+            "external-tool-call-requirement:v1", payload
+        ),
+    )
+
+
+def external_tool_result_ingress_fact(
+    result: ToolResultBlock,
+    *,
+    requirement: ExternalToolCallRequirementFact | None = None,
+    require_event_id: str = "require-external:test",
+    require_event_sequence: int = 1,
+) -> ExternalToolResultIngressFact:
+    requirement = requirement or external_tool_call_requirement_fact(
+        result.id, tool_name=result.name
+    )
+    block_payload = freeze_json(result.model_dump(mode="json"))
+    assert hasattr(block_payload, "entries")
+    state = ToolResultStateFact(result.state.value)
+    frozen_block = FrozenToolResultBlockFact(
+        tool_call_id=result.id,
+        model_tool_name=result.name,
+        result_state=state,
+        canonical_block_payload=block_payload,
+        block_payload_fingerprint=context_fingerprint(
+            "tool-result-block:v1", block_payload
+        ),
+    )
+    timing = ToolObservationTimingFact(
+        observed_at_utc="2026-07-09T00:00:00Z",
+        source_started_at_utc="2026-07-09T00:00:00Z",
+        source_ended_at_utc="2026-07-09T00:00:00Z",
+        observation_duration_seconds=0,
+        freshness="current_tool_observation",
+        clock_source="tool_runtime_metadata",
+        tool_origin="unknown",
+        tool_name=result.name,
+        tool_call_id=result.id,
+    )
+    variant = next(
+        item
+        for item in requirement.result_render_contract.allowed_variants
+        if item.variant_code is ToolResultRenderVariantCode.EXTERNAL_GENERIC_RESULT
+    )
+    profile_payload = {
+        "profile_version": "tool-result-profile:v1",
+        "selected_variant": variant,
+        "render_contract": requirement.result_render_contract,
+        "tool_origin": "unknown",
+        "descriptor_attribution": requirement.descriptor_attribution,
+        "render_contract_fingerprint": (
+            requirement.result_render_contract.contract_fingerprint
+        ),
+    }
+    profile = ToolResultRenderProfileFact(
+        **profile_payload,
+        profile_fingerprint=context_fingerprint(
+            "tool-result-render-profile:v1", profile_payload
+        ),
+    )
+    semantics = ToolResultExecutionSemanticsFact(
+        render_profile=profile,
+        result_state=state,
+        essential_capture_policy=None,
+        essential_result=None,
+        terminal_payload_timing=None,
+    )
+    reference = ExternalExecutionRequirementReferenceFact(
+        owner_runtime_session_id="runtime:test",
+        require_event_id=require_event_id,
+        require_event_sequence=require_event_sequence,
+        require_event_payload_fingerprint="sha256:" + "2" * 64,
+        tool_call_id=result.id,
+        requirement_fingerprint=requirement.requirement_fingerprint,
+    )
+    payload = {
+        "requirement_ref": reference,
+        "result_block": frozen_block,
+        "observation_timing": timing,
+        "execution_semantics": semantics,
+    }
+    return ExternalToolResultIngressFact(
+        **payload,
+        ingress_fingerprint=context_fingerprint(
+            "external-tool-result-ingress:v1", payload
+        ),
+    )
 
 
 def run_start_permission_fields(
@@ -45,6 +223,8 @@ def run_start_permission_fields(
     mcp_installation_id: str = "mcp_installation:empty",
     mcp_installation_owner_runtime_session_id: str = "runtime:test",
     model_target=None,
+    transcript_source_through_sequence: int = 0,
+    transcript_source_event_count: int = 0,
 ) -> dict[str, object]:
     parsed = parse_permission_mode(mode)
     permission_snapshot_id = f"permission_snapshot:{run_id}"
@@ -134,9 +314,7 @@ def run_start_permission_fields(
         permission_snapshot_id=permission_snapshot_id,
         plan_active=False,
         active_skill_names=(),
-        user_intent_fingerprint=sha256_fingerprint(
-            "test-user-intent:v1", user_input
-        ),
+        user_intent_fingerprint=sha256_fingerprint("test-user-intent:v1", user_input),
         prior_transcript_fingerprint="sha256:test-prior-transcript",
         mcp_installation_id=mcp_installation_id,
         execution_surface_identity=surface,
@@ -147,8 +325,8 @@ def run_start_permission_fields(
         "new_run_boundary": NewRunBoundaryFact(
             identity=identity,
             transcript=BoundaryTranscriptSnapshotFact(
-                source_through_sequence=0,
-                source_event_count=0,
+                source_through_sequence=transcript_source_through_sequence,
+                source_event_count=transcript_source_event_count,
                 compacted_window_id=None,
                 preflight_compaction_id=None,
                 preflight_compaction_terminal_event_id=None,

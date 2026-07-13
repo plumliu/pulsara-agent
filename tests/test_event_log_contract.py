@@ -174,9 +174,7 @@ def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> 
         user_input_chars=7,
     )
     ended = RunEndEvent(
-        **run_end_contract_fields(
-            ctx.run_id, status="aborted", abort_kind="user_stop"
-        ),
+        **run_end_contract_fields(ctx.run_id, status="aborted", abort_kind="user_stop"),
         **ctx.event_fields(),
         status="aborted",
         stop_reason="aborted",
@@ -339,9 +337,7 @@ def test_postgres_event_log_repairs_stale_runs_projection(tmp_path: Path) -> Non
             [
                 RunStartEvent(
                     **ended_ctx.event_fields(),
-                    **run_start_permission_fields(
-                        ended_ctx.run_id, user_input="x" * 8
-                    ),
+                    **run_start_permission_fields(ended_ctx.run_id, user_input="x" * 8),
                     user_input_chars=8,
                     created_at="2026-01-02T03:04:05+00:00",
                 ),
@@ -463,6 +459,7 @@ def test_context_compiled_pressure_event_round_trips_through_agent_event_seriali
             status="pressure",
             estimated_tokens=0,
             tools_estimated_tokens=0,
+            model_call_index=2,
         ),
         context_id="context:pressure",
         model_call_index=2,
@@ -1212,13 +1209,13 @@ def test_postgres_model_call_facts_round_trip(event_log: EventLog) -> None:
                     tools_estimated_tokens=0,
                 ),
                 context_id="context:postgres:model-facts",
-                model_call_index=0,
+                model_call_index=1,
             ),
             ModelCallStartEvent(
                 **ctx.event_fields(),
                 resolved_call=call,
                 context_id="context:postgres:model-facts",
-                model_call_index=0,
+                model_call_index=1,
             ),
         )
     )

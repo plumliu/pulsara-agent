@@ -152,7 +152,7 @@ def test_host_boundary_timestamp_is_canonical_utc() -> None:
         update={"observed_at_utc": "2026-07-12T09:02:03+08:00"}
     )
     reparsed = HostRunBoundaryIdentityFact.model_validate(identity.model_dump())
-    assert reparsed.observed_at_utc == UTC
+    assert reparsed.observed_at_utc == "2026-07-12T01:02:03.000000Z"
 
 
 def test_current_user_hash_and_host_attribution_are_enforced() -> None:
@@ -267,9 +267,7 @@ def test_child_result_render_policy_fingerprint_covers_caps() -> None:
         max_artifact_refs=3,
     )
     with pytest.raises(ValidationError):
-        policy.model_validate(
-            {**policy.model_dump(), "max_summary_chars": 18}
-        )
+        policy.model_validate({**policy.model_dump(), "max_summary_chars": 18})
 
 
 def test_explicit_handoff_evidence_must_precede_terminal() -> None:
@@ -330,9 +328,11 @@ def test_explicit_handoff_evidence_must_precede_terminal() -> None:
 
 @pytest.mark.parametrize(
     ("usage_status", "usage"),
-    [("missing", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
-     ("complete", None),
-     ("partial", None)],
+    [
+        ("missing", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
+        ("complete", None),
+        ("partial", None),
+    ],
 )
 def test_child_handoff_usage_status_matches_usage(
     usage_status: str, usage: dict[str, int] | None
@@ -556,9 +556,10 @@ def test_projection_fact_reconstructs_exact_fragmented_prompt() -> None:
     assert rebuilt == rendered.text
     assert fact.rendered_entry_count == 2
     assert fact.omitted_entry_count == 0
-    assert {
-        entry.source_kind for entry in fact.visible_source_entries
-    } == {"workspace", "user"}
+    assert {entry.source_kind for entry in fact.visible_source_entries} == {
+        "workspace",
+        "user",
+    }
 
 
 def test_continuation_projection_reuses_original_fragments_without_promotion() -> None:
@@ -649,6 +650,4 @@ def test_continuation_projection_reuses_original_fragments_without_promotion() -
         for fragment in narrowed.rendered_fragments
         if fragment.fragment_role == "entry"
     ] == [fragment.fragment_id for fragment in original_alpha_fragments]
-    assert [entry.stable_name for entry in narrowed.visible_source_entries] == [
-        "alpha"
-    ]
+    assert [entry.stable_name for entry in narrowed.visible_source_entries] == ["alpha"]

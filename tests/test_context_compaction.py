@@ -7,7 +7,10 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import (
+    run_start_permission_fields,
+    tool_result_end_contract_fields,
+)
 
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
@@ -98,9 +101,7 @@ from pulsara_agent.runtime.compaction.commit import (
     RuntimeSessionCompactionEventCommitPort,
 )
 from pulsara_agent.runtime.session import EventWriteResult
-from pulsara_agent.runtime.context_engine.tool_results import (
-    render_segmented_llm_messages,
-)
+from pulsara_agent.runtime.context_input import event_reference_from_stored
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionPolicy,
     ContextCompactionService,
@@ -116,7 +117,6 @@ from pulsara_agent.runtime.plan import (
     PlanQuestionResolution,
 )
 from pulsara_agent.runtime.state import (
-    LoopBudget,
     LoopState,
     LoopStatus,
     LoopTransition,
@@ -236,9 +236,7 @@ async def _seed_suspended_run_model_contract(
         preparing_identity=identity,
     )
     async with session._run_lock:
-        frozen_surface = state.scratchpad.get(
-            "frozen_capability_execution_surface"
-        )
+        frozen_surface = state.scratchpad.get("frozen_capability_execution_surface")
         if not isinstance(frozen_surface, FrozenCapabilityExecutionSurface):
             raise AssertionError("test PRE_RUN did not freeze a capability surface")
         resolved = agent.capability_runtime.resolve_exposure_projection(
@@ -274,11 +272,13 @@ async def _seed_suspended_run_model_contract(
         state.run_working_set.install_initial_exposure(
             plan=resolved.plan,
             fact=resolved.fact,
+            event_ref=event_reference_from_stored(
+                stored_exposure,
+                runtime_session_id=session.runtime_session_id,
+            ),
         )
     state.status = LoopStatus.WAITING_USER
-    state.scratchpad["suspended_state_token"] = (
-        f"suspended_state:test:{uuid4().hex}"
-    )
+    state.scratchpad["suspended_state_token"] = f"suspended_state:test:{uuid4().hex}"
 
 
 def _target(service: ContextCompactionService):
@@ -416,21 +416,25 @@ def _current_tail_state(
     return state
 
 
-def _rendered_current_run_messages(
-    *,
-    messages: list[Msg],
-    state: LoopState,
-) -> tuple[LLMMessage, ...]:
-    assert state.run_model_target is not None
-    segmented = render_segmented_llm_messages(
-        messages,
-        LoopBudget(),
-        f"user-message:{state.run_id}",
-        token_estimator=state.run_model_target.token_estimator,
+def _protected_current_run_messages(state: LoopState) -> tuple[LLMMessage, ...]:
+    """Minimal compaction fixture; typed renderer behavior is tested separately."""
+
+    user = next(message for message in state.messages if message.role == "user")
+    result = next(
+        message for message in state.messages if message.role == "tool_result"
+    )
+    user_text = "\n".join(
+        block.text for block in user.content if isinstance(block, TextBlock)
+    )
+    result_block = next(
+        block for block in result.content if isinstance(block, ToolResultBlock)
+    )
+    result_text = "\n".join(
+        block.text for block in result_block.output if isinstance(block, TextBlock)
     )
     return (
-        *(segmented.current_user_messages or ()),
-        *(segmented.current_run_tail_messages or ()),
+        LLMMessage.user(user_text),
+        LLMMessage.tool_result(result_text, tool_call_id=result_block.id),
     )
 
 
@@ -479,6 +483,7 @@ class _FakeHostCompactionService(_FakeCompactionServiceBase):
         self.calls.append({"method": "compact_if_needed", **kwargs})
         return False
 
+
 class _FakeFailingAutoCompactionService(_FakeCompactionServiceBase):
     def __init__(self, event_log: InMemoryEventLog) -> None:
         self.event_log = event_log
@@ -502,6 +507,7 @@ class _FakeFailingAutoCompactionService(_FakeCompactionServiceBase):
             )
         )
         return False
+
 
 class _FakeWritingAutoCompactionService(_FakeCompactionServiceBase):
     def __init__(self, event_log: InMemoryEventLog) -> None:
@@ -968,6 +974,7 @@ def test_compaction_plan_collects_tool_result_artifact_ids() -> None:
     log.append(
         ToolResultEndEvent(
             **_ctx("artifact").event_fields(),
+            **tool_result_end_contract_fields("call:firecrawl", tool_name="firecrawl"),
             tool_call_id="call:firecrawl",
             state=ToolResultState.SUCCESS,
             metadata={
@@ -1065,7 +1072,9 @@ def test_cancelled_compaction_after_started_commits_stable_failed_terminal() -> 
 
     asyncio.run(scenario())
     started = next(
-        event for event in log.iter() if isinstance(event, ContextCompactionStartedEvent)
+        event
+        for event in log.iter()
+        if isinstance(event, ContextCompactionStartedEvent)
     )
     failed = next(
         event for event in log.iter() if isinstance(event, ContextCompactionFailedEvent)
@@ -1141,7 +1150,9 @@ def test_cancelled_started_write_that_commits_late_remains_service_owned() -> No
     asyncio.run(scenario())
     assert service.pending_terminalization_count == 0
     started = [
-        event for event in log.iter() if isinstance(event, ContextCompactionStartedEvent)
+        event
+        for event in log.iter()
+        if isinstance(event, ContextCompactionStartedEvent)
     ]
     failed = [
         event for event in log.iter() if isinstance(event, ContextCompactionFailedEvent)
@@ -1268,11 +1279,11 @@ def test_terminal_commit_failure_keeps_bounded_compaction_owner_for_drain() -> N
             _compact(service, trigger="manual", reason="user_requested", force=True)
         )
     assert service.pending_terminalization_count == 1
-    assert any(
-        isinstance(event, ContextCompactionStartedEvent) for event in log.iter()
-    )
+    assert any(isinstance(event, ContextCompactionStartedEvent) for event in log.iter())
     assert not any(
-        isinstance(event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent))
+        isinstance(
+            event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent)
+        )
         for event in log.iter()
     )
 
@@ -1282,7 +1293,9 @@ def test_terminal_commit_failure_keeps_bounded_compaction_owner_for_drain() -> N
     terminals = [
         event
         for event in log.iter()
-        if isinstance(event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent))
+        if isinstance(
+            event, (ContextCompactionCompletedEvent, ContextCompactionFailedEvent)
+        )
     ]
     assert len(terminals) == 1
 
@@ -1886,9 +1899,7 @@ def test_rebuild_prior_messages_before_sequence_uses_mid_turn_boundary_without_r
     current_start = log.append(
         RunStartEvent(
             **current.event_fields(),
-            **run_start_permission_fields(
-                current.run_id, user_input="current request"
-            ),
+            **run_start_permission_fields(current.run_id, user_input="current request"),
             user_input_chars=len("current request"),
             metadata={"user_input": "current request"},
         )
@@ -2005,9 +2016,8 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
         result = await compactor.maybe_compact_before_followup(
             state=state,
             model_visible_messages=model_visible_messages,
-            protected_model_visible_messages_after=_rendered_current_run_messages(
-                messages=state.messages,
-                state=state,
+            protected_model_visible_messages_after=_protected_current_run_messages(
+                state
             ),
         )
 
@@ -2120,9 +2130,8 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
         result = await compactor.maybe_compact_before_followup(
             state=state,
             model_visible_messages=model_visible_messages,
-            protected_model_visible_messages_after=_rendered_current_run_messages(
-                messages=state.messages,
-                state=state,
+            protected_model_visible_messages_after=_protected_current_run_messages(
+                state
             ),
         )
 
@@ -2621,6 +2630,9 @@ def test_compaction_input_coalesces_deltas_and_clips_large_tool_result() -> None
             ),
             ToolResultEndEvent(
                 **ctx.event_fields(),
+                **tool_result_end_contract_fields(
+                    "call:search", tool_name="memory_search"
+                ),
                 tool_call_id="call:search",
                 state=ToolResultState.SUCCESS,
                 metadata={
@@ -2840,8 +2852,7 @@ def test_host_session_invokes_compaction_at_preflight_only(tmp_path) -> None:
     assert preflight["target_model_target"].fact == run_start.model_target
     assert run_start.new_run_boundary is not None
     assert (
-        preflight["host_boundary_id"]
-        == run_start.new_run_boundary.identity.boundary_id
+        preflight["host_boundary_id"] == run_start.new_run_boundary.identity.boundary_id
     )
     assert preflight["host_boundary_kind"] == "pre_run"
 
@@ -3197,6 +3208,7 @@ def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
             ToolCallBlock(id="call:test", name="terminal", state=ToolCallState.ASKING),
         ),
     )
+
     async def fake_resume(resume_state, resolution):
         resume_state.status = LoopStatus.FINISHED
         resume_state.stop_reason = "final"
@@ -3270,6 +3282,7 @@ def test_plan_interaction_resume_does_not_auto_compact(tmp_path) -> None:
         tool_call_id="call:plan",
         question="choose",
     )
+
     async def fake_resume(resume_state, resolution):
         resume_state.status = LoopStatus.FINISHED
         resume_state.stop_reason = "final"
@@ -3356,6 +3369,7 @@ def test_mcp_input_required_resume_does_not_auto_compact(tmp_path) -> None:
             "arguments": {},
         },
     )
+
     async def fake_resume(resume_state, resolution):
         resume_state.status = LoopStatus.FINISHED
         resume_state.stop_reason = "final"
@@ -3609,53 +3623,6 @@ def test_mid_turn_protected_messages_are_counted_after_but_not_summarized() -> N
         part for message in transport.contexts[0].messages for part in message.content
     )
     assert "PROTECTED_CURRENT_RUN_SENTINEL" not in compact_input
-
-
-def test_mid_turn_protected_tool_result_uses_renderer_visible_estimate() -> None:
-    limits = test_model_limits(
-        total_context_tokens=12_000,
-        max_input_tokens=11_000,
-        max_output_tokens=1_000,
-        default_output_tokens=1_000,
-        input_safety_margin_tokens=0,
-    )
-    service, log, _transport = _contract_compaction_service(
-        pro_limits=limits,
-        policy=ContextCompactionPolicy(
-            min_events_after_last_compact=1,
-            auto_trigger_ratio=0.80,
-            post_compaction_target_ratio=0.55,
-            max_summary_chars=256,
-        ),
-    )
-    target = _target(service)
-    _append_compiled_baseline(service, log, baseline_tokens=0)
-    state = _current_tail_state("runtime:rendered-protected")
-    state.run_model_target = target
-    tool_result = state.messages[-1].content[0]
-    assert isinstance(tool_result, ToolResultBlock)
-    tool_result.output = [TextBlock(text="x" * 32_000)]
-    rendered = _rendered_current_run_messages(messages=state.messages, state=state)
-
-    plan = service._build_plan(
-        log.iter(),
-        compaction_id="context_compaction:rendered-protected",
-        target_model_target=target,
-        model_visible_messages_before=state.messages,
-        protected_model_visible_messages_after=rendered,
-        force=True,
-    )
-
-    assert plan is not None
-    assert 0 < plan.protected_transcript_tokens < 4_000
-    assert plan.target_estimate.non_transcript_baseline_tokens is not None
-    assert (
-        plan.target_estimate.non_transcript_baseline_tokens
-        + plan.target_estimate.summary_tokens_reserved
-        + plan.retained_transcript_tokens
-        + plan.protected_transcript_tokens
-        <= plan.post_compaction_target_tokens
-    )
 
 
 def test_compiled_baseline_estimate_requires_complete_attribution() -> None:
@@ -3989,12 +3956,14 @@ def test_mid_turn_compaction_uses_current_call_target(tmp_path) -> None:
     test_agent_runtime_runs_context_compactor_before_tool_followup(tmp_path)
 
 
-def test_compaction_retry_reuses_main_call(tmp_path) -> None:
+def test_compaction_retry_reuses_main_call(tmp_path, monkeypatch) -> None:
     from tests.test_agent_runtime_loop import (
         test_agent_runtime_retries_after_recoverable_context_pressure_compaction,
     )
 
-    test_agent_runtime_retries_after_recoverable_context_pressure_compaction(tmp_path)
+    test_agent_runtime_retries_after_recoverable_context_pressure_compaction(
+        tmp_path, monkeypatch
+    )
 
 
 def test_compaction_summarizer_has_separate_call() -> None:
@@ -4376,9 +4345,7 @@ async def _resume_contract_fixture(tmp_path):
         ),
     )
     state = agent.new_state()
-    await _seed_suspended_run_model_contract(
-        agent, runtime_wiring, session, state
-    )
+    await _seed_suspended_run_model_contract(agent, runtime_wiring, session, state)
     pending = PendingApproval(
         approval_id="approval:model-contract",
         host_session_id=session.host_session_id,
@@ -4408,12 +4375,14 @@ def test_resume_rebinds_original_run_target(tmp_path) -> None:
                 state,
                 interaction_id=pending.approval_id,
             )
-            resumed, _committed, _stored = (
-                await session._prepare_and_commit_resume_boundary(
-                    pending=pending,
-                    interaction_kind="approval",
-                    identity=identity,
-                )
+            (
+                resumed,
+                _committed,
+                _stored,
+            ) = await session._prepare_and_commit_resume_boundary(
+                pending=pending,
+                interaction_kind="approval",
+                identity=identity,
             )
             assert resumed.run_model_target is not None
             assert resumed.run_model_target.fact == durable_target

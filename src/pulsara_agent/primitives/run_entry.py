@@ -41,7 +41,11 @@ def canonical_utc_timestamp(value: str) -> str:
         raise ValueError("timestamp must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return (
+        parsed.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def text_sha256(text: str) -> str:

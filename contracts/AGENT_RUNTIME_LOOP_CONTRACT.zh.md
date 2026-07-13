@@ -62,8 +62,8 @@ _Created: 2026-07-04_
 - token usage；
 - in-run recovery state；
 - stop/abort state；
-- capability exposure scratchpad；
-- plan workflow scratchpad。
+- committed `RunWorkingSet`的process-local execution handles与projection；
+- 当前segment的短生命周期状态。
 
 禁止把 `LoopState.scratchpad` 当作 resume / inspect / long-term facts。需要跨 run 或跨进程解释的事实必须写 typed event 或 durable projection。
 
@@ -71,31 +71,59 @@ _Created: 2026-07-04_
 
 ## 4. Run start 顺序
 
-普通 user turn 的 run start 顺序必须是：
+普通 user turn 必须先经过Host `PRE_RUN` boundary：
 
-1. 将 prior messages 复制进 `LoopState.messages`。
-2. append current user message。
-3. capture immutable `RunPermissionSnapshot`与Host safe point已经安装的frozen MCP installation contract；
-4. 通过一个`emit_many()`原子提交`RUN_START`及本run首次引用的pending MCP installation audit。RunStart必须包含
-   `mcp_installation_id`与owner runtime session id；child owner指向parent ledger；
-5. emit pending plan-entry audit（若用户先进入 plan mode）。
-6. run memory `on_turn_start` hook。
-7. resolve `CapabilityExposurePlan`；该run内使用同一installed execution surface，不读取worker completion；
-8. store exposure in `state.scratchpad["capability_exposure"]` for this run。
-9. emit `CustomEvent(name="capability_exposure_resolved")`。
-10. 进入 model/tool loop。
+1. 冻结authority high-water、permission、model target、MCP installation、execution surface与typed current-user fact；
+2. 完成preflight compaction及required gates；
+3. 通过一个`emit_many()`原子提交`RunStartEvent`与本run首次引用的pending MCP installation audits；
+4. FULL commit后安装`CommittedRunExecutionOwner`与initial segment；
+5. AgentRuntime只消费`CommittedHostRunEntry`和frozen execution handles，生成typed capability exposure event；
+6. 构造immutable context input snapshot/transcript/tool units/candidates，确认input manifest durable后进入model loop。
+
+AgentRuntime不拥有Host `RunStartEvent`写权限，也不允许先创建active `LoopState`再补ledger。Child只通过
+`CommittedSubagentRunEntry`进入。
 
 Approval、plan interaction与MCP input-required resume在safe point后必须先提交该safe point产生的pending MCP
 installation audit，再将suspended `LoopState`恢复为active。Audit commit失败时不允许model continuation，原pending
 interaction保持可重试；streaming resume把已提交audit作为本次stream的前缀事件返回。
 
-Capability exposure 不得在 memory hook 之前解析，因为 memory hook 可能准备本 turn 的 projections；也不得在模型调用之后才解析，因为 tools array 与 skill prompt 需要在模型请求前固定。
+Capability descriptor/execution surface必须在RunStart前冻结；context-sensitive projection在RunStart FULL后解析并写typed
+`CapabilityExposureResolvedEvent`。Projection与memory candidate可以在compile准备阶段生成，但不得改变已冻结execution surface。
+
+Context input preparation从event-slice读取到manifest candidate形成前必须有stage-aware error boundary。只要ledger结构仍可信，
+snapshot、transcript/tool-unit normalization、policy/cache prepare、candidate collection/materialization任一步失败都必须写
+`ContextCompiledEvent(status="failed", failure_stage=..., input_failure=...)`，outer context/call/index必须与inner failure一致；
+不得只留下RunStart/RunEnd。ledger UNKNOWN/PARTIAL/reconciliation latch时才禁止继续append audit。
+
+Snapshot必须先冻结`candidate_source_selections`与`candidate_authorities`。Selection拥有eligible/selected/omitted、policy与
+source range审计；authority只拥有实际model-visible正文/timing/attribution。Subagent selection必须在已冻结parent event slice上
+运行pure reducer一次性派生，Agent不得分别读取live selected/count后绑定较晚high-water。随后candidate prepare与compiler allocation都对正文hash、event/artifact refs、
+source/channel/lowering矩阵及high-water执行强join。`lowering_kind`是compiler实际lowering依据，不是只供审计展示的闲置字段。
+Candidate collector只消费snapshot selection/authority，不接受第二份source字符串。即使selection为空而没有authority，collector
+仍必须把no-eligible或omitted-only decision写入prepared set/manifest。Memory
+authority以当前run最新ProjectionRequested为基准，只接受其后`projection_id + role + scope`唯一匹配的terminal；Ready从event
+重建正文，Failed不生成candidate，terminal缺失/不唯一fail closed，不得复用旧Ready。Subagent authority从同一event slice的
+SubagentRunCompleted facts重建正文；两者用真实event created-at/sequence生成timing，不能复用current-user observation time。
+Plan revision从当前run最新`PlanExitResolvedEvent(decision="revise")`重建，禁止读取scratchpad feedback。
+Runtime context从冻结的environment/timing facts纯渲染；memory hook prompt必须先冻结为versioned static-instruction fact。
+Lifecycle prepare后、budget allocation前必须运行纯timing overlay：每个compiled section都产生structured timing metadata，
+需要model-visible timing的candidate由overlay生成header；memory/subagent不得统一标成current_turn。
+
+所有context-input同步PostgreSQL I/O由RuntimeSession-owned bounded service执行。caller cancellation或soft timeout不释放真实worker；
+Host close必须先bounded drain该owner。static instruction artifact只在首次persist时通过该service写入，随后复用frozen fact；
+每次model call不得在event loop同步写PostgreSQL archive。
+
+RuntimeSession拥有的tool-render与candidate-lifecycle cache只负责优化。cache read/write异常必须被隔离为bounded operational
+diagnostic；durable ContextCompiled FULL后cache write失败不得阻止model call。candidate lifecycle cache使用bounded LRU，
+session summary暴露entry/chars/eviction/oversized-skip而不把它们写成historical semantic fact。Candidate cache read exception的
+canonical lifecycle与普通miss相同，不能改变manifest fingerprint；oversized entry必须在LRU mutation前skip。
 
 ---
 
 ## 5. System prompt composition
 
-每次模型调用的系统上下文必须 fresh compose，不从 compaction summary 恢复。
+每次模型调用的系统上下文必须从immutable `ContextFactSnapshot`与`PreparedContextCandidateSet` fresh compose，不从compaction
+summary、`LoopState`或scratchpad恢复。
 
 系统上下文包括：
 
@@ -260,6 +288,8 @@ Abort / host teardown / stop request 必须通过 typed abort state，而不是 
 
 - run start event 顺序包含 capability exposure resolved。
 - runtime context prompt 每 turn fresh 注入，且不创建 terminal session。
+- runtime context正文只能由本次snapshot的`ContextRuntimeEnvironmentFact + ContextCompileTimingFact`生成；Agent不得另传
+  pre-rendered字符串。
 - unknown/hidden/unavailable tool call-local deny，不阻断同批合法 tool。
 - approval resume 后重新做 capability exposure access。
 - workflow control descriptor missing 时 fail-closed。

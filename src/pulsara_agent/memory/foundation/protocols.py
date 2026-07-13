@@ -47,9 +47,16 @@ class ArtifactStore(Protocol):
         run_id: str | None,
         media_type: str,
         semantic_metadata: dict[str, Any],
+        deadline_monotonic: float | None = None,
     ) -> ArtifactPutConfirmation: ...
 
-    def get_info(self, blob_id: str, *, session_id: str | None = None) -> ArtifactRecord: ...
+    def get_info(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> ArtifactRecord: ...
 
     def read_text(
         self,
@@ -60,7 +67,13 @@ class ArtifactStore(Protocol):
         max_chars: int = 20_000,
     ) -> ArtifactTextSlice: ...
 
-    def get_text(self, blob_id: str, *, session_id: str | None = None) -> str: ...
+    def get_text(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> str: ...
 
     def get_bytes(self, blob_id: str, *, session_id: str | None = None) -> bytes: ...
 

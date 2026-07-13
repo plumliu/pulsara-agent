@@ -13,8 +13,14 @@ from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.foundation.provenance import RuntimeEventSpan
 from pulsara_agent.memory.foundation.records import ArtifactWriteResult
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.message import TextBlock, ToolResultArtifactRef, ToolResultBlock, ToolResultState
+from pulsara_agent.message import (
+    TextBlock,
+    ToolResultArtifactRef,
+    ToolResultBlock,
+    ToolResultState,
+)
 from pulsara_agent.ontology import memory, runtime as rt
+from tests.conftest import tool_result_end_contract_fields
 
 
 def build_ledger() -> ExecutionEvidenceLedger:
@@ -60,10 +66,15 @@ def _tool_events(
         events.append(
             ToolResultEndEvent(
                 **ctx.event_fields(),
+                **tool_result_end_contract_fields(
+                    tool_call_id, tool_name=tool_name, state=state
+                ),
                 tool_call_id=tool_call_id,
                 state=state,
                 artifacts=artifacts,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             )
         )
     return events
@@ -81,8 +92,12 @@ def test_tool_result_creates_ledger_nodes() -> None:
         scope="ctx:workspace/test_project",
     )
 
-    assert ledger.graph.get_jsonld(result.tool_result_id)["@type"] == [rt.TOOL_RESULT.name]
-    assert ledger.graph.get_jsonld("turn:test/001")[rt.PRODUCED.name] == [{"@id": result.tool_result_id}]
+    assert ledger.graph.get_jsonld(result.tool_result_id)["@type"] == [
+        rt.TOOL_RESULT.name
+    ]
+    assert ledger.graph.get_jsonld("turn:test/001")[rt.PRODUCED.name] == [
+        {"@id": result.tool_result_id}
+    ]
     assert result.artifact_id is None
 
 
@@ -291,7 +306,9 @@ def test_evidence_supports_claim() -> None:
 
     assert claim.status is memory.NodeStatus.ACTIVE
     assert claim.confidence_level is memory.ConfidenceLevel.HIGH
-    assert ledger.graph.get_jsonld(evidence.evidence_id)[memory.SUPPORTS.name] == [{"@id": claim.claim_id}]
+    assert ledger.graph.get_jsonld(evidence.evidence_id)[memory.SUPPORTS.name] == [
+        {"@id": claim.claim_id}
+    ]
 
 
 def test_record_tool_result_from_event_slice_uses_only_current_slice() -> None:
@@ -317,11 +334,21 @@ def test_record_tool_result_from_event_slice_uses_only_current_slice() -> None:
         )
     )
 
-    old_record = ledger.record_tool_result_from_event_slice(old_events, "call:read", session_id="runtime:test")
-    new_record = ledger.record_tool_result_from_event_slice(new_events, "call:read", session_id="runtime:test")
+    old_record = ledger.record_tool_result_from_event_slice(
+        old_events, "call:read", session_id="runtime:test"
+    )
+    new_record = ledger.record_tool_result_from_event_slice(
+        new_events, "call:read", session_id="runtime:test"
+    )
 
-    assert ledger.graph.get_jsonld(old_record.tool_result_id)[rt.OUTPUT_SUMMARY.name] == "OLD"
-    assert ledger.graph.get_jsonld(new_record.tool_result_id)[rt.OUTPUT_SUMMARY.name] == "NEW"
+    assert (
+        ledger.graph.get_jsonld(old_record.tool_result_id)[rt.OUTPUT_SUMMARY.name]
+        == "OLD"
+    )
+    assert (
+        ledger.graph.get_jsonld(new_record.tool_result_id)[rt.OUTPUT_SUMMARY.name]
+        == "NEW"
+    )
 
 
 def test_record_tool_result_from_event_slice_adds_provenance() -> None:
@@ -437,19 +464,29 @@ def test_record_tool_result_from_persisted_event_ref_filters_by_span() -> None:
         tool_call_id="call:read",
     )
 
-    assert ledger.graph.get_jsonld(result.tool_result_id)[rt.OUTPUT_SUMMARY.name] == "NEW"
+    assert (
+        ledger.graph.get_jsonld(result.tool_result_id)[rt.OUTPUT_SUMMARY.name] == "NEW"
+    )
     assert first[1].id != second[1].id
 
 
-def test_record_tool_result_from_event_slice_merges_text_and_appends_data_blocks() -> None:
+def test_record_tool_result_from_event_slice_merges_text_and_appends_data_blocks() -> (
+    None
+):
     ledger = build_ledger()
     ctx = EventContext(run_id="run:data", turn_id="turn:data", reply_id="reply:data")
     events = InMemoryEventLog().extend(
         [
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-            ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:data", tool_call_name="lookup"),
-            ToolResultTextDeltaEvent(**ctx.event_fields(), tool_call_id="call:data", delta="hello "),
-            ToolResultTextDeltaEvent(**ctx.event_fields(), tool_call_id="call:data", delta="world"),
+            ToolResultStartEvent(
+                **ctx.event_fields(), tool_call_id="call:data", tool_call_name="lookup"
+            ),
+            ToolResultTextDeltaEvent(
+                **ctx.event_fields(), tool_call_id="call:data", delta="hello "
+            ),
+            ToolResultTextDeltaEvent(
+                **ctx.event_fields(), tool_call_id="call:data", delta="world"
+            ),
             ToolResultDataDeltaEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:data",
@@ -464,14 +501,19 @@ def test_record_tool_result_from_event_slice_merges_text_and_appends_data_blocks
             ),
             ToolResultEndEvent(
                 **ctx.event_fields(),
+                **tool_result_end_contract_fields("call:data", tool_name="data_tool"),
                 tool_call_id="call:data",
                 state=ToolResultState.SUCCESS,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             ),
         ]
     )
 
-    result = ledger.record_tool_result_from_event_slice(events, "call:data", session_id="runtime:test")
+    result = ledger.record_tool_result_from_event_slice(
+        events, "call:data", session_id="runtime:test"
+    )
     doc = ledger.graph.get_jsonld(result.tool_result_id)
 
     assert doc[rt.OUTPUT_SUMMARY.name].startswith("hello world")
@@ -487,32 +529,42 @@ def test_record_tool_result_from_event_slice_missing_start_raises_key_error() ->
     )
 
     try:
-        ledger.record_tool_result_from_event_slice(events, "call:missing", session_id="runtime:test")
+        ledger.record_tool_result_from_event_slice(
+            events, "call:missing", session_id="runtime:test"
+        )
     except KeyError as exc:
         assert "call:missing" in str(exc)
     else:
         raise AssertionError("Expected KeyError")
 
 
-def test_record_tool_result_from_event_slice_delta_without_start_raises_value_error() -> None:
+def test_record_tool_result_from_event_slice_delta_without_start_raises_value_error() -> (
+    None
+):
     ledger = build_ledger()
     ctx = EventContext(run_id="run:bad", turn_id="turn:bad", reply_id="reply:bad")
     events = InMemoryEventLog().extend(
         [
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-            ToolResultTextDeltaEvent(**ctx.event_fields(), tool_call_id="call:bad", delta="orphan"),
+            ToolResultTextDeltaEvent(
+                **ctx.event_fields(), tool_call_id="call:bad", delta="orphan"
+            ),
         ]
     )
 
     try:
-        ledger.record_tool_result_from_event_slice(events, "call:bad", session_id="runtime:test")
+        ledger.record_tool_result_from_event_slice(
+            events, "call:bad", session_id="runtime:test"
+        )
     except ValueError as exc:
         assert "without start" in str(exc)
     else:
         raise AssertionError("Expected ValueError")
 
 
-def test_record_tool_result_from_event_slice_start_without_end_raises_value_error() -> None:
+def test_record_tool_result_from_event_slice_start_without_end_raises_value_error() -> (
+    None
+):
     ledger = build_ledger()
     events = InMemoryEventLog().extend(
         _tool_events(
@@ -526,7 +578,9 @@ def test_record_tool_result_from_event_slice_start_without_end_raises_value_erro
     )
 
     try:
-        ledger.record_tool_result_from_event_slice(events, "call:bad", session_id="runtime:test")
+        ledger.record_tool_result_from_event_slice(
+            events, "call:bad", session_id="runtime:test"
+        )
     except ValueError as exc:
         assert "missing end" in str(exc)
     else:
@@ -535,10 +589,17 @@ def test_record_tool_result_from_event_slice_start_without_end_raises_value_erro
 
 def test_named_graph_supports_put_get_and_delete() -> None:
     graph = InMemoryGraphStore()
-    document = {"@id": "tool-result:1", "@type": ["ToolResult"], "scope": "ctx:workspace/test_project"}
+    document = {
+        "@id": "tool-result:1",
+        "@type": ["ToolResult"],
+        "scope": "ctx:workspace/test_project",
+    }
 
     graph.put_jsonld(document, graph_id="graph:test")
-    assert graph.get_jsonld("tool-result:1", graph_id="graph:test")["@id"] == "tool-result:1"
+    assert (
+        graph.get_jsonld("tool-result:1", graph_id="graph:test")["@id"]
+        == "tool-result:1"
+    )
     assert not graph.has_jsonld("tool-result:1")
     assert graph.has_jsonld("tool-result:1", graph_id="graph:test")
     try:
@@ -560,7 +621,11 @@ def test_named_graph_supports_put_get_and_delete() -> None:
 def test_put_jsonld_none_graph_id_writes_to_default_graph() -> None:
     graph = InMemoryGraphStore()
     graph.put_jsonld(
-        {"@id": "claim:none", "@type": [memory.CLAIM.name], "statement": "default via none"},
+        {
+            "@id": "claim:none",
+            "@type": [memory.CLAIM.name],
+            "statement": "default via none",
+        },
         graph_id=None,
     )
 
@@ -574,7 +639,9 @@ def test_empty_graph_id_is_rejected() -> None:
     graph = InMemoryGraphStore()
 
     try:
-        graph.put_jsonld({"@id": "claim:empty", "@type": [memory.CLAIM.name]}, graph_id="")
+        graph.put_jsonld(
+            {"@id": "claim:empty", "@type": [memory.CLAIM.name]}, graph_id=""
+        )
     except ValueError:
         pass
     else:
@@ -584,7 +651,10 @@ def test_empty_graph_id_is_rejected() -> None:
 def test_default_graph_lookup_does_not_return_named_graph_duplicate() -> None:
     graph = InMemoryGraphStore()
     graph.put_jsonld({"@id": "claim:1", "@type": ["Claim"], "statement": "default"})
-    graph.put_jsonld({"@id": "claim:1", "@type": ["Claim"], "statement": "named"}, graph_id="graph:named")
+    graph.put_jsonld(
+        {"@id": "claim:1", "@type": ["Claim"], "statement": "named"},
+        graph_id="graph:named",
+    )
 
     assert graph.get_jsonld("claim:1")["statement"] == "default"
     assert graph.get_jsonld("claim:1", graph_id="graph:named")["statement"] == "named"
@@ -594,19 +664,25 @@ def test_default_graph_lookup_does_not_return_named_graph_duplicate() -> None:
 
 def test_default_find_by_type_does_not_scan_named_graphs() -> None:
     graph = InMemoryGraphStore()
-    graph.put_jsonld({"@id": "claim:default", "@type": [memory.CLAIM.name], "statement": "default"})
+    graph.put_jsonld(
+        {"@id": "claim:default", "@type": [memory.CLAIM.name], "statement": "default"}
+    )
     graph.put_jsonld(
         {"@id": "claim:named", "@type": [memory.CLAIM.name], "statement": "named"},
         graph_id="graph:named",
     )
 
     assert [doc["@id"] for doc in graph.find_by_type(memory.CLAIM)] == ["claim:default"]
-    assert [doc["@id"] for doc in graph.find_by_type(memory.CLAIM, graph_id="graph:named")] == ["claim:named"]
+    assert [
+        doc["@id"] for doc in graph.find_by_type(memory.CLAIM, graph_id="graph:named")
+    ] == ["claim:named"]
 
 
 def test_find_by_type_returns_defensive_copies() -> None:
     graph = InMemoryGraphStore()
-    graph.put_jsonld({"@id": "claim:copy", "@type": [memory.CLAIM.name], "statement": "original"})
+    graph.put_jsonld(
+        {"@id": "claim:copy", "@type": [memory.CLAIM.name], "statement": "original"}
+    )
 
     docs = graph.find_by_type(memory.CLAIM)
     docs[0]["statement"] = "mutated"

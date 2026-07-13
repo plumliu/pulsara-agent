@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    run_end_contract_fields,
+    run_start_permission_fields,
+    tool_result_end_contract_fields,
+)
 from tests.support import (
     model_call_end_fields,
     model_call_start_fields,
@@ -111,6 +115,7 @@ def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
             ),
             ToolResultEndEvent(
                 **CTX.event_fields(),
+                **tool_result_end_contract_fields("call:read", tool_name="read_file"),
                 tool_call_id="call:read",
                 state=ToolResultState.SUCCESS,
                 metadata={
@@ -228,6 +233,9 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
             ),
             ToolResultEndEvent(
                 **CTX.event_fields(),
+                **tool_result_end_contract_fields(
+                    tool_call.id, tool_name=tool_call.name
+                ),
                 tool_call_id=tool_call.id,
                 state=ToolResultState.SUCCESS,
                 metadata={
@@ -446,6 +454,7 @@ def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
             ),
             ToolResultEndEvent(
                 **CTX.event_fields(),
+                **tool_result_end_contract_fields("call:read", tool_name="read_file"),
                 tool_call_id="call:read",
                 state=ToolResultState.SUCCESS,
                 metadata={

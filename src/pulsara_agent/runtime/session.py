@@ -29,7 +29,14 @@ from pulsara_agent.event_log import (
 )
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.primitives.context import ContextStaticInstructionFact
 from pulsara_agent.runtime.hooks import RuntimeHookManager
+from pulsara_agent.runtime.context_input.candidate import InMemoryContextLifecycleCache
+from pulsara_agent.runtime.context_input.manifest import (
+    ContextInputManifestWriteService,
+)
+from pulsara_agent.runtime.context_input.io_service import ContextInputIoService
+from pulsara_agent.runtime.context_input.render import InMemoryToolResultRenderCache
 from pulsara_agent.runtime.mcp.types import McpPendingInstallationAudit
 from pulsara_agent.runtime.permission import PermissionState
 from pulsara_agent.runtime.publisher import (
@@ -45,7 +52,10 @@ from pulsara_agent.runtime.terminal import (
     TerminalRuntimeBinding,
     TerminalSessionManager,
 )
-from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactIndex, ToolResultArtifactService
+from pulsara_agent.runtime.tool_artifacts import (
+    ToolResultArtifactIndex,
+    ToolResultArtifactService,
+)
 from pulsara_agent.tools.base import AsyncTool, Tool
 
 
@@ -91,8 +101,14 @@ class EventWriteResult:
             default=0,
         )
         reducer_sequence = self.reducer_high_waters.get(reducer_id)
-        reducer_failed = any(error.reducer_id == reducer_id for error in self.reducer_errors)
-        if reducer_sequence is None or reducer_sequence < last_sequence or reducer_failed:
+        reducer_failed = any(
+            error.reducer_id == reducer_id for error in self.reducer_errors
+        )
+        if (
+            reducer_sequence is None
+            or reducer_sequence < last_sequence
+            or reducer_failed
+        ):
             raise EventReconciliationRequired(
                 f"Committed reducer {reducer_id!r} did not apply through sequence {last_sequence}"
             )
@@ -176,6 +192,7 @@ class RuntimeSession:
     extra_tool_bindings: tuple[Tool | AsyncTool, ...] = ()
     subagent_runtime: Any | None = None
     mcp_supervisor: Any | None = None
+    context_event_log_locator: Any | None = None
     default_event_metadata: dict[str, Any] = field(default_factory=dict)
     publisher: RuntimeEventPublisher = field(init=False)
     write_coordinator: SessionWriteCoordinator = field(
@@ -184,8 +201,29 @@ class RuntimeSession:
     )
     terminal_sessions: TerminalSessionManager = field(init=False)
     artifact_service: ToolResultArtifactService = field(init=False)
+    context_input_manifest_service: ContextInputManifestWriteService = field(
+        init=False,
+        repr=False,
+    )
+    context_input_io_service: ContextInputIoService = field(
+        init=False,
+        repr=False,
+    )
+    context_static_instruction_cache: dict[
+        tuple[str, str, str], ContextStaticInstructionFact
+    ] = field(default_factory=dict, init=False, repr=False)
+    context_candidate_lifecycle_cache: InMemoryContextLifecycleCache = field(
+        init=False,
+        repr=False,
+    )
+    tool_result_render_cache: InMemoryToolResultRenderCache = field(
+        init=False,
+        repr=False,
+    )
     _owns_terminal_manager: bool = field(default=False, init=False, repr=False)
-    _terminal_owner: TerminalOwnerContext | None = field(default=None, init=False, repr=False)
+    _terminal_owner: TerminalOwnerContext | None = field(
+        default=None, init=False, repr=False
+    )
     _committed_reducers: dict[str, _CommittedReducerRegistration] = field(
         default_factory=dict,
         init=False,
@@ -193,11 +231,19 @@ class RuntimeSession:
     )
     _reconciliation_required: bool = field(default=False, init=False, repr=False)
     _ledger_reconciliation_required: bool = field(default=False, init=False, repr=False)
-    mcp_installation_id: str = field(
-        default="mcp_installation:empty", init=False
+    _context_input_reconciliation_required: bool = field(
+        default=False,
+        init=False,
+        repr=False,
     )
+    mcp_installation_id: str = field(default="mcp_installation:empty", init=False)
     mcp_installation_owner_runtime_session_id: str = field(init=False)
     _pending_mcp_installation_audits: list[McpPendingInstallationAudit] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
+    _context_input_cache_diagnostics: list[dict[str, str]] = field(
         default_factory=list,
         init=False,
         repr=False,
@@ -211,6 +257,13 @@ class RuntimeSession:
             index=self.tool_result_artifacts,
             runtime_session_id=self.runtime_session_id,
         )
+        self.context_input_manifest_service = ContextInputManifestWriteService(
+            archive=self.archive,
+            on_consistency_failure=self.latch_context_input_reconciliation_required,
+        )
+        self.context_input_io_service = ContextInputIoService()
+        self.context_candidate_lifecycle_cache = InMemoryContextLifecycleCache()
+        self.tool_result_render_cache = InMemoryToolResultRenderCache()
         self.publisher = RuntimeEventPublisher(
             runtime_session_id=self.runtime_session_id,
             next_sequence_to_publish=_next_publish_sequence(self.event_log),
@@ -309,7 +362,9 @@ class RuntimeSession:
         )
         baseline_names = previous.baseline_tool_names
         current_names = audit.current_tool_names
-        changed_names = tuple(sorted(baseline_names.symmetric_difference(current_names)))
+        changed_names = tuple(
+            sorted(baseline_names.symmetric_difference(current_names))
+        )
         bounded_changed_names = changed_names[:64]
         rebuilt = replace(
             audit,
@@ -345,17 +400,27 @@ class RuntimeSession:
             self._owns_terminal_manager = False
             self._terminal_owner = binding.owner
         else:
-            self.terminal_sessions = binding.manager or TerminalSessionManager(self.workspace_root)
+            self.terminal_sessions = binding.manager or TerminalSessionManager(
+                self.workspace_root
+            )
             self._owns_terminal_manager = True
             self._terminal_owner = None
 
     @property
     def terminal_owner_host_session_id(self) -> str | None:
-        return self._terminal_owner.host_session_id if self._terminal_owner is not None else None
+        return (
+            self._terminal_owner.host_session_id
+            if self._terminal_owner is not None
+            else None
+        )
 
     @property
     def terminal_owner_conversation_id(self) -> str | None:
-        return self._terminal_owner.conversation_id if self._terminal_owner is not None else None
+        return (
+            self._terminal_owner.conversation_id
+            if self._terminal_owner is not None
+            else None
+        )
 
     def _require_runtime_managed_sequence(self, event: AgentEvent) -> None:
         if event.sequence is not None:
@@ -375,7 +440,8 @@ class RuntimeSession:
         if not self.default_event_metadata:
             return
         missing = [
-            key for key, value in self.default_event_metadata.items()
+            key
+            for key, value in self.default_event_metadata.items()
             if key not in event.metadata
             or not _metadata_contains_default(event.metadata[key], value)
         ]
@@ -387,7 +453,11 @@ class RuntimeSession:
 
     @property
     def reconciliation_required(self) -> bool:
-        return self._ledger_reconciliation_required or self._reconciliation_required
+        return (
+            self._ledger_reconciliation_required
+            or self._context_input_reconciliation_required
+            or self._reconciliation_required
+        )
 
     @property
     def ledger_reconciliation_required(self) -> bool:
@@ -398,6 +468,32 @@ class RuntimeSession:
 
         with self.write_coordinator.lock:
             self._latch_ledger_reconciliation_required()
+
+    def latch_context_input_reconciliation_required(self) -> None:
+        """Block mutation after manifest identity/confirmation inconsistency."""
+
+        with self.write_coordinator.lock:
+            self._context_input_reconciliation_required = True
+
+    def record_context_input_cache_diagnostic(
+        self,
+        *,
+        cache_kind: str,
+        operation: str,
+        error: BaseException,
+    ) -> None:
+        self._context_input_cache_diagnostics.append(
+            {
+                "cache_kind": cache_kind,
+                "operation": operation,
+                "error_type": type(error).__name__,
+                "message": str(error)[:240],
+            }
+        )
+        del self._context_input_cache_diagnostics[:-32]
+
+    def context_input_cache_diagnostics(self) -> tuple[dict[str, str], ...]:
+        return tuple(dict(item) for item in self._context_input_cache_diagnostics)
 
     def require_mutation_allowed(self) -> None:
         """Fail before any safe-point side effect when the ledger is latched."""
@@ -512,9 +608,7 @@ class RuntimeSession:
                     )
                     if missing:
                         registration.apply_committed(missing)
-                registration.through_sequence = (
-                    events[-1].sequence if events else 0
-                )  # type: ignore[assignment]
+                registration.through_sequence = events[-1].sequence if events else 0  # type: ignore[assignment]
             except Exception:
                 registration.reconciliation_required = True
                 self._reconciliation_required = True
@@ -574,7 +668,10 @@ class RuntimeSession:
                 if attempt.result.publication_status != "unavailable"
                 else "unavailable"
             ),
-            publication_errors=(*attempt.result.publication_errors, *publication_errors),
+            publication_errors=(
+                *attempt.result.publication_errors,
+                *publication_errors,
+            ),
         )
 
     def write_events_from_thread(
@@ -592,16 +689,16 @@ class RuntimeSession:
             await_delivery=False,
         ).result
 
-    def _prepare_event_batch(self, events: Sequence[AgentEvent]) -> tuple[AgentEvent, ...]:
+    def _prepare_event_batch(
+        self, events: Sequence[AgentEvent]
+    ) -> tuple[AgentEvent, ...]:
         prepared: list[AgentEvent] = []
         for event in events:
             self._require_runtime_managed_sequence(event)
             prepared.append(self._with_default_metadata(event))
         return tuple(prepared)
 
-    def _validate_run_lifecycle_batch(
-        self, events: tuple[AgentEvent, ...]
-    ) -> None:
+    def _validate_run_lifecycle_batch(self, events: tuple[AgentEvent, ...]) -> None:
         """Enforce the stable RunStart-to-RunEnd identity before commit."""
 
         starts_in_batch = {
@@ -612,16 +709,12 @@ class RuntimeSession:
         ):
             raise ValueError("event batch contains duplicate RunStart facts")
         ends_in_batch: set[str] = set()
-        for terminal in (
-            event for event in events if isinstance(event, RunEndEvent)
-        ):
+        for terminal in (event for event in events if isinstance(event, RunEndEvent)):
             if terminal.run_id in ends_in_batch:
                 raise ValueError("event batch contains duplicate RunEnd facts")
             ends_in_batch.add(terminal.run_id)
             existing = tuple(self.event_log.iter(run_id=terminal.run_id))
-            starts = [
-                event for event in existing if isinstance(event, RunStartEvent)
-            ]
+            starts = [event for event in existing if isinstance(event, RunStartEvent)]
             candidate_start = starts_in_batch.get(terminal.run_id)
             if candidate_start is not None:
                 matching = next(
@@ -749,8 +842,7 @@ class RuntimeSession:
                 != boundary.effective_exposure_semantic_fingerprint
                 or effective.exposure.exposure_fact_fingerprint
                 != boundary.effective_exposure_fact_fingerprint
-                or effective.exposure.owner.owner_id
-                != boundary.identity.boundary_id
+                or effective.exposure.owner.owner_id != boundary.identity.boundary_id
             ):
                 raise ValueError(
                     "resume boundary effective exposure must precede it in the batch"
@@ -805,7 +897,9 @@ class RuntimeSession:
                 publication_status="completed" if await_delivery else "enqueued",
                 publisher_enqueued_through_sequence=self.publisher.enqueued_through_sequence,
             )
-            return _WriteAttempt(result=result, delivery_futures=(), published_events=())
+            return _WriteAttempt(
+                result=result, delivery_futures=(), published_events=()
+            )
         with self.write_coordinator.lock:
             if self.reconciliation_required:
                 raise EventReconciliationRequired(
@@ -844,7 +938,9 @@ class RuntimeSession:
                 ) from exc
             except Exception as exc:
                 try:
-                    confirmed, confirmed_high_water = self._confirm_committed_batch(events)
+                    confirmed, confirmed_high_water = self._confirm_committed_batch(
+                        events
+                    )
                 except (EventIdConflict, EventReconciliationRequired):
                     raise
                 except Exception as confirmation_error:
@@ -858,7 +954,9 @@ class RuntimeSession:
                         state=state,
                         await_delivery=await_delivery,
                     )
-                raise EventCommitError(f"Event batch commit failed: {type(exc).__name__}") from exc
+                raise EventCommitError(
+                    f"Event batch commit failed: {type(exc).__name__}"
+                ) from exc
 
             first_sequence = _event_sequence(committed[0])
             last_sequence = _event_sequence(committed[-1])
@@ -867,7 +965,9 @@ class RuntimeSession:
                 try:
                     if registration.through_sequence < first_sequence - 1:
                         missing = _contiguous_interval(
-                            self.event_log.iter(after_sequence=registration.through_sequence),
+                            self.event_log.iter(
+                                after_sequence=registration.through_sequence
+                            ),
                             start=registration.through_sequence + 1,
                             end=first_sequence - 1,
                         )
@@ -1128,7 +1228,9 @@ class RuntimeSession:
             )
         return prefix + current
 
-    async def emit(self, event: AgentEvent, *, state: LoopState | None = None) -> AgentEvent:
+    async def emit(
+        self, event: AgentEvent, *, state: LoopState | None = None
+    ) -> AgentEvent:
         result = await self.write_event(event, state=state)
         if result.publication_errors:
             raise EventPublicationAfterCommitError(result)
@@ -1145,11 +1247,15 @@ class RuntimeSession:
             raise EventPublicationAfterCommitError(result)
         return list(result.committed_events)
 
-    def emit_from_thread(self, event: AgentEvent, *, state: LoopState | None = None) -> AgentEvent:
+    def emit_from_thread(
+        self, event: AgentEvent, *, state: LoopState | None = None
+    ) -> AgentEvent:
         result = self.write_events_from_thread((event,), state=state)
         return result.committed_events[0]
 
-    def publish_stored_event(self, event: AgentEvent, *, state: LoopState | None = None) -> None:
+    def publish_stored_event(
+        self, event: AgentEvent, *, state: LoopState | None = None
+    ) -> None:
         if event.sequence is None:
             raise ValueError("Stored events must have a canonical sequence")
         self._require_default_metadata_present(event)
@@ -1191,7 +1297,9 @@ class RuntimeSession:
                 await_delivery=False,
             )
 
-    def make_thread_recorder(self, *, state: LoopState | None = None) -> RuntimeThreadRecorder:
+    def make_thread_recorder(
+        self, *, state: LoopState | None = None
+    ) -> RuntimeThreadRecorder:
         return RuntimeThreadRecorder(runtime_session=self, state=state)
 
     def close(self) -> None:
@@ -1199,6 +1307,12 @@ class RuntimeSession:
         # NOT kill/detach/shutdown the shared manager here — lease release is the
         # supervisor/HostCore job and must run exactly once (contract §5).
         # Idempotent: shutting an already-shut manager down is a no-op.
+        self.context_input_manifest_service.close_if_idle()
+        self.context_input_io_service.close_if_idle()
+        self.context_static_instruction_cache.clear()
+        self.context_candidate_lifecycle_cache.clear()
+        self.tool_result_render_cache.clear()
+        self._context_input_cache_diagnostics.clear()
         subagent_runtime = self.subagent_runtime
         detach = getattr(subagent_runtime, "detach_from_parent_session", None)
         if (
@@ -1210,6 +1324,7 @@ class RuntimeSession:
             self._committed_reducers.clear()
             self._reconciliation_required = False
             self._ledger_reconciliation_required = False
+            self._context_input_reconciliation_required = False
         if self._owns_terminal_manager:
             self.terminal_sessions.shutdown()
 
@@ -1227,7 +1342,9 @@ class RuntimeSession:
         from pulsara_agent.tools import ToolExecutor
         from pulsara_agent.tools.builtins.registry import build_core_tool_registry
 
-        if record_event is not None and not isinstance(record_event, RuntimeThreadRecorder):
+        if record_event is not None and not isinstance(
+            record_event, RuntimeThreadRecorder
+        ):
             raise TypeError(
                 "create_tool_executor(record_event=...) requires RuntimeSession.make_thread_recorder(...)"
             )
@@ -1253,7 +1370,9 @@ def _next_publish_sequence(event_log: EventLog) -> int:
     return event_log.next_sequence()
 
 
-def _merge_event_metadata(default_metadata: dict[str, Any], event_metadata: dict[str, Any]) -> dict[str, Any]:
+def _merge_event_metadata(
+    default_metadata: dict[str, Any], event_metadata: dict[str, Any]
+) -> dict[str, Any]:
     metadata = dict(default_metadata)
     for key, value in event_metadata.items():
         if isinstance(metadata.get(key), dict) and isinstance(value, dict):
@@ -1371,9 +1490,7 @@ def _contiguous_interval(
     if end < start:
         return ()
     selected = tuple(
-        event
-        for event in events
-        if start <= _event_sequence(event) <= end
+        event for event in events if start <= _event_sequence(event) <= end
     )
     actual = [_event_sequence(event) for event in selected]
     expected = list(range(start, end + 1))

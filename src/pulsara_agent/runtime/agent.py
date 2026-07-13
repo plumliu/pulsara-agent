@@ -84,22 +84,14 @@ from pulsara_agent.message import (
     ToolResultState,
 )
 from pulsara_agent.primitives.model_call import (
+    ContextBudgetReportEvent,
     ModelCallDiagnosticFact,
     ModelCallPurpose,
     ResolvedModelTargetFact,
     sha256_fingerprint,
 )
 from pulsara_agent.primitives.mcp import McpInstallationReferenceFact
-from pulsara_agent.runtime.context import build_compiled_context
-from pulsara_agent.runtime.context_engine import (
-    ContextBudgetExceeded,
-    ContextLifecycleCoordinator,
-)
-from pulsara_agent.runtime.context_engine.tool_results import (
-    ToolResultRenderDecisionCache,
-    make_tool_result_render_decision_cache,
-    render_segmented_llm_messages,
-)
+from pulsara_agent.runtime.context_engine.types import ContextBudgetExceeded
 from pulsara_agent.runtime.approval import ApprovalResolution
 from pulsara_agent.runtime.compaction.inline import (
     NoopRuntimeContextCompactor,
@@ -133,7 +125,48 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
+from pulsara_agent.runtime.context_input import (
+    DEFAULT_SYSTEM_PROMPT,
+    ContextInputManifestWriteResult,
+    ContextInputPreparationError,
+    ContextInputManifestConfirmedAbsent,
+    ContextInputManifestWriteConflict,
+    ContextInputManifestWriteDeadlineExceeded,
+    ContextInputManifestWriteOutcomeUnknown,
+    compile_context_from_facts,
+    provider_neutral_payload_fingerprint,
+    canonical_render_decisions_fingerprint,
+    ContextCandidateCollectionInput,
+    build_context_compile_input_audit,
+    build_context_input_manifest,
+    build_context_input_manifest_candidate,
+    descriptor_render_attribution,
+    event_reference_from_stored,
+    lower_transcript_for_context,
+    prepare_live_context_snapshot,
+    prepare_live_transcript_projection,
+    render_plan_revision_instruction,
+    render_prepared_tool_result_units,
+    validate_prepared_tool_result_render_output,
+)
 from pulsara_agent.primitives.permission import PermissionMode, parse_permission_mode
+from pulsara_agent.primitives.context import (
+    CapabilityDescriptorRenderAttributionFact,
+    ContextCompileInputFailureFact,
+    ContextInputFailureReasonCode,
+    FrozenJsonObjectFact,
+    freeze_json,
+)
+from pulsara_agent.primitives.tool_result import (
+    ToolResultRenderVariantCode,
+    ToolResultStateFact,
+)
+from pulsara_agent.capability.result_semantics import (
+    build_execution_semantics,
+    build_pre_execution_denial_semantics,
+    build_unknown_result_semantics,
+    tool_origin_for_descriptor_variant,
+)
 from pulsara_agent.primitives.run_entry import (
     CapabilityExposureOwnerFact,
     CurrentUserMessageFact,
@@ -153,6 +186,7 @@ from pulsara_agent.runtime.permission_snapshot import (
     validate_preset_policy_payload,
 )
 from pulsara_agent.runtime.plan import (
+    PLAN_ACTIVE_INSTRUCTION,
     McpInputRequiredInteractionResolution,
     PlanExitResolution,
     PlanInteractionResolution,
@@ -265,6 +299,7 @@ async def _await_sync_tool_thread(
         if not deferred_release:
             release_borrow()
 
+
 _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME = "plan_revision_required_instruction"
 _SUBAGENT_RESULTS_SECTION_ID = "subagent:results"
 _TERMINAL_CAPABILITY_CONTEXT_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
@@ -284,6 +319,7 @@ _KNOWN_CAPABILITY_GATE_REASON_CODES = frozenset(
         "hardline_terminal_process_input_blocked",
     }
 )
+
 
 @dataclass(frozen=True, slots=True)
 class _ProfileFilteredExecutionSurfaceProvider:
@@ -386,10 +422,12 @@ def _profile_filtered_capability_runtime(
     allowed_descriptor_ids = frozenset(
         getattr(profile, "allowed_descriptor_ids", ()) or ()
     )
-    allowed_skill_names = frozenset(
-        getattr(profile, "allowed_skill_names", ()) or ()
-    )
-    if not allowed_tool_names and not allowed_descriptor_ids and not allowed_skill_names:
+    allowed_skill_names = frozenset(getattr(profile, "allowed_skill_names", ()) or ())
+    if (
+        not allowed_tool_names
+        and not allowed_descriptor_ids
+        and not allowed_skill_names
+    ):
         return CapabilityRuntime(providers=())
     filtered: list[Any] = []
     for provider in parent.providers:
@@ -620,67 +658,6 @@ def _optional_float(value: object) -> float | None:
         return None
 
 
-def compose_system_prompt(
-    base: str | None,
-    *,
-    runtime_context_prompt: str | None = None,
-    memory_prompt: str | None = None,
-    capability_prompt: str | None = None,
-    active_skill_prompt: str | None = None,
-) -> str | None:
-    parts = [
-        part
-        for part in (
-            base,
-            runtime_context_prompt,
-            memory_prompt,
-            capability_prompt,
-            active_skill_prompt,
-        )
-        if part
-    ]
-    if not parts:
-        return None
-    return "\n\n".join(parts)
-
-
-def _with_memory_context_prompt(
-    system_prompt: str | None, memory_prompt: str | None
-) -> str | None:
-    return compose_system_prompt(system_prompt, memory_prompt=memory_prompt)
-
-
-def render_runtime_context_prompt(
-    *,
-    workspace_root: str,
-    workspace_kind: WorkspaceKind,
-    terminal_current_cwd: str,
-) -> str:
-    now = datetime.now().astimezone()
-    offset = now.strftime("%z")
-    offset_text = f"UTC{offset[:3]}:{offset[3:]}" if offset else "UTC offset unknown"
-    timezone_name = now.tzname() or offset_text
-    workspace_mode = (
-        "project workspace; treat workspace facts as durable project context."
-        if workspace_kind == "project"
-        else "transient scratch workspace; do not treat workspace facts as durable project context."
-    )
-    return "\n".join(
-        [
-            "<runtime-context>",
-            f"Current date: {now.date().isoformat()}",
-            f"Local timezone: {timezone_name} ({offset_text})",
-            f"Workspace kind: {workspace_kind} ({workspace_mode})",
-            f"Workspace root: {workspace_root}",
-            f"Terminal current cwd: {terminal_current_cwd}",
-            "Terminal workdir, when provided, must stay inside workspace_root; when unsure, omit workdir or run pwd.",
-            "Relative terminal workdir values resolve from workspace_root.",
-            "Read-only filesystem tools may read ordinary text files outside workspace_root, but write/edit tools and terminal workdir remain workspace-scoped.",
-            "</runtime-context>",
-        ]
-    )
-
-
 @dataclass(slots=True)
 class AgentRunResult:
     status: LoopStatus
@@ -737,10 +714,6 @@ class AgentRuntime:
         self.system_prompt = system_prompt
         self.capability_runtime = capability_runtime
         self.context_compactor = context_compactor or NoopRuntimeContextCompactor()
-        self.context_lifecycle = ContextLifecycleCoordinator()
-        self.tool_result_render_decision_cache: ToolResultRenderDecisionCache = (
-            make_tool_result_render_decision_cache()
-        )
         self.memory_domain = memory_domain
         self.workspace_kind = workspace_kind
         self._is_subagent_child = isinstance(
@@ -768,7 +741,8 @@ class AgentRuntime:
         self.runtime_session.subagent_runtime = self.subagent_runtime
         self._subagent_dangling_repair_done = False
         self._mcp_terminal_commit_outcomes: dict[
-            tuple[str, str], Literal["not_attempted", "attempting", "none", "full", "untrusted"]
+            tuple[str, str],
+            Literal["not_attempted", "attempting", "none", "full", "untrusted"],
         ] = {}
         self.tool_executor = runtime_session.create_tool_executor(
             memory_proposal_sink=getattr(
@@ -933,9 +907,7 @@ class AgentRuntime:
                         tool_call_name=tool_name,
                     )
                 finally:
-                    await self._complete_mcp_pending_lease(
-                        resolution.interaction_id
-                    )
+                    await self._complete_mcp_pending_lease(resolution.interaction_id)
             else:
                 state.pending_tool_calls = original_pending_tool_calls
                 state.pending_interaction_kind = original_pending_kind
@@ -1057,8 +1029,10 @@ class AgentRuntime:
         # A child profile is an execution-surface boundary, not merely a
         # model-visible projection.  Keep descriptor and binding sets exact so
         # disallowed parent tools cannot remain as unowned executable bindings.
-        child_agent.tool_executor.registry = child_agent.tool_executor.registry.restricted_to(
-            frozenset(capability_profile.allowed_tool_names)
+        child_agent.tool_executor.registry = (
+            child_agent.tool_executor.registry.restricted_to(
+                frozenset(capability_profile.allowed_tool_names)
+            )
         )
         if not run_view.task_text_complete or run_view.task_text is None:
             raise ValueError(
@@ -1076,9 +1050,7 @@ class AgentRuntime:
             max_summary_chars=run.budget_snapshot.max_result_summary_chars_per_child,
             max_artifact_refs=run.budget_snapshot.max_result_artifact_refs_per_child,
         )
-        validate_child_render_policy_against_budget(
-            render_policy, run.budget_snapshot
-        )
+        validate_child_render_policy_against_budget(render_policy, run.budget_snapshot)
         frozen_surface = child_agent.capability_runtime.freeze_execution_surface(
             CapabilityExecutionSurfaceSnapshotContext(
                 workspace_root=child_session.workspace_root,
@@ -1417,7 +1389,10 @@ class AgentRuntime:
                 yield event
         except BaseException as exc:
             if not state.finalized:
-                if isinstance(exc, asyncio.CancelledError) and state.stop_request is not None:
+                if (
+                    isinstance(exc, asyncio.CancelledError)
+                    and state.stop_request is not None
+                ):
                     raise
                 if not isinstance(
                     state.scratchpad.get("pending_run_end_candidate"), RunEndEvent
@@ -1519,6 +1494,10 @@ class AgentRuntime:
             self._require_run_working_set(state).install_initial_exposure(
                 plan=exposure,
                 fact=resolved_exposure.fact,
+                event_ref=event_reference_from_stored(
+                    confirmed[0],
+                    runtime_session_id=self.runtime_session.runtime_session_id,
+                ),
             )
             raise
         if not isinstance(stored_exposure, CapabilityExposureResolvedEvent):
@@ -1526,6 +1505,10 @@ class AgentRuntime:
         self._require_run_working_set(state).install_initial_exposure(
             plan=exposure,
             fact=resolved_exposure.fact,
+            event_ref=event_reference_from_stored(
+                stored_exposure,
+                runtime_session_id=self.runtime_session.runtime_session_id,
+            ),
         )
         if self._subagent_parent_features_enabled and self.subagent_runtime is not None:
             permission_snapshot = self._require_run_permission_snapshot(state)
@@ -1547,6 +1530,115 @@ class AgentRuntime:
                 "model/tool continuation requires a committed capability exposure"
             )
         return exposure
+
+    def _commit_prepared_context_caches(
+        self,
+        *,
+        prepared_context_input,
+        render_output,
+    ) -> None:
+        """Commit optimization hints only after durable ContextCompiled."""
+
+        for cache_write in render_output.cache_write_candidates:
+            try:
+                self.runtime_session.tool_result_render_cache.put(
+                    cache_write.cache_key,
+                    cache_write.hint,
+                )
+            except Exception as exc:
+                self.runtime_session.record_context_input_cache_diagnostic(
+                    cache_kind="tool_result_render",
+                    operation="write",
+                    error=exc,
+                )
+        for cache_write in prepared_context_input.candidate_cache_writes:
+            try:
+                self.runtime_session.context_candidate_lifecycle_cache.put(
+                    cache_write.key,
+                    cache_write.candidate,
+                )
+            except Exception as exc:
+                self.runtime_session.record_context_input_cache_diagnostic(
+                    cache_kind="candidate_lifecycle",
+                    operation="write",
+                    error=exc,
+                )
+
+    def _descriptor_render_attribution(
+        self,
+        state: LoopState,
+        descriptor,
+    ) -> CapabilityDescriptorRenderAttributionFact:
+        working_set = self._require_run_working_set(state)
+        exposure = working_set.effective_exposure_fact
+        event_ref = working_set.effective_exposure_event_ref
+        if exposure is None or event_ref is None:
+            raise RuntimeError(
+                "tool execution requires committed descriptor render attribution"
+            )
+        return descriptor_render_attribution(
+            descriptor=descriptor,
+            exposure_event_ref=event_ref,
+            exposure_fact=exposure,
+        )
+
+    def _typed_tool_result_error_events(
+        self,
+        state: LoopState,
+        *,
+        tool_call_id: str,
+        tool_call_name: str,
+        message: str,
+        result_state: ToolResultState = ToolResultState.ERROR,
+        arguments: dict[str, Any] | None = None,
+        failure_stage: str = "permission_denied",
+        tool_observation_timing_seed: dict[str, Any] | None = None,
+    ) -> list[AgentEvent]:
+        exposure = self._require_capability_exposure(state)
+        descriptor = exposure.descriptors_by_name.get(tool_call_name)
+        low_state = ToolResultStateFact(result_state.value)
+        if descriptor is None:
+            semantics = build_unknown_result_semantics(result_state=low_state)
+        else:
+            frozen_arguments = freeze_json(arguments or {})
+            if not isinstance(frozen_arguments, FrozenJsonObjectFact):
+                raise AssertionError("tool arguments must freeze as an object")
+            attribution = self._descriptor_render_attribution(state, descriptor)
+            tool_observation_timing_seed = {
+                **(tool_observation_timing_seed or {}),
+                "tool_origin": tool_origin_for_descriptor_variant(
+                    descriptor,
+                    descriptor.result_render_contract.pre_execution_denial_variant_code,
+                ),
+            }
+            semantics = None
+
+            def semantics_factory(timing):
+                return build_pre_execution_denial_semantics(
+                    descriptor=descriptor,
+                    descriptor_attribution=attribution,
+                    requested_arguments=frozen_arguments,
+                    message=message,
+                    result_state=low_state,
+                    reason_code=failure_stage,
+                    failure_stage=failure_stage,
+                    capture_policy=self.tool_executor.essential_capture_policy,
+                    registry=self.tool_executor.semantics_registry,
+                    observation_timing=timing,
+                )
+
+        if descriptor is None:
+            semantics_factory = None
+        return build_tool_result_error_events(
+            self._event_context(state),
+            tool_call_id=tool_call_id,
+            tool_call_name=tool_call_name,
+            message=message,
+            state=result_state,
+            tool_observation_timing_seed=tool_observation_timing_seed,
+            semantics=semantics,
+            semantics_factory=semantics_factory,
+        )
 
     @staticmethod
     def _require_run_working_set(state: LoopState) -> RunWorkingSet:
@@ -1663,6 +1755,8 @@ class AgentRuntime:
             output=decision.reason or "tool call denied by capability exposure",
             result_state=result_state,
             tool_observation_timing_seed=tool_observation_timing_seed,
+            tool_arguments=call.arguments,
+            failure_stage="capability_exposure_denied",
         ):
             yield event
         fact = self._capability_gate_decision_fact(
@@ -1690,12 +1784,14 @@ class AgentRuntime:
             else ToolResultState.DENIED
         )
         stored_events = await self.runtime_session.emit_many(
-            build_tool_result_error_events(
-                self._event_context(state),
+            self._typed_tool_result_error_events(
+                state,
                 tool_call_id=call.id,
                 tool_call_name=call.name,
                 message=decision.reason or "tool call denied by permission gate",
-                state=result_state,
+                result_state=result_state,
+                arguments=call.arguments,
+                failure_stage="permission_denied",
                 tool_observation_timing_seed=tool_observation_timing_seed,
             ),
             state=state,
@@ -1797,62 +1893,233 @@ class AgentRuntime:
                 target=self._require_run_model_target(state),
                 purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             )
-            runtime_context_prompt = render_runtime_context_prompt(
-                workspace_root=str(self.runtime_session.workspace_root),
-                workspace_kind=self.workspace_kind,
-                terminal_current_cwd=str(
-                    self.runtime_session.terminal_sessions.current_cwd(
-                        owner_host_session_id=self.runtime_session.terminal_owner_host_session_id
-                    )
-                ),
-            )
             memory_prompt = getattr(
                 self.memory_hooks, "memory_context_prompt", lambda: None
             )()
-            subagent_results_prompt: str | None = None
-            pending_subagent_results = ()
-            if (
-                self._subagent_parent_features_enabled
-                and self.subagent_runtime is not None
-            ):
-                subagent_results_prompt, pending_subagent_results = (
-                    self.subagent_runtime.render_pending_results_section(
-                        max_results=self.budget.max_subagent_results_per_parent_compile,
-                    )
-                )
             compiled_context = None
             compile_attempt_index = 0
             context_retry_index = 0
             while state.status is LoopStatus.RUNNING:
                 compile_attempt_index += 1
+                context_id = f"context:{uuid4().hex}"
+                input_audit = None
+                render_output = None
                 try:
-                    compiled_context = build_compiled_context(
-                        state=state,
-                        tools=exposure.direct_tool_specs,
-                        system_prompt=self.system_prompt,
-                        budget=self.budget,
-                        context_id=f"context:{uuid4().hex}",
-                        model_call_index=model_call_index,
+                    local_clock = datetime.now().astimezone()
+                    offset = local_clock.strftime("%z")
+                    offset_text = (
+                        f"UTC{offset[:3]}:{offset[3:]}"
+                        if offset
+                        else "UTC offset unknown"
+                    )
+                    timezone_name = local_clock.tzname() or offset_text
+                    prepared_context_input = await prepare_live_context_snapshot(
+                        runtime_session=self.runtime_session,
+                        working_set=self._require_run_working_set(state),
                         resolved_call=resolved_call,
-                        exposure=exposure,
-                        current_user_anchor=f"user-message:{state.run_id}",
-                        runtime_session_id=self.runtime_session.runtime_session_id,
-                        component_prompts=tuple(
-                            (component_id, text)
-                            for component_id, text in (
-                                ("runtime_context", runtime_context_prompt),
-                                ("memory:hook_prompt", memory_prompt),
-                                ("capability:catalog", exposure.catalog_prompt),
-                                (
-                                    "capability:active_skill",
-                                    exposure.active_skill_prompt,
-                                ),
-                                (_SUBAGENT_RESULTS_SECTION_ID, subagent_results_prompt),
+                        budget=self.budget,
+                        system_prompt=self.system_prompt or DEFAULT_SYSTEM_PROMPT,
+                        context_id=context_id,
+                        model_call_index=model_call_index,
+                        compile_attempt_index=compile_attempt_index,
+                        context_retry_index=context_retry_index,
+                        compiled_at_utc=utc_now(),
+                        compiled_local_date=local_clock.date().isoformat(),
+                        session_timezone=f"{timezone_name} ({offset_text})",
+                        workspace_kind=self.workspace_kind,
+                        terminal_current_cwd=str(
+                            self.runtime_session.terminal_sessions.current_cwd(
+                                owner_host_session_id=(
+                                    self.runtime_session.terminal_owner_host_session_id
+                                )
                             )
-                            if text
                         ),
-                        lifecycle_coordinator=self.context_lifecycle,
-                        tool_result_render_decision_cache=self.tool_result_render_decision_cache,
+                        raw_suspended_state_token_for_validation=(
+                            state.scratchpad.get("suspended_state_token")
+                        ),
+                        candidate_sources=ContextCandidateCollectionInput(
+                            system_prompt=(self.system_prompt or DEFAULT_SYSTEM_PROMPT),
+                            memory_hook_prompt=memory_prompt,
+                            capability_catalog=exposure.catalog_prompt,
+                            capability_active_skill=exposure.active_skill_prompt,
+                            plan_workflow=(
+                                PLAN_ACTIVE_INSTRUCTION
+                                if self._plan_state(state).active
+                                else None
+                            ),
+                        ),
+                    )
+                    try:
+                        input_manifest = build_context_input_manifest(
+                            snapshot=prepared_context_input.invocation.fact,
+                            transcript_fingerprint=(
+                                prepared_context_input.normalized_transcript.transcript.transcript_fingerprint
+                            ),
+                            prepared_tool_results=(
+                                prepared_context_input.prepared_tool_results
+                            ),
+                            prepared_candidates=(
+                                prepared_context_input.prepared_candidates
+                            ),
+                        )
+                        manifest_candidate = build_context_input_manifest_candidate(
+                            input_manifest
+                        )
+                    except Exception as exc:
+                        raise _context_manifest_preparation_error(
+                            prepared_context_input,
+                            cause=exc,
+                        ) from exc
+                    try:
+                        manifest_write = await (
+                            self.runtime_session.context_input_manifest_service.persist(
+                                manifest_candidate,
+                                deadline_monotonic=time.monotonic() + 30.0,
+                            )
+                        )
+                    except (
+                        ContextInputManifestConfirmedAbsent,
+                        ContextInputManifestWriteConflict,
+                        ContextInputManifestWriteDeadlineExceeded,
+                        ContextInputManifestWriteOutcomeUnknown,
+                    ) as exc:
+                        input_failure = _context_manifest_input_failure(
+                            snapshot=prepared_context_input,
+                            manifest=input_manifest,
+                            candidate=manifest_candidate,
+                            error=exc,
+                        )
+                        state.status = LoopStatus.FAILED
+                        state.stop_reason = RunStopReason.MODEL_ERROR
+                        state.error_message = str(exc)
+                        state.transition(LoopTransition.FAIL)
+                        yield await self.runtime_session.emit(
+                            ContextCompiledEvent(
+                                **self._event_context(state).event_fields(),
+                                status="failed",
+                                failure_stage="input_manifest_write",
+                                context_id=context_id,
+                                model_call_index=model_call_index,
+                                compile_attempt_index=compile_attempt_index,
+                                context_retry_index=context_retry_index,
+                                resolved_call=resolved_call.fact,
+                                budget=_empty_context_budget_report(resolved_call),
+                                input_failure=input_failure,
+                            ),
+                            state=state,
+                        )
+                        yield await self.runtime_session.emit(
+                            RunErrorEvent(
+                                **self._event_context(state).event_fields(),
+                                message=str(exc),
+                                code="context_input_manifest_write_failed",
+                            ),
+                            state=state,
+                        )
+                        if isinstance(
+                            exc,
+                            (
+                                ContextInputManifestWriteConflict,
+                                ContextInputManifestWriteOutcomeUnknown,
+                            ),
+                        ):
+                            state.scratchpad[
+                                "context_input_latch_after_terminalization"
+                            ] = True
+                        break
+                    input_audit = build_context_compile_input_audit(
+                        manifest=input_manifest,
+                        candidate=manifest_candidate,
+                        write_result=ContextInputManifestWriteResult(
+                            outcome=manifest_write.outcome,
+                            artifact_id=manifest_write.artifact_id,
+                            content_fingerprint=(manifest_write.content_fingerprint),
+                        ),
+                        transcript_message_count=len(
+                            prepared_context_input.normalized_transcript.transcript.messages
+                        ),
+                        transcript_pair_count=len(
+                            prepared_context_input.normalized_transcript.transcript.tool_pairs
+                        ),
+                        tool_result_unit_count=len(
+                            prepared_context_input.prepared_tool_results.units
+                        ),
+                    )
+                    render_output = render_prepared_tool_result_units(
+                        prepared=prepared_context_input.prepared_tool_results,
+                        transcript=(
+                            prepared_context_input.normalized_transcript.transcript
+                        ),
+                        token_estimator=resolved_call.target.token_estimator,
+                    )
+                    validate_prepared_tool_result_render_output(
+                        output=render_output,
+                        resolved_call=resolved_call,
+                        context_id=context_id,
+                        model_call_index=model_call_index,
+                    )
+                    compiled_context = compile_context_from_facts(
+                        facts=prepared_context_input.invocation,
+                        transcript=prepared_context_input.normalized_transcript.transcript,
+                        rendered_tool_results=render_output,
+                        section_candidates=prepared_context_input.prepared_candidates,
+                    )
+                    _validate_prepared_context_input(
+                        prepared_context_input=prepared_context_input,
+                        compiled_context=compiled_context,
+                    )
+                    break
+                except ContextInputPreparationError as exc:
+                    if (
+                        exc.reason_code
+                        is ContextInputFailureReasonCode.LEDGER_UNTRUSTED
+                        or self.runtime_session.reconciliation_required
+                    ):
+                        raise
+                    input_failure = _context_pre_manifest_input_failure(
+                        error=exc,
+                        context_id=context_id,
+                        resolved_model_call_id=(
+                            resolved_call.fact.resolved_model_call_id
+                        ),
+                        model_call_index=model_call_index,
+                        compile_attempt_index=compile_attempt_index,
+                        context_retry_index=context_retry_index,
+                    )
+                    state.status = LoopStatus.FAILED
+                    state.stop_reason = RunStopReason.MODEL_ERROR
+                    state.error_message = str(exc)
+                    state.transition(LoopTransition.FAIL)
+                    yield await self.runtime_session.emit(
+                        ContextCompiledEvent(
+                            **self._event_context(state).event_fields(),
+                            status="failed",
+                            failure_stage=exc.failure_stage,
+                            context_id=context_id,
+                            model_call_index=model_call_index,
+                            compile_attempt_index=compile_attempt_index,
+                            context_retry_index=context_retry_index,
+                            resolved_call=resolved_call.fact,
+                            budget=_empty_context_budget_report(resolved_call),
+                            diagnostics=[
+                                {
+                                    "severity": "error",
+                                    "code": exc.reason_code.value,
+                                    "message": str(exc)[:512],
+                                    "failure_stage": exc.failure_stage,
+                                }
+                            ],
+                            input_failure=input_failure,
+                        ),
+                        state=state,
+                    )
+                    yield await self.runtime_session.emit(
+                        RunErrorEvent(
+                            **self._event_context(state).event_fields(),
+                            message=str(exc),
+                            code=f"context_input_{exc.reason_code.value}",
+                        ),
+                        state=state,
                     )
                     break
                 except ContextBudgetExceeded as exc:
@@ -1889,6 +2156,7 @@ class AgentRuntime:
                             lifecycle_decisions=[],
                             tool_result_render_decisions=pressure_tool_result_render_decisions,
                             tool_result_budget_report=pressure_tool_result_budget_report,
+                            input_audit=input_audit,
                         ),
                         state=state,
                     )
@@ -1917,6 +2185,7 @@ class AgentRuntime:
                         ContextCompiledEvent(
                             **self._event_context(state).event_fields(),
                             status="failed",
+                            failure_stage="context_budget",
                             context_id=failed_context_id,
                             model_call_index=failed_model_call_index,
                             compile_attempt_index=compile_attempt_index,
@@ -1929,6 +2198,7 @@ class AgentRuntime:
                             lifecycle_decisions=[],
                             tool_result_render_decisions=pressure_tool_result_render_decisions,
                             tool_result_budget_report=pressure_tool_result_budget_report,
+                            input_audit=input_audit,
                         ),
                         state=state,
                     )
@@ -1941,51 +2211,143 @@ class AgentRuntime:
                         state=state,
                     )
                     break
+                except Exception as exc:
+                    if self.runtime_session.reconciliation_required:
+                        raise
+                    if input_audit is None:
+                        raise
+                    failure_stage = (
+                        "tool_result_render"
+                        if render_output is None
+                        else "context_compile"
+                    )
+                    state.status = LoopStatus.FAILED
+                    state.stop_reason = RunStopReason.MODEL_ERROR
+                    state.error_message = str(exc)
+                    state.transition(LoopTransition.FAIL)
+                    yield await self.runtime_session.emit(
+                        ContextCompiledEvent(
+                            **self._event_context(state).event_fields(),
+                            status="failed",
+                            failure_stage=failure_stage,
+                            context_id=context_id,
+                            model_call_index=model_call_index,
+                            compile_attempt_index=compile_attempt_index,
+                            context_retry_index=context_retry_index,
+                            resolved_call=resolved_call.fact,
+                            budget=_empty_context_budget_report(resolved_call),
+                            diagnostics=[
+                                {
+                                    "severity": "error",
+                                    "code": f"context_{failure_stage}_failed",
+                                    "message": (f"{type(exc).__name__}: {exc}")[:512],
+                                    "failure_stage": failure_stage,
+                                }
+                            ],
+                            input_audit=input_audit,
+                        ),
+                        state=state,
+                    )
+                    yield await self.runtime_session.emit(
+                        RunErrorEvent(
+                            **self._event_context(state).event_fields(),
+                            message=f"{type(exc).__name__}: {exc}",
+                            code=f"context_{failure_stage}_failed",
+                        ),
+                        state=state,
+                    )
+                    break
             if compiled_context is None:
                 break
             state.scratchpad["current_context_id"] = compiled_context.context_id
             state.scratchpad["current_model_call_index"] = model_call_index
-            yield await self.runtime_session.emit(
-                ContextCompiledEvent(
-                    **self._event_context(state).event_fields(),
-                    context_id=compiled_context.context_id,
-                    model_call_index=model_call_index,
-                    compile_attempt_index=compile_attempt_index,
-                    context_retry_index=context_retry_index,
-                    resolved_call=resolved_call.fact,
-                    budget=compiled_context.budget.to_event_value(),
-                    sections=[
-                        section.to_event_value()
-                        for section in compiled_context.sections
-                    ],
-                    tool_specs=[
-                        tool.to_event_value() for tool in compiled_context.tool_specs
-                    ],
-                    diagnostics=[
-                        diagnostic.to_event_value()
-                        for diagnostic in compiled_context.diagnostics
-                    ],
-                    lifecycle_decisions=[
-                        decision.to_event_value()
-                        for decision in compiled_context.lifecycle_decisions
-                    ],
-                    tool_result_render_decisions=[
-                        dict(decision)
-                        for decision in compiled_context.tool_result_render_decisions
-                    ],
-                    tool_result_budget_report=dict(
-                        compiled_context.tool_result_budget_report
-                    ),
+            context_compiled_candidate = ContextCompiledEvent(
+                **self._event_context(state).event_fields(),
+                context_id=compiled_context.context_id,
+                model_call_index=model_call_index,
+                compile_attempt_index=compile_attempt_index,
+                context_retry_index=context_retry_index,
+                resolved_call=resolved_call.fact,
+                budget=compiled_context.budget.to_event_value(),
+                sections=[
+                    section.to_event_value() for section in compiled_context.sections
+                ],
+                tool_specs=[
+                    tool.to_event_value() for tool in compiled_context.tool_specs
+                ],
+                diagnostics=[
+                    diagnostic.to_event_value()
+                    for diagnostic in compiled_context.diagnostics
+                ],
+                lifecycle_decisions=[
+                    dict(decision) for decision in compiled_context.lifecycle_decisions
+                ],
+                tool_result_render_decisions=[
+                    dict(decision)
+                    for decision in compiled_context.tool_result_render_decisions
+                ],
+                tool_result_budget_report=dict(
+                    compiled_context.tool_result_budget_report
                 ),
-                state=state,
+                tool_result_render_decision_facts=(
+                    compiled_context.tool_result_render_decision_facts
+                ),
+                tool_result_render_operational_facts=(
+                    compiled_context.tool_result_render_operational_facts
+                ),
+                input_audit=input_audit,
+                provider_neutral_payload_fingerprint=(
+                    provider_neutral_payload_fingerprint(compiled_context.llm_context)
+                ),
+                canonical_render_decisions_fingerprint=(
+                    canonical_render_decisions_fingerprint(
+                        compiled_context.tool_result_render_decision_facts
+                    )
+                ),
             )
+            try:
+                stored_context_compiled = await self.runtime_session.emit(
+                    context_compiled_candidate,
+                    state=state,
+                )
+            except EventPublicationAfterCommitError as exc:
+                if any(
+                    event.id == context_compiled_candidate.id
+                    for event in exc.result.committed_events
+                ):
+                    self._commit_prepared_context_caches(
+                        prepared_context_input=prepared_context_input,
+                        render_output=render_output,
+                    )
+                raise
+            self._commit_prepared_context_caches(
+                prepared_context_input=prepared_context_input,
+                render_output=render_output,
+            )
+            yield stored_context_compiled
             context = replace(
                 compiled_context.llm_context,
                 resolved_model_call_id=resolved_call.fact.resolved_model_call_id,
                 target_fingerprint=resolved_call.target.fact.target_fingerprint,
             )
+            selected_subagent_result_ids = (
+                prepared_context_input.invocation.fact.candidate_source_selections[
+                    0
+                ].selected_source_ids
+            )
+            if selected_subagent_result_ids and self.subagent_runtime is None:
+                raise RuntimeError(
+                    "canonical subagent selection lacks a bound graph runtime"
+                )
+            selected_subagent_results = (
+                self.subagent_runtime.materialize_result_selection(
+                    selected_subagent_result_ids
+                )
+                if selected_subagent_result_ids
+                else ()
+            )
             deliverable_subagent_results = (
-                pending_subagent_results
+                selected_subagent_results
                 if _compiled_section_included(
                     compiled_context, _SUBAGENT_RESULTS_SECTION_ID
                 )
@@ -2112,7 +2474,7 @@ class AgentRuntime:
                     state.messages.append(
                         SystemMsg(
                             _PLAN_REVISION_REQUIRED_INSTRUCTION_NAME,
-                            _plan_revision_required_instruction(
+                            render_plan_revision_instruction(
                                 str(
                                     state.scratchpad.get("plan_revision_feedback") or ""
                                 )
@@ -2332,6 +2694,7 @@ class AgentRuntime:
                 tool_call_name=tool_name,
                 output="MCP input-required interaction expired before it was resumed.",
                 result_state=ToolResultState.ERROR,
+                tool_arguments=dict(original_request.get("arguments") or {}),
                 tool_observation_timing_seed={**timing_seed, "resumed_at": utc_now()}
                 if timing_seed
                 else None,
@@ -2401,10 +2764,9 @@ class AgentRuntime:
                     "binding generation changed."
                 ),
                 result_state=ToolResultState.ERROR,
+                tool_arguments=gate_call.arguments,
                 tool_observation_timing_seed=(
-                    {**timing_seed, "resumed_at": utc_now()}
-                    if timing_seed
-                    else None
+                    {**timing_seed, "resumed_at": utc_now()} if timing_seed else None
                 ),
             ):
                 yield event
@@ -2489,6 +2851,7 @@ class AgentRuntime:
                         output=f"tool {tool_name!r} cannot resume MCP input-required",
                         result_state=ToolResultState.ERROR,
                         tool_observation_timing_seed=resume_timing_seed,
+                        tool_arguments=gate_call.arguments,
                     ):
                         yield event
                 else:
@@ -2546,6 +2909,7 @@ class AgentRuntime:
                                 tool_call_name=tool_name,
                                 output="MCP input-required interaction exceeded the maximum round count.",
                                 result_state=ToolResultState.ERROR,
+                                tool_arguments=gate_call.arguments,
                                 tool_observation_timing_seed=(
                                     {**timing_seed, "resumed_at": utc_now()}
                                     if timing_seed
@@ -2568,6 +2932,8 @@ class AgentRuntime:
                         tool_call_name=tool_name,
                         output=result.output,
                         result_state=result.status,
+                        tool_arguments=gate_call.arguments,
+                        execution_result=result,
                         tool_observation_timing_seed={
                             **timing_seed,
                             "resumed_at": utc_now(),
@@ -2611,17 +2977,23 @@ class AgentRuntime:
         ]
         protected_model_visible_messages_after: tuple[LLMMessage, ...] = ()
         if state.run_model_target is not None:
-            current_user_anchor = f"user-message:{state.run_id}"
-            segmented = render_segmented_llm_messages(
-                model_visible_messages,
-                self.budget,
-                current_user_anchor,
+            projection = await prepare_live_transcript_projection(
+                runtime_session=self.runtime_session,
+                working_set=self._require_run_working_set(state),
+                budget=self.budget,
+            )
+            rendered = render_prepared_tool_result_units(
+                prepared=projection.prepared_tool_results,
+                transcript=projection.normalized_transcript.transcript,
                 token_estimator=state.run_model_target.token_estimator,
-                decision_cache=self.tool_result_render_decision_cache,
+            )
+            lowered = lower_transcript_for_context(
+                transcript=projection.normalized_transcript.transcript,
+                rendered_tool_results=rendered,
             )
             protected_model_visible_messages_after = (
-                *(segmented.current_user_messages or ()),
-                *(segmented.current_run_tail_messages or ()),
+                *lowered.current_user_messages,
+                *lowered.current_run_tail_messages,
             )
         result = await self.context_compactor.maybe_compact_before_followup(
             state=state,
@@ -2677,6 +3049,7 @@ class AgentRuntime:
             tool_call_name=tool_name,
             output=output,
             result_state=ToolResultState.SUCCESS,
+            tool_arguments=dict(payload),
         ):
             yield event
 
@@ -2769,6 +3142,7 @@ class AgentRuntime:
             tool_call_name="exit_plan",
             output=output,
             result_state=ToolResultState.SUCCESS,
+            tool_arguments=dict(payload),
         ):
             yield event
 
@@ -2918,12 +3292,8 @@ class AgentRuntime:
                             candidate, state=state
                         )
                     except BaseException as retry_error:
-                        if isinstance(
-                            retry_error, EventPublicationAfterCommitError
-                        ):
-                            retry_confirmed = tuple(
-                                retry_error.result.committed_events
-                            )
+                        if isinstance(retry_error, EventPublicationAfterCommitError):
+                            retry_confirmed = tuple(retry_error.result.committed_events)
                         else:
                             try:
                                 retry_confirmation = (
@@ -2936,9 +3306,7 @@ class AgentRuntime:
                                 raise
                             if retry_confirmation.missing_event_ids:
                                 raise
-                            retry_confirmed = tuple(
-                                retry_confirmation.committed_events
-                            )
+                            retry_confirmed = tuple(retry_confirmation.committed_events)
                         if len(retry_confirmed) != 1 or not isinstance(
                             retry_confirmed[0], RunEndEvent
                         ):
@@ -2947,6 +3315,7 @@ class AgentRuntime:
                                 "RunEnd retry confirmation was not exact"
                             ) from retry_error
                         state.finalized = True
+                        self._latch_context_input_after_terminalization(state)
                         state.scratchpad["run_end_commit_state"] = "committed"
                         state.scratchpad.pop("pending_run_end_candidate", None)
                         raise
@@ -2955,6 +3324,7 @@ class AgentRuntime:
                             "RunEnd bounded retry returned wrong event type"
                         )
                     state.finalized = True
+                    self._latch_context_input_after_terminalization(state)
                     state.scratchpad["run_end_commit_state"] = "committed"
                     state.scratchpad.pop("pending_run_end_candidate", None)
                     yield stored_retry
@@ -2964,15 +3334,21 @@ class AgentRuntime:
                 self.runtime_session.latch_event_commit_outcome_unknown()
                 raise RuntimeError("RunEnd confirmation was not exact") from exc
             state.finalized = True
+            self._latch_context_input_after_terminalization(state)
             state.scratchpad["run_end_commit_state"] = "committed"
             state.scratchpad.pop("pending_run_end_candidate", None)
             raise
         if not isinstance(stored, RunEndEvent):
             raise RuntimeError("RunEnd commit returned wrong event type")
         state.finalized = True
+        self._latch_context_input_after_terminalization(state)
         state.scratchpad["run_end_commit_state"] = "committed"
         state.scratchpad.pop("pending_run_end_candidate", None)
         yield stored
+
+    def _latch_context_input_after_terminalization(self, state: LoopState) -> None:
+        if state.scratchpad.pop("context_input_latch_after_terminalization", False):
+            self.runtime_session.latch_context_input_reconciliation_required()
 
     def _run_result(self, state: LoopState) -> AgentRunResult:
         return AgentRunResult(
@@ -3133,6 +3509,7 @@ class AgentRuntime:
                         role=self.model_role.value,
                         scope=state.current_scope or "session",
                         token_budget=self.budget.projection_token_budget,
+                        projection_kind=_memory_projection_kind(baseline),
                         included_memory_ids=_projection_ids(baseline),
                         summary=_projection_summary(baseline),
                         metadata={
@@ -3178,6 +3555,7 @@ class AgentRuntime:
                 role=self.model_role.value,
                 scope=state.current_scope or "session",
                 token_budget=self.budget.projection_token_budget,
+                projection_kind=_memory_projection_kind(projection),
                 included_memory_ids=_projection_ids(projection),
                 summary=_projection_summary(projection),
             ),
@@ -3195,11 +3573,12 @@ class AgentRuntime:
                 parsed_calls.append(_parse_tool_call(block))
             except ValueError as exc:
                 stored_events = await self.runtime_session.emit_many(
-                    build_tool_result_error_events(
-                        self._event_context(state),
+                    self._typed_tool_result_error_events(
+                        state,
                         tool_call_id=block.id,
                         tool_call_name=block.name,
                         message=str(exc),
+                        failure_stage="malformed_arguments",
                     ),
                     state=state,
                 )
@@ -3219,17 +3598,19 @@ class AgentRuntime:
 
         duplicate_ids = _duplicate_tool_call_ids(parsed_calls)
         if duplicate_ids:
-            unique_calls: list[ToolCall] = []
-            for call in parsed_calls:
-                if call.id not in duplicate_ids:
-                    unique_calls.append(call)
-                    continue
+            unique_calls = [
+                call for call in parsed_calls if call.id not in duplicate_ids
+            ]
+            for duplicate_id in sorted(duplicate_ids):
+                call = next(call for call in parsed_calls if call.id == duplicate_id)
                 stored_events = await self.runtime_session.emit_many(
-                    build_tool_result_error_events(
-                        self._event_context(state),
+                    self._typed_tool_result_error_events(
+                        state,
                         tool_call_id=call.id,
                         tool_call_name=call.name,
                         message=f"Duplicate tool_call_id in assistant reply: {call.id}",
+                        arguments=call.arguments,
+                        failure_stage="policy_denied",
                     ),
                     state=state,
                 )
@@ -3453,6 +3834,7 @@ class AgentRuntime:
                     tool_call_name=workflow_call.name,
                     output=f"unknown workflow tool: {workflow_call.name}",
                     result_state=ToolResultState.ERROR,
+                    tool_arguments=workflow_call.arguments,
                 ):
                     yield event
         except Exception as exc:
@@ -3462,6 +3844,7 @@ class AgentRuntime:
                 tool_call_name=workflow_call.name,
                 output=f"[TOOL_ERROR] {type(exc).__name__}: {exc}",
                 result_state=ToolResultState.ERROR,
+                tool_arguments=workflow_call.arguments,
             ):
                 yield event
 
@@ -3477,6 +3860,8 @@ class AgentRuntime:
                     "retry after the workflow step completes"
                 ),
                 result_state=ToolResultState.DENIED,
+                tool_arguments=call.arguments,
+                failure_stage="workflow_short_circuit",
             ):
                 yield event
 
@@ -3492,6 +3877,7 @@ class AgentRuntime:
                 tool_call_name=call.name,
                 output=output,
                 result_state=ToolResultState.SUCCESS,
+                tool_arguments=call.arguments,
             ):
                 yield event
             return
@@ -3529,6 +3915,7 @@ class AgentRuntime:
             tool_call_name=call.name,
             output=output,
             result_state=ToolResultState.SUCCESS,
+            tool_arguments=call.arguments,
         ):
             yield event
         state.status = LoopStatus.FINISHED
@@ -3545,6 +3932,8 @@ class AgentRuntime:
                 tool_call_name=call.name,
                 output="ask_plan_question can only be used while Plan workflow is active",
                 result_state=ToolResultState.DENIED,
+                tool_arguments=call.arguments,
+                failure_stage="workflow_state_denied",
             ):
                 yield event
             return
@@ -3598,6 +3987,8 @@ class AgentRuntime:
                 tool_call_name=call.name,
                 output="exit_plan can only be used while Plan workflow is active",
                 result_state=ToolResultState.DENIED,
+                tool_arguments=call.arguments,
+                failure_stage="workflow_state_denied",
             ):
                 yield event
             return
@@ -3646,7 +4037,104 @@ class AgentRuntime:
         output: str,
         result_state: ToolResultState,
         tool_observation_timing_seed: dict[str, Any] | None = None,
+        tool_arguments: dict[str, Any] | None = None,
+        failure_stage: str | None = None,
+        execution_result: ToolExecutionResult | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        prior_result_events = [
+            event
+            for event in self.runtime_session.event_log.iter(run_id=state.run_id)
+            if getattr(event, "tool_call_id", None) == tool_call_id
+            and isinstance(event, (ToolResultStartEvent, ToolResultEndEvent))
+        ]
+        prior_starts = [
+            event
+            for event in prior_result_events
+            if isinstance(event, ToolResultStartEvent)
+        ]
+        prior_ends = [
+            event
+            for event in prior_result_events
+            if isinstance(event, ToolResultEndEvent)
+        ]
+        if len(prior_starts) > 1 or len(prior_ends) > 1:
+            raise RuntimeError("tool-result ledger contains duplicate boundaries")
+        existing_start = prior_starts[0] if prior_starts and not prior_ends else None
+        exposure = self._require_capability_exposure(state)
+        descriptor = exposure.descriptors_by_name.get(tool_call_name)
+        semantics = None
+        semantics_factory = None
+        if descriptor is not None:
+            arguments = dict(tool_arguments or {})
+            frozen_arguments = freeze_json(arguments)
+            if not isinstance(frozen_arguments, FrozenJsonObjectFact):
+                raise AssertionError("tool arguments must freeze as an object")
+            attribution = self._descriptor_render_attribution(state, descriptor)
+            if failure_stage is not None:
+                timing_variant = (
+                    descriptor.result_render_contract.pre_execution_denial_variant_code
+                )
+
+                def semantics_factory(timing):
+                    return build_pre_execution_denial_semantics(
+                        descriptor=descriptor,
+                        descriptor_attribution=attribution,
+                        requested_arguments=frozen_arguments,
+                        message=output,
+                        result_state=ToolResultStateFact(result_state.value),
+                        reason_code=failure_stage,
+                        failure_stage=failure_stage,
+                        capture_policy=self.tool_executor.essential_capture_policy,
+                        registry=self.tool_executor.semantics_registry,
+                        observation_timing=timing,
+                    )
+            else:
+                runtime_result = execution_result or ToolExecutionResult(
+                    call_id=tool_call_id,
+                    tool_name=tool_call_name,
+                    status=result_state,
+                    output=output,
+                )
+                if (
+                    runtime_result.call_id != tool_call_id
+                    or runtime_result.tool_name != tool_call_name
+                    or runtime_result.status is not result_state
+                    or runtime_result.output != output
+                ):
+                    raise ValueError("typed synthetic tool result identity mismatch")
+                call = ToolCall(
+                    id=tool_call_id,
+                    name=tool_call_name,
+                    arguments=arguments,
+                )
+                timing_variant = (
+                    runtime_result.semantics_input.semantics_input_kind
+                    if runtime_result.semantics_input is not None
+                    else ToolResultRenderVariantCode.GENERIC_RESULT
+                )
+
+                def semantics_factory(timing):
+                    return build_execution_semantics(
+                        descriptor=descriptor,
+                        descriptor_attribution=attribution,
+                        call=call,
+                        result=runtime_result,
+                        observation_timing=timing,
+                        capture_policy=self.tool_executor.essential_capture_policy,
+                        registry=self.tool_executor.semantics_registry,
+                    )
+
+            tool_observation_timing_seed = {
+                **(tool_observation_timing_seed or {}),
+                "tool_origin": tool_origin_for_descriptor_variant(
+                    descriptor,
+                    timing_variant,
+                ),
+            }
+        else:
+            semantics = build_unknown_result_semantics(
+                result_state=ToolResultStateFact(result_state.value)
+            )
         candidates = tuple(
             build_tool_result_error_events(
                 self._event_context(state),
@@ -3655,12 +4143,13 @@ class AgentRuntime:
                 message=output,
                 state=result_state,
                 tool_observation_timing_seed=tool_observation_timing_seed,
+                existing_start=existing_start,
+                semantics=semantics,
+                semantics_factory=semantics_factory,
             )
         )
         commit_outcome_key = (state.run_id, tool_call_id)
-        track_mcp_terminal = (
-            commit_outcome_key in self._mcp_terminal_commit_outcomes
-        )
+        track_mcp_terminal = commit_outcome_key in self._mcp_terminal_commit_outcomes
         if track_mcp_terminal:
             self._mcp_terminal_commit_outcomes[commit_outcome_key] = "attempting"
         try:
@@ -3674,7 +4163,10 @@ class AgentRuntime:
             stored_events = list(exc.result.committed_events)
             self._record_tool_result_events(
                 state,
-                stored_events=stored_events,
+                stored_events=(
+                    self._committed_tool_result_events(state, tool_call_id=tool_call_id)
+                    or stored_events
+                ),
                 tool_call_id=tool_call_id,
                 tool_call_name=tool_call_name,
             )
@@ -3686,9 +4178,7 @@ class AgentRuntime:
                 # A failed confirmation is UNKNOWN, never NONE.  Preserve any
                 # external resource owner and block further mutation/teardown.
                 if track_mcp_terminal:
-                    self._mcp_terminal_commit_outcomes[commit_outcome_key] = (
-                        "untrusted"
-                    )
+                    self._mcp_terminal_commit_outcomes[commit_outcome_key] = "untrusted"
                 self.runtime_session.latch_event_commit_outcome_unknown()
                 raise
             if confirmation.missing_event_ids:
@@ -3702,7 +4192,10 @@ class AgentRuntime:
             stored_events = list(confirmation.committed_events)
             self._record_tool_result_events(
                 state,
-                stored_events=stored_events,
+                stored_events=(
+                    self._committed_tool_result_events(state, tool_call_id=tool_call_id)
+                    or stored_events
+                ),
                 tool_call_id=tool_call_id,
                 tool_call_name=tool_call_name,
             )
@@ -3713,7 +4206,10 @@ class AgentRuntime:
             yield event
         self._record_tool_result_events(
             state,
-            stored_events=stored_events,
+            stored_events=(
+                self._committed_tool_result_events(state, tool_call_id=tool_call_id)
+                or stored_events
+            ),
             tool_call_id=tool_call_id,
             tool_call_name=tool_call_name,
         )
@@ -3813,6 +4309,8 @@ class AgentRuntime:
             tool_call_name=call.name,
             output=message,
             result_state=ToolResultState.ERROR,
+            tool_arguments=call.arguments,
+            failure_stage="workflow_budget_exceeded",
         ):
             yield event
         yield await self.runtime_session.emit(
@@ -3903,12 +4401,14 @@ class AgentRuntime:
                 async for event in flush_parsed_calls():
                     yield event
                 stored_events = await self.runtime_session.emit_many(
-                    build_tool_result_error_events(
-                        self._event_context(state),
+                    self._typed_tool_result_error_events(
+                        state,
                         tool_call_id=block.id,
                         tool_call_name=block.name,
                         message="tool call denied by user approval",
-                        state=ToolResultState.DENIED,
+                        result_state=ToolResultState.DENIED,
+                        arguments=_tool_block_arguments_for_semantics(block),
+                        failure_stage="permission_denied",
                     ),
                     state=state,
                 )
@@ -3929,11 +4429,12 @@ class AgentRuntime:
                 async for event in flush_parsed_calls():
                     yield event
                 stored_events = await self.runtime_session.emit_many(
-                    build_tool_result_error_events(
-                        self._event_context(state),
+                    self._typed_tool_result_error_events(
+                        state,
                         tool_call_id=block.id,
                         tool_call_name=block.name,
                         message=str(exc),
+                        failure_stage="malformed_arguments",
                     ),
                     state=state,
                 )
@@ -3995,6 +4496,8 @@ class AgentRuntime:
             record_event=self.runtime_session.make_thread_recorder(state=state),
             artifact_service=self.tool_executor.artifact_service,
             runtime_session_id=self.runtime_session.runtime_session_id,
+            semantics_registry=self.tool_executor.semantics_registry,
+            essential_capture_policy=(self.tool_executor.essential_capture_policy),
         )
 
         async def execute_call(
@@ -4032,6 +4535,9 @@ class AgentRuntime:
                         call,
                         event_context=self._event_context(state),
                         descriptor=descriptor,
+                        descriptor_attribution=self._descriptor_render_attribution(
+                            state, descriptor
+                        ),
                         context_id=_optional_scratchpad_str(
                             state, "current_context_id"
                         ),
@@ -4048,9 +4554,10 @@ class AgentRuntime:
                     call,
                     event_context=self._event_context(state),
                     descriptor=descriptor,
-                    context_id=_optional_scratchpad_str(
-                        state, "current_context_id"
+                    descriptor_attribution=self._descriptor_render_attribution(
+                        state, descriptor
                     ),
+                    context_id=_optional_scratchpad_str(state, "current_context_id"),
                     model_call_index=_optional_scratchpad_int(
                         state, "current_model_call_index"
                     ),
@@ -4250,9 +4757,216 @@ def _compiled_section_included(compiled_context, section_id: str) -> bool:
     )
 
 
+def _empty_context_budget_report(resolved_call) -> ContextBudgetReportEvent:
+    target = resolved_call.target
+    return ContextBudgetReportEvent(
+        target_fingerprint=target.fact.target_fingerprint,
+        resolved_model_call_id=resolved_call.fact.resolved_model_call_id,
+        measurement_stage="tool_result_render",
+        total_context_tokens=target.limits.total_context_tokens,
+        max_input_tokens=target.limits.max_input_tokens,
+        max_output_tokens=target.limits.max_output_tokens,
+        effective_output_tokens=target.context_budget.effective_output_tokens,
+        safety_margin_tokens=target.context_budget.safety_margin_tokens,
+        input_budget_tokens=target.context_budget.input_budget_tokens,
+        estimator=target.token_estimator.fact,
+    )
+
+
+def _context_manifest_input_failure(
+    *,
+    snapshot,
+    manifest,
+    candidate,
+    error: BaseException,
+) -> ContextCompileInputFailureFact:
+    if isinstance(error, ContextInputManifestConfirmedAbsent):
+        outcome = "confirmed_absent"
+        reason = ContextInputFailureReasonCode.MANIFEST_CONFIRMED_ABSENT
+    elif isinstance(error, ContextInputManifestWriteConflict):
+        outcome = "conflict"
+        reason = ContextInputFailureReasonCode.MANIFEST_CONFLICT
+    elif isinstance(error, ContextInputManifestWriteDeadlineExceeded):
+        outcome = "deadline_exceeded"
+        reason = ContextInputFailureReasonCode.MANIFEST_DEADLINE_EXCEEDED
+    else:
+        outcome = "outcome_unknown"
+        reason = ContextInputFailureReasonCode.MANIFEST_OUTCOME_UNKNOWN
+    fact = snapshot.invocation.fact
+    available = tuple(
+        sorted(
+            (
+                (
+                    "prepared_candidate_set",
+                    snapshot.prepared_candidates.candidate_set_fingerprint,
+                ),
+                ("snapshot_fact", fact.snapshot_fact_fingerprint),
+                (
+                    "tool_result_render_input",
+                    snapshot.prepared_tool_results.render_input_fingerprint,
+                ),
+                (
+                    "transcript",
+                    snapshot.normalized_transcript.transcript.transcript_fingerprint,
+                ),
+            )
+        )
+    )
+    return ContextCompileInputFailureFact(
+        failure_stage="input_manifest_write",
+        context_id=fact.identity.context_id,
+        resolved_model_call_id=fact.resolved_model_call.resolved_model_call_id,
+        model_call_index=fact.identity.model_call_index,
+        compile_attempt_index=fact.identity.compile_attempt_index,
+        context_retry_index=fact.identity.context_retry_index,
+        snapshot_id=fact.identity.snapshot_id,
+        source_through_sequence=fact.identity.source_through_sequence,
+        available_component_fingerprints=available,
+        input_aggregate_fingerprint=manifest.input_aggregate_fingerprint,
+        manifest_candidate_artifact_id=candidate.artifact_id,
+        manifest_candidate_content_fingerprint=candidate.content_fingerprint,
+        manifest_candidate_metadata_fingerprint=candidate.metadata_fingerprint,
+        manifest_write_outcome=outcome,
+        reason_code=reason,
+    )
+
+
+def _context_pre_manifest_input_failure(
+    *,
+    error: ContextInputPreparationError,
+    context_id: str,
+    resolved_model_call_id: str,
+    model_call_index: int,
+    compile_attempt_index: int,
+    context_retry_index: int,
+) -> ContextCompileInputFailureFact:
+    return ContextCompileInputFailureFact(
+        failure_stage=error.failure_stage,
+        context_id=context_id,
+        resolved_model_call_id=resolved_model_call_id,
+        model_call_index=model_call_index,
+        compile_attempt_index=compile_attempt_index,
+        context_retry_index=context_retry_index,
+        snapshot_id=error.snapshot_id,
+        source_through_sequence=error.source_through_sequence,
+        available_component_fingerprints=(error.available_component_fingerprints),
+        input_aggregate_fingerprint=None,
+        manifest_candidate_artifact_id=None,
+        manifest_candidate_content_fingerprint=None,
+        manifest_candidate_metadata_fingerprint=None,
+        manifest_write_outcome="not_attempted",
+        reason_code=error.reason_code,
+    )
+
+
+def _context_manifest_preparation_error(
+    prepared_context_input,
+    *,
+    cause: Exception,
+) -> ContextInputPreparationError:
+    fact = prepared_context_input.invocation.fact
+    available = tuple(
+        sorted(
+            (
+                (
+                    "prepared_candidate_set",
+                    prepared_context_input.prepared_candidates.candidate_set_fingerprint,
+                ),
+                ("snapshot_fact", fact.snapshot_fact_fingerprint),
+                (
+                    "tool_result_render_input",
+                    prepared_context_input.prepared_tool_results.render_input_fingerprint,
+                ),
+                (
+                    "transcript",
+                    prepared_context_input.normalized_transcript.transcript.transcript_fingerprint,
+                ),
+            )
+        )
+    )
+    return ContextInputPreparationError(
+        failure_stage="candidate_materialization",
+        reason_code=ContextInputFailureReasonCode.CANDIDATE_INVALID,
+        snapshot_id=fact.identity.snapshot_id,
+        source_through_sequence=fact.identity.source_through_sequence,
+        available_component_fingerprints=available,
+        cause=cause,
+    )
+
+
+def _validate_prepared_context_input(
+    *, prepared_context_input, compiled_context
+) -> None:
+    """Fail closed when the prepared immutable input disagrees with compiled output."""
+
+    fact = prepared_context_input.invocation.fact
+    if fact.identity.context_id != compiled_context.context_id:
+        raise RuntimeError("immutable context snapshot context ID drift")
+    if fact.resolved_model_call != compiled_context.resolved_model_call:
+        raise RuntimeError("immutable context snapshot resolved-call drift")
+    compiled_names = tuple(sorted(item.name for item in compiled_context.tool_specs))
+    frozen_names = tuple(item.model_tool_name for item in fact.tool_specs)
+    if compiled_names != frozen_names:
+        raise RuntimeError("immutable context snapshot tool-spec drift")
+    compiled_descriptor_ids = tuple(
+        sorted(
+            item.descriptor_id
+            for item in compiled_context.tool_specs
+            if item.descriptor_id is not None
+        )
+    )
+    frozen_descriptor_ids = tuple(
+        sorted(item.descriptor_id for item in fact.tool_specs)
+    )
+    if compiled_descriptor_ids != frozen_descriptor_ids:
+        raise RuntimeError("immutable context snapshot descriptor attribution drift")
+    normalized = prepared_context_input.normalized_transcript
+    if normalized.transcript.current_user_anchor != (
+        fact.current_user_message.message_id
+    ):
+        raise RuntimeError("normalized transcript current-user anchor drift")
+    old_result_ids = tuple(
+        str(decision.get("tool_call_id"))
+        for decision in compiled_context.tool_result_render_decisions
+        if isinstance(decision, dict) and decision.get("tool_call_id")
+    )
+    normalized_result_ids = tuple(
+        unit.tool_call_id for unit in normalized.tool_result_units
+    )
+    if old_result_ids != normalized_result_ids:
+        raise RuntimeError(
+            "normalized transcript tool-result ordering drift: "
+            f"old={old_result_ids!r} normalized={normalized_result_ids!r}"
+        )
+    if (
+        prepared_context_input.prepared_tool_results.resolved_policy.basis
+        != fact.compile_policy.tool_result_basis
+    ):
+        raise RuntimeError("prepared tool-result policy drift")
+    compiled_section_ids = {section.id for section in compiled_context.sections}
+    missing_candidate_sections = tuple(
+        entry.candidate.source_instance_id
+        for entry in prepared_context_input.prepared_candidates.entries
+        if entry.candidate.source_instance_id not in compiled_section_ids
+    )
+    if missing_candidate_sections:
+        raise RuntimeError(
+            "typed context candidates are absent from old compiler sections: "
+            f"{missing_candidate_sections!r}"
+        )
+
+
 def _optional_scratchpad_str(state: LoopState, key: str) -> str | None:
     value = state.scratchpad.get(key)
     return value if isinstance(value, str) else None
+
+
+def _tool_block_arguments_for_semantics(block: ToolCallBlock) -> dict[str, Any]:
+    try:
+        value = json.loads(block.input or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _optional_scratchpad_int(state: LoopState, key: str) -> int | None:
@@ -4322,10 +5036,8 @@ def _tool_result_message_from_events(
             "freshness": "current_tool_observation",
             "clock_source": "event_created_at",
         }
-    if end is not None and isinstance(
-        end.metadata.get("tool_observation_timing"), dict
-    ):
-        timing = dict(end.metadata["tool_observation_timing"])
+    if end is not None:
+        timing = end.observation_timing.to_message_projection_payload()
         metadata["tool_observation_timing_by_call_id"] = {result_block.id: timing}
         metadata["tool_observation_timing"] = timing
     return Msg(
@@ -4353,15 +5065,13 @@ def _plan_exit_resolution_output(resolution: PlanExitResolution) -> dict[str, ob
     return payload
 
 
-def _plan_revision_required_instruction(user_feedback: str) -> str:
-    feedback = user_feedback.strip() or "(no additional feedback text was provided)"
-    return (
-        "Plan revision is still pending. The user requested a revision with this feedback:\n"
-        f"{feedback}\n\n"
-        "You must now present the revised plan by calling exit_plan. Do not provide a plain-text "
-        "final answer or implementation summary. Only call ask_plan_question if a new material "
-        "ambiguity genuinely blocks the revised plan."
-    )
+def _memory_projection_kind(
+    projection: dict[str, Any] | None,
+) -> Literal["memory", "working_context", "mixed"]:
+    raw = projection.get("projection_kind") if projection else None
+    if raw in {"working_context", "mixed"}:
+        return raw
+    return "memory"
 
 
 def _accepted_plan_artifact_id(run_id: str, exit_request_id: str) -> str:

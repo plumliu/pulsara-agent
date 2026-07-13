@@ -13,7 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -22,7 +21,6 @@ from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolResultArtifactRef,
-    ToolResultBlock,
     ToolResultState,
 )
 from pulsara_agent.ontology import memory
@@ -48,6 +46,11 @@ from pulsara_agent.primitives.permission import (
     preset_permission_payload,
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
+from pulsara_agent.primitives.context import (
+    ContextCompileInputAuditFact,
+    ContextCompileFailureStage,
+    ContextCompileInputFailureFact,
+)
 from pulsara_agent.primitives.run_boundary import (
     InteractionResumeBoundaryFact,
     NewRunBoundaryFact,
@@ -60,6 +63,19 @@ from pulsara_agent.primitives.run_entry import (
     validate_host_current_user_attribution,
     validate_subagent_current_user_attribution,
 )
+from pulsara_agent.primitives.tool_result import (
+    ExternalToolCallRequirementFact,
+    ExternalToolResultIngressFact,
+    TerminalPayloadTimingFact,
+    ToolResultEssentialCapturePolicyFact,
+    ToolResultEssentialFact,
+    ToolResultExecutionSemanticsFact,
+    ToolResultRenderProfileFact,
+    ToolResultRenderDecisionFact,
+    ToolResultRenderOperationalFact,
+    ToolResultStateFact,
+)
+from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 from pulsara_agent.primitives.run_lifecycle import (
     FAILURE_STOP_REASONS,
     RunStopReason,
@@ -230,91 +246,6 @@ class EventBase(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolObservationTiming(BaseModel):
-    """Pulsara-owned timing facts for a completed or suspended tool observation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    observed_at: str
-    source_started_at: str | None = None
-    source_ended_at: str | None = None
-    observation_duration_seconds: float | None = None
-    tool_reported_duration_seconds: float | None = None
-    freshness: Literal[
-        "current_tool_observation",
-        "background_process_observation",
-        "historical_tool_observation",
-        "suspended_tool_observation",
-        "unknown",
-    ] = "current_tool_observation"
-    clock_source: Literal[
-        "tool_result_events",
-        "tool_runtime_metadata",
-        "mixed",
-    ] = "tool_result_events"
-    tool_origin: Literal[
-        "builtin",
-        "mcp",
-        "custom",
-        "workflow",
-        "subagent_system",
-        "unknown",
-    ] = "unknown"
-    tool_name: str | None = None
-    tool_call_id: str | None = None
-    suspended_at: str | None = None
-    resumed_at: str | None = None
-
-    @field_validator(
-        "observed_at",
-        "source_started_at",
-        "source_ended_at",
-        "suspended_at",
-        "resumed_at",
-    )
-    @classmethod
-    def _validate_utc_timestamp(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = _parse_utc_timestamp(value)
-        if parsed is None:
-            raise ValueError("timestamp must be an ISO-8601 datetime with UTC offset")
-        return _format_utc_timestamp(parsed)
-
-    @field_validator("observation_duration_seconds", "tool_reported_duration_seconds")
-    @classmethod
-    def _validate_non_negative_duration(cls, value: float | None) -> float | None:
-        if value is not None and (not math.isfinite(value) or value < 0):
-            raise ValueError("duration must be finite and non-negative")
-        return value
-
-
-def _validate_tool_observation_timing_payload(
-    value: object, *, context: str
-) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{context} requires a tool observation timing object")
-    try:
-        timing = ToolObservationTiming.model_validate(value)
-    except ValidationError as exc:
-        raise ValueError(f"{context} is invalid") from exc
-    return timing.model_dump(mode="json", exclude_none=True)
-
-
-def _parse_utc_timestamp(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(timezone.utc)
-
-
-def _format_utc_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 class RunStartEvent(EventBase):
     type: Literal[EventType.RUN_START] = EventType.RUN_START
     user_input_chars: int
@@ -451,7 +382,9 @@ class McpCapabilitySnapshotInstalledEvent(EventBase):
             summary.reconcile_trigger for summary in self.coalesced_attempt_summaries
         )
         if not triggers or tuple(sorted(triggers)) != tuple(self.installation_triggers):
-            raise ValueError("MCP installation triggers must match changed attempt facts")
+            raise ValueError(
+                "MCP installation triggers must match changed attempt facts"
+            )
         return self
 
 
@@ -592,6 +525,7 @@ class ModelCallStartEvent(EventBase):
 class ContextCompiledEvent(EventBase):
     type: Literal[EventType.CONTEXT_COMPILED] = EventType.CONTEXT_COMPILED
     status: Literal["compiled", "pressure", "failed"] = "compiled"
+    failure_stage: ContextCompileFailureStage | None = None
     context_id: str
     model_call_index: int
     compile_attempt_index: int
@@ -604,9 +538,69 @@ class ContextCompiledEvent(EventBase):
     lifecycle_decisions: list[dict[str, Any]] = Field(default_factory=list)
     tool_result_render_decisions: list[dict[str, Any]] = Field(default_factory=list)
     tool_result_budget_report: dict[str, Any] = Field(default_factory=dict)
+    input_audit: ContextCompileInputAuditFact | None = None
+    input_failure: ContextCompileInputFailureFact | None = None
+    provider_neutral_payload_fingerprint: str | None = None
+    canonical_render_decisions_fingerprint: str | None = None
+    tool_result_render_decision_facts: tuple[ToolResultRenderDecisionFact, ...] = ()
+    tool_result_render_operational_facts: tuple[
+        ToolResultRenderOperationalFact, ...
+    ] = ()
 
     @model_validator(mode="after")
     def _validate_budget_stage(self) -> "ContextCompiledEvent":
+        if (self.input_audit is None) == (self.input_failure is None):
+            raise ValueError("context compile event requires exactly one input carrier")
+        if self.status == "failed":
+            if self.failure_stage is None:
+                raise ValueError("failed context compile requires failure stage")
+        elif self.failure_stage is not None:
+            raise ValueError("non-failed context compile cannot carry failure stage")
+        if self.status in {"compiled", "pressure"} and self.input_audit is None:
+            raise ValueError("compiled/pressure context requires full input audit")
+        exact_fingerprints = (
+            self.provider_neutral_payload_fingerprint,
+            self.canonical_render_decisions_fingerprint,
+        )
+        if self.status == "compiled":
+            if any(item is None for item in exact_fingerprints):
+                raise ValueError("compiled context requires exact replay fingerprints")
+        elif any(item is not None for item in exact_fingerprints):
+            raise ValueError(
+                "non-compiled context cannot carry exact replay fingerprints"
+            )
+        if self.input_audit is not None:
+            audit = self.input_audit
+            if (
+                audit.resolved_model_call_id
+                != self.resolved_call.resolved_model_call_id
+                or audit.model_call_index != self.model_call_index
+                or audit.compile_attempt_index != self.compile_attempt_index
+                or audit.context_retry_index != self.context_retry_index
+            ):
+                raise ValueError("context input audit outer identity mismatch")
+        if self.input_failure is not None:
+            failure = self.input_failure
+            if (
+                failure.failure_stage != self.failure_stage
+                or failure.context_id != self.context_id
+                or failure.resolved_model_call_id
+                != self.resolved_call.resolved_model_call_id
+                or failure.model_call_index != self.model_call_index
+                or failure.compile_attempt_index != self.compile_attempt_index
+                or failure.context_retry_index != self.context_retry_index
+            ):
+                raise ValueError("context input failure outer identity mismatch")
+        decision_ids = tuple(
+            item.unit_id for item in self.tool_result_render_decision_facts
+        )
+        operational_ids = tuple(
+            item.unit_id for item in self.tool_result_render_operational_facts
+        )
+        if decision_ids != operational_ids:
+            raise ValueError("context render decision/operational unit mismatch")
+        if len(decision_ids) != len(set(decision_ids)):
+            raise ValueError("context render decision unit IDs are not unique")
         if (
             self.status == "compiled"
             and self.budget.measurement_stage != "final_payload"
@@ -836,20 +830,27 @@ class ToolResultEndEvent(EventBase):
     tool_call_id: str
     state: ToolResultState
     artifacts: list[ToolResultArtifactRef] = Field(default_factory=list)
+    observation_timing: ToolObservationTimingFact
+    render_profile: ToolResultRenderProfileFact
+    essential_capture_policy: ToolResultEssentialCapturePolicyFact | None = None
+    essential_result: ToolResultEssentialFact | None = None
+    terminal_payload_timing: TerminalPayloadTimingFact | None = None
 
     @model_validator(mode="after")
     def _validate_tool_observation_timing(self) -> "ToolResultEndEvent":
-        timing = _validate_tool_observation_timing_payload(
-            self.metadata.get("tool_observation_timing"),
-            context="ToolResultEndEvent.metadata.tool_observation_timing",
-        )
-        embedded_tool_call_id = timing.get("tool_call_id")
+        embedded_tool_call_id = self.observation_timing.tool_call_id
         if (
             embedded_tool_call_id is not None
             and embedded_tool_call_id != self.tool_call_id
         ):
             raise ValueError("ToolResultEndEvent timing tool_call_id mismatch")
-        self.metadata["tool_observation_timing"] = timing
+        ToolResultExecutionSemanticsFact(
+            render_profile=self.render_profile,
+            result_state=ToolResultStateFact(self.state.value),
+            essential_capture_policy=self.essential_capture_policy,
+            essential_result=self.essential_result,
+            terminal_payload_timing=self.terminal_payload_timing,
+        )
         return self
 
 
@@ -873,65 +874,39 @@ class RequireExternalExecutionEvent(EventBase):
     type: Literal[EventType.REQUIRE_EXTERNAL_EXECUTION] = (
         EventType.REQUIRE_EXTERNAL_EXECUTION
     )
-    tool_calls: list[ToolCallBlock]
+    external_tool_calls: tuple[ExternalToolCallRequirementFact, ...]
+
+    @model_validator(mode="after")
+    def _requirements(self) -> "RequireExternalExecutionEvent":
+        ids = tuple(item.tool_call_id for item in self.external_tool_calls)
+        if not ids or len(ids) != len(set(ids)):
+            raise ValueError(
+                "external execution requirements must be non-empty and unique"
+            )
+        return self
 
 
 class ExternalExecutionResultEvent(EventBase):
     type: Literal[EventType.EXTERNAL_EXECUTION_RESULT] = (
         EventType.EXTERNAL_EXECUTION_RESULT
     )
-    execution_results: list[ToolResultBlock]
+    external_results: tuple[ExternalToolResultIngressFact, ...]
 
     @model_validator(mode="after")
-    def _validate_tool_observation_timing_map(self) -> "ExternalExecutionResultEvent":
-        timing_by_call_id = self.metadata.get("tool_observation_timing_by_call_id")
-        if not isinstance(timing_by_call_id, dict):
-            raise ValueError(
-                "ExternalExecutionResultEvent requires metadata.tool_observation_timing_by_call_id"
-            )
-        result_ids = [result.id for result in self.execution_results]
+    def _validate_external_results(self) -> "ExternalExecutionResultEvent":
+        result_ids = [
+            result.result_block.tool_call_id for result in self.external_results
+        ]
         duplicate_ids = sorted(
             {result_id for result_id in result_ids if result_ids.count(result_id) > 1}
         )
         if duplicate_ids:
             raise ValueError(
-                "ExternalExecutionResultEvent execution_results contain duplicate ids: "
+                "ExternalExecutionResultEvent external_results contain duplicate ids: "
                 + ", ".join(duplicate_ids)
             )
-        result_id_set = set(result_ids)
-        missing = [
-            result.id
-            for result in self.execution_results
-            if not isinstance(timing_by_call_id.get(result.id), dict)
-        ]
-        if missing:
-            raise ValueError(
-                "ExternalExecutionResultEvent timing map is missing tool result ids: "
-                + ", ".join(missing)
-            )
-        extra = sorted(
-            str(key) for key in timing_by_call_id if key not in result_id_set
-        )
-        if extra:
-            raise ValueError(
-                "ExternalExecutionResultEvent timing map contains unknown tool result ids: "
-                + ", ".join(extra)
-            )
-        for tool_call_id, timing_payload in list(timing_by_call_id.items()):
-            timing = _validate_tool_observation_timing_payload(
-                timing_payload,
-                context=f"ExternalExecutionResultEvent timing for {tool_call_id!r}",
-            )
-            embedded_tool_call_id = timing.get("tool_call_id")
-            if (
-                embedded_tool_call_id is not None
-                and embedded_tool_call_id != tool_call_id
-            ):
-                raise ValueError(
-                    "ExternalExecutionResultEvent timing tool_call_id mismatch for "
-                    f"{tool_call_id!r}"
-                )
-            timing_by_call_id[tool_call_id] = timing
+        if not result_ids:
+            raise ValueError("ExternalExecutionResultEvent requires external results")
         return self
 
 
@@ -1061,7 +1036,9 @@ class PlanModeExitedEvent(EventBase):
             if not self.host_workflow_operation_id:
                 raise ValueError("host workflow plan exit requires operation id")
         elif self.host_workflow_operation_id is not None:
-            raise ValueError("agent-run plan exit cannot carry host workflow operation id")
+            raise ValueError(
+                "agent-run plan exit cannot carry host workflow operation id"
+            )
         return self
 
 
@@ -1244,6 +1221,7 @@ class ProjectionRequestedEvent(ProjectionEventBase):
 
 class ProjectionReadyEvent(ProjectionEventBase):
     type: Literal[EventType.PROJECTION_READY] = EventType.PROJECTION_READY
+    projection_kind: Literal["memory", "working_context", "mixed"]
     included_memory_ids: list[str] = Field(default_factory=list)
     filtered_memory_ids: list[str] = Field(default_factory=list)
     summary: str
@@ -1580,7 +1558,10 @@ class ContextCompactionFailedEvent(EventBase):
                 target_estimate=self.target_estimate,
             )
             has_actual_after = self.target_estimate.estimated_tokens_after is not None
-            if self.failure_stage in {"artifact_write", "completed_append"} and not has_actual_after:
+            if (
+                self.failure_stage in {"artifact_write", "completed_append"}
+                and not has_actual_after
+            ):
                 raise ValueError(
                     "post-summary persistence failure requires actual after measurements"
                 )

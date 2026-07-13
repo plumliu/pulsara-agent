@@ -28,6 +28,14 @@ from pulsara_agent.capability.provider import (
     CapabilityProjectionOutput,
 )
 from pulsara_agent.capability.render import render_active_skill_prompt
+from pulsara_agent.capability.result_contracts import (
+    result_render_contract_for_tool,
+    terminal_process_result_render_contract,
+)
+from pulsara_agent.capability.result_semantics import (
+    FrozenToolResultSemanticsRuntimeInput,
+    build_terminal_payload_timing,
+)
 from pulsara_agent.capability.registry import CapabilityRegistry
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
@@ -42,6 +50,8 @@ from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     EventContext,
     PlanModeEnteredEvent,
+    ReplyEndEvent,
+    ReplyStartEvent,
     RunStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -80,9 +90,18 @@ from pulsara_agent.primitives.permission import preset_permission_policy_fact
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
 from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.primitives.run_entry import CapabilityExposureOwnerFact
-from pulsara_agent.host.run_boundary import CapabilityResolveBasis, derive_continuation_basis
+from pulsara_agent.primitives.tool_result import (
+    TerminalCommandDomainSubmissionFact,
+    TerminalProcessInventoryDomainSubmissionFact,
+    ToolResultRenderVariantCode,
+)
+from pulsara_agent.host.run_boundary import (
+    CapabilityResolveBasis,
+    derive_continuation_basis,
+)
 from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
 from pulsara_agent.runtime.run_entry import RunWorkingSet
+from pulsara_agent.runtime.context_input import event_reference_from_stored
 from pulsara_agent.runtime.tool_artifacts import (
     InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
@@ -105,11 +124,56 @@ class DummyTool:
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         self.calls.append(call.id)
+        timing = build_terminal_payload_timing(
+            observed_at_utc="2026-01-01T00:00:00Z",
+            duration_seconds=0,
+            freshness="current_tool_observation",
+            clock_source="tool_runtime_metadata",
+        )
+        semantics_input = None
+        terminal_timing = None
+        if self.name == "terminal":
+            semantics_input = FrozenToolResultSemanticsRuntimeInput(
+                semantics_input_kind=ToolResultRenderVariantCode.TERMINAL_COMMAND_EXECUTED,
+                domain_submission=TerminalCommandDomainSubmissionFact(
+                    command=str(call.arguments.get("command") or "test command"),
+                    status="success",
+                    exit_code=0,
+                    cwd="/test",
+                    timed_out=False,
+                    output_truncated=False,
+                    error=None,
+                    process_id=None,
+                    yielded_to_background=False,
+                    terminal_session_id="test",
+                    backend_type="test",
+                    io_mode=None,
+                    stdin_closed=None,
+                    policy_code=None,
+                    duration_seconds=0,
+                ),
+            )
+            terminal_timing = timing
+        elif self.name == "terminal_process":
+            semantics_input = FrozenToolResultSemanticsRuntimeInput(
+                semantics_input_kind=ToolResultRenderVariantCode.TERMINAL_PROCESS_INVENTORY,
+                domain_submission=TerminalProcessInventoryDomainSubmissionFact(
+                    status="success",
+                    live_process_count=0,
+                    finished_process_count=0,
+                    process_summaries=(),
+                    omitted_process_count=0,
+                    summaries_truncated=False,
+                ),
+            )
+            terminal_timing = timing
         return ToolExecutionResult(
             call_id=call.id,
             tool_name=call.name,
             status=ToolResultState.SUCCESS,
             output=f"ran:{call.id}",
+            semantics_input=semantics_input,
+            terminal_payload_timing=terminal_timing,
         )
 
 
@@ -182,6 +246,7 @@ def _descriptor(
         is_model_callable=True,
         is_read_only=True,
         is_concurrency_safe=True,
+        result_render_contract=result_render_contract_for_tool(name),
         permission_category=permission_category,
         advertise_policy=advertise_policy,
         availability=availability,
@@ -399,9 +464,7 @@ def test_projection_semantic_fingerprint_ignores_exposure_scoped_artifact_ids(
     )
     runtime = _runtime_for_provider(provider)
     registry = ToolRegistry()
-    registry.register(
-        DummyTool("alpha", is_read_only=True, is_concurrency_safe=True)
-    )
+    registry.register(DummyTool("alpha", is_read_only=True, is_concurrency_safe=True))
     registry.bind_contract(
         build_tool_binding_contract(
             tool_name="alpha",
@@ -623,6 +686,7 @@ def test_capability_gate_preserves_terminal_process_observe_contract_and_termina
         is_model_callable=True,
         is_read_only=False,
         is_concurrency_safe=False,
+        result_render_contract=terminal_process_result_render_contract(),
         is_open_world=True,
         permission_category="terminal",
     )
@@ -1090,8 +1154,14 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(
     ]
     assert len(exposure_events) == 1
     authorization = exposure_events[0].exposure.authorization_entries
-    assert [entry.capability_name for entry in authorization if entry.disposition == "direct"] == ["noop"]
-    assert [entry.capability_name for entry in authorization if entry.callable] == ["noop"]
+    assert [
+        entry.capability_name
+        for entry in authorization
+        if entry.disposition == "direct"
+    ] == ["noop"]
+    assert [entry.capability_name for entry in authorization if entry.callable] == [
+        "noop"
+    ]
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.tool_call_id == "call:noop"
     assert gate_decision.descriptor_id == "builtin:noop"
@@ -1113,7 +1183,11 @@ def test_terminal_gate_decision_records_active_skill_capability_context(
         [
             {
                 "tool_calls": [
-                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                    {
+                        "id": "call:terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "echo denied"}),
+                    }
                 ]
             },
             {"text": "done"},
@@ -1192,7 +1266,11 @@ def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(
         [
             {
                 "tool_calls": [
-                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                    {
+                        "id": "call:terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "echo denied"}),
+                    }
                 ]
             },
             {"text": "done"},
@@ -1418,6 +1496,9 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
         user_input="original request",
         turn_id=state.turn_id,
         reply_id=state.reply_id,
+        mcp_installation_owner_runtime_session_id=(
+            agent.runtime_session.runtime_session_id
+        ),
         model_target=state.run_model_target.fact,
     )
     state.scratchpad["terminal_run_end_event_id"] = run_start_fields[
@@ -1444,6 +1525,42 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
         assert stored_start.sequence is not None
         boundary = stored_start.new_run_boundary
         assert boundary is not None
+        await agent.runtime_session.emit_many(
+            (
+                ReplyStartEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    name="assistant",
+                ),
+                ToolCallStartEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:write",
+                    tool_call_name="write_file",
+                ),
+                ToolCallDeltaEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:write",
+                    delta=state.pending_tool_calls[0].input,
+                ),
+                ToolCallEndEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:write",
+                ),
+                ReplyEndEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                ),
+            ),
+            state=state,
+        )
         state.run_working_set = RunWorkingSet(
             run_start_event_id=stored_start.id,
             run_start_sequence=stored_start.sequence,
@@ -1478,9 +1595,46 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             ),
             original_exposure_plan=exposure,
             original_exposure_fact=None,
+            original_exposure_event_ref=None,
             effective_exposure_plan=exposure,
             effective_exposure_fact=None,
+            effective_exposure_event_ref=None,
             latest_committed_resume_boundary=None,
+            latest_committed_resume_boundary_ref=None,
+        )
+        resolved_exposure = agent.capability_runtime.resolve_exposure_projection(
+            CapabilityProjectionResolveContext(
+                workspace_root=tmp_path,
+                workspace_kind="project",
+                memory_domain=None,
+                user_input="original request",
+                active_skill_names=frozenset(),
+            ),
+            frozen_surface=state.run_working_set.frozen_execution_surface,
+            archive=agent.runtime_session.archive,
+            runtime_session_id=agent.runtime_session.runtime_session_id,
+            owner=boundary.capability_basis.owner,
+            resolve_basis=boundary.capability_basis,
+            exposure_id="capability-exposure:test-missing-descriptor",
+        )
+        stored_exposure = await agent.runtime_session.emit(
+            CapabilityExposureResolvedEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                exposure=resolved_exposure.fact,
+                exposure_revision=1,
+            ),
+            state=state,
+        )
+        assert isinstance(stored_exposure, CapabilityExposureResolvedEvent)
+        state.run_working_set.install_initial_exposure(
+            plan=resolved_exposure.plan,
+            fact=resolved_exposure.fact,
+            event_ref=event_reference_from_stored(
+                stored_exposure,
+                runtime_session_id=agent.runtime_session.runtime_session_id,
+            ),
         )
         return await agent.resume_after_approval(
             state,

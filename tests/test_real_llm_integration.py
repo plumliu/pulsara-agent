@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from tests.support import bind_test_context, run_agent_task, test_llm_context
+from tests.support.context_input import render_event_log_transcript
 import psycopg
 
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
@@ -85,15 +86,12 @@ from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserM
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
     ApprovalResolution,
-    LoopBudget,
     LoopState,
     PendingPlanInteraction,
     PlanExitResolution,
     ToolApprovalDecision,
     build_agent_runtime_wiring,
 )
-from pulsara_agent.runtime.context import msg_to_llm_messages
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.settings import PulsaraSettings
@@ -1356,21 +1354,19 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
         dsn=settings.storage.postgres_dsn, runtime_session_id=runtime_session_id
     )
     try:
-        log.extend(
+        prior_events = log.extend(
             [
-                    RunStartEvent(
-                        **ctx.event_fields(),
-                        **run_start_permission_fields(
-                            ctx.run_id,
-                            user_input=user_input,
-                            turn_id=ctx.turn_id,
-                            reply_id=ctx.reply_id,
-                            mcp_installation_owner_runtime_session_id=(
-                                runtime_session_id
-                            ),
-                        ),
-                        user_input_chars=len(user_input),
+                RunStartEvent(
+                    **ctx.event_fields(),
+                    **run_start_permission_fields(
+                        ctx.run_id,
+                        user_input=user_input,
+                        turn_id=ctx.turn_id,
+                        reply_id=ctx.reply_id,
+                        mcp_installation_owner_runtime_session_id=(runtime_session_id),
                     ),
+                    user_input_chars=len(user_input),
+                ),
                 ToolCallStartEvent(
                     **ctx.event_fields(),
                     tool_call_id="call:danger",
@@ -1403,13 +1399,33 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
                 ),
             ]
         )
-        prior_messages = rebuild_prior_messages(log)
-        llm_messages = list(
-            msg_to_llm_messages(
-                prior_messages,
-                LoopBudget(),
-                token_estimator=PulsaraHeuristicTokenEstimatorV1(),
+        validation_ctx = EventContext(
+            run_id=f"run:real-aborted-validation:{uuid4().hex}",
+            turn_id=f"turn:real-aborted-validation:{uuid4().hex}",
+            reply_id=f"reply:real-aborted-validation:{uuid4().hex}",
+        )
+        validation_start = log.append(
+            RunStartEvent(
+                id=f"run-start:real-aborted-validation:{uuid4().hex}",
+                **validation_ctx.event_fields(),
+                **run_start_permission_fields(
+                    validation_ctx.run_id,
+                    user_input="validate the recovery note",
+                    turn_id=validation_ctx.turn_id,
+                    reply_id=validation_ctx.reply_id,
+                    mcp_installation_owner_runtime_session_id=runtime_session_id,
+                    transcript_source_through_sequence=(prior_events[-1].sequence or 0),
+                    transcript_source_event_count=len(prior_events),
+                ),
+                user_input_chars=len("validate the recovery note"),
             )
+        )
+        llm_messages = list(
+            render_event_log_transcript(
+                log,
+                run_start_event_id=validation_start.id,
+                runtime_session_id=runtime_session_id,
+            ).lowered.full_messages
         )
         llm_messages.append(
             LLMMessage.user(
@@ -2596,7 +2612,9 @@ async def _run_real_agent_terminal_large_output_smoke(tmp_path: Path) -> dict:
             '"python -c \'print(\\"PULSARA_LARGE_HEAD\\"); print(\\"q\\" * 50000); print(\\"PULSARA_LARGE_TAIL\\")\'" '
             "and max_output_chars exactly 120. Do not use background, tty, terminal_process, or file tools. "
             "After the terminal tool result, inspect the artifacts[] ref and call artifact_read with that artifact_id "
-            "and max_chars 60000. After artifact_read shows both PULSARA_LARGE_HEAD and PULSARA_LARGE_TAIL, "
+            "and max_chars 60000. Copy artifacts[0].artifact_id exactly, including the full run/call suffix; "
+            "never invent a shorter alias, never search the workspace, and never run terminal a second time. "
+            "After artifact_read shows both PULSARA_LARGE_HEAD and PULSARA_LARGE_TAIL, "
             "answer exactly: PULSARA_TERMINAL_LARGE_OUTPUT_OK"
         ),
         permission_policy=_trusted_terminal_policy(),
@@ -4883,9 +4901,7 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
         engine = MemoryGovernanceEngine(
             llm_runtime=build_llm_runtime(settings.llm),
             executor=executor,
-            options=MemoryGovernanceOptions(
-                llm_options=LLMOptions()
-            ),
+            options=MemoryGovernanceOptions(llm_options=LLMOptions()),
         )
 
         result = await engine.run_pending(
@@ -5065,9 +5081,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
         engine = MemoryGovernanceEngine(
             llm_runtime=build_llm_runtime(settings.llm),
             executor=executor,
-            options=MemoryGovernanceOptions(
-                llm_options=LLMOptions()
-            ),
+            options=MemoryGovernanceOptions(llm_options=LLMOptions()),
             relatedness_service=GovernanceRelatednessService(
                 memory_query=PostgresMemoryQuery(dsn=dsn),
                 tokenizer=build_tokenizer(settings.retrieval.tokenizer),

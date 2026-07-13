@@ -3,20 +3,44 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.capability.result_semantics import (
+    FrozenToolResultSemanticsRuntimeInput,
+    build_terminal_payload_timing,
+    unbounded_error_preview,
+)
+from pulsara_agent.primitives.tool_result import (
+    TerminalCommandDomainSubmissionFact,
+    TerminalCommandErrorDomainSubmissionFact,
+    ToolResultRenderVariantCode,
+)
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    freeze_json,
+    thaw_json,
+)
 from pulsara_agent.runtime.permission import PermissionState, TerminalAccess
-from pulsara_agent.runtime.terminal import TerminalRequest, TerminalSessionManager, TerminalStatus
+from pulsara_agent.runtime.terminal import (
+    TerminalRequest,
+    TerminalSessionManager,
+    TerminalStatus,
+)
 from pulsara_agent.runtime.tool_artifacts import (
     ToolResultArtifactOptions,
     build_adaptive_preview,
     effective_terminal_output_cap,
 )
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate, ToolRuntimeContext
+from pulsara_agent.tools.base import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolResultArtifactCandidate,
+    ToolRuntimeContext,
+)
 from pulsara_agent.tools.builtins.schemas import (
     DEFAULT_MAX_OUTPUT_CHARS,
     MIN_TERMINAL_OUTPUT_CHARS,
@@ -46,35 +70,40 @@ class TerminalTool(WorkspaceTool):
         "Use read_file/search_files/write_file/edit_file for file operations; "
         "reserve terminal for builds, tests, git, package managers, scripts, network commands, and external CLIs."
     )
-    parameters: dict[str, Any] = field(default_factory=lambda: object_schema(
-        properties={
-            "command": {"type": "string", "description": "Shell command to run."},
-            "workdir": {
-                "type": "string",
-                "description": "Optional working directory inside workspace_root. Relative paths resolve from workspace_root.",
+    parameters: dict[str, Any] = field(
+        default_factory=lambda: object_schema(
+            properties={
+                "command": {"type": "string", "description": "Shell command to run."},
+                "workdir": {
+                    "type": "string",
+                    "description": "Optional working directory inside workspace_root. Relative paths resolve from workspace_root.",
+                },
+                "terminal_session_id": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Terminal session id. Use short names like default, frontend, or tests.",
+                },
+                "yield_time_ms": {
+                    "type": "integer",
+                    "default": 10_000,
+                    "description": (
+                        "Wait up to this many milliseconds for the command to finish. "
+                        "If it is still running after this window, return process_id; the command is not killed."
+                    ),
+                },
+                "tty": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Allocate a POSIX PTY for interactive commands.",
+                },
+                "max_output_chars": {
+                    "type": "integer",
+                    "default": DEFAULT_MAX_OUTPUT_CHARS,
+                },
             },
-            "terminal_session_id": {
-                "type": "string",
-                "default": "default",
-                "description": "Terminal session id. Use short names like default, frontend, or tests.",
-            },
-            "yield_time_ms": {
-                "type": "integer",
-                "default": 10_000,
-                "description": (
-                    "Wait up to this many milliseconds for the command to finish. "
-                    "If it is still running after this window, return process_id; the command is not killed."
-                ),
-            },
-            "tty": {
-                "type": "boolean",
-                "default": False,
-                "description": "Allocate a POSIX PTY for interactive commands.",
-            },
-            "max_output_chars": {"type": "integer", "default": DEFAULT_MAX_OUTPUT_CHARS},
-        },
-        required=["command"],
-    ))
+            required=["command"],
+        )
+    )
     is_read_only: bool = False
     is_concurrency_safe: bool = False
 
@@ -86,7 +115,9 @@ class TerminalTool(WorkspaceTool):
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         return self._execute(call)
 
-    def execute_streaming(self, call: ToolCall, emit_delta: Callable[[str], None]) -> ToolExecutionResult:
+    def execute_streaming(
+        self, call: ToolCall, emit_delta: Callable[[str], None]
+    ) -> ToolExecutionResult:
         return self._execute_streaming(call, emit_delta)
 
     def execute_with_context(
@@ -153,13 +184,17 @@ class TerminalTool(WorkspaceTool):
         command = required_str_arg(call.arguments, "command")
         workdir = str_arg(call.arguments, "workdir")
         session_id = str_arg(call.arguments, "terminal_session_id") or "default"
-        if _terminal_access_off(runtime_context=runtime_context, permission_state=self.permission_state):
+        if _terminal_access_off(
+            runtime_context=runtime_context, permission_state=self.permission_state
+        ):
             return self._blocked_result(
                 call,
                 command=command,
                 session_id=session_id,
                 error="terminal is disabled by permission policy",
                 policy_code="terminal_access_off",
+                variant_code=ToolResultRenderVariantCode.TERMINAL_COMMAND_DENIED,
+                failure_stage="permission_denied",
             )
         if "max_lifetime_seconds" in call.arguments:
             return self._blocked_result(
@@ -170,9 +205,12 @@ class TerminalTool(WorkspaceTool):
                     "max_lifetime_seconds is runtime-only and is not model-facing; "
                     "use terminal_process.kill to stop a yielded process"
                 ),
+                variant_code=ToolResultRenderVariantCode.TERMINAL_COMMAND_MALFORMED_ARGUMENTS,
+                failure_stage="malformed_arguments",
             )
         removed_args = sorted(
-            {"background", "timeout_seconds", "session_id", "notify_on_complete"} & call.arguments.keys()
+            {"background", "timeout_seconds", "session_id", "notify_on_complete"}
+            & call.arguments.keys()
         )
         if removed_args:
             return self._blocked_result(
@@ -183,6 +221,8 @@ class TerminalTool(WorkspaceTool):
                     f"terminal arguments are no longer supported: {', '.join(removed_args)}; "
                     "use yield_time_ms and terminal_process instead"
                 ),
+                variant_code=ToolResultRenderVariantCode.TERMINAL_COMMAND_MALFORMED_ARGUMENTS,
+                failure_stage="malformed_arguments",
             )
         yield_time_ms = int_arg(call.arguments, "yield_time_ms", 10_000)
         max_output = _max_output_chars_arg(call.arguments)
@@ -194,7 +234,14 @@ class TerminalTool(WorkspaceTool):
                 owner_conversation_id=self.owner_conversation_id,
             )
         except ValueError as exc:
-            return self._blocked_result(call, command=command, session_id=session_id, error=str(exc))
+            return self._blocked_result(
+                call,
+                command=command,
+                session_id=session_id,
+                error=str(exc),
+                variant_code=ToolResultRenderVariantCode.TERMINAL_COMMAND_ADAPTER_ERROR,
+                failure_stage="adapter_initialization",
+            )
 
         metadata: dict[str, Any] = {}
         if output_callback is not None:
@@ -218,7 +265,8 @@ class TerminalTool(WorkspaceTool):
             duration_seconds=_float_or_none(result.metadata.get("duration_seconds")),
             freshness=(
                 "background_process_observation"
-                if result.status is TerminalStatus.RUNNING and result.process_id is not None
+                if result.status is TerminalStatus.RUNNING
+                and result.process_id is not None
                 else "current_tool_observation"
             ),
         )
@@ -246,6 +294,47 @@ class TerminalTool(WorkspaceTool):
                 "timing": timing,
             },
             artifact_candidates=terminal_artifact_candidates(result, timing=timing),
+            display_payload=freeze_tool_display_payload(payload),
+            semantics_input=FrozenToolResultSemanticsRuntimeInput(
+                semantics_input_kind=ToolResultRenderVariantCode.TERMINAL_COMMAND_EXECUTED,
+                domain_submission=TerminalCommandDomainSubmissionFact(
+                    command=command,
+                    status=result.status.value,
+                    exit_code=result.exit_code,
+                    cwd=result.cwd,
+                    timed_out=result.timed_out,
+                    output_truncated=result.truncated,
+                    error=(
+                        unbounded_error_preview(result.error) if result.error else None
+                    ),
+                    process_id=result.process_id,
+                    yielded_to_background=(
+                        result.status is TerminalStatus.RUNNING
+                        and result.process_id is not None
+                    ),
+                    terminal_session_id=terminal_session.session_id,
+                    backend_type=terminal_session.state.backend_type.value,
+                    io_mode=(
+                        str(result.metadata["io_mode"])
+                        if result.metadata.get("io_mode") is not None
+                        else None
+                    ),
+                    stdin_closed=(
+                        result.metadata.get("stdin_closed")
+                        if isinstance(result.metadata.get("stdin_closed"), bool)
+                        else None
+                    ),
+                    policy_code=(
+                        str(result.metadata["policy_code"])
+                        if result.metadata.get("policy_code") is not None
+                        else None
+                    ),
+                    duration_seconds=_float_or_none(
+                        result.metadata.get("duration_seconds")
+                    ),
+                ),
+            ),
+            terminal_payload_timing=terminal_payload_timing_fact(timing),
         )
 
     def _blocked_result(
@@ -258,30 +347,32 @@ class TerminalTool(WorkspaceTool):
         payload_status: str = TerminalStatus.BLOCKED.value,
         suggested_args: dict[str, Any] | None = None,
         policy_code: str | None = None,
+        variant_code: ToolResultRenderVariantCode = (
+            ToolResultRenderVariantCode.TERMINAL_COMMAND_ADAPTER_ERROR
+        ),
+        failure_stage: str = "adapter_initialization",
     ) -> ToolExecutionResult:
         timing = terminal_timing_payload(freshness="current_tool_observation")
+        payload = {
+            "status": payload_status,
+            "output": "",
+            "exit_code": -1,
+            "cwd": str(self.workspace_root),
+            "timed_out": False,
+            "truncated": False,
+            "error": error,
+            "policy_code": policy_code,
+            "suggested_args": suggested_args or {},
+            "process_id": None,
+            "yielded_to_background": False,
+            "terminal_session_id": session_id,
+            "backend_type": "local",
+            "timing": timing,
+        }
         return self._result(
             call,
             status=ToolResultState.ERROR,
-            output=json.dumps(
-                {
-                    "status": payload_status,
-                    "output": "",
-                    "exit_code": -1,
-                    "cwd": str(self.workspace_root),
-                    "timed_out": False,
-                    "truncated": False,
-                    "error": error,
-                    "policy_code": policy_code,
-                    "suggested_args": suggested_args or {},
-                    "process_id": None,
-                    "yielded_to_background": False,
-                    "terminal_session_id": session_id,
-                    "backend_type": "local",
-                    "timing": timing,
-                },
-                ensure_ascii=False,
-            ),
+            output=json.dumps(payload, ensure_ascii=False),
             metadata={
                 "command": command,
                 "exit_code": -1,
@@ -293,6 +384,22 @@ class TerminalTool(WorkspaceTool):
                 "backend_type": "local",
                 "timing": timing,
             },
+            display_payload=freeze_tool_display_payload(payload),
+            semantics_input=FrozenToolResultSemanticsRuntimeInput(
+                semantics_input_kind=variant_code,
+                domain_submission=TerminalCommandErrorDomainSubmissionFact(
+                    requested_command=command,
+                    failure_stage=failure_stage,
+                    status=payload_status,
+                    error=unbounded_error_preview(error),
+                    policy_code=policy_code,
+                    observed_cwd=None,
+                    terminal_session_id=None,
+                    backend_type=None,
+                    io_mode=None,
+                ),
+            ),
+            terminal_payload_timing=None,
         )
 
 
@@ -323,6 +430,13 @@ def terminal_timing_payload(
     return payload
 
 
+def freeze_tool_display_payload(payload: dict[str, Any]) -> FrozenJsonObjectFact:
+    frozen = freeze_json(payload)
+    if not isinstance(frozen, FrozenJsonObjectFact):
+        raise AssertionError("terminal display payload must freeze as an object")
+    return frozen
+
+
 def terminal_timing_metadata_subset(timing: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(timing, dict):
         return {}
@@ -331,6 +445,30 @@ def terminal_timing_metadata_subset(timing: dict[str, Any] | None) -> dict[str, 
         for key in ("observed_at", "duration_seconds", "freshness", "clock_source")
         if key in timing
     }
+
+
+def terminal_payload_timing_fact(timing: dict[str, Any]):
+    return build_terminal_payload_timing(
+        observed_at_utc=str(timing["observed_at"]),
+        duration_seconds=_float_or_none(timing.get("duration_seconds")),
+        freshness=str(timing["freshness"]),
+        clock_source=str(timing["clock_source"]),
+        command_started_at_utc=(
+            str(timing["command_started_at"])
+            if timing.get("command_started_at") is not None
+            else None
+        ),
+        process_started_at_utc=(
+            str(timing["process_started_at"])
+            if timing.get("process_started_at") is not None
+            else None
+        ),
+        last_output_at_utc=(
+            str(timing["last_output_at"])
+            if timing.get("last_output_at") is not None
+            else None
+        ),
+    )
 
 
 def terminal_result_payload(
@@ -350,7 +488,8 @@ def terminal_result_payload(
         "truncated": result.truncated,
         "error": result.error,
         "process_id": result.process_id,
-        "yielded_to_background": result.status is TerminalStatus.RUNNING and result.process_id is not None,
+        "yielded_to_background": result.status is TerminalStatus.RUNNING
+        and result.process_id is not None,
         "terminal_session_id": terminal_session_id,
         "backend_type": backend_type,
         "io_mode": result.metadata.get("io_mode"),
@@ -408,13 +547,25 @@ def _terminal_access_off(
     runtime_context: ToolRuntimeContext | None,
     permission_state: PermissionState | None,
 ) -> bool:
-    if runtime_context is not None and isinstance(runtime_context.permission_policy, dict):
-        return runtime_context.permission_policy.get("terminal_access") == TerminalAccess.OFF.value
-    return permission_state is not None and permission_state.policy.terminal is TerminalAccess.OFF
+    if runtime_context is not None and isinstance(
+        runtime_context.permission_policy, dict
+    ):
+        return (
+            runtime_context.permission_policy.get("terminal_access")
+            == TerminalAccess.OFF.value
+        )
+    return (
+        permission_state is not None
+        and permission_state.policy.terminal is TerminalAccess.OFF
+    )
 
 
 def _tool_result_state(status: TerminalStatus) -> ToolResultState:
-    return ToolResultState.SUCCESS if status in {TerminalStatus.SUCCESS, TerminalStatus.RUNNING} else ToolResultState.ERROR
+    return (
+        ToolResultState.SUCCESS
+        if status in {TerminalStatus.SUCCESS, TerminalStatus.RUNNING}
+        else ToolResultState.ERROR
+    )
 
 
 def _max_output_chars_arg(args: dict[str, Any]) -> int:
@@ -428,7 +579,9 @@ def _max_output_chars_arg(args: dict[str, Any]) -> int:
 
 
 def _utc_now_z() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
 
 
 def _float_or_none(value: object) -> float | None:
@@ -449,31 +602,49 @@ def _metadata_timing(metadata: object) -> dict[str, Any] | None:
 class _StreamingTerminalJsonBuilder:
     _TRUNCATION_NOTICE = "\n\n... [OUTPUT TRUNCATED - full redacted output available via artifact_read when an artifact is present] ...\n\n"
 
-    def __init__(self, emit_delta: Callable[[str], None], *, max_output_chars: int) -> None:
+    def __init__(
+        self, emit_delta: Callable[[str], None], *, max_output_chars: int
+    ) -> None:
         self._emit_delta = emit_delta
-        self._max_output_chars = effective_terminal_output_cap(max_output_chars) or DEFAULT_MAX_OUTPUT_CHARS
+        self._max_output_chars = (
+            effective_terminal_output_cap(max_output_chars) or DEFAULT_MAX_OUTPUT_CHARS
+        )
         default_options = ToolResultArtifactOptions()
         huge_preview = min(default_options.huge_preview_chars, self._max_output_chars)
         options_seed = ToolResultArtifactOptions(
             archive_threshold_bytes=default_options.effective_archive_threshold_bytes,
-            complete_preview_body_chars=min(default_options.complete_preview_body_chars, self._max_output_chars),
-            large_preview_chars=min(default_options.effective_large_preview_chars, self._max_output_chars),
+            complete_preview_body_chars=min(
+                default_options.complete_preview_body_chars, self._max_output_chars
+            ),
+            large_preview_chars=min(
+                default_options.effective_large_preview_chars, self._max_output_chars
+            ),
             huge_output_chars=default_options.huge_output_chars,
             huge_preview_chars=huge_preview,
             streaming_live_head_cap_chars=1,
             tool_result_message_context_chars=default_options.effective_tool_result_message_context_chars,
         )
-        huge_head_cap = build_adaptive_preview("x" * (default_options.huge_output_chars + 1), options_seed).visible_head_chars
+        huge_head_cap = build_adaptive_preview(
+            "x" * (default_options.huge_output_chars + 1), options_seed
+        ).visible_head_chars
         self._options = ToolResultArtifactOptions(
             archive_threshold_bytes=default_options.effective_archive_threshold_bytes,
-            complete_preview_body_chars=min(default_options.complete_preview_body_chars, self._max_output_chars),
-            large_preview_chars=min(default_options.effective_large_preview_chars, self._max_output_chars),
+            complete_preview_body_chars=min(
+                default_options.complete_preview_body_chars, self._max_output_chars
+            ),
+            large_preview_chars=min(
+                default_options.effective_large_preview_chars, self._max_output_chars
+            ),
             huge_output_chars=default_options.huge_output_chars,
             huge_preview_chars=huge_preview,
-            streaming_live_head_cap_chars=max(1, min(default_options.streaming_live_head_cap_chars, huge_head_cap)),
+            streaming_live_head_cap_chars=max(
+                1, min(default_options.streaming_live_head_cap_chars, huge_head_cap)
+            ),
             tool_result_message_context_chars=default_options.effective_tool_result_message_context_chars,
         )
-        self._live_head_cap_chars = min(self._max_output_chars, self._options.streaming_live_head_cap_chars)
+        self._live_head_cap_chars = min(
+            self._max_output_chars, self._options.streaming_live_head_cap_chars
+        )
         self._started = False
         self._output_chars = 0
         self._preview_parts: list[str] = []
@@ -494,24 +665,35 @@ class _StreamingTerminalJsonBuilder:
         self._overflowed = True
 
     def finish(self, result: ToolExecutionResult) -> ToolExecutionResult:
-        payload = json.loads(result.output)
+        if result.display_payload is None:
+            raise ValueError("streaming terminal result requires typed display payload")
+        payload = thaw_json(result.display_payload)
         payload_output = str(payload.get("output") or "")
-        full_output = _primary_text_artifact_candidate(result) or str(payload.get("output") or "")
+        full_output = _primary_text_artifact_candidate(result) or str(
+            payload.get("output") or ""
+        )
         preview = build_adaptive_preview(full_output, self._options)
         display_output = payload_output if preview.policy == "full" else preview.text
         emitted_head = "".join(self._preview_parts)
         output_suffix = ""
         if self._started:
             if preview.policy == "full":
-                output_suffix = payload_output[len(emitted_head):]
+                output_suffix = payload_output[len(emitted_head) :]
             else:
-                output_suffix = preview.text[len(emitted_head):] if preview.text.startswith(emitted_head) else (
-                    self._TRUNCATION_NOTICE + preview.text[-preview.visible_tail_chars:]
+                output_suffix = (
+                    preview.text[len(emitted_head) :]
+                    if preview.text.startswith(emitted_head)
+                    else (
+                        self._TRUNCATION_NOTICE
+                        + preview.text[-preview.visible_tail_chars :]
+                    )
                 )
             if output_suffix:
                 self._emit_delta(_json_string_fragment(output_suffix))
             payload["output"] = emitted_head + output_suffix
-            payload["truncated"] = preview.omitted_middle_chars > 0 or bool(payload.get("truncated"))
+            payload["truncated"] = preview.omitted_middle_chars > 0 or bool(
+                payload.get("truncated")
+            )
             payload["preview_policy"] = preview.policy
             payload["output_preview_chars"] = len(payload["output"])
             payload["output_original_chars"] = preview.original_chars
@@ -539,9 +721,11 @@ class _StreamingTerminalJsonBuilder:
             else:
                 self._emit_delta(result.output)
 
-        final_payload = json.loads(result.output)
+        final_payload = thaw_json(result.display_payload)
         final_payload["output"] = display_output
-        final_payload["truncated"] = preview.omitted_middle_chars > 0 or bool(final_payload.get("truncated"))
+        final_payload["truncated"] = preview.omitted_middle_chars > 0 or bool(
+            final_payload.get("truncated")
+        )
         final_payload["preview_policy"] = preview.policy
         final_payload["output_preview_chars"] = preview.preview_chars
         final_payload["output_original_chars"] = preview.original_chars
@@ -551,6 +735,24 @@ class _StreamingTerminalJsonBuilder:
         final_payload["visible_tail_chars"] = preview.visible_tail_chars
         final_payload["preview"] = preview.to_metadata().model_dump()
         output = json.dumps(final_payload, ensure_ascii=False)
+        semantics_input = result.semantics_input
+        if isinstance(
+            semantics_input, FrozenToolResultSemanticsRuntimeInput
+        ) and isinstance(
+            semantics_input.domain_submission,
+            TerminalCommandDomainSubmissionFact,
+        ):
+            semantics_input = replace(
+                semantics_input,
+                domain_submission=semantics_input.domain_submission.model_copy(
+                    update={
+                        "output_truncated": (
+                            preview.omitted_middle_chars > 0
+                            or semantics_input.domain_submission.output_truncated
+                        )
+                    }
+                ),
+            )
         return ToolExecutionResult(
             call_id=result.call_id,
             tool_name=result.tool_name,
@@ -558,6 +760,10 @@ class _StreamingTerminalJsonBuilder:
             output=output,
             metadata={**result.metadata, "streamed_output_complete": True},
             artifact_candidates=result.artifact_candidates,
+            display_payload=freeze_tool_display_payload(final_payload),
+            semantics_input=semantics_input,
+            terminal_payload_timing=result.terminal_payload_timing,
+            semantics=result.semantics,
         )
 
     def _emit_preview(self, text: str) -> None:
@@ -575,7 +781,10 @@ def _json_string_fragment(value: str) -> str:
 
 def _primary_text_artifact_candidate(result: ToolExecutionResult) -> str | None:
     for candidate in result.artifact_candidates:
-        if candidate.text is not None and candidate.role in {"combined_output", "output"}:
+        if candidate.text is not None and candidate.role in {
+            "combined_output",
+            "output",
+        }:
             return candidate.text
     for candidate in result.artifact_candidates:
         if candidate.text is not None:

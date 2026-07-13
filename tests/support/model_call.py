@@ -24,6 +24,7 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelTargetFact,
     ModelTokenUsageFact,
 )
+from pulsara_agent.primitives.context import ContextCompileInputAuditFact
 
 
 def compaction_completed_contract_fields(
@@ -129,6 +130,7 @@ def context_compiled_contract_fields(
     status: str = "compiled",
     non_transcript_baseline_tokens: int | None = None,
     resolved_call: ResolvedModelCallFact | None = None,
+    model_call_index: int = 1,
 ) -> dict[str, object]:
     call = resolved_call or test_resolved_call_fact()
     target = call.target
@@ -162,10 +164,51 @@ def context_compiled_contract_fields(
     )
     return {
         "status": status,
+        "failure_stage": "context_compile" if status == "failed" else None,
         "compile_attempt_index": 1,
         "context_retry_index": 0,
         "resolved_call": call,
         "budget": budget,
+        "input_audit": ContextCompileInputAuditFact(
+            snapshot_id="context_snapshot:test",
+            snapshot_semantic_fingerprint="sha256:" + "1" * 64,
+            snapshot_fact_fingerprint="sha256:" + "2" * 64,
+            snapshot_schema_version="context-snapshot:v1",
+            compiler_contract_version="context-compiler-input:v1",
+            source_runtime_session_id="runtime:test",
+            authority_from_sequence=1,
+            source_through_sequence=1,
+            authority_slice_plan_fingerprint="sha256:" + "3" * 64,
+            transcript_projection_window_fingerprint="sha256:" + "4" * 64,
+            run_start_event_id="run-start:test",
+            run_start_sequence=1,
+            continuation_event_id=None,
+            continuation_sequence=None,
+            continuation_count=0,
+            resolved_model_call_id=call.resolved_model_call_id,
+            model_call_index=model_call_index,
+            compile_attempt_index=1,
+            context_retry_index=0,
+            transcript_fingerprint="sha256:" + "5" * 64,
+            transcript_message_count=1,
+            transcript_pair_count=0,
+            tool_result_units_fingerprint="sha256:" + "6" * 64,
+            tool_result_unit_count=0,
+            tool_result_render_policy_fingerprint="sha256:" + "7" * 64,
+            tool_result_render_input_fingerprint="sha256:" + "8" * 64,
+            prepared_candidate_set_fingerprint="sha256:" + "9" * 64,
+            section_candidate_count=1,
+            input_aggregate_fingerprint="sha256:" + "a" * 64,
+            input_manifest_artifact_id="context-input-manifest:test",
+            input_manifest_fingerprint="sha256:" + "b" * 64,
+            input_manifest_write_outcome="stored",
+        ),
+        "provider_neutral_payload_fingerprint": (
+            "sha256:" + "c" * 64 if status == "compiled" else None
+        ),
+        "canonical_render_decisions_fingerprint": (
+            "sha256:" + "d" * 64 if status == "compiled" else None
+        ),
     }
 
 
@@ -444,9 +487,7 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
                     message.model_copy(deep=True)
                     for message in (kwargs.get("prior_messages") or ())
                 ),
-                active_skill_names=frozenset(
-                    kwargs.get("active_skill_names") or ()
-                ),
+                active_skill_names=frozenset(kwargs.get("active_skill_names") or ()),
                 workspace_root=agent.runtime_session.workspace_root,
                 memory_domain_id="memory_domain:test",
             ),

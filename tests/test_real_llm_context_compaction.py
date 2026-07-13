@@ -8,7 +8,12 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    run_end_contract_fields,
+    run_start_permission_fields,
+    tool_result_end_contract_fields,
+)
+from tests.support.context_input import render_event_log_transcript
 
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
@@ -21,6 +26,12 @@ from pulsara_agent.event import (
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
+    ToolResultEndEvent,
+    ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.host.transcript import rebuild_prior_messages
@@ -40,9 +51,6 @@ from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionPolicy,
     ContextCompactionService,
-)
-from pulsara_agent.runtime.context_engine.tool_results import (
-    render_segmented_llm_messages,
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopTransition
@@ -365,15 +373,75 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
             ),
         )
         state.run_model_target = capture.resolve_target(role=ModelRole.PRO)
-        segmented = render_segmented_llm_messages(
-            state.messages,
-            LoopBudget(),
-            f"user-message:{state.run_id}",
-            token_estimator=state.run_model_target.token_estimator,
+        log.extend(
+            (
+                ReplyStartEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    name="assistant",
+                ),
+                ToolCallStartEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:current",
+                    tool_call_name="terminal",
+                ),
+                ToolCallDeltaEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:current",
+                    delta='{"command":"printf current"}',
+                ),
+                ToolCallEndEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:current",
+                ),
+                ReplyEndEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                ),
+                ToolResultStartEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:current",
+                    tool_call_name="terminal",
+                ),
+                ToolResultTextDeltaEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:current",
+                    delta="current tool result",
+                ),
+                ToolResultEndEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:current",
+                    state=ToolResultState.SUCCESS,
+                    **tool_result_end_contract_fields(
+                        "call:current",
+                        tool_name="terminal",
+                    ),
+                ),
+            )
         )
+        lowered = render_event_log_transcript(
+            log,
+            run_start_event_id=current_start.id,
+            runtime_session_id=runtime_session_id,
+            budget=LoopBudget(),
+        ).lowered
         protected = (
-            *(segmented.current_user_messages or ()),
-            *(segmented.current_run_tail_messages or ()),
+            *lowered.current_user_messages,
+            *lowered.current_run_tail_messages,
         )
         model_visible_messages = [
             message
@@ -442,16 +510,16 @@ def _append_turn(
     )
     log.extend(
         [
-                RunStartEvent(
-                    **ctx.event_fields(),
-                    **run_start_permission_fields(
-                        ctx.run_id,
-                        user_input=user_input,
-                        turn_id=ctx.turn_id,
-                        reply_id=ctx.reply_id,
-                    ),
-                    user_input_chars=len(user_input),
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(
+                    ctx.run_id,
+                    user_input=user_input,
+                    turn_id=ctx.turn_id,
+                    reply_id=ctx.reply_id,
                 ),
+                user_input_chars=len(user_input),
+            ),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
             TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
             TextBlockDeltaEvent(

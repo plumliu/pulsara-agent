@@ -167,6 +167,6 @@ terminal 后台进程完成(`TerminalProcessCompletedEvent` → transcript 的 c
 - 两张 guidance 表 key 集合一致。
 - failed run → `RUN_FAILED`;普通 user-stop(plan 未 active)→ `USER_ABORTED`;**在已 active plan 中 stop 且该 run 无新 question/exit 事件 → `in_plan_workflow=True` + `PLAN_ABORTED`**(reducer 判定的漏判反例)。
 - cross-run 两窗口:late `ToolResultEnd`(`RunEnd` 之后才到)仍把 tool 从 unfinished 中消掉;`in_plan_workflow` 不受 late 事件影响。
-- in-run producer:`recovery_mode` → `run_status=None` + `IN_RUN_STEP_FAILED`,`build_llm_context` 注入对应 prompt 文案。
+- in-run producer:`recovery_mode` → `run_status=None` + `IN_RUN_STEP_FAILED`，Stage-3 recovery candidate producer把typed projection写入`PreparedContextCandidateSet`。
 - `AbortKind` / `RunEndEvent.abort_kind` round-trip。
 - 回归:transcript failed/aborted note 仍注入、completion note 仍独立、`_strip_unfinished_tool_calls` 行为不变、plan workflow tool 不出现在 unfinished 摘要。

@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.message.blocks import ToolResultState
+from pulsara_agent.primitives.context import FrozenJsonObjectFact
+from pulsara_agent.primitives.tool_result import (
+    TerminalPayloadTimingFact,
+    ToolResultExecutionSemanticsFact,
+)
+
+if TYPE_CHECKING:
+    from pulsara_agent.capability.result_semantics import (
+        ToolResultSemanticsRuntimeInput,
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class ToolCall:
@@ -23,6 +34,10 @@ class ToolExecutionResult:
     output: str
     metadata: dict[str, Any] = field(default_factory=dict)
     artifact_candidates: tuple["ToolResultArtifactCandidate", ...] = ()
+    display_payload: FrozenJsonObjectFact | None = None
+    semantics_input: "ToolResultSemanticsRuntimeInput | None" = None
+    terminal_payload_timing: TerminalPayloadTimingFact | None = None
+    semantics: ToolResultExecutionSemanticsFact | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +72,9 @@ class ToolResultArtifactCandidate:
 
     def __post_init__(self) -> None:
         if (self.text is None) == (self.data is None):
-            raise ValueError("ToolResultArtifactCandidate requires exactly one of text or data")
+            raise ValueError(
+                "ToolResultArtifactCandidate requires exactly one of text or data"
+            )
 
 
 class Tool(Protocol):

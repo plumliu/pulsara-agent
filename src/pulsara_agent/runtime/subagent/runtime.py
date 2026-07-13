@@ -75,6 +75,7 @@ from pulsara_agent.runtime.subagent.hydration import (
     SubagentGraphHydrator,
 )
 from pulsara_agent.runtime.subagent.immutable import thaw_json_mapping
+from pulsara_agent.runtime.subagent.reducer import pending_subagent_result_ids
 from pulsara_agent.runtime.subagent.facts import (
     SubagentGraphState,
     SubagentResultFact,
@@ -111,9 +112,14 @@ from pulsara_agent.primitives.run_lifecycle import (
 _ACTIVE_STATUSES: set[SubagentStatus] = {"running", "suspended"}
 _TERMINAL_STATUSES: set[SubagentStatus] = {"completed", "failed", "cancelled"}
 _CHILD_REPORT_TOOL_NAMES = ("report_agent_phase", "report_agent_result")
-_CHILD_REPORT_DESCRIPTOR_IDS = ("workflow:report_agent_phase", "workflow:report_agent_result")
+_CHILD_REPORT_DESCRIPTOR_IDS = (
+    "workflow:report_agent_phase",
+    "workflow:report_agent_result",
+)
 _READ_ONLY_WORKER_TOOL_NAMES = frozenset({"read_file", "search_files", "artifact_read"})
-_VERIFICATION_WORKER_TOOL_NAMES = frozenset({"read_file", "search_files", "artifact_read", "terminal", "terminal_process"})
+_VERIFICATION_WORKER_TOOL_NAMES = frozenset(
+    {"read_file", "search_files", "artifact_read", "terminal", "terminal_process"}
+)
 _WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file"})
 _TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
 
@@ -135,7 +141,9 @@ class SubagentNotReady(SubagentRuntimeError):
 
 
 ChildEventLogFactory = Callable[[str], EventLog]
-SubagentChildRunner = Callable[["SubagentRuntime", HydratedSubagentRunView], Awaitable[None]]
+SubagentChildRunner = Callable[
+    ["SubagentRuntime", HydratedSubagentRunView], Awaitable[None]
+]
 
 
 class SubagentRuntime:
@@ -151,6 +159,11 @@ class SubagentRuntime:
         self.parent_runtime_session = parent_runtime_session
         self._child_event_log_factory = child_event_log_factory
         self.event_log_locator = event_log_locator or InMemoryEventLogLocator()
+        if hasattr(self.event_log_locator, "register"):
+            self.event_log_locator.register(  # type: ignore[attr-defined]
+                parent_runtime_session.runtime_session_id,
+                parent_runtime_session.event_log,
+            )
         self.default_budget = default_budget or SubagentBudget()
         self._child_runner = child_runner
         self._execution_registry = ChildExecutionRegistry()
@@ -259,7 +272,9 @@ class SubagentRuntime:
         result.require_reduced(self._graph_reducer_id)
         return result.committed_events
 
-    def _commit_plan_from_thread(self, plan: PlannedSubagentWrite) -> tuple[AgentEvent, ...]:
+    def _commit_plan_from_thread(
+        self, plan: PlannedSubagentWrite
+    ) -> tuple[AgentEvent, ...]:
         plan = self._command_planner.validate(plan, state=self._graph_store.state)
         result = self.parent_runtime_session.write_events_from_thread(
             plan.events,
@@ -290,8 +305,14 @@ class SubagentRuntime:
             allowed_tool_names.append(name)
             allowed_descriptor_ids.append(str(getattr(descriptor, "id", name)))
             metadata = getattr(descriptor, "metadata", {}) or {}
-            provider_kind = getattr(getattr(descriptor, "provider_kind", None), "value", None)
-            if provider_kind == "mcp" and isinstance(metadata, dict) and isinstance(metadata.get("server_id"), str):
+            provider_kind = getattr(
+                getattr(descriptor, "provider_kind", None), "value", None
+            )
+            if (
+                provider_kind == "mcp"
+                and isinstance(metadata, dict)
+                and isinstance(metadata.get("server_id"), str)
+            ):
                 allowed_mcp_server_ids.append(metadata["server_id"])
                 mcp_tool_names.append(name)
         for name in _CHILD_REPORT_TOOL_NAMES:
@@ -311,13 +332,17 @@ class SubagentRuntime:
             allowed_mcp_server_ids=tuple(dict.fromkeys(allowed_mcp_server_ids)),
             can_spawn_subagents=False,
             memory_enabled=False,
-            computed_from_parent_exposure_generation=getattr(exposure, "registry_generation", None),
+            computed_from_parent_exposure_generation=getattr(
+                exposure, "registry_generation", None
+            ),
             diagnostics=(
                 {
                     "code": "subagent_parent_snapshot_mcp_tools",
                     "tool_names": list(dict.fromkeys(mcp_tool_names)),
                 },
-            ) if mcp_tool_names else (),
+            )
+            if mcp_tool_names
+            else (),
         )
 
     async def create_task(
@@ -355,17 +380,17 @@ class SubagentRuntime:
             },
         )
         event = SubagentTaskCreatedEvent(
-                **event_context.event_fields(),
-                task_id=task_id,
-                batch_id=batch_id,
-                create_tool_call_id=create_tool_call_id,
-                task_key=task_key,
-                label=label,
-                profile_id=profile_id,
-                display_role=display_role,
-                objective_preview=objective_preview,
-                objective_artifact_id=objective_artifact_id,
-                depends_on=list(depends_on),
+            **event_context.event_fields(),
+            task_id=task_id,
+            batch_id=batch_id,
+            create_tool_call_id=create_tool_call_id,
+            task_key=task_key,
+            label=label,
+            profile_id=profile_id,
+            display_role=display_role,
+            objective_preview=objective_preview,
+            objective_artifact_id=objective_artifact_id,
+            depends_on=list(depends_on),
         )
         await self._commit_plan(
             PlannedSubagentWrite(
@@ -391,24 +416,26 @@ class SubagentRuntime:
         self._require_task(task_id)
         state = self._graph_store.state
         if status not in {"waiting_dependency", "blocked_dependency_failed"}:
-            raise ValueError("status must be waiting_dependency or blocked_dependency_failed")
+            raise ValueError(
+                "status must be waiting_dependency or blocked_dependency_failed"
+            )
         terminal_event_ids = self._dependency_terminal_event_ids(
             blocked_by_task_ids,
             overrides=dependency_terminal_event_ids,
         )
         event = SubagentTaskBlockedEvent(
-                **event_context.event_fields(),
-                task_id=task_id,
-                status=status,  # type: ignore[arg-type]
-                blocked_reason=blocked_reason,  # type: ignore[arg-type]
-                blocked_by_task_ids=list(blocked_by_task_ids),
-                dependency_status_snapshot={
-                    dependency_id: state.tasks[dependency_id].status
-                    for dependency_id in blocked_by_task_ids
-                    if dependency_id in state.tasks
-                },
-                dependency_terminal_event_ids=terminal_event_ids,
-                dependency_generation=subagent_dependency_generation(terminal_event_ids),
+            **event_context.event_fields(),
+            task_id=task_id,
+            status=status,  # type: ignore[arg-type]
+            blocked_reason=blocked_reason,  # type: ignore[arg-type]
+            blocked_by_task_ids=list(blocked_by_task_ids),
+            dependency_status_snapshot={
+                dependency_id: state.tasks[dependency_id].status
+                for dependency_id in blocked_by_task_ids
+                if dependency_id in state.tasks
+            },
+            dependency_terminal_event_ids=terminal_event_ids,
+            dependency_generation=subagent_dependency_generation(terminal_event_ids),
         )
         events: tuple[AgentEvent, ...] = (event,)
         if status == "blocked_dependency_failed":
@@ -555,7 +582,9 @@ class SubagentRuntime:
                         blocked_by_task_ids=list(blocked_by_task_ids),
                         dependency_status_snapshot=dependency_status_snapshot,
                         dependency_terminal_event_ids=terminal_event_ids,
-                        dependency_generation=subagent_dependency_generation(terminal_event_ids),
+                        dependency_generation=subagent_dependency_generation(
+                            terminal_event_ids
+                        ),
                     )
                 )
                 continue
@@ -586,7 +615,9 @@ class SubagentRuntime:
                     "profile_id": profile_id,
                     "batch_id": batch_id,
                     "create_tool_call_id": create_tool_call_id,
-                    "spawn_initiator_id": spawn_initiator_id or create_tool_call_id or task_id,
+                    "spawn_initiator_id": spawn_initiator_id
+                    or create_tool_call_id
+                    or task_id,
                     "parent_context_id": parent_context_id,
                     "parent_model_call_index": parent_model_call_index,
                 }
@@ -617,7 +648,9 @@ class SubagentRuntime:
                     parent_model_call_index=parent_model_call_index,
                     spawning_tool_name="create_agent_tasks",
                     spawn_initiator_kind="tool_call",
-                    spawn_initiator_id=spawn_initiator_id or create_tool_call_id or task_id,
+                    spawn_initiator_id=spawn_initiator_id
+                    or create_tool_call_id
+                    or task_id,
                     child_runtime_session_id=child_runtime_session_id,
                     label=label,
                     role="worker",
@@ -650,7 +683,9 @@ class SubagentRuntime:
                     create_tool_call_id=create_tool_call_id,
                     run_index=1,
                     spawn_initiator_kind="tool_call",
-                    spawn_initiator_id=spawn_initiator_id or create_tool_call_id or task_id,
+                    spawn_initiator_id=spawn_initiator_id
+                    or create_tool_call_id
+                    or task_id,
                 )
             )
 
@@ -710,7 +745,9 @@ class SubagentRuntime:
                     reservation=reservation,
                     mcp_binding_identities=_mcp_binding_identities(
                         child_runtime,
-                        allowed_tool_names=info["capability_profile"].allowed_tool_names,
+                        allowed_tool_names=info[
+                            "capability_profile"
+                        ].allowed_tool_names,
                     ),
                 )
                 run = self._require_run(subagent_run_id)
@@ -763,7 +800,9 @@ class SubagentRuntime:
         if task.has_child_run:
             raise SubagentRuntimeError(f"Task already has a child run: {task_id}")
         if task.status not in {"created", "waiting_dependency"}:
-            raise SubagentRuntimeError(f"Task cannot be started from status {task.status}: {task_id}")
+            raise SubagentRuntimeError(
+                f"Task cannot be started from status {task.status}: {task_id}"
+            )
         state = self._graph_store.state
         self.validate_can_start_batch(event_context.run_id, count=1)
         reservation = self._execution_registry.reserve(
@@ -805,7 +844,9 @@ class SubagentRuntime:
                 parent_context_id=parent_context_id,
                 parent_model_call_index=parent_model_call_index,
                 spawning_tool_name=(
-                    "create_agent_tasks" if spawn_initiator_kind == "tool_call" else None
+                    "create_agent_tasks"
+                    if spawn_initiator_kind == "tool_call"
+                    else None
                 ),
                 spawn_initiator_kind=spawn_initiator_kind,  # type: ignore[arg-type]
                 spawn_initiator_id=initiator_id,
@@ -939,9 +980,14 @@ class SubagentRuntime:
         task_artifact_id: str | None = None,
     ) -> SubagentRunFact:
         budget = budget or self.default_budget
-        capability_profile = capability_profile or self._default_capability_profile(budget)
+        capability_profile = capability_profile or self._default_capability_profile(
+            budget
+        )
         context_policy = context_policy or SubagentContextPolicy()
-        if context_policy.mode == "fork" and context_policy.fork_source_context_id is None:
+        if (
+            context_policy.mode == "fork"
+            and context_policy.fork_source_context_id is None
+        ):
             if parent_context_id is None:
                 raise SubagentRuntimeError(
                     "fork context policy requires parent_context_id attribution"
@@ -1153,8 +1199,10 @@ class SubagentRuntime:
             )
         ctx = event_context or _spawn_event_context(run)
         summary = _clip(summary, run.budget.max_result_summary_chars_per_child)
-        resolved_child_run_id = child_run_id or run.child_run_id or (
-            f"run:synthetic-child:{subagent_run_id}"
+        resolved_child_run_id = (
+            child_run_id
+            or run.child_run_id
+            or (f"run:synthetic-child:{subagent_run_id}")
         )
         result_id = f"subagent_result:{uuid4().hex}"
         result_artifact_id = f"{subagent_run_id}:result:{uuid4().hex}"
@@ -1221,7 +1269,9 @@ class SubagentRuntime:
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
-            await self._schedule_dependents_after_completion(run.task_id, event_context=ctx)
+            await self._schedule_dependents_after_completion(
+                run.task_id, event_context=ctx
+            )
         result_fact = self._graph_store.state.results[result_id]
         return _legacy_result_from_fact(result_fact)
 
@@ -1371,7 +1421,9 @@ class SubagentRuntime:
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
-            await self._schedule_dependents_after_completion(run.task_id, event_context=ctx)
+            await self._schedule_dependents_after_completion(
+                run.task_id, event_context=ctx
+            )
         return _legacy_result_from_fact(self._graph_store.state.results[result_id])
 
     # Compatibility/test seam.  Production child execution calls
@@ -1486,7 +1538,9 @@ class SubagentRuntime:
             explicit_evidence = (
                 ChildExplicitResultEvidenceFact(
                     source_result_submitted_event_id=(
-                        submitted_event.id if submitted_event is not None else "submitted:test"
+                        submitted_event.id
+                        if submitted_event is not None
+                        else "submitted:test"
                     ),
                     source_result_submitted_event_sequence=(
                         submitted_event.sequence
@@ -1551,13 +1605,13 @@ class SubagentRuntime:
         # and the child runtime's own raw event stream.
         parent_context = _spawn_event_context(run)
         event = SubagentPhaseReportedEvent(
-                **parent_context.event_fields(),
-                subagent_run_id=subagent_run_id,
-                task_id=run.task_id,
-                phase=_clip(phase, 120),
-                message=_clip(message, 1_000) if message else None,
-                progress=dict(progress or {}),
-                source_tool_call_id=source_tool_call_id,
+            **parent_context.event_fields(),
+            subagent_run_id=subagent_run_id,
+            task_id=run.task_id,
+            phase=_clip(phase, 120),
+            message=_clip(message, 1_000) if message else None,
+            progress=dict(progress or {}),
+            source_tool_call_id=source_tool_call_id,
         )
         await self._commit_plan(
             PlannedSubagentWrite(
@@ -1581,11 +1635,16 @@ class SubagentRuntime:
         state = self._graph_store.state
         run = self._require_run(subagent_run_id)
         if run.status not in _ACTIVE_STATUSES:
-            raise SubagentRuntimeError(f"Subagent run is already terminal: {subagent_run_id}")
+            raise SubagentRuntimeError(
+                f"Subagent run is already terminal: {subagent_run_id}"
+            )
         existing = _result_for_run(state, subagent_run_id, status="submitted")
         if existing is not None:
             return _legacy_result_from_fact(existing)
-        summary = _clip(summary.strip() or "(child agent submitted an empty result)", run.budget.max_result_summary_chars_per_child)
+        summary = _clip(
+            summary.strip() or "(child agent submitted an empty result)",
+            run.budget.max_result_summary_chars_per_child,
+        )
         result_id = f"subagent_result:{uuid4().hex}"
         result_artifact_id = f"{subagent_run_id}:result:{uuid4().hex}"
         self.parent_runtime_session.archive.put_text(
@@ -1608,16 +1667,16 @@ class SubagentRuntime:
         # identity reuse.
         parent_context = _spawn_event_context(run)
         event = SubagentResultSubmittedEvent(
-                **parent_context.event_fields(),
-                subagent_run_id=subagent_run_id,
-                task_id=run.task_id,
-                result_id=result_id,
-                summary=summary,
-                output_preview=output_preview,
-                result_artifact_id=result_artifact_id,
-                artifact_ids=[result_artifact_id, *artifact_ids],
-                source_tool_call_id=source_tool_call_id,
-                diagnostics=[dict(item) for item in diagnostics],
+            **parent_context.event_fields(),
+            subagent_run_id=subagent_run_id,
+            task_id=run.task_id,
+            result_id=result_id,
+            summary=summary,
+            output_preview=output_preview,
+            result_artifact_id=result_artifact_id,
+            artifact_ids=[result_artifact_id, *artifact_ids],
+            source_tool_call_id=source_tool_call_id,
+            diagnostics=[dict(item) for item in diagnostics],
         )
         await self._commit_plan(
             PlannedSubagentWrite(
@@ -1684,8 +1743,10 @@ class SubagentRuntime:
                 "explicit child completion requires one durable result submission"
             )
         submitted_event = submitted_events[0]
-        resolved_child_run_id = child_run_id or run.child_run_id or (
-            f"run:synthetic-child:{subagent_run_id}"
+        resolved_child_run_id = (
+            child_run_id
+            or run.child_run_id
+            or (f"run:synthetic-child:{subagent_run_id}")
         )
         handoff = self._build_result_handoff(
             run=run,
@@ -1769,7 +1830,9 @@ class SubagentRuntime:
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
-            await self._schedule_dependents_after_completion(run.task_id, event_context=ctx)
+            await self._schedule_dependents_after_completion(
+                run.task_id, event_context=ctx
+            )
         return _legacy_result_from_fact(
             self._graph_store.state.results[result_fact.result_id]
         )
@@ -1794,7 +1857,11 @@ class SubagentRuntime:
         ctx = event_context or _spawn_event_context(run)
         run_failed = SubagentRunFailedEvent(
             id=terminal_event_id or uuid4().hex,
-            **({"created_at": terminal_created_at} if terminal_created_at is not None else {}),
+            **(
+                {"created_at": terminal_created_at}
+                if terminal_created_at is not None
+                else {}
+            ),
             **ctx.event_fields(),
             subagent_run_id=subagent_run_id,
             parent_runtime_session_id=run.parent_runtime_session_id,
@@ -2066,9 +2133,10 @@ class SubagentRuntime:
                     terminal = stored[0]
                 except BaseException:
                     confirmation = child_log.confirm_batch((recovered,))
-                    if confirmation.missing_event_ids or len(
-                        confirmation.committed_events
-                    ) != 1:
+                    if (
+                        confirmation.missing_event_ids
+                        or len(confirmation.committed_events) != 1
+                    ):
                         raise
                     terminal = confirmation.committed_events[0]
                 if not isinstance(terminal, RunEndEvent):
@@ -2325,7 +2393,9 @@ class SubagentRuntime:
                 is None
             ):
                 try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, timeout_seconds))
+                    await asyncio.wait_for(
+                        asyncio.shield(task), timeout=max(0.0, timeout_seconds)
+                    )
                 except TimeoutError:
                     pass
         return await self.wait_result(
@@ -2354,14 +2424,20 @@ class SubagentRuntime:
         for task_id in task_ids:
             self._require_task(task_id)
 
-        deadline = None if timeout_seconds is None else asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+        deadline = (
+            None
+            if timeout_seconds is None
+            else asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+        )
         while True:
             settled = [
                 self._task_wait_payload(task_id, include_consumed=include_consumed)
                 for task_id in task_ids
             ]
             settled = [item for item in settled if item is not None]
-            if (settle == "first" and settled) or (settle == "all" and len(settled) == len(task_ids)):
+            if (settle == "first" and settled) or (
+                settle == "all" and len(settled) == len(task_ids)
+            ):
                 chosen = settled[:1] if settle == "first" else settled
                 await self._consume_task_wait_results(
                     chosen,
@@ -2378,7 +2454,9 @@ class SubagentRuntime:
                     include_consumed=include_consumed,
                 )
                 return tuple(settled)
-            await asyncio.sleep(min(0.01, max(0.0, deadline - asyncio.get_running_loop().time())))
+            await asyncio.sleep(
+                min(0.01, max(0.0, deadline - asyncio.get_running_loop().time()))
+            )
 
     async def cancel_task(
         self,
@@ -2401,7 +2479,12 @@ class SubagentRuntime:
                     cancelled_by=cancelled_by,
                 )
                 return self._require_task(task_id)
-        if task.status in {"completed", "failed", "cancelled", "blocked_dependency_failed"}:
+        if task.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "blocked_dependency_failed",
+        }:
             return task
         return await self.cancel_materialized_task(
             task_id,
@@ -2431,15 +2514,15 @@ class SubagentRuntime:
             return task
         state = self._graph_store.state
         event = SubagentTaskCancelledEvent(
-                **event_context.event_fields(),
-                task_id=task_id,
-                subagent_run_id=task.current_run_id,
-                batch_id=task.batch_id,
-                create_tool_call_id=task.create_tool_call_id,
-                repair_id=repair_id,
-                reason_code=reason_code,
-                reason_message=reason_message,
-                cancelled_by=cancelled_by,  # type: ignore[arg-type]
+            **event_context.event_fields(),
+            task_id=task_id,
+            subagent_run_id=task.current_run_id,
+            batch_id=task.batch_id,
+            create_tool_call_id=task.create_tool_call_id,
+            repair_id=repair_id,
+            reason_code=reason_code,
+            reason_message=reason_message,
+            cancelled_by=cancelled_by,  # type: ignore[arg-type]
         )
         events: tuple[AgentEvent, ...] = (event,)
         events += _plan_dependency_failure_cascade(
@@ -2484,7 +2567,12 @@ class SubagentRuntime:
                     diagnostics=diagnostics,
                 )
                 return self._require_task(task_id)
-        if task.status in {"completed", "failed", "cancelled", "blocked_dependency_failed"}:
+        if task.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "blocked_dependency_failed",
+        }:
             return task
         state = self._graph_store.state
         failed = SubagentTaskFailedEvent(
@@ -2540,12 +2628,8 @@ class SubagentRuntime:
                 key=lambda run: run.subagent_run_id,
             )
         )
-        create_tool_call_ids = {
-            task.create_tool_call_id
-            for task in task_facts
-        } | {
-            run.create_tool_call_id
-            for run in run_facts
+        create_tool_call_ids = {task.create_tool_call_id for task in task_facts} | {
+            run.create_tool_call_id for run in run_facts
         }
         if len(create_tool_call_ids) > 1:
             raise SubagentRuntimeError(
@@ -2616,14 +2700,8 @@ class SubagentRuntime:
             timeout_seconds=5.0,
         )
         return (
-            tuple(
-                self._require_task(task.task_id)
-                for task in task_facts
-            ),
-            tuple(
-                self._require_run(run.subagent_run_id)
-                for run in run_facts
-            ),
+            tuple(self._require_task(task.task_id) for task in task_facts),
+            tuple(self._require_run(run.subagent_run_id) for run in run_facts),
         )
 
     async def _schedule_dependents_after_completion(
@@ -2663,7 +2741,10 @@ class SubagentRuntime:
                     )
                 except EventWriteConflict:
                     refreshed = self._require_task(task.task_id)
-                    if refreshed.status == "running" or refreshed.current_run_id is not None:
+                    if (
+                        refreshed.status == "running"
+                        or refreshed.current_run_id is not None
+                    ):
                         continue
                     raise
                 except (SubagentLimitExceeded, SubagentRuntimeError) as exc:
@@ -2709,11 +2790,15 @@ class SubagentRuntime:
         state = self._graph_store.state
         for task_id in task_ids:
             task = state.tasks.get(task_id)
-            terminal_event_id = task.provenance.terminal_event_id if task is not None else None
+            terminal_event_id = (
+                task.provenance.terminal_event_id if task is not None else None
+            )
             if isinstance(terminal_event_id, str) and terminal_event_id:
                 terminal_event_ids[task_id] = terminal_event_id
         if overrides:
-            terminal_event_ids.update({key: value for key, value in overrides.items() if value})
+            terminal_event_ids.update(
+                {key: value for key, value in overrides.items() if value}
+            )
         return terminal_event_ids
 
     def _dependency_status_snapshot(
@@ -2732,7 +2817,9 @@ class SubagentRuntime:
             planned_status = planned.get(task_id)
             if planned_status is None:
                 continue
-            snapshot[task_id] = "running" if planned_status == "start" else planned_status
+            snapshot[task_id] = (
+                "running" if planned_status == "start" else planned_status
+            )
         return snapshot
 
     def _dependencies_satisfied(self, task: SubagentTaskFact) -> bool:
@@ -2759,7 +2846,12 @@ class SubagentRuntime:
         include_consumed: bool,
     ) -> dict[str, object] | None:
         task = self._require_task(task_id)
-        if task.status not in {"completed", "failed", "cancelled", "blocked_dependency_failed"}:
+        if task.status not in {
+            "completed",
+            "failed",
+            "cancelled",
+            "blocked_dependency_failed",
+        }:
             return None
         state = self._graph_store.state
         run_fact = state.runs.get(task.current_run_id or "")
@@ -2769,7 +2861,9 @@ class SubagentRuntime:
             else None
         )
         run = run_fact
-        result = _legacy_result_from_fact(result_fact) if result_fact is not None else None
+        result = (
+            _legacy_result_from_fact(result_fact) if result_fact is not None else None
+        )
         consumed_task_ids, consumed_result_ids = _consumed_ids(state)
         consumed = bool(
             task_id in consumed_task_ids
@@ -2782,11 +2876,15 @@ class SubagentRuntime:
             "task_key": task.task_key,
             "status": task.status,
             "subagent_run_id": task.current_run_id,
-            "child_runtime_session_id": run.child_runtime_session_id if run is not None else None,
+            "child_runtime_session_id": run.child_runtime_session_id
+            if run is not None
+            else None,
             "result_id": result.result_id if result is not None else None,
             "summary": result.summary if result is not None else None,
             "output_preview": result.output_preview if result is not None else None,
-            "result_artifact_id": result.final_message_artifact_id if result is not None else None,
+            "result_artifact_id": result.final_message_artifact_id
+            if result is not None
+            else None,
             "artifact_ids": list(result.artifact_ids) if result is not None else [],
             "result_source": result.result_source if result is not None else "none",
             "consumed": consumed,
@@ -2818,7 +2916,9 @@ class SubagentRuntime:
             terminal_event_id = (
                 None
                 if isinstance(result_id, str)
-                else task_fact.provenance.terminal_event_id if task_fact is not None else None
+                else task_fact.provenance.terminal_event_id
+                if task_fact is not None
+                else None
             )
             events.append(
                 SubagentResultConsumedEvent(
@@ -2827,11 +2927,19 @@ class SubagentRuntime:
                     consumer_tool_call_id=consumer_tool_call_id,
                     kind="wait_task",
                     task_id=task_id,
-                    subagent_run_id=payload.get("subagent_run_id") if isinstance(payload.get("subagent_run_id"), str) else None,
+                    subagent_run_id=payload.get("subagent_run_id")
+                    if isinstance(payload.get("subagent_run_id"), str)
+                    else None,
                     result_id=result_id if isinstance(result_id, str) else None,
                     consumed_status=(
                         consumed_status
-                        if consumed_status in {"completed", "failed", "cancelled", "blocked_dependency_failed"}
+                        if consumed_status
+                        in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "blocked_dependency_failed",
+                        }
                         else "failed"
                     ),  # type: ignore[arg-type]
                     terminal_event_id=terminal_event_id,
@@ -2871,26 +2979,37 @@ class SubagentRuntime:
             run.child_runtime_session_id
         )
 
-    def pending_results_for_delivery(self, *, max_results: int = 8) -> tuple[SubagentResult, ...]:
-        results: list[SubagentResult] = []
+    def pending_results_for_delivery(
+        self, *, max_results: int = 8
+    ) -> tuple[SubagentResult, ...]:
+        if max_results <= 0:
+            return ()
         state = self._graph_store.state
-        _consumed_task_ids, consumed_result_ids = _consumed_ids(state)
-        for result_fact in sorted(
-            state.results.values(),
-            key=lambda item: item.provenance.created_sequence,
-        ):
-            if result_fact.status != "completed":
-                continue
-            if result_fact.result_id in consumed_result_ids:
-                continue
-            if result_fact.result_id in state.deliveries:
-                continue
-            results.append(_legacy_result_from_fact(result_fact))
-            if len(results) >= max_results:
-                break
-        return tuple(results)
+        return tuple(
+            _legacy_result_from_fact(state.results[result_id])
+            for result_id in pending_subagent_result_ids(state)[:max_results]
+        )
 
-    def render_pending_results_section(self, *, max_results: int = 8) -> tuple[str | None, tuple[SubagentResult, ...]]:
+    def materialize_result_selection(
+        self, result_ids: tuple[str, ...]
+    ) -> tuple[SubagentResult, ...]:
+        """Materialize an already-frozen canonical selection without reselecting."""
+
+        state = self._graph_store.state
+        facts = tuple(state.results.get(result_id) for result_id in result_ids)
+        if any(fact is None or fact.status != "completed" for fact in facts):
+            raise SubagentRuntimeError(
+                "frozen subagent result selection is unavailable in graph state"
+            )
+        return tuple(
+            _legacy_result_from_fact(fact)
+            for fact in facts
+            if fact is not None
+        )
+
+    def render_pending_results_section(
+        self, *, max_results: int = 8
+    ) -> tuple[str | None, tuple[SubagentResult, ...]]:
         results = self.pending_results_for_delivery(max_results=max_results)
         if not results:
             return None, ()
@@ -2908,6 +3027,17 @@ class SubagentRuntime:
                 ]
             )
         return "\n".join(lines), results
+
+    def pending_result_delivery_count(self) -> int:
+        state = self._graph_store.state
+        _consumed_task_ids, consumed_result_ids = _consumed_ids(state)
+        return sum(
+            1
+            for result in state.results.values()
+            if result.status == "completed"
+            and result.result_id not in consumed_result_ids
+            and result.result_id not in state.deliveries
+        )
 
     async def mark_results_delivered(
         self,
@@ -2937,7 +3067,10 @@ class SubagentRuntime:
         _consumed_task_ids, consumed_result_ids = _consumed_ids(state)
         events: list[SubagentResultDeliveredEvent] = []
         for result in results:
-            if result.result_id in state.deliveries or result.result_id in consumed_result_ids:
+            if (
+                result.result_id in state.deliveries
+                or result.result_id in consumed_result_ids
+            ):
                 continue
             run = self._require_run(result.subagent_run_id)
             events.append(
@@ -2965,7 +3098,11 @@ class SubagentRuntime:
                 events=tuple(events),
             )
         )
-        return [event for event in committed if isinstance(event, SubagentResultDeliveredEvent)]
+        return [
+            event
+            for event in committed
+            if isinstance(event, SubagentResultDeliveredEvent)
+        ]
 
     def _create_child_runtime_session(
         self,
@@ -2998,6 +3135,7 @@ class SubagentRuntime:
                     "capability_profile_id": capability_profile_id,
                 }
             },
+            context_event_log_locator=self.event_log_locator,
         )
         child.mcp_supervisor = self.parent_runtime_session.mcp_supervisor
         child.set_mcp_installation_contract(
@@ -3045,8 +3183,7 @@ class SubagentRuntime:
                 child_runtime_session_id=run.child_runtime_session_id,
                 pending_kind="child_ledger_reconciliation",
                 reason_code=(
-                    "child_run_start_commit_"
-                    + exc.durable_run_existence.value
+                    "child_run_start_commit_" + exc.durable_run_existence.value
                 ),
                 reason_message=(
                     "Child RunStart commit existence is untrusted; the execution "
@@ -3136,9 +3273,7 @@ class SubagentRuntime:
             if run.parent_run_id == parent_run_id and run.status in _ACTIVE_STATUSES
         }
         active_for_session = {
-            run.subagent_run_id
-            for run in runs
-            if run.status in _ACTIVE_STATUSES
+            run.subagent_run_id for run in runs if run.status in _ACTIVE_STATUSES
         }
         # Durable terminal status does not release physical capacity. A child
         # whose cancellation cleanup is still running remains in the union via
@@ -3154,16 +3289,28 @@ class SubagentRuntime:
         reserved_for_session = self._execution_registry.uncommitted_reservation_count()
         if count < 1:
             raise ValueError("count must be positive")
-        if len(active_for_run) + reserved_for_run + count > budget.max_concurrent_children_per_parent_run:
-            raise SubagentLimitExceeded("max_concurrent_children_per_parent_run exceeded")
-        if len(active_for_session) + reserved_for_session + count > budget.max_concurrent_children_per_host_session:
-            raise SubagentLimitExceeded("max_concurrent_children_per_host_session exceeded")
+        if (
+            len(active_for_run) + reserved_for_run + count
+            > budget.max_concurrent_children_per_parent_run
+        ):
+            raise SubagentLimitExceeded(
+                "max_concurrent_children_per_parent_run exceeded"
+            )
+        if (
+            len(active_for_session) + reserved_for_session + count
+            > budget.max_concurrent_children_per_host_session
+        ):
+            raise SubagentLimitExceeded(
+                "max_concurrent_children_per_host_session exceeded"
+            )
         if len(total_for_run) + count > budget.max_total_child_runs_per_parent_run:
             raise SubagentLimitExceeded("max_total_child_runs_per_parent_run exceeded")
         if budget.max_spawn_depth_from_root < 0:
             raise SubagentLimitExceeded("max_spawn_depth_from_root exceeded")
 
-    def _default_capability_profile(self, budget: SubagentBudget) -> SubagentCapabilityProfile:
+    def _default_capability_profile(
+        self, budget: SubagentBudget
+    ) -> SubagentCapabilityProfile:
         if self._parent_capability_snapshot is None:
             return _default_capability_profile(budget)
         return replace(
@@ -3179,19 +3326,29 @@ class SubagentRuntime:
         budget: SubagentBudget | None = None,
     ) -> SubagentCapabilityProfile:
         budget = budget or self.default_budget
-        if profile_name not in {"research_worker", "review_worker", "verification_worker"}:
+        if profile_name not in {
+            "research_worker",
+            "review_worker",
+            "verification_worker",
+        }:
             return self._default_capability_profile(budget)
         base = self._parent_capability_snapshot or _default_capability_profile(budget)
         inherited_names = set(base.allowed_tool_names)
         inherited_descriptor_ids = set(base.allowed_descriptor_ids)
         if profile_name in {"research_worker", "review_worker"}:
-            allowed_names = _profile_tool_subset(inherited_names, _READ_ONLY_WORKER_TOOL_NAMES)
+            allowed_names = _profile_tool_subset(
+                inherited_names, _READ_ONLY_WORKER_TOOL_NAMES
+            )
             if profile_name == "research_worker":
                 allowed_names.update(_mcp_tool_names_from_profile(base))
             profile_summary = "read-only investigation/review profile"
         else:
-            allowed_names = _profile_tool_subset(inherited_names, _VERIFICATION_WORKER_TOOL_NAMES)
-            profile_summary = "verification profile with terminal access but no file writes"
+            allowed_names = _profile_tool_subset(
+                inherited_names, _VERIFICATION_WORKER_TOOL_NAMES
+            )
+            profile_summary = (
+                "verification profile with terminal access but no file writes"
+            )
         allowed_names.update(_CHILD_REPORT_TOOL_NAMES)
         allowed_descriptor_ids = {
             descriptor_id
@@ -3222,6 +3379,7 @@ class SubagentRuntime:
             diagnostics=tuple(diagnostics),
         )
 
+
 def _final_child_assistant_text(
     child_events: tuple[AgentEvent, ...],
     *,
@@ -3238,7 +3396,9 @@ def _final_child_assistant_text(
             continue
         update = assembler.append(event)
         for item in update.completed:
-            if item.reply_id != terminal.reply_id or not isinstance(item.block, TextBlock):
+            if item.reply_id != terminal.reply_id or not isinstance(
+                item.block, TextBlock
+            ):
                 continue
             completed.append((item.end_sequence or 0, item.block.text))
     completed.sort(key=lambda item: item[0])
@@ -3323,8 +3483,7 @@ def _explicit_result_evidence(
     results = [
         event
         for event in child_events
-        if isinstance(event, ToolResultEndEvent)
-        and event.tool_call_id == tool_call_id
+        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == tool_call_id
     ]
     if len(starts) != 1 or len(results) != 1:
         raise SubagentRuntimeError(
@@ -3379,11 +3538,7 @@ def _single_optional_value(
     rows: list[dict[str, Any]],
     key: str,
 ) -> str | None:
-    values = {
-        str(row[key])
-        for row in rows
-        if row.get(key) is not None
-    }
+    values = {str(row[key]) for row in rows if row.get(key) is not None}
     if len(values) > 1:
         raise ValueError(f"Batch contains conflicting {key} values")
     return next(iter(values), None)
@@ -3466,7 +3621,11 @@ def _plan_run_cancellation(
 ) -> PlannedSubagentWrite:
     run_cancelled = SubagentRunCancelledEvent(
         id=terminal_event_id or uuid4().hex,
-        **({"created_at": terminal_created_at} if terminal_created_at is not None else {}),
+        **(
+            {"created_at": terminal_created_at}
+            if terminal_created_at is not None
+            else {}
+        ),
         **event_context.event_fields(),
         subagent_run_id=run.subagent_run_id,
         parent_runtime_session_id=run.parent_runtime_session_id,
@@ -3539,12 +3698,10 @@ def _plan_dependency_failure_cascade_many(
     excluded_task_ids: set[str] | None = None,
 ) -> tuple[SubagentTaskBlockedEvent, ...]:
     planned_statuses = {
-        task_id: status
-        for task_id, (status, _event_id) in roots.items()
+        task_id: status for task_id, (status, _event_id) in roots.items()
     }
     terminal_event_ids = {
-        task_id: event_id
-        for task_id, (_status, event_id) in roots.items()
+        task_id: event_id for task_id, (_status, event_id) in roots.items()
     }
     excluded = excluded_task_ids or set()
     queue = sorted(roots)
@@ -3597,7 +3754,9 @@ def _default_capability_profile(budget: SubagentBudget) -> SubagentCapabilityPro
     )
 
 
-def _profile_tool_subset(inherited_names: set[str], allowed_core_names: frozenset[str]) -> set[str]:
+def _profile_tool_subset(
+    inherited_names: set[str], allowed_core_names: frozenset[str]
+) -> set[str]:
     allowed = set(inherited_names) & allowed_core_names
     allowed.difference_update(_WRITE_TOOL_NAMES)
     if "terminal" not in allowed_core_names:
@@ -3661,8 +3820,10 @@ def _optional_str_value(value: object) -> str | None:
 def _spawn_event_context(run: SubagentRunFact) -> EventContext:
     return EventContext(
         run_id=run.parent_run_id,
-        turn_id=run.parent_turn_id or f"turn:subagent-maintenance:{run.subagent_run_id}",
-        reply_id=run.parent_reply_id or f"reply:subagent-maintenance:{run.subagent_run_id}",
+        turn_id=run.parent_turn_id
+        or f"turn:subagent-maintenance:{run.subagent_run_id}",
+        reply_id=run.parent_reply_id
+        or f"reply:subagent-maintenance:{run.subagent_run_id}",
     )
 
 
@@ -3673,7 +3834,9 @@ def _parse_dt(value: str) -> datetime:
 def _event_ref(event: Any) -> str:
     event_id = getattr(event, "id", None)
     if not isinstance(event_id, str) or not event_id:
-        raise SubagentRuntimeError("Subagent dependency terminal event requires a durable event id")
+        raise SubagentRuntimeError(
+            "Subagent dependency terminal event requires a durable event id"
+        )
     return event_id
 
 

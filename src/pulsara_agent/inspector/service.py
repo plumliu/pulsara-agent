@@ -28,6 +28,7 @@ from pulsara_agent.event import (
     SubagentRunCompletedEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog, dump_agent_event
+from pulsara_agent.event_log.protocol import EventLogReadSnapshot
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.inspector.diagnostics import (
@@ -48,6 +49,15 @@ from pulsara_agent.message.blocks import (
 )
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime.timeline import build_run_timeline
+from pulsara_agent.runtime.context_input import (
+    ContextEventSlice,
+    ContextInputReplayError,
+    ContextInputReplayStatus,
+    load_context_input_manifest,
+    replay_compiled_context,
+    replay_context_input,
+)
+from pulsara_agent.runtime.context_input.event_slice import ContextEventSliceError
 from pulsara_agent.runtime.subagent.projection import project_subagent_graph
 from pulsara_agent.runtime.subagent.reducer import fold_subagent_graph
 
@@ -113,7 +123,9 @@ class InspectorService:
                 for row in self.store.working_context_for_session(session_id)
             ],
             "capability_surface_as_seen": _capability_surface_projection(events),
-            "context_compilations": _context_compilation_projection(events),
+            "context_compilations": _context_compilation_projection(
+                events, store=self.store
+            ),
             "model_targets": model_contracts["model_targets"],
             "model_calls": model_contracts["model_calls"],
             "model_usage_by_run": model_contracts["usage_by_run"],
@@ -249,7 +261,9 @@ class InspectorService:
                 if isinstance(event, ProjectionReadyEvent)
             ],
             "capability_surface_as_seen": _capability_surface_projection(run_events),
-            "contexts_as_seen": _context_compilation_projection(run_events),
+            "contexts_as_seen": _context_compilation_projection(
+                run_events, store=self.store
+            ),
             "model_targets": model_contracts["model_targets"],
             "model_calls": model_contracts["model_calls"],
             "model_usage_by_run": model_contracts["usage_by_run"],
@@ -507,8 +521,7 @@ def _mcp_installation_events_projection(
                 event.coalesced_attempt_summaries_omitted
             ),
             "server_snapshots": [
-                snapshot.model_dump(mode="json")
-                for snapshot in event.server_snapshots
+                snapshot.model_dump(mode="json") for snapshot in event.server_snapshots
             ],
             "total_installed_tool_count": event.total_installed_tool_count,
             "added_tool_count": event.added_tool_count,
@@ -516,8 +529,7 @@ def _mcp_installation_events_projection(
             "changed_tool_names": list(event.changed_tool_names_bounded),
             "changed_tool_names_omitted": event.changed_tool_names_omitted,
             "diagnostics": [
-                diagnostic.model_dump(mode="json")
-                for diagnostic in event.diagnostics
+                diagnostic.model_dump(mode="json") for diagnostic in event.diagnostics
             ],
         }
         for event in events
@@ -603,9 +615,7 @@ def _run_boundary_projection(
         ),
         key=lambda event: event.sequence or 0,
     )
-    exposure_by_id = {
-        event.exposure.exposure_id: event for event in exposures
-    }
+    exposure_by_id = {event.exposure.exposure_id: event for event in exposures}
     continuations: list[dict[str, Any]] = []
     for event in continuation_events:
         boundary = event.boundary
@@ -632,12 +642,8 @@ def _run_boundary_projection(
                 "boundary_id": boundary.identity.boundary_id,
                 "interaction_id": boundary.interaction_id,
                 "interaction_kind": boundary.interaction_kind,
-                "original_run_start_event_id": (
-                    boundary.original_run_start_event_id
-                ),
-                "original_run_start_sequence": (
-                    boundary.original_run_start_sequence
-                ),
+                "original_run_start_event_id": (boundary.original_run_start_event_id),
+                "original_run_start_sequence": (boundary.original_run_start_sequence),
                 "mcp_installation_id": boundary.mcp_installation_id,
                 "source_exposure_id": boundary.source_exposure_id,
                 "source_exposure_semantic_fingerprint": (
@@ -749,14 +755,10 @@ def _run_boundary_projection(
                 else None
             ),
             "exposure_semantic_fingerprint": (
-                exposure.exposure_semantic_fingerprint
-                if exposure is not None
-                else None
+                exposure.exposure_semantic_fingerprint if exposure is not None else None
             ),
             "exposure_fact_fingerprint": (
-                exposure.exposure_fact_fingerprint
-                if exposure is not None
-                else None
+                exposure.exposure_fact_fingerprint if exposure is not None else None
             ),
             "run_start_event_id": run_start.id,
             "run_start_sequence": run_start.sequence,
@@ -1577,7 +1579,11 @@ def _model_contract_diagnostic(
     return {"code": code, "severity": "error", "message": message, "details": details}
 
 
-def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, Any]:
+def _context_compilation_projection(
+    events: Iterable[AgentEvent],
+    *,
+    store: PostgresInspectorStore | None = None,
+) -> dict[str, Any]:
     context_events: list[ContextCompiledEvent] = []
     model_starts: list[ModelCallStartEvent] = []
     for event in events:
@@ -1657,17 +1663,30 @@ def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, A
                     },
                 }
             )
+    projected = [
+        _context_compiled_to_dict(
+            event,
+            input_replay=(
+                _context_input_replay_projection(event, store)
+                if store is not None
+                else None
+            ),
+        )
+        for event in context_events
+    ]
     return {
-        "latest": _context_compiled_to_dict(context_events[-1])
-        if context_events
-        else None,
-        "contexts": [_context_compiled_to_dict(event) for event in context_events],
+        "latest": projected[-1] if context_events else None,
+        "contexts": projected,
         "model_call_joins": joins,
         "diagnostics": diagnostics,
     }
 
 
-def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
+def _context_compiled_to_dict(
+    event: ContextCompiledEvent,
+    *,
+    input_replay: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     sections = [_json_safe(section) for section in event.sections]
     omitted = [
         section
@@ -1704,11 +1723,265 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "tool_result_render_decisions": [
             _json_safe(decision) for decision in event.tool_result_render_decisions
         ],
+        "canonical_tool_result_render_decisions": [
+            decision.model_dump(mode="json")
+            for decision in event.tool_result_render_decision_facts
+        ],
+        "tool_result_render_operational": [
+            item.model_dump(mode="json")
+            for item in event.tool_result_render_operational_facts
+        ],
         "tool_result_timings": _tool_result_timing_projection(
             event.tool_result_render_decisions
         ),
         "tool_result_budget_report": _json_safe(event.tool_result_budget_report),
+        "input_status": (
+            "audited" if event.input_audit is not None else "input_failed"
+        ),
+        "input_audit": (
+            event.input_audit.model_dump(mode="json")
+            if event.input_audit is not None
+            else None
+        ),
+        "input_failure": (
+            event.input_failure.model_dump(mode="json")
+            if event.input_failure is not None
+            else None
+        ),
+        "provider_neutral_payload_fingerprint": (
+            event.provider_neutral_payload_fingerprint
+        ),
+        "canonical_render_decisions_fingerprint": (
+            event.canonical_render_decisions_fingerprint
+        ),
+        "input_replay": input_replay,
     }
+
+
+def _context_input_replay_projection(
+    event: ContextCompiledEvent,
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    if event.input_audit is None:
+        failure = event.input_failure
+        reason = (
+            failure.reason_code.value
+            if failure is not None
+            else "missing_input_carrier"
+        )
+        status = (
+            ContextInputReplayStatus.LEDGER_UNTRUSTED
+            if reason == "ledger_untrusted"
+            else ContextInputReplayStatus.ARTIFACT_MISSING
+            if reason == "manifest_confirmed_absent"
+            else ContextInputReplayStatus.CONTRACT_MISMATCH
+        )
+        return {
+            "status": status.value,
+            "diagnostics": [
+                {
+                    "code": reason,
+                    "message": "Context compilation did not confirm a replay manifest.",
+                }
+            ],
+            "manifest": None,
+        }
+
+    audit = event.input_audit
+    archive = PostgresArtifactStore(store.dsn)
+    try:
+        manifest = load_context_input_manifest(audit=audit, archive=archive)
+        primary = _context_event_slice_for_range(
+            store=store,
+            runtime_session_id=manifest.snapshot.primary_event_range.runtime_session_id,
+            first_sequence=manifest.snapshot.primary_event_range.first_sequence,
+            through_sequence=manifest.snapshot.primary_event_range.through_sequence,
+        )
+        named = tuple(
+            _context_event_slice_for_range(
+                store=store,
+                runtime_session_id=item.runtime_session_id,
+                first_sequence=item.first_sequence,
+                through_sequence=item.through_sequence,
+            )
+            for item in manifest.snapshot.named_event_ranges
+        )
+        replayed = replay_context_input(
+            audit=audit,
+            archive=archive,
+            event_slice=primary,
+            named_slices=named,
+        )
+        try:
+            exact = replay_compiled_context(
+                event=event,
+                archive=archive,
+                event_slice=primary,
+                named_slices=named,
+            )
+        except ContextInputReplayError as exc:
+            if exc.status is not ContextInputReplayStatus.FACT_REPLAY_ONLY:
+                raise
+            replay_status = exc.status
+            replay_diagnostics = [{"code": exc.reason_code, "message": str(exc)}]
+        else:
+            replayed = exact.inputs
+            replay_status = ContextInputReplayStatus.EXACT_REPLAY
+            replay_diagnostics = []
+    except ContextInputReplayError as exc:
+        return {
+            "status": exc.status.value,
+            "diagnostics": [{"code": exc.reason_code, "message": str(exc)}],
+            "manifest": {
+                "artifact_id": audit.input_manifest_artifact_id,
+                "fingerprint": audit.input_manifest_fingerprint,
+                "write_outcome": audit.input_manifest_write_outcome,
+            },
+        }
+    except ContextEventSliceError as exc:
+        return {
+            "status": ContextInputReplayStatus.LEDGER_UNTRUSTED.value,
+            "diagnostics": [
+                {
+                    "code": "context_input_event_slice_untrusted",
+                    "message": str(exc),
+                }
+            ],
+            "manifest": {
+                "artifact_id": audit.input_manifest_artifact_id,
+                "fingerprint": audit.input_manifest_fingerprint,
+                "write_outcome": audit.input_manifest_write_outcome,
+            },
+        }
+
+    snapshot = replayed.manifest.snapshot
+    units = replayed.normalized_transcript.tool_result_units
+    candidates = replayed.prepared_candidates
+    profile_counts: dict[str, int] = {}
+    builder_contracts: dict[tuple[str, str, str], dict[str, str]] = {}
+    for unit in units:
+        variant = unit.render_profile.selected_variant.variant_code.value
+        profile_counts[variant] = profile_counts.get(variant, 0) + 1
+        contract = unit.render_profile.render_contract.semantics_builder_contract
+        key = (
+            contract.builder_id,
+            contract.builder_version,
+            contract.contract_fingerprint,
+        )
+        builder_contracts[key] = {
+            "builder_id": contract.builder_id,
+            "builder_version": contract.builder_version,
+            "contract_fingerprint": contract.contract_fingerprint,
+        }
+    source_counts: dict[str, int] = {}
+    lifecycle_counts: dict[str, int] = {}
+    for entry in candidates.entries:
+        source = entry.candidate.source_kind
+        source_counts[source] = source_counts.get(source, 0) + 1
+        lifecycle = entry.lifecycle.status
+        lifecycle_counts[lifecycle] = lifecycle_counts.get(lifecycle, 0) + 1
+    source_selections = [
+        item.model_dump(mode="json")
+        for item in snapshot.candidate_source_selections[:64]
+    ]
+    collection_decisions = [
+        item.model_dump(mode="json")
+        for item in candidates.collection_decisions[:128]
+    ]
+    window = snapshot.authority_slice_plan.transcript_window
+    return {
+        "status": replay_status.value,
+        "diagnostics": replay_diagnostics,
+        "manifest": {
+            "artifact_id": audit.input_manifest_artifact_id,
+            "fingerprint": replayed.manifest.manifest_fingerprint,
+            "write_outcome": audit.input_manifest_write_outcome,
+            "aggregate_fingerprint": replayed.manifest.input_aggregate_fingerprint,
+        },
+        "snapshot": {
+            "snapshot_id": snapshot.identity.snapshot_id,
+            "schema_version": snapshot.identity.schema_version,
+            "semantic_fingerprint": snapshot.snapshot_semantic_fingerprint,
+            "fact_fingerprint": snapshot.snapshot_fact_fingerprint,
+            "compiler_contract_version": snapshot.identity.compiler_contract_version,
+            "run_entry_kind": snapshot.run_entry.run_entry_kind,
+            "run_start": snapshot.run_entry.run_start.model_dump(mode="json"),
+            "continuation": (
+                snapshot.continuation.model_dump(mode="json")
+                if snapshot.continuation is not None
+                else None
+            ),
+            "primary_range": snapshot.primary_event_range.model_dump(mode="json"),
+            "named_ranges": [
+                item.model_dump(mode="json") for item in snapshot.named_event_ranges
+            ],
+            "authority_plan_fingerprint": snapshot.authority_slice_plan.plan_fingerprint,
+            "transcript_window": window.model_dump(mode="json"),
+            "resolved_model_call_id": snapshot.resolved_model_call.resolved_model_call_id,
+            "target_fingerprint": snapshot.resolved_model_call.target.target_fingerprint,
+        },
+        "transcript": {
+            "fingerprint": replayed.normalized_transcript.transcript.transcript_fingerprint,
+            "message_count": len(replayed.normalized_transcript.transcript.messages),
+            "pair_count": len(replayed.normalized_transcript.transcript.tool_pairs),
+            "stripped_unfinished_call_ids": list(
+                replayed.normalized_transcript.transcript.stripped_unfinished_call_ids
+            ),
+        },
+        "tool_results": {
+            "unit_count": len(units),
+            "profile_counts": profile_counts,
+            "builder_contracts": list(builder_contracts.values()),
+            "render_policy_fingerprint": (
+                replayed.prepared_tool_results.resolved_policy.policy_fingerprint
+            ),
+            "latest_reserved_unit_ids": list(
+                replayed.prepared_tool_results.resolved_policy.latest_reserved_unit_ids
+            ),
+        },
+        "candidates": {
+            "count": len(candidates.entries),
+            "source_counts": source_counts,
+            "lifecycle_counts": lifecycle_counts,
+            "source_selections": source_selections,
+            "source_selections_truncated": (
+                len(snapshot.candidate_source_selections) > len(source_selections)
+            ),
+            "collection_decisions": collection_decisions,
+            "collection_decisions_truncated": (
+                len(candidates.collection_decisions) > len(collection_decisions)
+            ),
+            "invalidation_count": len(candidates.invalidations),
+            "fingerprint": candidates.candidate_set_fingerprint,
+        },
+        "current_process_diagnostics": {
+            "semantics_builder_implementation_build_fingerprints": None,
+            "historical_fact": False,
+        },
+    }
+
+
+def _context_event_slice_for_range(
+    *,
+    store: PostgresInspectorStore,
+    runtime_session_id: str,
+    first_sequence: int,
+    through_sequence: int,
+) -> ContextEventSlice:
+    events = tuple(
+        event
+        for event in store.events_for_session(runtime_session_id)
+        if event.sequence is not None
+        and first_sequence <= event.sequence <= through_sequence
+    )
+    return ContextEventSlice.from_read_snapshot(
+        runtime_session_id=runtime_session_id,
+        minimum_sequence=first_sequence,
+        snapshot=EventLogReadSnapshot(
+            through_sequence=through_sequence,
+            events=events,
+        ),
+    )
 
 
 def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
@@ -1737,10 +2010,21 @@ def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
             source = {}
             freshness = None
             status = "missing"
+        source_started_at = (
+            source.get("source_started_at_utc") or source.get("source_started_at")
+            if isinstance(source, dict)
+            else None
+        )
+        source_ended_at = (
+            source.get("source_ended_at_utc") or source.get("source_ended_at")
+            if isinstance(source, dict)
+            else None
+        )
         observed_at = (
-            source.get("observed_at")
-            or source.get("source_ended_at")
-            or source.get("source_started_at")
+            source.get("observed_at_utc")
+            or source.get("observed_at")
+            or source_ended_at
+            or source_started_at
             if isinstance(source, dict)
             else None
         )
@@ -1756,12 +2040,8 @@ def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
                 if isinstance(timing, dict)
                 else None,
                 "observed_at": observed_at,
-                "source_started_at": source.get("source_started_at")
-                if isinstance(source, dict)
-                else None,
-                "source_ended_at": source.get("source_ended_at")
-                if isinstance(source, dict)
-                else None,
+                "source_started_at": source_started_at,
+                "source_ended_at": source_ended_at,
                 "age_seconds": timing.get("age_seconds")
                 if isinstance(timing, dict)
                 else None,

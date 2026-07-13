@@ -3,7 +3,11 @@ import json
 from typing import AsyncIterator
 
 import pytest
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    run_end_contract_fields,
+    run_start_permission_fields,
+    tool_result_end_contract_fields,
+)
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -366,7 +370,9 @@ def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> Non
             ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="model_error"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
@@ -407,7 +413,9 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
             ReplyEndEvent(**failed_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(failed_ctx.run_id, status="failed"),
-                **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
+                **failed_ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
             RunStartEvent(
                 **done_ctx.event_fields(),
@@ -423,7 +431,9 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
             ReplyEndEvent(**done_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(done_ctx.run_id, status="finished"),
-                **done_ctx.event_fields(), status="finished", stop_reason="final"
+                **done_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -633,7 +643,9 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
             ),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="tool_error_budget"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="tool_error_budget",
             ),
         ]
     )
@@ -694,6 +706,9 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
             ),
             ToolResultEndEvent(
                 **ctx.event_fields(),
+                **tool_result_end_contract_fields(
+                    "call:terminal", tool_name="terminal"
+                ),
                 tool_call_id="call:terminal",
                 state=ToolResultState.SUCCESS,
                 metadata={
@@ -757,7 +772,9 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:term"),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="model_error"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
@@ -842,7 +859,9 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
             ),
             RunEndEvent(
                 **run_end_contract_fields(failed_ctx.run_id, status="failed"),
-                **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
+                **failed_ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
@@ -904,7 +923,9 @@ def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succ
             ReplyEndEvent(**done_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(done_ctx.run_id, status="finished"),
-                **done_ctx.event_fields(), status="finished", stop_reason="final"
+                **done_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -951,7 +972,9 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
             ),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="model_error"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
@@ -985,7 +1008,9 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
             ReplyEndEvent(**first_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(first_ctx.run_id, status="finished"),
-                **first_ctx.event_fields(), status="finished", stop_reason="final"
+                **first_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
             TerminalProcessCompletedEvent(
                 **first_ctx.event_fields(),
@@ -1018,7 +1043,9 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
             ReplyEndEvent(**second_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(second_ctx.run_id, status="finished"),
-                **second_ctx.event_fields(), status="finished", stop_reason="final"
+                **second_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -1049,14 +1076,18 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
         [
             RunStartEvent(
                 **first_ctx.event_fields(),
-                **run_start_permission_fields(first_ctx.run_id, user_input="start server"),
+                **run_start_permission_fields(
+                    first_ctx.run_id, user_input="start server"
+                ),
                 user_input_chars=len("start server"),
                 metadata={"user_input": "start server"},
             ),
             ReplyEndEvent(**first_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(first_ctx.run_id, status="finished"),
-                **first_ctx.event_fields(), status="finished", stop_reason="final"
+                **first_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
             RunStartEvent(
                 **second_ctx.event_fields(),
@@ -1079,7 +1110,9 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
             ReplyEndEvent(**second_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(second_ctx.run_id, status="finished"),
-                **second_ctx.event_fields(), status="finished", stop_reason="final"
+                **second_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -1353,7 +1386,13 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
                         "name": "terminal",
                         "arguments": json.dumps(
                             {
-                                "command": "sleep 0.25 && printf LATE_DONE",
+                                # Keep completion after the first run's
+                                # post-tool compile/model call but inside
+                                # the deliberately slow following turn.
+                                # The durable context-input manifest adds
+                                # bounded pre-send work, so 0.25s no longer
+                                # establishes that ordering reliably.
+                                "command": "sleep 0.5 && printf LATE_DONE",
                                 "yield_time_ms": 0,
                             }
                         ),
@@ -2572,6 +2611,21 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
 def test_exit_plan_revise_keeps_plan_active_and_read_only(
     tmp_path, monkeypatch
 ) -> None:
+    import pulsara_agent.runtime.agent as agent_module
+
+    prepared_snapshots = []
+    original_prepare = agent_module.prepare_live_context_snapshot
+
+    async def capture_prepare(**kwargs):
+        prepared = await original_prepare(**kwargs)
+        prepared_snapshots.append(prepared)
+        return prepared
+
+    monkeypatch.setattr(
+        agent_module,
+        "prepare_live_context_snapshot",
+        capture_prepare,
+    )
     transport = ScriptedTransport(
         [
             {
@@ -2632,6 +2686,23 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(
     assert "add tests" in revision_context
     retry_context = _context_text(transport.contexts[2])
     assert "Plan revision is still pending" in retry_context
+    revise_event = next(
+        event
+        for event in session.replay_events()
+        if isinstance(event, PlanExitResolvedEvent) and event.decision == "revise"
+    )
+    revision_authorities = [
+        authority
+        for prepared in prepared_snapshots
+        for authority in prepared.invocation.fact.candidate_authorities
+        if authority.source_instance_id == "plan:revision"
+    ]
+    assert revision_authorities
+    assert all(
+        tuple(ref.event_id for ref in authority.source_fact_refs)
+        == (revise_event.id,)
+        for authority in revision_authorities
+    )
 
 
 def test_cancel_plan_exits_plan_mode_and_aborts_suspended_exit_run(

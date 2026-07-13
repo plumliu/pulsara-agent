@@ -60,7 +60,7 @@ class MessageReducer:
                 _remember_tool_observation_timing(
                     self.message,
                     tool_call_id=event.tool_call_id,
-                    timing=event.metadata.get("tool_observation_timing"),
+                    timing=event.observation_timing.to_message_projection_payload(),
                 )
 
             case EventType.REQUIRE_USER_CONFIRM:
@@ -84,29 +84,22 @@ class MessageReducer:
 
             case EventType.REQUIRE_EXTERNAL_EXECUTION:
                 assert isinstance(event, RequireExternalExecutionEvent)
-                for tool_call in event.tool_calls:
-                    block = self._find_block("tool_call", tool_call.id)
+                for requirement in event.external_tool_calls:
+                    block = self._find_block("tool_call", requirement.tool_call_id)
                     if isinstance(block, ToolCallBlock):
                         block.state = ToolCallState.SUBMITTED
 
             case EventType.EXTERNAL_EXECUTION_RESULT:
                 assert isinstance(event, ExternalExecutionResultEvent)
-                for result in event.execution_results:
-                    block = self._find_block("tool_call", result.id)
+                for result in event.external_results:
+                    tool_call_id = result.result_block.tool_call_id
+                    block = self._find_block("tool_call", tool_call_id)
                     if isinstance(block, ToolCallBlock):
                         block.state = ToolCallState.FINISHED
-                    timing_by_call_id = event.metadata.get(
-                        "tool_observation_timing_by_call_id"
-                    )
-                    timing = (
-                        timing_by_call_id.get(result.id)
-                        if isinstance(timing_by_call_id, dict)
-                        else None
-                    )
                     _remember_tool_observation_timing(
                         self.message,
-                        tool_call_id=result.id,
-                        timing=timing,
+                        tool_call_id=tool_call_id,
+                        timing=result.observation_timing.to_message_projection_payload(),
                     )
 
         return self.message

@@ -143,7 +143,9 @@ class InMemoryArchiveStore:
         run_id: str | None,
         media_type: str,
         semantic_metadata: dict[str, Any],
+        deadline_monotonic: float | None = None,
     ) -> ArtifactPutConfirmation:
+        del deadline_monotonic
         metadata = canonical_artifact_semantic_metadata(semantic_metadata)
         encoded = content.encode("utf-8")
         digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
@@ -188,7 +190,14 @@ class InMemoryArchiveStore:
             ),
         )
 
-    def get_info(self, blob_id: str, *, session_id: str | None = None) -> ArtifactRecord:
+    def get_info(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> ArtifactRecord:
+        del deadline_monotonic
         blob = self._blob(blob_id, session_id=session_id)
         return _record(blob)
 
@@ -216,7 +225,14 @@ class InMemoryArchiveStore:
             has_more=offset_chars + len(sliced) < total_chars,
         )
 
-    def get_text(self, blob_id: str, *, session_id: str | None = None) -> str:
+    def get_text(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> str:
+        del deadline_monotonic
         blob = self._blob(blob_id, session_id=session_id)
         if blob.text_content is None:
             raise ValueError(f"Artifact {blob_id!r} is not a text artifact")
@@ -266,9 +282,13 @@ def _validate_identity(
     ):
         raise ValueError(f"artifact {blob.id!r} already exists with different content")
     if blob.media_type != media_type:
-        raise ValueError(f"artifact {blob.id!r} already exists with media_type {blob.media_type!r}")
+        raise ValueError(
+            f"artifact {blob.id!r} already exists with media_type {blob.media_type!r}"
+        )
     if session_id is not None and blob.session_id != session_id:
-        raise ValueError(f"artifact {blob.id!r} already belongs to runtime session {blob.session_id!r}")
+        raise ValueError(
+            f"artifact {blob.id!r} already belongs to runtime session {blob.session_id!r}"
+        )
     if run_id is not None and blob.run_id != run_id:
         raise ValueError(f"artifact {blob.id!r} already belongs to run {blob.run_id!r}")
 

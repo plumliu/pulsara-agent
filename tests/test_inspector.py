@@ -11,6 +11,7 @@ from tests.conftest import (
     run_end_contract_fields,
     run_start_permission_fields,
     subagent_result_handoff_fields,
+    tool_result_end_contract_fields,
 )
 from tests.support import (
     compaction_completed_contract_fields,
@@ -665,9 +666,7 @@ def test_inspector_projects_all_committed_resume_boundaries(tmp_path: Path) -> N
             plan_active=source_basis.plan_active,
             active_skill_names=source_basis.active_skill_names,
             user_intent_fingerprint=source_basis.user_intent_fingerprint,
-            prior_transcript_fingerprint=(
-                source_basis.prior_transcript_fingerprint
-            ),
+            prior_transcript_fingerprint=(source_basis.prior_transcript_fingerprint),
             mcp_installation_id=source_basis.mcp_installation_id,
             execution_surface_identity=source_basis.execution_surface_identity,
         )
@@ -757,9 +756,7 @@ def test_inspector_projects_primitive_child_entry_with_nullable_task(
             user_input="primitive objective",
             turn_id=ctx.turn_id,
             reply_id=ctx.reply_id,
-            mcp_installation_owner_runtime_session_id=(
-                parent_runtime_session_id
-            ),
+            mcp_installation_owner_runtime_session_id=(parent_runtime_session_id),
         )
         entry = fields["subagent_run_entry"]
         current_user = fields["current_user_message"]
@@ -1165,7 +1162,9 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
                 ReplyEndEvent(**ctx.event_fields()),
                 RunEndEvent(
                     **run_end_contract_fields(ctx.run_id, status="finished"),
-                    **ctx.event_fields(), status="finished", stop_reason="final"
+                    **ctx.event_fields(),
+                    status="finished",
+                    stop_reason="final",
                 ),
             ]
         )
@@ -1208,6 +1207,15 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
             contexts["latest"]["tool_result_timings"][1]["status"] == "not_applicable"
         )
         assert contexts["latest"]["lifecycle_decisions"][0]["decision"] == "invalidated"
+        assert contexts["latest"]["input_status"] == "audited"
+        assert contexts["latest"]["input_audit"] == compiled_fields[
+            "input_audit"
+        ].model_dump(mode="json")
+        assert contexts["latest"]["input_failure"] is None
+        assert contexts["latest"]["input_replay"]["status"] == "artifact_missing"
+        assert contexts["latest"]["input_replay"]["diagnostics"][0]["code"] == (
+            "context_input_manifest_missing"
+        )
         assert contexts["model_call_joins"][0]["join_status"] == "matched"
         assert contexts["model_call_joins"][0]["context_compiled_sequence"] is not None
         assert contexts["diagnostics"] == []
@@ -1452,6 +1460,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                     role="pro",
                     scope="session",
                     token_budget=100,
+                    projection_kind="memory",
                     summary="TARGET_PROJECTION_AS_SEEN",
                 ),
                 ReplyStartEvent(**target.event_fields(), name="assistant"),
@@ -1463,7 +1472,9 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                 ReplyEndEvent(**target.event_fields()),
                 RunEndEvent(
                     **run_end_contract_fields(target.run_id, status="finished"),
-                    **target.event_fields(), status="finished", stop_reason="final"
+                    **target.event_fields(),
+                    status="finished",
+                    stop_reason="final",
                 ),
             ]
         )
@@ -1481,11 +1492,14 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                     role="pro",
                     scope="session",
                     token_budget=100,
+                    projection_kind="memory",
                     summary="FUTURE_PROJECTION_NOT_SEEN",
                 ),
                 RunEndEvent(
                     **run_end_contract_fields(future.run_id, status="finished"),
-                    **future.event_fields(), status="finished", stop_reason="final"
+                    **future.event_fields(),
+                    status="finished",
+                    stop_reason="final",
                 ),
             ]
         )
@@ -1634,7 +1648,9 @@ def test_inspector_projects_bounded_mcp_installation_facts(tmp_path: Path) -> No
                 _mcp_installed_event(ctx),
                 RunEndEvent(
                     **run_end_contract_fields(ctx.run_id, status="finished"),
-                    **ctx.event_fields(), status="finished", stop_reason="final"
+                    **ctx.event_fields(),
+                    status="finished",
+                    stop_reason="final",
                 ),
             ]
         )
@@ -1766,7 +1782,9 @@ def test_inspector_reports_missing_mcp_installation_audit(tmp_path: Path) -> Non
                 ),
                 RunEndEvent(
                     **run_end_contract_fields(ctx.run_id, status="finished"),
-                    **ctx.event_fields(), status="finished", stop_reason="final"
+                    **ctx.event_fields(),
+                    status="finished",
+                    stop_reason="final",
                 ),
             ]
         )
@@ -2087,6 +2105,7 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
                 ),
                 ToolResultEndEvent(
                     **ctx.event_fields(),
+                    **tool_result_end_contract_fields(call_id, tool_name="read_file"),
                     tool_call_id=call_id,
                     state=ToolResultState.SUCCESS,
                     metadata={
@@ -2105,7 +2124,9 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
                 ),
                 RunEndEvent(
                     **run_end_contract_fields(ctx.run_id, status="finished"),
-                    **ctx.event_fields(), status="finished", stop_reason="final"
+                    **ctx.event_fields(),
+                    status="finished",
+                    stop_reason="final",
                 ),
             ]
         )

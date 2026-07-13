@@ -1225,6 +1225,8 @@ def test_close_active_streaming_run_emits_auditable_host_teardown(
             try:
                 async for event in s.stream_turn("go"):
                     events.append(event)
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
 
@@ -1438,8 +1440,7 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
             nonlocal injected
             stored = await original(self, events, state=state)
             if not injected and any(
-                isinstance(event, RunInteractionResumeBoundaryEvent)
-                for event in events
+                isinstance(event, RunInteractionResumeBoundaryEvent) for event in events
             ):
                 injected = True
                 raise asyncio.CancelledError

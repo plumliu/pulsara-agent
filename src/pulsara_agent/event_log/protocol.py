@@ -20,7 +20,9 @@ class EventIdConflict(RuntimeError):
 class EventLogWriteConflict(RuntimeError):
     """Conditional append observed a different session high-water mark."""
 
-    def __init__(self, *, expected_last_sequence: int, actual_last_sequence: int) -> None:
+    def __init__(
+        self, *, expected_last_sequence: int, actual_last_sequence: int
+    ) -> None:
         self.expected_last_sequence = expected_last_sequence
         self.actual_last_sequence = actual_last_sequence
         super().__init__(
@@ -34,6 +36,14 @@ class EventBatchConfirmation:
     committed_events: tuple[AgentEvent, ...]
     missing_event_ids: tuple[str, ...]
     actual_last_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class EventLogReadSnapshot:
+    """One atomic ordered read boundary from a single runtime ledger."""
+
+    through_sequence: int
+    events: tuple[AgentEvent, ...]
 
 
 class EventLog(Protocol):
@@ -68,7 +78,17 @@ class EventLog(Protocol):
 
     def get_by_id(self, event_id: str) -> AgentEvent | None: ...
 
-    def confirm_batch(self, candidates: Sequence[AgentEvent]) -> EventBatchConfirmation: ...
+    def confirm_batch(
+        self, candidates: Sequence[AgentEvent]
+    ) -> EventBatchConfirmation: ...
+
+    def read_range_snapshot(
+        self,
+        *,
+        minimum_sequence: int,
+        through_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> EventLogReadSnapshot: ...
 
     def replay(self, reply_id: str) -> Msg: ...
 

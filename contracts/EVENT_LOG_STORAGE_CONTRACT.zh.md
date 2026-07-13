@@ -67,6 +67,20 @@ pending state切回active或继续model/tool loop。pre-commit失败保留原pen
 post-commit publication failure清除committed audit ownership但仍向上传播；
 不得因为“没有新RunStart”而跳过durable installation attribution。
 
+### 2.2 Context input durable carriers
+
+`RunStartEvent.current_user_message`、`ToolResultEndEvent.observation_timing/render_profile/essential_result/terminal_payload_timing`、
+`ContextCompiledEvent.input_audit|input_failure`均为required typed contract。Replay不得从`metadata`、tool output JSON或当前
+descriptor补造缺失字段。
+
+Context compiler读取event时必须使用atomic range snapshot：同一次读取返回high-water与canonical stored bytes。每个
+`FrozenStoredEvent`的wrapper identity必须与decoded payload完全一致；range不连续、同ID异payload或structural latch一律
+fail closed。EventLog reader返回owned copies，修改调用者对象不能改变stored payload、slice fingerprint或另一projector输入。
+
+Production PostgreSQL range read是deadline-aware contract：同一repeatable-read transaction必须设置不超过caller绝对deadline的
+connect/statement timeout。async caller通过RuntimeSession-owned bounded I/O owner执行sync driver调用；外层task取消不等于物理
+query已停止，Host close必须等待物理operation退出后才能释放session resources。
+
 ---
 
 ## 3. Sequence
@@ -195,6 +209,11 @@ Memory canonical substrate schema 不属于本契约；见 [MEMORY_SURFACES_CONT
 - 不允许直接更新 projection 表来代替 typed event。
 - 不允许跨 session 复用 run/turn id。
 - 不允许 inspector 或 resume 读取 live scratchpad 来解释历史。
+- 不允许context replay解析tool-result JSON来补造typed execution semantics。
+- `ProjectionReadyEvent`必须持久化`projection_kind`；context authority先定位当前run最新`ProjectionRequestedEvent`，再按
+  `projection_id + role + scope`确认其后唯一terminal。Ready只能从该event的summary/kind与frozen wrapper
+  created-at/sequence重建memory正文/timing；Failed表示本次无memory candidate。terminal缺失、不唯一或最新Failed时不得
+  回读live memory state或复用旧Ready。
 
 ---
 

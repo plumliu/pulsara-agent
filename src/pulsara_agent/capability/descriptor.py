@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+from pulsara_agent.primitives.tool_result import CapabilityResultRenderContractFact
 
 
 class CapabilityProviderKind(StrEnum):
@@ -58,6 +59,7 @@ class CapabilityDescriptor:
     is_model_callable: bool
     is_read_only: bool
     is_concurrency_safe: bool
+    result_render_contract: CapabilityResultRenderContractFact
     is_destructive: bool = False
     is_open_world: bool = False
     requires_user_interaction: bool = False
@@ -84,6 +86,9 @@ class CapabilityDescriptor:
             "is_destructive": self.is_destructive,
             "is_open_world": self.is_open_world,
             "permission_category": self.permission_category,
+            "result_render_contract": self.result_render_contract.model_dump(
+                mode="json"
+            ),
             "advertise_policy": self.advertise_policy.value,
             "artifact_mode": self.artifact_mode.value,
             "availability": self.availability.value,
@@ -107,6 +112,9 @@ class CapabilityDescriptor:
             "is_open_world": self.is_open_world,
             "requires_user_interaction": self.requires_user_interaction,
             "permission_category": self.permission_category,
+            "result_render_contract": self.result_render_contract.model_dump(
+                mode="json"
+            ),
             "approval_policy_hint": self.approval_policy_hint,
             "advertise_policy": self.advertise_policy.value,
             "artifact_mode": self.artifact_mode.value,
@@ -129,6 +137,4 @@ class CapabilityDescriptor:
         }
 
     def fingerprint(self) -> str:
-        return sha256_fingerprint(
-            "capability-descriptor:v1", self.to_event_payload()
-        )
+        return sha256_fingerprint("capability-descriptor:v1", self.to_event_payload())

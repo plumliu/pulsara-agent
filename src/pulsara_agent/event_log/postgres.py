@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
+from time import monotonic
 from typing import Iterable
 
 import psycopg
@@ -11,11 +13,17 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.event.events import AgentEvent, ReplyStartEvent, RunEndEvent, RunStartEvent
+from pulsara_agent.event.events import (
+    AgentEvent,
+    ReplyStartEvent,
+    RunEndEvent,
+    RunStartEvent,
+)
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.event_log.protocol import (
     EventBatchConfirmation,
     EventIdConflict,
+    EventLogReadSnapshot,
     EventLogWriteConflict,
     same_event_payload,
 )
@@ -96,7 +104,9 @@ class PostgresEventLog:
                 self._ensure_event_ids_available(cursor, event_list)
                 for event in event_list:
                     self._ensure_parent_rows(cursor, event)
-                    stored, next_sequence = self._with_canonical_sequence(event, next_sequence)
+                    stored, next_sequence = self._with_canonical_sequence(
+                        event, next_sequence
+                    )
                     self._insert_event(cursor, stored)
                     self._sync_run_projection(cursor, stored)
                     stored_events.append(stored)
@@ -232,9 +242,75 @@ class PostgresEventLog:
                     actual_last_sequence=self._next_sequence(cursor) - 1,
                 )
 
+    def read_range_snapshot(
+        self,
+        *,
+        minimum_sequence: int,
+        through_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> EventLogReadSnapshot:
+        if minimum_sequence < 1:
+            raise ValueError("minimum sequence must be positive")
+        connection_kwargs = {"row_factory": dict_row}
+        if deadline_monotonic is not None:
+            remaining = deadline_monotonic - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("event-slice read deadline exceeded")
+            connection_kwargs["connect_timeout"] = max(1, ceil(remaining))
+        with psycopg.connect(self.dsn, **connection_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("set transaction isolation level repeatable read")
+                if deadline_monotonic is not None:
+                    remaining_ms = int((deadline_monotonic - monotonic()) * 1000)
+                    if remaining_ms <= 0:
+                        raise TimeoutError("event-slice read deadline exceeded")
+                    cursor.execute(
+                        "select set_config('statement_timeout', %s, true)",
+                        (str(max(1, remaining_ms)),),
+                    )
+                cursor.execute(
+                    "select coalesce(max(sequence), 0) as high_water "
+                    "from agent_events where session_id = %s",
+                    (self.runtime_session_id,),
+                )
+                current_high_water = int(cursor.fetchone()["high_water"])
+                effective_through = (
+                    current_high_water if through_sequence is None else through_sequence
+                )
+                if effective_through > current_high_water:
+                    raise ValueError(
+                        "requested event high-water has not been committed"
+                    )
+                if effective_through < minimum_sequence:
+                    raise ValueError("event read range is empty or reversed")
+                cursor.execute(
+                    """
+                    select payload
+                    from agent_events
+                    where session_id = %s
+                      and sequence >= %s
+                      and sequence <= %s
+                    order by sequence asc
+                    """,
+                    (
+                        self.runtime_session_id,
+                        minimum_sequence,
+                        effective_through,
+                    ),
+                )
+                events = tuple(
+                    load_agent_event(row["payload"]) for row in cursor.fetchall()
+                )
+        return EventLogReadSnapshot(
+            through_sequence=effective_through,
+            events=events,
+        )
+
     def replay(self, reply_id: str) -> Msg:
         events = self.iter(reply_id=reply_id)
-        start = next((event for event in events if isinstance(event, ReplyStartEvent)), None)
+        start = next(
+            (event for event in events if isinstance(event, ReplyStartEvent)), None
+        )
         message = AssistantMsg(
             id=reply_id,
             name=start.name if start else "assistant",
@@ -288,7 +364,10 @@ class PostgresEventLog:
             values (%s, %s)
             on conflict (id) do nothing
             """,
-            (self.runtime_session_id, str(self.workspace_root) if self.workspace_root is not None else None),
+            (
+                self.runtime_session_id,
+                str(self.workspace_root) if self.workspace_root is not None else None,
+            ),
         )
 
     def _ensure_run_belongs_to_session(self, cursor, event: AgentEvent) -> None:
@@ -303,7 +382,9 @@ class PostgresEventLog:
             )
 
     def _ensure_turn_belongs_to_run(self, cursor, event: AgentEvent) -> None:
-        cursor.execute("select session_id, run_id from turns where id = %s", (event.turn_id,))
+        cursor.execute(
+            "select session_id, run_id from turns where id = %s", (event.turn_id,)
+        )
         row = cursor.fetchone()
         if row is None:
             return
@@ -389,7 +470,13 @@ class PostgresEventLog:
                     completed_at = %s::timestamptz
                 where id = %s and session_id = %s
                 """,
-                (stored.status, stored.stop_reason, stored.created_at, stored.run_id, self.runtime_session_id),
+                (
+                    stored.status,
+                    stored.stop_reason,
+                    stored.created_at,
+                    stored.run_id,
+                    self.runtime_session_id,
+                ),
             )
 
     def _next_sequence(self, cursor) -> int:
@@ -403,7 +490,9 @@ class PostgresEventLog:
         )
         return cursor.fetchone()[0]
 
-    def _with_canonical_sequence(self, event: AgentEvent, next_sequence: int) -> tuple[AgentEvent, int]:
+    def _with_canonical_sequence(
+        self, event: AgentEvent, next_sequence: int
+    ) -> tuple[AgentEvent, int]:
         return event.model_copy(update={"sequence": next_sequence}), next_sequence + 1
 
 

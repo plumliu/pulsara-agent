@@ -1,8 +1,8 @@
 # Pulsara 下一阶段六步 Hard-Cut 总路线
 
-> 状态：冻结的阶段顺序与跨阶段契约；每一阶段仍需自己的实施规格。  
-> 基线：ResolvedModelTarget / ResolvedModelCall hard cut 已完成；Subagent graph reducer hard cut 已完成。  
-> 进度：阶段一 MCP Startup Latency、阶段二 Host Run-Boundary Safe Point Hard Cut 已完成；下一实施章固定为阶段三 Context Compiler Input Hard Cut。
+> 状态：冻结的阶段顺序与跨阶段契约；每一阶段仍需自己的实施规格。
+> 基线：ResolvedModelTarget / ResolvedModelCall hard cut 已完成；Subagent graph reducer hard cut 已完成。
+> 进度：阶段一 MCP Startup Latency、阶段二 Host Run-Boundary Safe Point、阶段三 Context Compiler Input Hard Cut 已完成；下一实施章固定为阶段四 Long-Horizon Context Windows。
 > 阶段二已通过归档后 durable-ownership 复审：RunStart/RunEnd confirmation、boundary payload conflict、迟到 compaction commit owner、frozen execution truth、Prepared carrier、child native evidence与deferred-borrow handle retirement均已补齐。
 > 原则：项目尚未上线，不为旧 event、旧数据库、旧 constructor 或旧 runtime facade 保留生产兼容路径。
 > 文件名说明：为保持既有链接稳定，文件仍保留 NEXT_FIVE；正文路线已正式扩展为六阶段。
@@ -13,7 +13,7 @@
 
 1. **MCP Startup Latency Hard Cut（已完成）**
 2. **Host Run-Boundary Safe Point Hard Cut（已完成）**
-3. **Context Compiler Input Hard Cut**
+3. **Context Compiler Input Hard Cut（已完成）**
 4. **Long-Horizon Context Windows**
 5. **ContextSource Ownership Hard Cut**
 6. **Prompt Cache**
@@ -387,7 +387,11 @@ Failure disposition至少区分：
 stable run/segment ownership、fragment-only capability narrowing、deterministic child handoff、Inspector/replay、
 fault injection、全量 pytest/Ruff 与必要 real-LLM approval/plan/subagent/compaction dogfood。路线当前指针移至第5节。
 
-## 5. 阶段三：Context Compiler Input Hard Cut
+## 5. 阶段三：Context Compiler Input Hard Cut（已完成）
+
+详细实施规格：
+
+- [PULSARA_CONTEXT_COMPILER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/PULSARA_CONTEXT_COMPILER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md)
 
 ### 5.1 目标
 
@@ -427,15 +431,21 @@ class ToolResultRenderUnit(BaseModel):
     artifacts: tuple[ToolResultArtifactRef, ...]
     observation_timing: ToolObservationTiming
     render_profile: ToolResultRenderProfileFact
+    essential: ToolResultEssentialFact | None
 ```
 
-字段名可在实施文档中微调，但 ownership 不再开放讨论：
+上面只表示ownership轮廓；字段与validator的唯一实施真源是详细规格。详细规格已经进一步冻结：canonical
+`FrozenStoredEvent` slice、`ContextSnapshotBuildInput` pure builder、raw malformed tool arguments、durable terminal
+essential、完整resolved render/candidate policy、`PreparedToolResultRenderInput`与`PreparedContextCandidateSet`。
 
-- snapshot builder required接收`CommittedRunEntry`（CommittedHostRunEntry或CommittedSubagentRunEntry）与
+ownership 不再开放讨论：
+
+- live snapshot collector required接收`CommittedRunEntry`（CommittedHostRunEntry或CommittedSubagentRunEntry）与
   optional latest `CommittedInteractionResumeBoundary`，再读取本model step的typed working facts；
 - continuation不是新run entry；child不需要伪造Host boundary；
-- compiler 只读 snapshot / transcript / render units；
+- compiler只读snapshot / transcript / prepared render input / prepared candidate set；
 - tool-result pairing 在进入 compiler 前已结构化；
+- renderer只返回per-unit fragments；最终`LLMMessage`、assistant tool-call/result sequencing与message order只由compiler lowering；
 - compiler 不通过 scratchpad 找 cache、span 或 fallback message。
 - boundary result不是ContextFactSnapshot本身；resolved call、memory、subagent、tool-result与compile
   timing仍按每次model call加入。
@@ -447,12 +457,17 @@ class ToolResultRenderUnit(BaseModel):
 - 新增 immutable `ContextFactSnapshot`；
 - 新增 `TranscriptCompileInput`；
 - 新增 normalized `ToolResultRenderUnit`；
+- 新增完整resolved render/candidate policy与prepared ingress DTO；
 - 新增 fingerprint/version；
 - event-visible DTO 放低层 primitives/contracts，避免 event/runtime 反向依赖。
 
 #### C1：Snapshot builder
 
-- 从上一阶段的committed boundary facts构造run-frozen/upstream slice；
+- live collector从committed boundary/working set构造`ContextSnapshotBuildInput`；replay collector只从durable
+  facts/manifest构造同形状input；pure builder不接收`RunWorkingSet`；
+- canonical authority slice保存同一high-water下的immutable stored-event bytes，不保存mutable`AgentEvent`引用；
+- transcript projection window单独选择summary/retained history/protected current run，compaction不再决定authority起点；
+- stored-event wrapper identity与canonical bytes由唯一factory双向验证；
 - 在每次model call前组合resolved call与current typed working facts；
 - 所有 mutable dict/list 递归 freeze；
 - snapshot 记录 source event ids/sequences；
@@ -460,12 +475,33 @@ class ToolResultRenderUnit(BaseModel):
 - current user只从RunStartEvent.current_user_message读取，不从metadata或process-local input重造。
 - TranscriptCompileInput.current_user_anchor必须等于该typed message id，文本/hash/timing必须完全一致。
 - 不允许重新读取session default、live MCP supervisor或scratchpad capability exposure。
+- snapshot冻结完整`candidate_authorities`：正文hash/chars、event/artifact refs、priority/required/stability、channel/lowering与
+  dependency fingerprint；candidate prepare/compiler均做强join，合法artifact ID不能掩护伪造inline正文。
+- authority同时持有唯一model-visible正文、source timing与selection facts；collector只消费authority，不接受并行字符串。
+  memory/subagent从canonical projection/graph events重建正文并使用真实event created-at/sequence。
 
 #### C2：Transcript 与 tool-result normalization
 
 - assembler/reducer 产出 provider-neutral typed transcript；
 - call/result pairing、provider-native assistant tool call、external result 全部规范化；
-- tool-result renderer 接收 resolved estimator 与 render units；
+- malformed/non-object tool arguments保留raw provider string并与error result配对；
+- render profile、terminal command/process/inventory essential required durable carrier；
+- descriptor声明allowed render variants与versioned declarative semantics builder contract，terminal_process的
+  inventory/observation/error形态由本次event保存的actual profile表达；
+- render variant同时冻结allowed result states、execution phase与terminal-payload timing requirement；
+- composition root通过immutable `ToolResultSemanticsBuilderRegistry`绑定builder ID/version/declarative contract与callable；
+- descriptor、registry binding与External requirement必须精确匹配builder ID/version/contract fingerprint；process-local
+  implementation build fingerprint只用于当前进程诊断，不进入任何durable或semantic identity；
+- pre-execution permission/exposure/policy deny必须消费原descriptor的typed denial semantics；
+- normal/deny/workflow/MCP/external全部实际调用同一个resolved semantics builder；unknown只允许descriptor缺失；
+- terminal command的executed essential与pre-execution command-error essential分离，deny不伪造cwd/session/backend；
+- actual profile保存render-contract/variant fingerprints与original exposure/descriptor durable attribution；
+- external execution requirement冻结descriptor contract与essential capture policy，result通过typed ingress builder回指
+  original requirement；delayed completion只消费原requirement policy，不读取当前system policy；
+- external caller只提交result/timing/variant/domain payload，descriptor/exposure/fingerprints由builder注入；
+- tool-result renderer 接收 resolved estimator 与 render units，只返回fragments/canonical decisions，不返回pre-lowered messages；
+- result ref/pair/unit/fragment四方identity与message/block/global position必须完全一致，跨call pairing fail closed；
+- observation/terminal timing inclusion由renderer显式flags传递，禁止扫描工具正文推断timing是否已渲染；
 - 删除 compiler 前的第二套 chars/4 估算真源。
 
 #### C3：Compiler API hard cut
@@ -477,8 +513,8 @@ compile_context(
     *,
     facts: ContextFactSnapshot,
     transcript: TranscriptCompileInput,
-    tool_results: tuple[ToolResultRenderUnit, ...],
-    section_candidates: tuple[ContextSectionCandidate, ...],
+    tool_results: PreparedToolResultRenderInput,
+    section_candidates: PreparedContextCandidateSet,
 ) -> CompiledContext
 ```
 
@@ -490,12 +526,29 @@ string；S 阶段再把这些 producer 的 ownership 迁入正式 source registr
 - 删除 production `ContextCompileInputs`；
 - 删除 legacy current-user fallback；
 - 删除 scratchpad render-cache fallback。
+- candidate required/priority成为唯一allocation顺序真源；system candidate不再隐式must-keep；
+- 固定source/channel/lowering矩阵由schema与compiler共同消费；lifecycle后、budget前运行pure timing overlay，所有section保存
+  structured timing，memory/subagent使用各自freshness；
+- session-owned render cache采用prepare-read、durable compiled FULL后commit-write的两阶段协议；
+- render cache只接纳full-visible/full-envelope/within-budget/payload-preserved结果；cache failure仅是operational diagnostic；
+- 多artifact compact/minimal envelope与decision共享同一text-like primary；binary不冒充primary，非primary无read_more；
+- candidate lifecycle cache改为entry count与aggregate chars双上界LRU，并暴露bounded eviction/oversized-skip metrics；cache read
+  exception与普通miss生成同一durable candidate-set/manifest fingerprint；
+- pre-manifest所有preparation stage失败都写typed input-failure audit（ledger untrusted除外）；
+- static-instruction artifact写入与PostgreSQL event-slice读取通过RuntimeSession-owned bounded I/O owner执行；
+- manifest未确认时failed event只使用candidate-aware input failure，full audit只能引用confirmed artifact；
+- manifest write cancellation/unknown由session-owned generation/CAS state machine、shielded waiter与bounded drain收口；
+- logical generation与physical DB operation分离，old blocking writer必须被保留到真实EXIT，之后再final confirm。
+- logical availability、physical drain与post-terminal verification是三个正交状态，迟到conflict进consistency latch
+  而不反向改写已完成Future。
 
 #### C4：Replay / recovery / Inspector
 
 - replay 从 durable event 重建同形状 snapshot；
 - live/replay compile fact equality；
 - Inspector 展示 snapshot id、source sequences、normalized unit counts；
+- Inspector分开展示historical durable builder semantic contract与当前进程implementation build diagnostic，后者不参与
+  replay verdict；
 - schema 缺失直接 contract error。
 
 #### C5：删除旧 facade
@@ -514,6 +567,36 @@ string；S 阶段再把这些 producer 的 ownership 迁入正式 source registr
 - tool-result renderer 与 final estimator 使用同一个 resolved call；
 - `ContextCompiledEvent` 可 join 到 snapshot 与 source sequences；
 - 同一 snapshot + 同一 compiler version 必须得到同一 provider-neutral compiled payload。
+
+### 5.4 明确移交阶段四的成本：subagent graph 从 sequence 1 全量 fold
+
+阶段三为先保证 correctness 与 exact replay，冻结了一个有意保守的 V1 合约：每次 live compile 与 replay 都从同一份
+parent canonical event slice 派生 subagent candidate selection；在尚无 durable graph checkpoint 时，该 source range 必须是
+`sequence 1..source_through_sequence`。Pure reducer由这份冻结 slice 一次性产生 ordered eligible IDs，再按同一 frozen policy
+切分 selected/omitted。Selection 保存真实 `source_from_sequence/source_through_sequence`，不得先读 process-local graph、再绑定
+较晚 EventLog high-water，也不得为了缩短查询范围漏掉旧的 pending result。
+
+这个选择解决的是事实一致性，不是最终性能方案。它意味着：
+
+- 每次 model compile 可能读取、解码并 fold 整个 parent session ledger；
+- exact replay / Inspector 需要读取同一全量 graph source range；
+- session 越长，context preparation 的 I/O、CPU、内存与 replay latency 越接近 O(session event count)；
+- authority range可能被旧的 pending/omitted subagent facts拉回 sequence 1，即使model-visible transcript已经compacted。
+
+因此这是一项**已知且被阶段三验收允许的过渡成本**，不是可以长期保留的 Long-Horizon 行为，也不能被误报成阶段三
+compiler purity缺陷。阶段四必须将它作为正式 hard-cut 工作项，而不只是顺手优化：
+
+1. 引入 durable、versioned、fingerprinted subagent graph checkpoint或语义等价的可验证 reducer checkpoint；
+2. selection authority改为`checkpoint through K + contiguous delta K+1..source_through_sequence`，并在snapshot/manifest中保存
+   checkpoint identity、reducer contract version、delta range与aggregate fingerprint；
+3. live与replay必须消费同一 checkpoint + delta 算法，结果与从sequence 1全量fold bit-for-bit等价；
+4. checkpoint缺失、版本不匹配、delta不连续或fingerprint漂移时fail closed，禁止读取当前process-local graph补造事实；
+5. hard cut完成后删除正常compile/replay中的sequence-1 full-fold生产路径；旧event log不走runtime fallback，开发阶段reset或
+   使用一次性显式migration/baseline；
+6. `cap=0`、no eligible、全部omitted、跨window pending result与result consumed/delivered边界必须继续保持当前selection语义。
+
+阶段四实施规格必须给出checkpoint创建/推进/compaction/recovery owner、PostgreSQL读取边界、崩溃恢复、Inspector projection与
+负向测试；只把`minimum_sequence`改大、只复用live reducer state或增加无durable identity的内存cache均不算完成。
 
 ## 6. 阶段四：Long-Horizon Context Windows
 
@@ -566,6 +649,9 @@ class RolloutBudgetStateFact(BaseModel):
 
 - active context、observation projection、rollout、step、progress 分开；
 - window identity、projection generation、rewrite reason；
+- durable subagent graph checkpoint、reducer contract version、checkpoint high-water、delta range与aggregate fingerprint；
+- selection source range从sequence-1 full fold迁移为可验证checkpoint + contiguous delta；checkpoint生产、推进、恢复与
+  Inspector attribution必须有单一owner；
 - typed window opened/closed、projection rewritten、budget phase changed events；
 - Inspector join contract。
 
@@ -645,7 +731,11 @@ exploration
 - raw events/artifacts 与 compacted projection均可 inspect；
 - 120 万累计 input 不会被误判为单次 context overflow；
 - budget 收窄时先限制探索并保留 final answer；
-- 重复搜索真实 dogfood 能因 evidence progress 而收口。
+- 重复搜索真实 dogfood 能因 evidence progress 而收口；
+- steady-state live compile与exact replay不再从parent ledger sequence 1全量fold subagent graph；
+- checkpoint + delta selection与sequence-1 reference fold在cap=0、no eligible、policy omitted、consumed/delivered及跨window
+  pending result矩阵上完全一致；
+- architecture/grep gate禁止正常production compile/replay重新引入sequence-1 subagent graph full fold或process-local truth fallback。
 
 ## 7. 阶段五：ContextSource Ownership Hard Cut
 
@@ -676,6 +766,9 @@ class ContextSectionCandidate(BaseModel):
     lowering_kind: str
     payload: ContextSectionPayload
 ```
+
+这里的正式source-owned candidate必须复用阶段三实施规格中已经hard-cut的candidate ingress；本节字段表示S阶段新增/
+收紧的ownership contract，不代表再创建第二个同名DTO。需要新增required字段时升级统一schema并原子迁移。
 
 ### 7.2 所有权规则
 

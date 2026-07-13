@@ -87,6 +87,26 @@ def fold_subagent_graph(
     return state
 
 
+def pending_subagent_result_ids(state: SubagentGraphState) -> tuple[str, ...]:
+    """Return pending delivery IDs from one immutable graph state."""
+
+    consumed_result_ids = {
+        item.result_id
+        for item in state.consumptions.values()
+        if item.result_id is not None
+    }
+    return tuple(
+        result.result_id
+        for result in sorted(
+            state.results.values(),
+            key=lambda item: item.provenance.created_sequence,
+        )
+        if result.status == "completed"
+        and result.result_id not in consumed_result_ids
+        and result.result_id not in state.deliveries
+    )
+
+
 def apply_subagent_event(state: SubagentGraphState, event: AgentEvent) -> SubagentGraphState:
     if not event.id:
         return _diagnose(

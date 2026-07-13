@@ -26,6 +26,7 @@ from pulsara_agent.primitives.run_entry import (
     RunEntryKind,
     SubagentRunEntryFact,
 )
+from pulsara_agent.primitives.context import ContextEventReferenceFact
 from pulsara_agent.primitives.mcp import McpInstallationReferenceFact
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
@@ -57,24 +58,34 @@ class RunWorkingSet:
     frozen_execution_surface: FrozenCapabilityExecutionSurface
     original_exposure_plan: CapabilityExposurePlan | None
     original_exposure_fact: CapabilityExposureSnapshotFact | None
+    original_exposure_event_ref: ContextEventReferenceFact | None
     effective_exposure_plan: CapabilityExposurePlan | None
     effective_exposure_fact: CapabilityExposureSnapshotFact | None
+    effective_exposure_event_ref: ContextEventReferenceFact | None
     latest_committed_resume_boundary: InteractionResumeBoundaryFact | None
+    latest_committed_resume_boundary_ref: ContextEventReferenceFact | None
+    latest_validated_suspended_state_token_fingerprint: str | None = None
 
     def install_initial_exposure(
         self,
         *,
         plan: CapabilityExposurePlan,
         fact: CapabilityExposureSnapshotFact,
+        event_ref: ContextEventReferenceFact,
     ) -> None:
         if self.original_exposure_fact is not None:
-            if self.original_exposure_fact != fact:
+            if (
+                self.original_exposure_fact != fact
+                or self.original_exposure_event_ref != event_ref
+            ):
                 raise RuntimeError("initial capability exposure already differs")
             return
         self.original_exposure_plan = plan
         self.original_exposure_fact = fact
+        self.original_exposure_event_ref = event_ref
         self.effective_exposure_plan = plan
         self.effective_exposure_fact = fact
+        self.effective_exposure_event_ref = event_ref
 
     def install_continuation(
         self,
@@ -83,8 +94,11 @@ class RunWorkingSet:
         permission_snapshot: RunPermissionSnapshot,
         plan: CapabilityExposurePlan,
         fact: CapabilityExposureSnapshotFact,
+        event_ref: ContextEventReferenceFact,
         boundary: InteractionResumeBoundaryFact,
+        boundary_ref: ContextEventReferenceFact,
         frozen_execution_surface: FrozenCapabilityExecutionSurface,
+        validated_suspended_state_token_fingerprint: str,
     ) -> None:
         if self.original_exposure_fact is None:
             raise RuntimeError("continuation requires an initial capability exposure")
@@ -92,7 +106,17 @@ class RunWorkingSet:
         self.permission_snapshot = permission_snapshot
         self.effective_exposure_plan = plan
         self.effective_exposure_fact = fact
+        self.effective_exposure_event_ref = event_ref
         self.latest_committed_resume_boundary = boundary
+        self.latest_committed_resume_boundary_ref = boundary_ref
+        if (
+            validated_suspended_state_token_fingerprint
+            != boundary.suspended_state_token_fingerprint
+        ):
+            raise RuntimeError("validated suspended token fingerprint mismatch")
+        self.latest_validated_suspended_state_token_fingerprint = (
+            validated_suspended_state_token_fingerprint
+        )
         self.frozen_execution_surface = frozen_execution_surface
 
 
@@ -164,9 +188,12 @@ def install_run_working_set(
         frozen_execution_surface=frozen_execution_surface,
         original_exposure_plan=None,
         original_exposure_fact=None,
+        original_exposure_event_ref=None,
         effective_exposure_plan=None,
         effective_exposure_fact=None,
+        effective_exposure_event_ref=None,
         latest_committed_resume_boundary=None,
+        latest_committed_resume_boundary_ref=None,
     )
     state.run_working_set = working_set
     return working_set

@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
-    ToolObservationTiming,
     ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
@@ -21,8 +20,17 @@ from pulsara_agent.memory.foundation.provenance import runtime_event_span_from_e
 from pulsara_agent.message import Msg, ToolCallBlock, ToolResultBlock, ToolResultState
 from pulsara_agent.message.assembler import completed_tool_result_from_events
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
-from pulsara_agent.runtime.publisher import RuntimeEventSubscriber, RuntimePublishedEvent
+from pulsara_agent.runtime.publisher import (
+    RuntimeEventSubscriber,
+    RuntimePublishedEvent,
+)
 from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.primitives.tool_result import ToolResultExecutionSemanticsFact
+from pulsara_agent.primitives.tool_result import ToolResultStateFact
+from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.capability.result_semantics import (
+    build_unknown_result_semantics,
+)
 from pulsara_agent.tools import ToolCall, ToolExecutor
 from pulsara_agent.tools.executor import synthetic_tool_observation_timing
 
@@ -57,47 +65,73 @@ def build_tool_result_error_events(
     message: str,
     state: ToolResultState = ToolResultState.ERROR,
     tool_observation_timing_seed: dict[str, Any] | None = None,
+    semantics: ToolResultExecutionSemanticsFact | None = None,
+    semantics_factory: Callable[
+        [ToolObservationTimingFact], ToolResultExecutionSemanticsFact
+    ]
+    | None = None,
+    existing_start: ToolResultStartEvent | None = None,
 ) -> list[AgentEvent]:
-    start = ToolResultStartEvent(
-        **event_context.event_fields(),
-        tool_call_id=tool_call_id,
-        tool_call_name=tool_call_name,
-    )
+    if semantics is not None and semantics_factory is not None:
+        raise ValueError("tool result semantics and factory are mutually exclusive")
+    if existing_start is not None:
+        if (
+            existing_start.run_id != event_context.run_id
+            or existing_start.tool_call_id != tool_call_id
+            or existing_start.tool_call_name != tool_call_name
+        ):
+            raise ValueError("existing tool-result start identity mismatch")
+        start = existing_start
+    else:
+        start = ToolResultStartEvent(
+            id=f"tool_result_start:{event_context.run_id}:{tool_call_id}",
+            **event_context.event_fields(),
+            tool_call_id=tool_call_id,
+            tool_call_name=tool_call_name,
+        )
     text = ToolResultTextDeltaEvent(
+        id=f"tool_result_text:{event_context.run_id}:{tool_call_id}",
         **event_context.event_fields(),
         tool_call_id=tool_call_id,
         delta=message,
     )
     end_created_at = utc_now()
-    timing = _synthetic_timing_payload(
+    timing = _synthetic_timing_fact(
         start=start,
         end_created_at=end_created_at,
         tool_call_id=tool_call_id,
         tool_call_name=tool_call_name,
         seed=tool_observation_timing_seed,
     )
+    actual_semantics = (
+        semantics_factory(timing)
+        if semantics_factory is not None
+        else semantics
+        or build_unknown_result_semantics(result_state=ToolResultStateFact(state.value))
+    )
     end = ToolResultEndEvent(
+        id=f"tool_result_end:{event_context.run_id}:{tool_call_id}",
         **event_context.event_fields(),
         created_at=end_created_at,
         tool_call_id=tool_call_id,
         state=state,
-        metadata={"tool_observation_timing": timing},
+        observation_timing=timing,
+        render_profile=actual_semantics.render_profile,
+        essential_capture_policy=actual_semantics.essential_capture_policy,
+        essential_result=actual_semantics.essential_result,
+        terminal_payload_timing=actual_semantics.terminal_payload_timing,
     )
-    return [
-        start,
-        text,
-        end,
-    ]
+    return [*(() if existing_start is not None else (start,)), text, end]
 
 
-def _synthetic_timing_payload(
+def _synthetic_timing_fact(
     *,
     start: ToolResultStartEvent,
     end_created_at: str,
     tool_call_id: str,
     tool_call_name: str,
     seed: dict[str, Any] | None,
-) -> dict[str, object]:
+) -> ToolObservationTimingFact:
     if not seed:
         return synthetic_tool_observation_timing(
             start_event=start,
@@ -105,21 +139,27 @@ def _synthetic_timing_payload(
             call_id=tool_call_id,
             tool_name=tool_call_name,
             tool_origin="unknown",
-        ).model_dump(mode="json", exclude_none=True)
+        )
     source_started_at = str(seed.get("source_started_at") or start.created_at)
-    return ToolObservationTiming(
-        observed_at=end_created_at,
-        source_started_at=source_started_at,
-        source_ended_at=end_created_at,
-        observation_duration_seconds=_duration_seconds(source_started_at, end_created_at),
+    return ToolObservationTimingFact(
+        observed_at_utc=end_created_at,
+        source_started_at_utc=source_started_at,
+        source_ended_at_utc=end_created_at,
+        observation_duration_seconds=_duration_seconds(
+            source_started_at, end_created_at
+        ),
         freshness="suspended_tool_observation",
         clock_source="mixed",
         tool_origin=str(seed.get("tool_origin") or "unknown"),  # type: ignore[arg-type]
         tool_name=tool_call_name,
         tool_call_id=tool_call_id,
-        suspended_at=str(seed.get("suspended_at")) if seed.get("suspended_at") is not None else None,
-        resumed_at=str(seed.get("resumed_at")) if seed.get("resumed_at") is not None else None,
-    ).model_dump(mode="json", exclude_none=True)
+        suspended_at_utc=str(seed.get("suspended_at"))
+        if seed.get("suspended_at") is not None
+        else None,
+        resumed_at_utc=str(seed.get("resumed_at"))
+        if seed.get("resumed_at") is not None
+        else None,
+    )
 
 
 def _duration_seconds(start: str | None, end: str | None) -> float | None:
@@ -143,7 +183,9 @@ def _parse_tool_call(block: ToolCallBlock) -> ToolCall:
     try:
         parsed = json.loads(block.input or "{}")
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Malformed JSON arguments for tool {block.name}: {exc.msg}") from exc
+        raise ValueError(
+            f"Malformed JSON arguments for tool {block.name}: {exc.msg}"
+        ) from exc
     if not isinstance(parsed, dict):
         raise ValueError(f"Tool arguments for {block.name} must be a JSON object")
     return ToolCall(id=block.id, name=block.name, arguments=parsed)
@@ -193,7 +235,9 @@ def _call_can_run_concurrently(
 ) -> bool:
     if exposure is not None:
         descriptor = exposure.descriptors_by_name.get(call.name)
-        return bool(descriptor and descriptor.is_read_only and descriptor.is_concurrency_safe)
+        return bool(
+            descriptor and descriptor.is_read_only and descriptor.is_concurrency_safe
+        )
     try:
         tool = executor.registry.get(call.name)
     except KeyError:
@@ -201,14 +245,20 @@ def _call_can_run_concurrently(
     return bool(tool.is_read_only and tool.is_concurrency_safe)
 
 
-def _remember_tool_result_event_span(state: LoopState, events: list[AgentEvent], tool_call_id: str) -> None:
+def _remember_tool_result_event_span(
+    state: LoopState, events: list[AgentEvent], tool_call_id: str
+) -> None:
     try:
-        span = runtime_event_span_from_events(events, tool_call_id, session_id=state.session_id)
+        span = runtime_event_span_from_events(
+            events, tool_call_id, session_id=state.session_id
+        )
     except KeyError:
         return
     spans = state.scratchpad.setdefault("tool_result_event_spans", {})
     spans[tool_call_id] = span
 
 
-def _tool_result_from_event_slice(events: list[AgentEvent], tool_call_id: str) -> ToolResultBlock:
+def _tool_result_from_event_slice(
+    events: list[AgentEvent], tool_call_id: str
+) -> ToolResultBlock:
     return completed_tool_result_from_events(events, tool_call_id)

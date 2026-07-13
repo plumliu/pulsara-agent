@@ -38,6 +38,7 @@ from pulsara_agent.message.blocks import (
     ToolResultState,
     URLSource,
 )
+from pulsara_agent.primitives.context import thaw_json
 
 
 @dataclass(slots=True)
@@ -107,7 +108,9 @@ class BlockAssembler:
 
             case EventType.TEXT_BLOCK_END:
                 assert isinstance(event, TextBlockEndEvent)
-                return BlockAssemblyUpdate(started=[], completed=self._complete(event, "text", event.block_id))
+                return BlockAssemblyUpdate(
+                    started=[], completed=self._complete(event, "text", event.block_id)
+                )
 
             case EventType.THINKING_BLOCK_START:
                 assert isinstance(event, ThinkingBlockStartEvent)
@@ -128,7 +131,10 @@ class BlockAssembler:
 
             case EventType.THINKING_BLOCK_END:
                 assert isinstance(event, ThinkingBlockEndEvent)
-                return BlockAssemblyUpdate(started=[], completed=self._complete(event, "thinking", event.block_id))
+                return BlockAssemblyUpdate(
+                    started=[],
+                    completed=self._complete(event, "thinking", event.block_id),
+                )
 
             case EventType.DATA_BLOCK_START:
                 assert isinstance(event, DataBlockStartEvent)
@@ -153,15 +159,21 @@ class BlockAssembler:
                     and isinstance(active.block.source, Base64Source)
                 ):
                     active.block.source.data += event.data
-                    active.block.source.media_type = event.media_type or active.block.source.media_type
+                    active.block.source.media_type = (
+                        event.media_type or active.block.source.media_type
+                    )
 
             case EventType.DATA_BLOCK_END:
                 assert isinstance(event, DataBlockEndEvent)
-                return BlockAssemblyUpdate(started=[], completed=self._complete(event, "data", event.block_id))
+                return BlockAssemblyUpdate(
+                    started=[], completed=self._complete(event, "data", event.block_id)
+                )
 
             case EventType.HINT_BLOCK:
                 assert isinstance(event, HintBlockEvent)
-                block = HintBlock(id=event.block_id, source=event.source, hint=event.hint)
+                block = HintBlock(
+                    id=event.block_id, source=event.source, hint=event.hint
+                )
                 return BlockAssemblyUpdate(
                     started=[],
                     completed=[
@@ -180,7 +192,9 @@ class BlockAssembler:
 
             case EventType.TOOL_CALL_START:
                 assert isinstance(event, ToolCallStartEvent)
-                block = ToolCallBlock(id=event.tool_call_id, name=event.tool_call_name, input="")
+                block = ToolCallBlock(
+                    id=event.tool_call_id, name=event.tool_call_name, input=""
+                )
                 self._start(
                     event,
                     "tool_call",
@@ -197,7 +211,10 @@ class BlockAssembler:
 
             case EventType.TOOL_CALL_END:
                 assert isinstance(event, ToolCallEndEvent)
-                return BlockAssemblyUpdate(started=[], completed=self._complete(event, "tool_call", event.tool_call_id))
+                return BlockAssemblyUpdate(
+                    started=[],
+                    completed=self._complete(event, "tool_call", event.tool_call_id),
+                )
 
             case EventType.TOOL_RESULT_START:
                 assert isinstance(event, ToolResultStartEvent)
@@ -219,7 +236,9 @@ class BlockAssembler:
                 assert isinstance(event, ToolResultTextDeltaEvent)
                 active = self._get(event, "tool_result", event.tool_call_id)
                 if active is not None and isinstance(active.block, ToolResultBlock):
-                    if active.block.output and isinstance(active.block.output[-1], TextBlock):
+                    if active.block.output and isinstance(
+                        active.block.output[-1], TextBlock
+                    ):
                         active.block.output[-1].text += event.delta
                     else:
                         active.block.output.append(TextBlock(text=event.delta))
@@ -233,7 +252,9 @@ class BlockAssembler:
                         if event.data is not None
                         else URLSource(url=str(event.url), media_type=event.media_type)
                     )
-                    active.block.output.append(DataBlock(id=event.block_id, source=source))
+                    active.block.output.append(
+                        DataBlock(id=event.block_id, source=source)
+                    )
 
             case EventType.TOOL_RESULT_END:
                 assert isinstance(event, ToolResultEndEvent)
@@ -252,32 +273,40 @@ class BlockAssembler:
                     started=[],
                     completed=[
                         BlockCompletion(
-                            block=result.model_copy(deep=True),
+                            block=ToolResultBlock.model_validate(
+                                thaw_json(result.result_block.canonical_block_payload)
+                            ),
                             reply_id=event.reply_id,
-                            block_id=result.id,
+                            block_id=result.result_block.tool_call_id,
                             block_type="tool_result",
                             start_sequence=event.sequence,
                             end_sequence=event.sequence,
                             start_event_id=event.id,
                             end_event_id=event.id,
                         )
-                        for result in event.execution_results
+                        for result in event.external_results
                     ],
                 )
 
         return BlockAssemblyUpdate.empty()
 
-    def _start(self, event: AgentEvent, block_type: str, block_id: str, block: ContentBlock) -> None:
+    def _start(
+        self, event: AgentEvent, block_type: str, block_id: str, block: ContentBlock
+    ) -> None:
         self._active[(event.reply_id, block_type, block_id)] = _ActiveBlock(
             block=block,
             start_sequence=event.sequence,
             start_event_id=event.id,
         )
 
-    def _get(self, event: AgentEvent, block_type: str, block_id: str) -> _ActiveBlock | None:
+    def _get(
+        self, event: AgentEvent, block_type: str, block_id: str
+    ) -> _ActiveBlock | None:
         return self._active.get((event.reply_id, block_type, block_id))
 
-    def _complete(self, event: AgentEvent, block_type: str, block_id: str) -> list[BlockCompletion]:
+    def _complete(
+        self, event: AgentEvent, block_type: str, block_id: str
+    ) -> list[BlockCompletion]:
         active = self._active.pop((event.reply_id, block_type, block_id), None)
         if active is None:
             return []
@@ -295,7 +324,9 @@ class BlockAssembler:
         ]
 
 
-def completed_tool_result_from_events(events: list[AgentEvent], tool_call_id: str) -> ToolResultBlock:
+def completed_tool_result_from_events(
+    events: list[AgentEvent], tool_call_id: str
+) -> ToolResultBlock:
     assembler = BlockAssembler()
     saw_matching_tool_result_event = False
     saw_start = False
@@ -318,19 +349,30 @@ def completed_tool_result_from_events(events: list[AgentEvent], tool_call_id: st
         saw_matching_tool_result_event = True
         if not saw_start and not isinstance(event, ToolResultStartEvent):
             if isinstance(event, ToolResultEndEvent):
-                raise ValueError(f"Tool result end without start for tool_call_id: {tool_call_id}")
-            raise ValueError(f"Tool result delta without start for tool_call_id: {tool_call_id}")
+                raise ValueError(
+                    f"Tool result end without start for tool_call_id: {tool_call_id}"
+                )
+            raise ValueError(
+                f"Tool result delta without start for tool_call_id: {tool_call_id}"
+            )
         if isinstance(event, ToolResultStartEvent):
             saw_start = True
 
         for completion in assembler.append(event).completed:
-            if isinstance(completion.block, ToolResultBlock) and completion.block.id == tool_call_id:
+            if (
+                isinstance(completion.block, ToolResultBlock)
+                and completion.block.id == tool_call_id
+            ):
                 completed = completion.block
 
     if completed is not None:
         return completed
     if not saw_matching_tool_result_event:
-        raise KeyError(f"No tool result found in event slice for tool_call_id: {tool_call_id}")
+        raise KeyError(
+            f"No tool result found in event slice for tool_call_id: {tool_call_id}"
+        )
     if saw_start:
-        raise ValueError(f"Tool result slice missing end for tool_call_id: {tool_call_id}")
+        raise ValueError(
+            f"Tool result slice missing end for tool_call_id: {tool_call_id}"
+        )
     raise ValueError(f"Malformed tool result slice for tool_call_id: {tool_call_id}")
