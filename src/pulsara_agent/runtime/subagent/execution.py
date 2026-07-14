@@ -247,6 +247,29 @@ class ChildExecutionRegistry:
             )
         self._finalize_release(subagent_run_id, expected_task=task)
 
+    async def cancel_for_terminal_handoff(
+        self,
+        subagent_run_id: str,
+        *,
+        timeout_seconds: float | None,
+    ) -> None:
+        """Stop a child while retaining its owner until parent terminal commit."""
+
+        with self._lock:
+            handle = self._handles.get(subagent_run_id)
+            if handle is None:
+                return
+            handle.cancellation_requested = True
+            handle.phase = "closing"
+            task = handle.coroutine
+        if task is None or task.done():
+            return
+        _cancel_task_on_owner_loop(task)
+        if not await _wait_for_task_completion(task, timeout_seconds=timeout_seconds):
+            raise TimeoutError(
+                f"Timed out draining child coroutine for {subagent_run_id}"
+            )
+
     def request_cancel(self, subagent_run_id: str) -> asyncio.Task[None] | None:
         """Request cancellation on the task's owning loop without releasing it."""
 
@@ -308,6 +331,38 @@ class ChildExecutionRegistry:
                 "Timed out draining child coroutines: " + ", ".join(sorted(timed_out))
             )
 
+    async def wait_run_ids(
+        self,
+        subagent_run_ids: tuple[str, ...],
+        *,
+        timeout_seconds: float | None,
+    ) -> None:
+        """Boundedly await natural completion without issuing cancellation."""
+
+        with self._lock:
+            tasks = {
+                run_id: handle.coroutine
+                for run_id in subagent_run_ids
+                if (handle := self._handles.get(run_id)) is not None
+                and handle.coroutine is not None
+            }
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
+        timed_out: list[str] = []
+        for run_id, task in tasks.items():
+            assert task is not None
+            remaining = None if deadline is None else max(0.0, deadline - loop.time())
+            if not await _wait_for_task_completion(
+                task,
+                timeout_seconds=remaining,
+            ):
+                timed_out.append(run_id)
+        if timed_out:
+            raise TimeoutError(
+                "Timed out waiting for child coroutines: "
+                + ", ".join(sorted(timed_out))
+            )
+
     def _coroutine_done(
         self,
         subagent_run_id: str,
@@ -327,6 +382,10 @@ class ChildExecutionRegistry:
             if handle is None:
                 return
             if expected_task is not None and handle.coroutine is not expected_task:
+                return
+            if not handle.release_requested:
+                if handle.coroutine is not None and handle.coroutine.done():
+                    handle.phase = "closing"
                 return
             task = handle.coroutine
             if task is not None and not task.done():

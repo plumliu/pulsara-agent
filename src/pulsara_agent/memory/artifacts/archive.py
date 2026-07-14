@@ -143,7 +143,9 @@ class InMemoryArchiveStore:
         run_id: str | None,
         media_type: str,
         semantic_metadata: dict[str, Any],
+        deadline_monotonic: float | None = None,
     ) -> ArtifactPutConfirmation:
+        del deadline_monotonic
         metadata = canonical_artifact_semantic_metadata(semantic_metadata)
         encoded = content.encode("utf-8")
         digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
@@ -188,7 +190,14 @@ class InMemoryArchiveStore:
             ),
         )
 
-    def get_info(self, blob_id: str, *, session_id: str | None = None) -> ArtifactRecord:
+    def get_info(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> ArtifactRecord:
+        del deadline_monotonic
         blob = self._blob(blob_id, session_id=session_id)
         return _record(blob)
 
@@ -216,7 +225,14 @@ class InMemoryArchiveStore:
             has_more=offset_chars + len(sliced) < total_chars,
         )
 
-    def get_text(self, blob_id: str, *, session_id: str | None = None) -> str:
+    def get_text(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> str:
+        del deadline_monotonic
         blob = self._blob(blob_id, session_id=session_id)
         if blob.text_content is None:
             raise ValueError(f"Artifact {blob_id!r} is not a text artifact")
@@ -227,6 +243,34 @@ class InMemoryArchiveStore:
         if blob.binary_content is None:
             raise ValueError(f"Artifact {blob_id!r} is not a binary artifact")
         return blob.binary_content
+
+    def delete_if_identity(
+        self,
+        blob_id: str,
+        *,
+        session_id: str,
+        digest: str,
+        media_type: str,
+        semantic_metadata_fingerprint: str,
+    ) -> bool:
+        """Privileged maintenance deletion guarded by immutable identity."""
+
+        with self._lock:
+            existing = self.blobs.get(blob_id)
+            if existing is None:
+                return False
+            if (
+                existing.session_id != session_id
+                or existing.digest != digest
+                or existing.media_type != media_type
+                or existing.metadata.get("semantic_metadata_fingerprint")
+                != semantic_metadata_fingerprint
+            ):
+                raise ArtifactContentConflict(
+                    f"artifact {blob_id!r} maintenance identity mismatch"
+                )
+            del self.blobs[blob_id]
+            return True
 
     def _blob(self, blob_id: str, *, session_id: str | None) -> ArchiveBlob:
         blob = self.blobs[blob_id]
@@ -266,9 +310,13 @@ def _validate_identity(
     ):
         raise ValueError(f"artifact {blob.id!r} already exists with different content")
     if blob.media_type != media_type:
-        raise ValueError(f"artifact {blob.id!r} already exists with media_type {blob.media_type!r}")
+        raise ValueError(
+            f"artifact {blob.id!r} already exists with media_type {blob.media_type!r}"
+        )
     if session_id is not None and blob.session_id != session_id:
-        raise ValueError(f"artifact {blob.id!r} already belongs to runtime session {blob.session_id!r}")
+        raise ValueError(
+            f"artifact {blob.id!r} already belongs to runtime session {blob.session_id!r}"
+        )
     if run_id is not None and blob.run_id != run_id:
         raise ValueError(f"artifact {blob.id!r} already belongs to run {blob.run_id!r}")
 

@@ -16,12 +16,14 @@ from pulsara_agent.capability.descriptor import (
     CapabilityDescriptor,
     CapabilityProviderKind,
 )
+from pulsara_agent.capability.result_contracts import result_render_contract_for_tool
 from pulsara_agent.capability.provider import (
     CapabilityDescriptorSnapshotOutput,
 )
 from pulsara_agent.capability.types import (
     CapabilityExecutionSurfaceSnapshotContext,
 )
+from pulsara_agent.runtime.tool_action import builtin_tool_action_policy
 
 
 DEFAULT_ARTIFACT_READ_CHARS = 20_000
@@ -105,6 +107,8 @@ def _descriptor(
         is_destructive=is_destructive,
         is_open_world=is_open_world,
         permission_category=permission_category,
+        result_render_contract=result_render_contract_for_tool(name),
+        long_horizon_policy=builtin_tool_action_policy(name),
         advertise_policy=CapabilityAdvertisePolicy.DIRECT,
         artifact_mode=artifact_mode,
         metadata={"source": "explicit_builtin_descriptor"},
@@ -178,7 +182,11 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
                 "Omit unless the user explicitly names one of these types; do not infer a type from the question."
             ),
         },
-        "limit": {"type": "integer", "default": 5, "description": "Maximum results to return."},
+        "limit": {
+            "type": "integer",
+            "default": 5,
+            "description": "Maximum results to return.",
+        },
         "max_hops": {
             "type": "integer",
             "default": 0,
@@ -192,12 +200,20 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
 )
 _MEMORY_GET_PARAMETERS = object_schema(
     properties={
-        "memory_id": {"type": "string", "description": "Canonical memory node id, e.g. preference:abc."}
+        "memory_id": {
+            "type": "string",
+            "description": "Canonical memory node id, e.g. preference:abc.",
+        }
     },
     required=["memory_id"],
 )
 _MEMORY_EXPLAIN_PARAMETERS = object_schema(
-    properties={"memory_id": {"type": "string", "description": "Canonical memory node id to explain."}},
+    properties={
+        "memory_id": {
+            "type": "string",
+            "description": "Canonical memory node id to explain.",
+        }
+    },
     required=["memory_id"],
 )
 _COMMON_PARAMETERS = _memory_parameters()
@@ -246,7 +262,10 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
                 "artifact_id": {"type": "string"},
                 "mode": {"type": "string", "enum": ["text", "info"], "default": "text"},
                 "offset_chars": {"type": "integer", "default": 0},
-                "max_chars": {"type": "integer", "default": DEFAULT_ARTIFACT_READ_CHARS},
+                "max_chars": {
+                    "type": "integer",
+                    "default": DEFAULT_ARTIFACT_READ_CHARS,
+                },
             },
             required=["artifact_id"],
         ),
@@ -268,7 +287,11 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
                     "description": "Relative paths resolve from workspace_root; absolute paths and ~ are allowed for text reads.",
                 },
                 "offset": {"type": "integer", "default": 1},
-                "limit": {"type": "integer", "default": DEFAULT_READ_LINES, "maximum": MAX_READ_LINES},
+                "limit": {
+                    "type": "integer",
+                    "default": DEFAULT_READ_LINES,
+                    "maximum": MAX_READ_LINES,
+                },
             },
             required=["path"],
         ),
@@ -285,7 +308,11 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         input_schema=object_schema(
             properties={
                 "pattern": {"type": "string"},
-                "target": {"type": "string", "enum": ["content", "files"], "default": "content"},
+                "target": {
+                    "type": "string",
+                    "enum": ["content", "files"],
+                    "default": "content",
+                },
                 "path": {
                     "type": "string",
                     "default": ".",
@@ -294,7 +321,11 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
                 "file_glob": {"type": "string"},
                 "limit": {"type": "integer", "default": DEFAULT_SEARCH_LIMIT},
                 "offset": {"type": "integer", "default": 0},
-                "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "default": "content"},
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["content", "files_only", "count"],
+                    "default": "content",
+                },
                 "context": {"type": "integer", "default": 0},
             },
             required=[],
@@ -346,7 +377,10 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
                 "terminal_session_id": {"type": "string", "default": "default"},
                 "yield_time_ms": {"type": "integer", "default": 10_000},
                 "tty": {"type": "boolean", "default": False},
-                "max_output_chars": {"type": "integer", "default": DEFAULT_MAX_OUTPUT_CHARS},
+                "max_output_chars": {
+                    "type": "integer",
+                    "default": DEFAULT_MAX_OUTPUT_CHARS,
+                },
             },
             required=["command"],
         ),
@@ -363,12 +397,27 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             properties={
                 "action": {
                     "type": "string",
-                    "enum": ["list", "log", "poll", "wait", "kill", "write", "submit", "close_stdin"],
+                    "enum": [
+                        "list",
+                        "log",
+                        "poll",
+                        "wait",
+                        "kill",
+                        "write",
+                        "submit",
+                        "close_stdin",
+                    ],
                 },
                 "process_id": {"type": "string"},
                 "data": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "default": DEFAULT_WAIT_TIMEOUT_SECONDS},
-                "max_output_chars": {"type": "integer", "default": DEFAULT_MAX_OUTPUT_CHARS},
+                "timeout_seconds": {
+                    "type": "integer",
+                    "default": DEFAULT_WAIT_TIMEOUT_SECONDS,
+                },
+                "max_output_chars": {
+                    "type": "integer",
+                    "default": DEFAULT_MAX_OUTPUT_CHARS,
+                },
                 "include_finished": {"type": "boolean", "default": True},
                 "include_running": {"type": "boolean", "default": True},
             },
@@ -386,10 +435,16 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         description="Track the current runtime task plan.",
         input_schema=object_schema(
             properties={
-                "action": {"type": "string", "enum": ["add", "update", "list", "clear"]},
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "update", "list", "clear"],
+                },
                 "text": {"type": "string"},
                 "id": {"type": "string"},
-                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed"],
+                },
             },
             required=["action"],
         ),
@@ -408,7 +463,10 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             properties={
                 "task": {"type": "string"},
                 "label": {"type": "string"},
-                "role": {"type": "string", "enum": ["worker", "verifier", "synthesizer", "orchestrator"]},
+                "role": {
+                    "type": "string",
+                    "enum": ["worker", "verifier", "synthesizer", "orchestrator"],
+                },
                 "context": {"type": "string", "enum": ["isolated", "fork"]},
             },
             required=["task"],
@@ -439,7 +497,10 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         name="stop_agent",
         description="Cancel a running child agent runtime.",
         input_schema=object_schema(
-            properties={"subagent_run_id": {"type": "string"}, "reason": {"type": "string"}},
+            properties={
+                "subagent_run_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
             required=["subagent_run_id"],
         ),
         provider_kind=CapabilityProviderKind.WORKFLOW,
@@ -483,11 +544,19 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
                             "label": {"type": "string"},
                             "profile": {
                                 "type": "string",
-                                "enum": ["research_worker", "review_worker", "verification_worker", "general_worker"],
+                                "enum": [
+                                    "research_worker",
+                                    "review_worker",
+                                    "verification_worker",
+                                    "general_worker",
+                                ],
                             },
                             "task": {"type": "string"},
                             "display_role": {"type": "string"},
-                            "depends_on": {"type": "array", "items": {"type": "string"}},
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
                         },
                         "required": ["profile", "task"],
                         "additionalProperties": False,
@@ -572,7 +641,9 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     "enter_plan": _descriptor(
         name="enter_plan",
         description="Enter Plan workflow, narrowing the session to read-only planning.",
-        input_schema=object_schema(properties={"reason": {"type": "string"}}, required=[]),
+        input_schema=object_schema(
+            properties={"reason": {"type": "string"}}, required=[]
+        ),
         provider_kind=CapabilityProviderKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,

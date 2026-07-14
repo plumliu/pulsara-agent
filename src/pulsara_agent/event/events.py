@@ -13,7 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -22,7 +21,6 @@ from pulsara_agent.event.candidates import MemoryCandidate
 from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolResultArtifactRef,
-    ToolResultBlock,
     ToolResultState,
 )
 from pulsara_agent.ontology import memory
@@ -33,8 +31,38 @@ from pulsara_agent.primitives.model_call import (
     ModelCallDiagnosticFact,
     ModelCallPurpose,
     ModelTokenUsageFact,
+    ModelCallControlDisposition,
+    ModelStreamSemanticAttributionFact,
+    ProviderSanitizedErrorFact,
+    RunTerminationIntentAttributionFact,
     ResolvedModelCallFact,
     ResolvedModelTargetFact,
+    sha256_fingerprint,
+)
+from pulsara_agent.primitives.long_horizon import (
+    ChildRolloutReservationPolicyFact,
+    ChildRolloutSettlementAggregateFact,
+    ChildRolloutSubaccountFact,
+    ChildRolloutUsageHandoffFact,
+    ContextWindowCloseReason,
+    ContextWindowCompactionPlanFact,
+    ContextWindowFact,
+    LongHorizonContextBudgetDecisionFact,
+    LongHorizonProjectionPressureShadowFact,
+    ObservationRollupFact,
+    ProjectionRewriteReason,
+    RolloutBudgetAccountFact,
+    RolloutPhase,
+    RolloutReservationFact,
+    RolloutTransitionReason,
+    RolloutUsageChargeFact,
+    ResolvedChildRolloutBudgetFact,
+    RunLongHorizonContractFact,
+    SubagentGraphReducerContractFact,
+    SubagentGraphCheckpointArtifactFact,
+    SubagentGraphCheckpointStateFact,
+    ToolObservationProjectionRewriteEntryFact,
+    ToolActionClassificationFact,
 )
 from pulsara_agent.primitives.mcp import (
     MAX_MCP_DIAGNOSTICS_PER_FACT,
@@ -48,9 +76,16 @@ from pulsara_agent.primitives.permission import (
     preset_permission_payload,
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
+from pulsara_agent.primitives.context import (
+    ContextCompileInputAuditFact,
+    ContextCompileFailureStage,
+    ContextCompileInputFailureFact,
+)
 from pulsara_agent.primitives.run_boundary import (
     InteractionResumeBoundaryFact,
+    ModelStreamRecoveryPlanFact,
     NewRunBoundaryFact,
+    RunExecutionActivationFact,
 )
 from pulsara_agent.primitives.run_entry import (
     CurrentUserMessageFact,
@@ -60,6 +95,20 @@ from pulsara_agent.primitives.run_entry import (
     validate_host_current_user_attribution,
     validate_subagent_current_user_attribution,
 )
+from pulsara_agent.primitives.tool_result import (
+    ExternalToolCallRequirementFact,
+    ExternalToolResultIngressFact,
+    TerminalPayloadTimingFact,
+    ToolResultEssentialCapturePolicyFact,
+    ToolResultEssentialFact,
+    ToolResultExecutionSemanticsFact,
+    ToolResultRenderProfileFact,
+    ToolResultRenderDecisionFact,
+    ToolResultRenderOperationalFact,
+    ToolResultRollupSemanticsFact,
+    ToolResultStateFact,
+)
+from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 from pulsara_agent.primitives.run_lifecycle import (
     FAILURE_STOP_REASONS,
     RunStopReason,
@@ -111,11 +160,14 @@ class EventType(StrEnum):
     REPLY_START = "REPLY_START"
     REPLY_END = "REPLY_END"
     RUN_ERROR = "RUN_ERROR"
-    EXCEED_MAX_ITERS = "EXCEED_MAX_ITERS"
 
     MODEL_CALL_START = "MODEL_CALL_START"
     MODEL_CALL_END = "MODEL_CALL_END"
     MODEL_CALL_REJECTED = "MODEL_CALL_REJECTED"
+    PROVIDER_MODEL_STREAM_ERROR = "PROVIDER_MODEL_STREAM_ERROR"
+    MODEL_CALL_CONTROL_DISPOSITION_RESOLVED = (
+        "MODEL_CALL_CONTROL_DISPOSITION_RESOLVED"
+    )
     CONTEXT_COMPILED = "CONTEXT_COMPILED"
     CAPABILITY_GATE_DECISION = "CAPABILITY_GATE_DECISION"
     CAPABILITY_EXPOSURE_RESOLVED = "CAPABILITY_EXPOSURE_RESOLVED"
@@ -144,6 +196,7 @@ class EventType(StrEnum):
     TOOL_RESULT_TEXT_DELTA = "TOOL_RESULT_TEXT_DELTA"
     TOOL_RESULT_DATA_DELTA = "TOOL_RESULT_DATA_DELTA"
     TOOL_RESULT_END = "TOOL_RESULT_END"
+    TOOL_EXECUTION_SUSPENDED = "TOOL_EXECUTION_SUSPENDED"
 
     REQUIRE_USER_CONFIRM = "REQUIRE_USER_CONFIRM"
     USER_CONFIRM_RESULT = "USER_CONFIRM_RESULT"
@@ -198,6 +251,21 @@ class EventType(StrEnum):
     SUBAGENT_PHASE_REPORTED = "SUBAGENT_PHASE_REPORTED"
     SUBAGENT_RESULT_SUBMITTED = "SUBAGENT_RESULT_SUBMITTED"
     SUBAGENT_RESULT_CONSUMED = "SUBAGENT_RESULT_CONSUMED"
+    SUBAGENT_GRAPH_CHECKPOINT_COMMITTED = "SUBAGENT_GRAPH_CHECKPOINT_COMMITTED"
+
+    CONTEXT_WINDOW_OPENED = "CONTEXT_WINDOW_OPENED"
+    CONTEXT_WINDOW_CLOSED = "CONTEXT_WINDOW_CLOSED"
+    CONTEXT_WINDOW_COMPACTION_STARTED = "CONTEXT_WINDOW_COMPACTION_STARTED"
+    CONTEXT_WINDOW_COMPACTION_COMPLETED = "CONTEXT_WINDOW_COMPACTION_COMPLETED"
+    CONTEXT_WINDOW_COMPACTION_FAILED = "CONTEXT_WINDOW_COMPACTION_FAILED"
+    CONTEXT_PROJECTION_REWRITE_PAGE = "CONTEXT_PROJECTION_REWRITE_PAGE"
+    ROLLOUT_BUDGET_ACCOUNT_OPENED = "ROLLOUT_BUDGET_ACCOUNT_OPENED"
+    ROLLOUT_BUDGET_ACCOUNT_CLOSED = "ROLLOUT_BUDGET_ACCOUNT_CLOSED"
+    CHILD_ROLLOUT_SUBACCOUNT_CLOSED = "CHILD_ROLLOUT_SUBACCOUNT_CLOSED"
+    ROLLOUT_BUDGET_RESERVATION_CREATED = "ROLLOUT_BUDGET_RESERVATION_CREATED"
+    ROLLOUT_BUDGET_RESERVATION_SETTLED = "ROLLOUT_BUDGET_RESERVATION_SETTLED"
+    ROLLOUT_PHASE_TRANSITIONED = "ROLLOUT_PHASE_TRANSITIONED"
+    SUBAGENT_ROLLOUT_BUDGET_RESOLVED = "SUBAGENT_ROLLOUT_BUDGET_RESOLVED"
 
     CUSTOM = "CUSTOM"
 
@@ -230,91 +298,6 @@ class EventBase(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolObservationTiming(BaseModel):
-    """Pulsara-owned timing facts for a completed or suspended tool observation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    observed_at: str
-    source_started_at: str | None = None
-    source_ended_at: str | None = None
-    observation_duration_seconds: float | None = None
-    tool_reported_duration_seconds: float | None = None
-    freshness: Literal[
-        "current_tool_observation",
-        "background_process_observation",
-        "historical_tool_observation",
-        "suspended_tool_observation",
-        "unknown",
-    ] = "current_tool_observation"
-    clock_source: Literal[
-        "tool_result_events",
-        "tool_runtime_metadata",
-        "mixed",
-    ] = "tool_result_events"
-    tool_origin: Literal[
-        "builtin",
-        "mcp",
-        "custom",
-        "workflow",
-        "subagent_system",
-        "unknown",
-    ] = "unknown"
-    tool_name: str | None = None
-    tool_call_id: str | None = None
-    suspended_at: str | None = None
-    resumed_at: str | None = None
-
-    @field_validator(
-        "observed_at",
-        "source_started_at",
-        "source_ended_at",
-        "suspended_at",
-        "resumed_at",
-    )
-    @classmethod
-    def _validate_utc_timestamp(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = _parse_utc_timestamp(value)
-        if parsed is None:
-            raise ValueError("timestamp must be an ISO-8601 datetime with UTC offset")
-        return _format_utc_timestamp(parsed)
-
-    @field_validator("observation_duration_seconds", "tool_reported_duration_seconds")
-    @classmethod
-    def _validate_non_negative_duration(cls, value: float | None) -> float | None:
-        if value is not None and (not math.isfinite(value) or value < 0):
-            raise ValueError("duration must be finite and non-negative")
-        return value
-
-
-def _validate_tool_observation_timing_payload(
-    value: object, *, context: str
-) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{context} requires a tool observation timing object")
-    try:
-        timing = ToolObservationTiming.model_validate(value)
-    except ValidationError as exc:
-        raise ValueError(f"{context} is invalid") from exc
-    return timing.model_dump(mode="json", exclude_none=True)
-
-
-def _parse_utc_timestamp(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(timezone.utc)
-
-
-def _format_utc_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 class RunStartEvent(EventBase):
     type: Literal[EventType.RUN_START] = EventType.RUN_START
     user_input_chars: int
@@ -325,6 +308,9 @@ class RunStartEvent(EventBase):
     permission_policy: dict[str, Any]
     permission_snapshot_source: Literal["session_default", "plan_mode", "child_profile"]
     model_target: ResolvedModelTargetFact
+    subagent_graph_reducer_contract: SubagentGraphReducerContractFact
+    long_horizon: RunLongHorizonContractFact
+    child_rollout_subaccount: ChildRolloutSubaccountFact | None
     mcp_installation_id: str
     mcp_installation_owner_runtime_session_id: str
     run_entry_kind: RunEntryKind
@@ -347,6 +333,16 @@ class RunStartEvent(EventBase):
             policy=self.permission_policy,
             context="RunStartEvent",
         )
+        if self.long_horizon.subagent_graph_reducer_contract != (
+            self.subagent_graph_reducer_contract
+        ):
+            raise ValueError("RunStart long-horizon graph reducer contract mismatch")
+        if (
+            self.long_horizon.rollout_account_owner_runtime_session_id
+            != self.mcp_installation_owner_runtime_session_id
+            and self.run_entry_kind is RunEntryKind.HOST
+        ):
+            raise ValueError("host RunStart long-horizon account owner mismatch")
         if self.user_input_chars != len(self.current_user_message.text):
             raise ValueError("RunStartEvent user_input_chars mismatch")
         created_at = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
@@ -356,6 +352,8 @@ class RunStartEvent(EventBase):
         if created_at < observed_at:
             raise ValueError("RunStartEvent cannot predate current user observation")
         if self.run_entry_kind is RunEntryKind.HOST:
+            if self.child_rollout_subaccount is not None:
+                raise ValueError("host RunStart cannot carry child rollout subaccount")
             if self.new_run_boundary is None or self.subagent_run_entry is not None:
                 raise ValueError("host RunStart requires only new_run_boundary")
             boundary = self.new_run_boundary
@@ -383,6 +381,16 @@ class RunStartEvent(EventBase):
             raise ValueError("child RunStart requires only subagent_run_entry")
         else:
             entry = self.subagent_run_entry
+            inherited = self.long_horizon.inherited_rollout_reservation
+            if self.child_rollout_subaccount is None or inherited is None:
+                raise ValueError("child RunStart requires child rollout subaccount")
+            if (
+                self.child_rollout_subaccount.child_run_id != self.run_id
+                or self.child_rollout_subaccount.root_account_id
+                != self.long_horizon.rollout_account_id
+                or self.child_rollout_subaccount.parent_reservation != inherited
+            ):
+                raise ValueError("child RunStart rollout subaccount mismatch")
             validate_subagent_current_user_attribution(
                 entry=entry,
                 current_user=self.current_user_message,
@@ -451,7 +459,9 @@ class McpCapabilitySnapshotInstalledEvent(EventBase):
             summary.reconcile_trigger for summary in self.coalesced_attempt_summaries
         )
         if not triggers or tuple(sorted(triggers)) != tuple(self.installation_triggers):
-            raise ValueError("MCP installation triggers must match changed attempt facts")
+            raise ValueError(
+                "MCP installation triggers must match changed attempt facts"
+            )
         return self
 
 
@@ -542,6 +552,355 @@ class RunEndEvent(EventBase):
         return self
 
 
+class ContextWindowOpenedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_WINDOW_OPENED] = EventType.CONTEXT_WINDOW_OPENED
+    window: ContextWindowFact
+    opening_batch_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _window_context(self) -> "ContextWindowOpenedEvent":
+        if self.window.run_id != self.run_id:
+            raise ValueError("context window open run mismatch")
+        return self
+
+
+class ContextWindowClosedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_WINDOW_CLOSED] = EventType.CONTEXT_WINDOW_CLOSED
+    window_id: str = Field(min_length=1)
+    window_generation: int = Field(ge=1)
+    close_reason: ContextWindowCloseReason
+    final_projection_generation: int = Field(ge=0)
+    final_projection_state_fingerprint: str = Field(min_length=1)
+    source_through_sequence: int = Field(ge=0)
+    next_window_id: str | None
+    compaction_terminal_event_id: str | None
+
+    @model_validator(mode="after")
+    def _close_shape(self) -> "ContextWindowClosedEvent":
+        compaction = self.close_reason is ContextWindowCloseReason.LLM_COMPACTION
+        if compaction != (
+            self.next_window_id is not None
+            and self.compaction_terminal_event_id is not None
+        ):
+            raise ValueError("window close compaction attribution mismatch")
+        return self
+
+
+class ContextWindowCompactionStartedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_WINDOW_COMPACTION_STARTED] = (
+        EventType.CONTEXT_WINDOW_COMPACTION_STARTED
+    )
+    plan: ContextWindowCompactionPlanFact
+
+    @model_validator(mode="after")
+    def _started(self) -> "ContextWindowCompactionStartedEvent":
+        if self.id != self.plan.stable_started_event_id:
+            raise ValueError("window compaction Started stable ID mismatch")
+        if self.run_id != self.plan.run_id:
+            raise ValueError("window compaction Started run mismatch")
+        return self
+
+
+class ContextWindowCompactionCompletedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_WINDOW_COMPACTION_COMPLETED] = (
+        EventType.CONTEXT_WINDOW_COMPACTION_COMPLETED
+    )
+    compaction_id: str = Field(min_length=1)
+    started_event_id: str = Field(min_length=1)
+    plan_fingerprint: str = Field(min_length=1)
+    summary_artifact_id: str = Field(min_length=1)
+    summary_content_sha256: str = Field(min_length=1)
+    summary_fact_fingerprint: str = Field(min_length=1)
+    summary_estimated_tokens: int = Field(ge=1)
+    actual_post_compaction_estimated_tokens: int = Field(ge=0)
+    post_compaction_target_tokens: int = Field(ge=1)
+    target_reached: Literal[True] = True
+    summarizer_call: ResolvedModelCallFact
+    summarizer_usage: ModelTokenUsageFact | None
+    usage_status: Literal["reported", "missing"]
+    rollout_settlement_event_id: str = Field(min_length=1)
+    source_window_close_event_id: str = Field(min_length=1)
+    target_window_open_event_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _completed(self) -> "ContextWindowCompactionCompletedEvent":
+        _validate_model_usage(self.usage_status, self.summarizer_usage)
+        if (
+            self.summarizer_call.purpose
+            is not ModelCallPurpose.CONTEXT_WINDOW_COMPACTION_SUMMARY
+        ):
+            raise ValueError("window compaction completed call purpose mismatch")
+        if (
+            self.actual_post_compaction_estimated_tokens
+            > self.post_compaction_target_tokens
+        ):
+            raise ValueError("completed window compaction did not reach its target")
+        ids = (
+            self.id,
+            self.started_event_id,
+            self.source_window_close_event_id,
+            self.target_window_open_event_id,
+        )
+        if len(set(ids)) != len(ids):
+            raise ValueError("window compaction completed event IDs overlap")
+        return self
+
+
+class ContextWindowCompactionFailedEvent(EventBase):
+    type: Literal[EventType.CONTEXT_WINDOW_COMPACTION_FAILED] = (
+        EventType.CONTEXT_WINDOW_COMPACTION_FAILED
+    )
+    compaction_id: str = Field(min_length=1)
+    compaction_attempt_index: int = Field(ge=1)
+    source_window_id: str = Field(min_length=1)
+    source_window_generation: int = Field(ge=1)
+    started_event_id: str | None
+    plan_fingerprint: str | None
+    failure_stage: Literal[
+        "planning",
+        "summarizer_resolution",
+        "input_manifest",
+        "model_validation",
+        "model_stream",
+        "summary_validation",
+        "summary_artifact",
+        "terminal_batch",
+        "recovery",
+    ]
+    reason_code: str = Field(min_length=1)
+    summarizer_call: ResolvedModelCallFact | None
+    rollout_settlement_event_id: str | None
+    observed_summary_tokens: int | None = Field(default=None, ge=0)
+    observed_post_compaction_tokens: int | None = Field(default=None, ge=0)
+    retryable: bool
+
+    @model_validator(mode="after")
+    def _failed(self) -> "ContextWindowCompactionFailedEvent":
+        before_start = self.failure_stage in {
+            "planning",
+            "summarizer_resolution",
+            "input_manifest",
+            "model_validation",
+        }
+        if before_start:
+            if self.started_event_id is not None:
+                raise ValueError("pre-Started window failure cannot reference Started")
+            if self.rollout_settlement_event_id is not None:
+                raise ValueError("pre-Started window failure cannot settle reservation")
+        elif self.started_event_id is None or self.rollout_settlement_event_id is None:
+            raise ValueError("post-Started window failure requires terminal attribution")
+        if self.failure_stage in {"planning", "summarizer_resolution"}:
+            if self.plan_fingerprint is not None:
+                raise ValueError("early window failure cannot claim a completed plan")
+        elif self.plan_fingerprint is None:
+            raise ValueError("planned window failure requires plan fingerprint")
+        if self.failure_stage == "planning" and self.summarizer_call is not None:
+            raise ValueError("planning failure cannot claim a summarizer call")
+        if self.summarizer_call is not None and (
+            self.summarizer_call.purpose
+            is not ModelCallPurpose.CONTEXT_WINDOW_COMPACTION_SUMMARY
+        ):
+            raise ValueError("window compaction failed call purpose mismatch")
+        return self
+
+
+class ContextProjectionRewritePageEvent(EventBase):
+    type: Literal[EventType.CONTEXT_PROJECTION_REWRITE_PAGE] = (
+        EventType.CONTEXT_PROJECTION_REWRITE_PAGE
+    )
+    rewrite_id: str = Field(min_length=1)
+    window_id: str = Field(min_length=1)
+    from_projection_generation: int = Field(ge=0)
+    to_projection_generation: int = Field(ge=1)
+    source_through_sequence: int = Field(ge=0)
+    page_index: int = Field(ge=0)
+    page_count: int = Field(ge=1)
+    entries: tuple[ToolObservationProjectionRewriteEntryFact, ...]
+    rollups: tuple[ObservationRollupFact, ...]
+    plan_fingerprint: str = Field(min_length=1)
+    final_state_fingerprint: str = Field(min_length=1)
+    reason_code: ProjectionRewriteReason
+
+    @model_validator(mode="after")
+    def _page(self) -> "ContextProjectionRewritePageEvent":
+        if self.to_projection_generation != self.from_projection_generation + 1:
+            raise ValueError("projection rewrite generation must advance by one")
+        if self.page_index >= self.page_count:
+            raise ValueError("projection rewrite page index is out of range")
+        unit_ids = tuple(entry.unit_id for entry in self.entries)
+        if len(unit_ids) != len(set(unit_ids)):
+            raise ValueError("projection rewrite page contains duplicate units")
+        if any(
+            entry.to_projection.window_id != self.window_id
+            or entry.to_projection.projection_generation
+            != self.to_projection_generation
+            for entry in self.entries
+        ):
+            raise ValueError("projection rewrite entry attribution mismatch")
+        return self
+
+
+class RolloutBudgetAccountOpenedEvent(EventBase):
+    type: Literal[EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED] = (
+        EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED
+    )
+    account: RolloutBudgetAccountFact
+
+    @model_validator(mode="after")
+    def _account_context(self) -> "RolloutBudgetAccountOpenedEvent":
+        if self.account.root_run_id != self.run_id:
+            raise ValueError("rollout account root run mismatch")
+        return self
+
+
+class RolloutBudgetAccountClosedEvent(EventBase):
+    type: Literal[EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED] = (
+        EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED
+    )
+    account_id: str = Field(min_length=1)
+    final_state_fingerprint: str = Field(min_length=1)
+    charged_milliunits: int = Field(ge=0)
+    model_call_count: int = Field(ge=0)
+    tool_call_count: int = Field(ge=0)
+    active_reservation_count: Literal[0]
+    run_end_event_id: str = Field(min_length=1)
+
+
+class ChildRolloutSubaccountClosedEvent(EventBase):
+    type: Literal[EventType.CHILD_ROLLOUT_SUBACCOUNT_CLOSED] = (
+        EventType.CHILD_ROLLOUT_SUBACCOUNT_CLOSED
+    )
+    subaccount_fingerprint: str = Field(min_length=1)
+    settlement_aggregate: ChildRolloutSettlementAggregateFact
+    run_end_event_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _subaccount_identity(self) -> "ChildRolloutSubaccountClosedEvent":
+        if (
+            self.subaccount_fingerprint
+            != self.settlement_aggregate.subaccount_fingerprint
+        ):
+            raise ValueError("child rollout close subaccount mismatch")
+        return self
+
+
+class RolloutBudgetReservationCreatedEvent(EventBase):
+    type: Literal[EventType.ROLLOUT_BUDGET_RESERVATION_CREATED] = (
+        EventType.ROLLOUT_BUDGET_RESERVATION_CREATED
+    )
+    reservation: RolloutReservationFact
+
+
+class RolloutBudgetReservationSettledEvent(EventBase):
+    type: Literal[EventType.ROLLOUT_BUDGET_RESERVATION_SETTLED] = (
+        EventType.ROLLOUT_BUDGET_RESERVATION_SETTLED
+    )
+    reservation_id: str = Field(min_length=1)
+    charged_milliunits: int = Field(ge=0)
+    usage_status: Literal[
+        "provider_reported_usage",
+        "not_started_zero",
+        "reserved_missing_usage",
+        "cancelled_reserved",
+        "tool_terminal",
+        "child_terminal_handoff",
+        "child_not_started_zero",
+    ]
+    usage_charge: RolloutUsageChargeFact | None
+    source_model_call_end_event_id: str | None
+    source_tool_result_event_id: str | None
+    child_usage_handoff: ChildRolloutUsageHandoffFact | None
+
+    @model_validator(mode="after")
+    def _settlement(self) -> "RolloutBudgetReservationSettledEvent":
+        is_model = self.usage_status in {
+            "provider_reported_usage",
+            "not_started_zero",
+            "reserved_missing_usage",
+            "cancelled_reserved",
+        }
+        if is_model:
+            if self.usage_charge is None:
+                raise ValueError("model settlement requires usage charge")
+            if self.source_model_call_end_event_id is None:
+                raise ValueError("model settlement requires model end event")
+            if self.source_tool_result_event_id is not None:
+                raise ValueError("model settlement cannot reference tool result")
+            if self.charged_milliunits != self.usage_charge.charged_milliunits:
+                raise ValueError("model settlement charge mismatch")
+            if self.usage_status != self.usage_charge.accounting_basis:
+                raise ValueError("model settlement usage basis mismatch")
+            if self.child_usage_handoff is not None:
+                raise ValueError("model settlement cannot carry child handoff")
+        elif self.usage_status == "tool_terminal":
+            if self.usage_charge is not None:
+                raise ValueError("tool settlement cannot carry model usage")
+            if self.source_model_call_end_event_id is not None:
+                raise ValueError("tool settlement cannot reference model end")
+            if self.source_tool_result_event_id is None:
+                raise ValueError("tool settlement requires tool result event")
+            if self.child_usage_handoff is not None:
+                raise ValueError("tool settlement cannot carry child handoff")
+        elif self.usage_status == "child_terminal_handoff":
+            if self.usage_charge is not None:
+                raise ValueError("child settlement cannot carry model usage")
+            if (
+                self.source_model_call_end_event_id is not None
+                or self.source_tool_result_event_id is not None
+            ):
+                raise ValueError("child settlement cannot reference model/tool end")
+            if self.child_usage_handoff is None:
+                raise ValueError("child terminal settlement requires usage handoff")
+            if (
+                self.charged_milliunits
+                != self.child_usage_handoff.settlement_aggregate.charged_milliunits
+            ):
+                raise ValueError("child settlement charge mismatch")
+        else:
+            if self.usage_charge is not None:
+                raise ValueError("child start settlement cannot carry model usage")
+            if (
+                self.source_model_call_end_event_id is not None
+                or self.source_tool_result_event_id is not None
+                or self.child_usage_handoff is not None
+            ):
+                raise ValueError("child start settlement cannot carry source facts")
+            if self.charged_milliunits != 0:
+                raise ValueError("unstarted child settlement must be zero")
+        return self
+
+
+class RolloutPhaseTransitionedEvent(EventBase):
+    type: Literal[EventType.ROLLOUT_PHASE_TRANSITIONED] = (
+        EventType.ROLLOUT_PHASE_TRANSITIONED
+    )
+    account_id: str = Field(min_length=1)
+    from_phase: RolloutPhase
+    to_phase: RolloutPhase
+    source_through_sequence: int = Field(ge=0)
+    state_before_fingerprint: str = Field(min_length=1)
+    state_after_fingerprint: str = Field(min_length=1)
+    reason_code: RolloutTransitionReason
+
+    @model_validator(mode="after")
+    def _monotonic(self) -> "RolloutPhaseTransitionedEvent":
+        from_index = tuple(RolloutPhase).index(self.from_phase)
+        to_index = tuple(RolloutPhase).index(self.to_phase)
+        if to_index <= from_index:
+            raise ValueError("rollout phase transition must advance")
+        return self
+
+
+class SubagentRolloutBudgetResolvedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_ROLLOUT_BUDGET_RESOLVED] = (
+        EventType.SUBAGENT_ROLLOUT_BUDGET_RESOLVED
+    )
+    subagent_run_id: str = Field(min_length=1)
+    subagent_task_id: str | None
+    budget_snapshot_event_id: str = Field(min_length=1)
+    resolved_budget: ResolvedChildRolloutBudgetFact
+
+
 class ReplyStartEvent(EventBase):
     type: Literal[EventType.REPLY_START] = EventType.REPLY_START
     name: str
@@ -550,6 +909,9 @@ class ReplyStartEvent(EventBase):
 
 class ReplyEndEvent(EventBase):
     type: Literal[EventType.REPLY_END] = EventType.REPLY_END
+    model_terminal_outcome: Literal[
+        "completed", "provider_error", "cancelled", "runtime_error"
+    ]
 
 
 class RunErrorEvent(EventBase):
@@ -558,17 +920,12 @@ class RunErrorEvent(EventBase):
     code: str = "runtime_error"
 
 
-class ExceedMaxItersEvent(EventBase):
-    type: Literal[EventType.EXCEED_MAX_ITERS] = EventType.EXCEED_MAX_ITERS
-    name: str
-    max_iters: int
-
-
 class ModelCallStartEvent(EventBase):
     type: Literal[EventType.MODEL_CALL_START] = EventType.MODEL_CALL_START
     resolved_call: ResolvedModelCallFact
     context_id: str
     model_call_index: int | None = None
+    recovery_plan: ModelStreamRecoveryPlanFact
 
     @model_validator(mode="after")
     def _validate_call_context(self) -> "ModelCallStartEvent":
@@ -586,12 +943,21 @@ class ModelCallStartEvent(EventBase):
             raise ValueError("direct model call start cannot carry model_call_index")
         if self.model_call_index is not None and self.model_call_index < 0:
             raise ValueError("model_call_index must be non-negative")
+        if (
+            self.recovery_plan.model_call_start_event_id != self.id
+            or self.recovery_plan.lifecycle_kind == "main_assistant_reply"
+            and self.model_call_index is None
+            or self.recovery_plan.lifecycle_kind != "main_assistant_reply"
+            and self.model_call_index is not None
+        ):
+            raise ValueError("model call start recovery plan lifecycle mismatch")
         return self
 
 
 class ContextCompiledEvent(EventBase):
     type: Literal[EventType.CONTEXT_COMPILED] = EventType.CONTEXT_COMPILED
     status: Literal["compiled", "pressure", "failed"] = "compiled"
+    failure_stage: ContextCompileFailureStage | None = None
     context_id: str
     model_call_index: int
     compile_attempt_index: int
@@ -604,9 +970,104 @@ class ContextCompiledEvent(EventBase):
     lifecycle_decisions: list[dict[str, Any]] = Field(default_factory=list)
     tool_result_render_decisions: list[dict[str, Any]] = Field(default_factory=list)
     tool_result_budget_report: dict[str, Any] = Field(default_factory=dict)
+    input_audit: ContextCompileInputAuditFact | None = None
+    input_failure: ContextCompileInputFailureFact | None = None
+    provider_neutral_payload_fingerprint: str | None = None
+    canonical_render_decisions_fingerprint: str | None = None
+    tool_result_render_decision_facts: tuple[ToolResultRenderDecisionFact, ...] = ()
+    tool_result_render_operational_facts: tuple[
+        ToolResultRenderOperationalFact, ...
+    ] = ()
+    long_horizon_context_budget_decision: (
+        LongHorizonContextBudgetDecisionFact | None
+    ) = None
+    long_horizon_projection_pressure_shadow: (
+        LongHorizonProjectionPressureShadowFact | None
+    ) = None
 
     @model_validator(mode="after")
     def _validate_budget_stage(self) -> "ContextCompiledEvent":
+        if (self.input_audit is None) == (self.input_failure is None):
+            raise ValueError("context compile event requires exactly one input carrier")
+        if self.status == "failed":
+            if self.failure_stage is None:
+                raise ValueError("failed context compile requires failure stage")
+        elif self.status == "pressure" and self.input_failure is not None:
+            if self.failure_stage is None:
+                raise ValueError(
+                    "pre-manifest context pressure requires failure stage"
+                )
+        elif self.failure_stage is not None:
+            raise ValueError("non-failed context compile cannot carry failure stage")
+        if self.status == "compiled" and self.input_audit is None:
+            raise ValueError("compiled context requires full input audit")
+        exact_fingerprints = (
+            self.provider_neutral_payload_fingerprint,
+            self.canonical_render_decisions_fingerprint,
+        )
+        if self.status == "compiled":
+            if any(item is None for item in exact_fingerprints):
+                raise ValueError("compiled context requires exact replay fingerprints")
+        elif any(item is not None for item in exact_fingerprints):
+            raise ValueError(
+                "non-compiled context cannot carry exact replay fingerprints"
+            )
+        if self.input_audit is not None:
+            audit = self.input_audit
+            if (
+                audit.resolved_model_call_id
+                != self.resolved_call.resolved_model_call_id
+                or audit.model_call_index != self.model_call_index
+                or audit.compile_attempt_index != self.compile_attempt_index
+                or audit.context_retry_index != self.context_retry_index
+            ):
+                raise ValueError("context input audit outer identity mismatch")
+        if self.input_failure is not None:
+            failure = self.input_failure
+            if (
+                failure.failure_stage != self.failure_stage
+                or failure.context_id != self.context_id
+                or failure.resolved_model_call_id
+                != self.resolved_call.resolved_model_call_id
+                or failure.model_call_index != self.model_call_index
+                or failure.compile_attempt_index != self.compile_attempt_index
+                or failure.context_retry_index != self.context_retry_index
+            ):
+                raise ValueError("context input failure outer identity mismatch")
+        decision_ids = tuple(
+            item.unit_id for item in self.tool_result_render_decision_facts
+        )
+        operational_ids = tuple(
+            item.unit_id for item in self.tool_result_render_operational_facts
+        )
+        if decision_ids != operational_ids:
+            raise ValueError("context render decision/operational unit mismatch")
+        if len(decision_ids) != len(set(decision_ids)):
+            raise ValueError("context render decision unit IDs are not unique")
+        budget_decision = self.long_horizon_context_budget_decision
+        pressure_shadow = self.long_horizon_projection_pressure_shadow
+        if (budget_decision is None) != (pressure_shadow is None):
+            raise ValueError(
+                "long-horizon context budget decision/shadow must be paired"
+            )
+        if budget_decision is not None and pressure_shadow is not None:
+            if (
+                budget_decision.window_id != pressure_shadow.window_id
+                or budget_decision.source_through_sequence
+                != pressure_shadow.source_through_sequence
+                or budget_decision.active_projection_unit_count
+                != pressure_shadow.active_projection_unit_count
+                or budget_decision.max_projection_units_per_window
+                != pressure_shadow.max_projection_units_per_window
+                or budget_decision.unit_count_limit_exceeded
+                != pressure_shadow.unit_count_limit_exceeded
+            ):
+                raise ValueError("long-horizon budget/shadow attribution mismatch")
+            if (
+                self.input_audit is not None
+                and self.input_audit.long_horizon_attribution_fingerprint == ""
+            ):
+                raise ValueError("long-horizon input attribution is required")
         if (
             self.status == "compiled"
             and self.budget.measurement_stage != "final_payload"
@@ -662,6 +1123,26 @@ class CapabilityGateDecisionEvent(EventBase):
     effective_permission_category: str | None = None
     effective_read_only: bool | None = None
     capability_context: dict[str, Any] = Field(default_factory=dict)
+    action_classification: ToolActionClassificationFact | None = None
+
+    @model_validator(mode="after")
+    def _action_classification_identity(self) -> "CapabilityGateDecisionEvent":
+        classification = self.action_classification
+        if self.descriptor_id is None:
+            if classification is not None:
+                raise ValueError(
+                    "descriptor-missing gate decision cannot carry action classification"
+                )
+        elif classification is None:
+            raise ValueError(
+                "known descriptor gate decision requires action classification"
+            )
+        elif (
+            classification.tool_call_id != self.tool_call_id
+            or classification.descriptor_id != self.descriptor_id
+        ):
+            raise ValueError("gate decision action classification identity mismatch")
+        return self
 
 
 class ModelCallEndEvent(EventBase):
@@ -669,7 +1150,8 @@ class ModelCallEndEvent(EventBase):
     resolved_model_call_id: str
     target_fingerprint: str
     reported_model_id: str | None
-    outcome: Literal["completed", "provider_error"]
+    outcome: Literal["completed", "provider_error", "cancelled", "runtime_error"]
+    provider_dispatch_status: Literal["not_started", "dispatched"]
     usage_status: Literal["reported", "missing"]
     usage: ModelTokenUsageFact | None
     estimated_input_tokens: int = Field(ge=0)
@@ -681,7 +1163,72 @@ class ModelCallEndEvent(EventBase):
             raise ValueError("reported model usage requires a usage fact")
         if self.usage_status == "missing" and self.usage is not None:
             raise ValueError("missing model usage cannot contain a usage fact")
+        if self.usage_status == "reported" and self.provider_dispatch_status != "dispatched":
+            raise ValueError("reported model usage requires provider dispatch")
+        if self.outcome in {"completed", "provider_error"} and (
+            self.provider_dispatch_status != "dispatched"
+        ):
+            raise ValueError("completed/provider-error outcome requires dispatch")
         _validate_reported_model_id(self.reported_model_id)
+        return self
+
+
+class ProviderModelStreamErrorEvent(EventBase):
+    type: Literal[EventType.PROVIDER_MODEL_STREAM_ERROR] = (
+        EventType.PROVIDER_MODEL_STREAM_ERROR
+    )
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+    error: ProviderSanitizedErrorFact
+
+    @model_validator(mode="after")
+    def _validate_attribution(self) -> "ProviderModelStreamErrorEvent":
+        if self.model_stream_attribution.draft_kind != "provider_error":
+            raise ValueError("provider stream error requires provider_error attribution")
+        return self
+
+
+class ModelCallControlDispositionResolvedEvent(EventBase):
+    type: Literal[EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED] = (
+        EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
+    )
+    resolved_model_call_id: str = Field(min_length=1)
+    model_call_start_event_id: str = Field(min_length=1)
+    model_call_end_event_id: str = Field(min_length=1)
+    model_call_index: int = Field(ge=1)
+    source_result_fingerprint: str = Field(min_length=1)
+    run_execution_activation: RunExecutionActivationFact
+    disposition: ModelCallControlDisposition
+    termination_intent: RunTerminationIntentAttributionFact | None
+    recovery_reason_code: Literal[
+        "process_restarted_before_control_resolution"
+    ] | None
+    event_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_disposition(self) -> "ModelCallControlDispositionResolvedEvent":
+        if self.disposition is ModelCallControlDisposition.ACCEPTED:
+            if self.termination_intent is not None or self.recovery_reason_code is not None:
+                raise ValueError("accepted disposition cannot carry suppression attribution")
+        elif self.disposition is ModelCallControlDisposition.SUPPRESSED_BY_TERMINATION:
+            if self.termination_intent is None or self.recovery_reason_code is not None:
+                raise ValueError("termination suppression requires termination attribution")
+            if (
+                self.termination_intent.target_run_execution_activation_fingerprint
+                != self.run_execution_activation.activation_fingerprint
+            ):
+                raise ValueError("termination suppression activation mismatch")
+        elif (
+            self.termination_intent is not None
+            or self.recovery_reason_code
+            != "process_restarted_before_control_resolution"
+        ):
+            raise ValueError("recovery suppression requires its stable recovery reason")
+        expected = sha256_fingerprint(
+            "model-call-control-disposition-event:v1",
+            self.model_dump(mode="json", exclude={"event_fingerprint", "sequence"}),
+        )
+        if self.event_fingerprint != expected:
+            raise ValueError("model call control disposition event fingerprint mismatch")
         return self
 
 
@@ -729,23 +1276,27 @@ class ModelCallRejectedEvent(EventBase):
 class TextBlockStartEvent(EventBase):
     type: Literal[EventType.TEXT_BLOCK_START] = EventType.TEXT_BLOCK_START
     block_id: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class TextBlockDeltaEvent(EventBase):
     type: Literal[EventType.TEXT_BLOCK_DELTA] = EventType.TEXT_BLOCK_DELTA
     block_id: str
     delta: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class TextBlockEndEvent(EventBase):
     type: Literal[EventType.TEXT_BLOCK_END] = EventType.TEXT_BLOCK_END
     block_id: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class DataBlockStartEvent(EventBase):
     type: Literal[EventType.DATA_BLOCK_START] = EventType.DATA_BLOCK_START
     block_id: str
     media_type: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class DataBlockDeltaEvent(EventBase):
@@ -753,27 +1304,32 @@ class DataBlockDeltaEvent(EventBase):
     block_id: str
     data: str
     media_type: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class DataBlockEndEvent(EventBase):
     type: Literal[EventType.DATA_BLOCK_END] = EventType.DATA_BLOCK_END
     block_id: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class ThinkingBlockStartEvent(EventBase):
     type: Literal[EventType.THINKING_BLOCK_START] = EventType.THINKING_BLOCK_START
     block_id: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class ThinkingBlockDeltaEvent(EventBase):
     type: Literal[EventType.THINKING_BLOCK_DELTA] = EventType.THINKING_BLOCK_DELTA
     block_id: str
     delta: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class ThinkingBlockEndEvent(EventBase):
     type: Literal[EventType.THINKING_BLOCK_END] = EventType.THINKING_BLOCK_END
     block_id: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class HintBlockEvent(EventBase):
@@ -787,17 +1343,20 @@ class ToolCallStartEvent(EventBase):
     type: Literal[EventType.TOOL_CALL_START] = EventType.TOOL_CALL_START
     tool_call_id: str
     tool_call_name: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class ToolCallDeltaEvent(EventBase):
     type: Literal[EventType.TOOL_CALL_DELTA] = EventType.TOOL_CALL_DELTA
     tool_call_id: str
     delta: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class ToolCallEndEvent(EventBase):
     type: Literal[EventType.TOOL_CALL_END] = EventType.TOOL_CALL_END
     tool_call_id: str
+    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
 
 
 class ToolResultStartEvent(EventBase):
@@ -836,20 +1395,49 @@ class ToolResultEndEvent(EventBase):
     tool_call_id: str
     state: ToolResultState
     artifacts: list[ToolResultArtifactRef] = Field(default_factory=list)
+    observation_timing: ToolObservationTimingFact
+    render_profile: ToolResultRenderProfileFact
+    essential_capture_policy: ToolResultEssentialCapturePolicyFact | None = None
+    essential_result: ToolResultEssentialFact | None = None
+    terminal_payload_timing: TerminalPayloadTimingFact | None = None
+    rollup_semantics: ToolResultRollupSemanticsFact | None
 
     @model_validator(mode="after")
     def _validate_tool_observation_timing(self) -> "ToolResultEndEvent":
-        timing = _validate_tool_observation_timing_payload(
-            self.metadata.get("tool_observation_timing"),
-            context="ToolResultEndEvent.metadata.tool_observation_timing",
-        )
-        embedded_tool_call_id = timing.get("tool_call_id")
+        embedded_tool_call_id = self.observation_timing.tool_call_id
         if (
             embedded_tool_call_id is not None
             and embedded_tool_call_id != self.tool_call_id
         ):
             raise ValueError("ToolResultEndEvent timing tool_call_id mismatch")
-        self.metadata["tool_observation_timing"] = timing
+        ToolResultExecutionSemanticsFact(
+            render_profile=self.render_profile,
+            result_state=ToolResultStateFact(self.state.value),
+            essential_capture_policy=self.essential_capture_policy,
+            essential_result=self.essential_result,
+            terminal_payload_timing=self.terminal_payload_timing,
+            rollup_semantics=self.rollup_semantics,
+        )
+        return self
+
+
+class ToolExecutionSuspendedEvent(EventBase):
+    """Canonical fact that a tool call entered a pending interaction."""
+
+    type: Literal[EventType.TOOL_EXECUTION_SUSPENDED] = (
+        EventType.TOOL_EXECUTION_SUSPENDED
+    )
+    interaction_kind: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+    payload: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _validate_payload_identity(self) -> "ToolExecutionSuspendedEvent":
+        if self.payload.get("tool_call_id") != self.tool_call_id:
+            raise ValueError("tool suspension payload tool_call_id mismatch")
+        if self.payload.get("tool_name") != self.tool_name:
+            raise ValueError("tool suspension payload tool_name mismatch")
         return self
 
 
@@ -873,65 +1461,39 @@ class RequireExternalExecutionEvent(EventBase):
     type: Literal[EventType.REQUIRE_EXTERNAL_EXECUTION] = (
         EventType.REQUIRE_EXTERNAL_EXECUTION
     )
-    tool_calls: list[ToolCallBlock]
+    external_tool_calls: tuple[ExternalToolCallRequirementFact, ...]
+
+    @model_validator(mode="after")
+    def _requirements(self) -> "RequireExternalExecutionEvent":
+        ids = tuple(item.tool_call_id for item in self.external_tool_calls)
+        if not ids or len(ids) != len(set(ids)):
+            raise ValueError(
+                "external execution requirements must be non-empty and unique"
+            )
+        return self
 
 
 class ExternalExecutionResultEvent(EventBase):
     type: Literal[EventType.EXTERNAL_EXECUTION_RESULT] = (
         EventType.EXTERNAL_EXECUTION_RESULT
     )
-    execution_results: list[ToolResultBlock]
+    external_results: tuple[ExternalToolResultIngressFact, ...]
 
     @model_validator(mode="after")
-    def _validate_tool_observation_timing_map(self) -> "ExternalExecutionResultEvent":
-        timing_by_call_id = self.metadata.get("tool_observation_timing_by_call_id")
-        if not isinstance(timing_by_call_id, dict):
-            raise ValueError(
-                "ExternalExecutionResultEvent requires metadata.tool_observation_timing_by_call_id"
-            )
-        result_ids = [result.id for result in self.execution_results]
+    def _validate_external_results(self) -> "ExternalExecutionResultEvent":
+        result_ids = [
+            result.result_block.tool_call_id for result in self.external_results
+        ]
         duplicate_ids = sorted(
             {result_id for result_id in result_ids if result_ids.count(result_id) > 1}
         )
         if duplicate_ids:
             raise ValueError(
-                "ExternalExecutionResultEvent execution_results contain duplicate ids: "
+                "ExternalExecutionResultEvent external_results contain duplicate ids: "
                 + ", ".join(duplicate_ids)
             )
-        result_id_set = set(result_ids)
-        missing = [
-            result.id
-            for result in self.execution_results
-            if not isinstance(timing_by_call_id.get(result.id), dict)
-        ]
-        if missing:
-            raise ValueError(
-                "ExternalExecutionResultEvent timing map is missing tool result ids: "
-                + ", ".join(missing)
-            )
-        extra = sorted(
-            str(key) for key in timing_by_call_id if key not in result_id_set
-        )
-        if extra:
-            raise ValueError(
-                "ExternalExecutionResultEvent timing map contains unknown tool result ids: "
-                + ", ".join(extra)
-            )
-        for tool_call_id, timing_payload in list(timing_by_call_id.items()):
-            timing = _validate_tool_observation_timing_payload(
-                timing_payload,
-                context=f"ExternalExecutionResultEvent timing for {tool_call_id!r}",
-            )
-            embedded_tool_call_id = timing.get("tool_call_id")
-            if (
-                embedded_tool_call_id is not None
-                and embedded_tool_call_id != tool_call_id
-            ):
-                raise ValueError(
-                    "ExternalExecutionResultEvent timing tool_call_id mismatch for "
-                    f"{tool_call_id!r}"
-                )
-            timing_by_call_id[tool_call_id] = timing
+        if not result_ids:
+            raise ValueError("ExternalExecutionResultEvent requires external results")
         return self
 
 
@@ -1061,7 +1623,9 @@ class PlanModeExitedEvent(EventBase):
             if not self.host_workflow_operation_id:
                 raise ValueError("host workflow plan exit requires operation id")
         elif self.host_workflow_operation_id is not None:
-            raise ValueError("agent-run plan exit cannot carry host workflow operation id")
+            raise ValueError(
+                "agent-run plan exit cannot carry host workflow operation id"
+            )
         return self
 
 
@@ -1244,6 +1808,7 @@ class ProjectionRequestedEvent(ProjectionEventBase):
 
 class ProjectionReadyEvent(ProjectionEventBase):
     type: Literal[EventType.PROJECTION_READY] = EventType.PROJECTION_READY
+    projection_kind: Literal["memory", "working_context", "mixed"]
     included_memory_ids: list[str] = Field(default_factory=list)
     filtered_memory_ids: list[str] = Field(default_factory=list)
     summary: str
@@ -1580,7 +2145,10 @@ class ContextCompactionFailedEvent(EventBase):
                 target_estimate=self.target_estimate,
             )
             has_actual_after = self.target_estimate.estimated_tokens_after is not None
-            if self.failure_stage in {"artifact_write", "completed_append"} and not has_actual_after:
+            if (
+                self.failure_stage in {"artifact_write", "completed_append"}
+                and not has_actual_after
+            ):
                 raise ValueError(
                     "post-summary persistence failure requires actual after measurements"
                 )
@@ -1790,6 +2358,7 @@ class SubagentBudgetSnapshotEvent(BaseModel):
     max_result_summary_chars_per_child: int
     max_result_artifact_refs_per_child: int
     max_subagent_results_per_parent_compile: int
+    child_rollout_policy: ChildRolloutReservationPolicyFact
 
     @model_validator(mode="after")
     def _validate_budget(self) -> SubagentBudgetSnapshotEvent:
@@ -2268,6 +2837,20 @@ class SubagentResultConsumedEvent(EventBase):
         return self
 
 
+class SubagentGraphCheckpointCommittedEvent(EventBase):
+    type: Literal[EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED] = (
+        EventType.SUBAGENT_GRAPH_CHECKPOINT_COMMITTED
+    )
+    checkpoint: SubagentGraphCheckpointStateFact
+    artifact: SubagentGraphCheckpointArtifactFact
+
+    @model_validator(mode="after")
+    def _checkpoint_identity(self) -> "SubagentGraphCheckpointCommittedEvent":
+        if self.artifact.checkpoint_state != self.checkpoint:
+            raise ValueError("checkpoint artifact state differs from event state")
+        return self
+
+
 class CustomEvent(EventBase):
     type: Literal[EventType.CUSTOM] = EventType.CUSTOM
     name: str
@@ -2276,6 +2859,19 @@ class CustomEvent(EventBase):
 
 AgentEvent: TypeAlias = (
     RunStartEvent
+    | ContextWindowOpenedEvent
+    | ContextWindowClosedEvent
+    | ContextWindowCompactionStartedEvent
+    | ContextWindowCompactionCompletedEvent
+    | ContextWindowCompactionFailedEvent
+    | ContextProjectionRewritePageEvent
+    | RolloutBudgetAccountOpenedEvent
+    | RolloutBudgetAccountClosedEvent
+    | ChildRolloutSubaccountClosedEvent
+    | RolloutBudgetReservationCreatedEvent
+    | RolloutBudgetReservationSettledEvent
+    | RolloutPhaseTransitionedEvent
+    | SubagentRolloutBudgetResolvedEvent
     | McpCapabilitySnapshotInstalledEvent
     | RunInteractionResumeBoundaryEvent
     | CapabilityExposureResolvedEvent
@@ -2283,11 +2879,12 @@ AgentEvent: TypeAlias = (
     | ReplyStartEvent
     | ReplyEndEvent
     | RunErrorEvent
-    | ExceedMaxItersEvent
     | ContextCompiledEvent
     | CapabilityGateDecisionEvent
     | ModelCallStartEvent
     | ModelCallEndEvent
+    | ProviderModelStreamErrorEvent
+    | ModelCallControlDispositionResolvedEvent
     | ModelCallRejectedEvent
     | TextBlockStartEvent
     | TextBlockDeltaEvent
@@ -2306,6 +2903,7 @@ AgentEvent: TypeAlias = (
     | ToolResultTextDeltaEvent
     | ToolResultDataDeltaEvent
     | ToolResultEndEvent
+    | ToolExecutionSuspendedEvent
     | RequireUserConfirmEvent
     | UserConfirmResultEvent
     | RequireExternalExecutionEvent
@@ -2353,5 +2951,6 @@ AgentEvent: TypeAlias = (
     | SubagentPhaseReportedEvent
     | SubagentResultSubmittedEvent
     | SubagentResultConsumedEvent
+    | SubagentGraphCheckpointCommittedEvent
     | CustomEvent
 )

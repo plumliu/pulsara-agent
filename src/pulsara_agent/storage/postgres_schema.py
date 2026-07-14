@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS agent_events (
     reply_id TEXT NOT NULL,
     sequence BIGINT NOT NULL,
     event_type TEXT NOT NULL,
+    event_schema_version TEXT NOT NULL,
+    event_schema_fingerprint TEXT NOT NULL,
+    event_domain_contract_fingerprint TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
     payload JSONB NOT NULL,
     UNIQUE (session_id, sequence)
@@ -73,6 +76,20 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_reply_sequence
 
 CREATE INDEX IF NOT EXISTS idx_agent_events_type
     ON agent_events(event_type);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_session_type_sequence
+    ON agent_events(session_id, event_type, sequence);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_session_model_call_sequence
+    ON agent_events(
+        session_id,
+        (coalesce(
+            payload #>> '{resolved_call,resolved_model_call_id}',
+            payload #>> '{resolved_model_call_id}',
+            payload #>> '{model_stream_attribution,resolved_model_call_id}'
+        )),
+        sequence
+    );
 
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,

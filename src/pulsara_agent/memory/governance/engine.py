@@ -6,14 +6,19 @@ import json
 import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.llm import LLMRuntime, ModelRole
-from pulsara_agent.llm.direct import DirectModelCallResult, collect_direct_model_call
+from pulsara_agent.llm.direct import (
+    DirectModelCallResult,
+    collect_direct_model_call_handle,
+)
+from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.primitives.model_call import (
@@ -42,6 +47,9 @@ from pulsara_agent.memory.governance.relatedness import (
 )
 from pulsara_agent.memory.scope import format_scope_list
 from pulsara_agent.ontology import memory
+
+if TYPE_CHECKING:
+    from pulsara_agent.runtime.session import RuntimeSession
 
 
 class MemoryGovernanceInput(BaseModel):
@@ -95,6 +103,7 @@ class MemoryGovernanceEngine:
 
     llm_runtime: LLMRuntime
     executor: MemoryGovernanceExecutor
+    runtime_session: "RuntimeSession | None" = None
     options: MemoryGovernanceOptions = field(default_factory=MemoryGovernanceOptions)
     relatedness_service: GovernanceRelatednessService | None = None
 
@@ -245,33 +254,52 @@ class MemoryGovernanceEngine:
         call,
     ) -> DirectModelCallResult:
         context_id = f"context:governance:{governance_input.governance_batch_id}"
-        stream = self.llm_runtime.stream(
-            call=call,
-            context=LLMContext(
-                system_prompt=_governance_system_prompt(
-                    self.executor.allowed_write_scopes
-                ),
-                messages=(
-                    LLMMessage.user(
-                        "Govern these memory candidates and output JSON only:\n"
-                        + json.dumps(
-                            governance_input.model_dump(mode="json"), ensure_ascii=False
-                        )
-                    ),
-                ),
-                tools=(),
-                context_id=context_id,
-                resolved_model_call_id=call.fact.resolved_model_call_id,
-                target_fingerprint=call.target.fact.target_fingerprint,
-                model_call_index=None,
+        context = LLMContext(
+            system_prompt=_governance_system_prompt(
+                self.executor.allowed_write_scopes
             ),
-            event_context=EventContext(
-                run_id=f"run:governance-planner/{governance_input.governance_batch_id}",
-                turn_id=f"turn:governance-planner/{governance_input.governance_batch_id}",
-                reply_id=f"reply:governance-planner/{governance_input.governance_batch_id}",
+            messages=(
+                LLMMessage.user(
+                    "Govern these memory candidates and output JSON only:\n"
+                    + json.dumps(
+                        governance_input.model_dump(mode="json"), ensure_ascii=False
+                    )
+                ),
             ),
+            tools=(),
+            context_id=context_id,
+            resolved_model_call_id=call.fact.resolved_model_call_id,
+            target_fingerprint=call.target.fact.target_fingerprint,
+            model_call_index=None,
         )
-        return await collect_direct_model_call(stream, expected_call=call)
+        event_context = EventContext(
+            run_id=f"run:governance-planner/{governance_input.governance_batch_id}",
+            turn_id=f"turn:governance-planner/{governance_input.governance_batch_id}",
+            reply_id=f"reply:governance-planner/{governance_input.governance_batch_id}",
+        )
+        if self.runtime_session is None:
+            raise RuntimeError(
+                "memory governance model execution requires RuntimeSession ownership"
+            )
+        start_bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=event_context,
+            runtime_session=self.runtime_session,
+            lifecycle_kind="direct_internal_call",
+        )
+        handle = self.llm_runtime.start_stream(
+            call=call,
+            context=context,
+            event_context=event_context,
+            start_bundle=start_bundle,
+            commit_port=RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=self.runtime_session,
+                state=None,
+            ),
+            execution_registry=self.runtime_session.model_stream_execution_registry,
+        )
+        return await collect_direct_model_call_handle(handle, expected_call=call)
 
     def _candidate_snapshot(
         self,

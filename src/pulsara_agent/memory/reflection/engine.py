@@ -21,7 +21,12 @@ from pulsara_agent.event.candidates import ValidCandidatePayload
 from pulsara_agent.event_log import EventLog
 from pulsara_agent.graph import GraphStore
 from pulsara_agent.llm import LLMRuntime, ModelRole
-from pulsara_agent.llm.direct import DirectModelCallResult, collect_direct_model_call
+from pulsara_agent.llm.direct import (
+    DirectModelCallResult,
+    collect_direct_model_call_handle,
+)
+from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.errors import (
     ModelContextIdentityMismatch,
     ModelInputBudgetExceeded,
@@ -42,6 +47,7 @@ from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 if TYPE_CHECKING:
+    from pulsara_agent.runtime.session import RuntimeSession
     from pulsara_agent.runtime.state import LoopState
 
 
@@ -192,6 +198,7 @@ class MemoryReflectionEngine:
     llm_runtime: LLMRuntime
     candidate_pool: CandidatePool
     graph: GraphStore
+    runtime_session: "RuntimeSession | None" = None
     graph_id: str | None = None
     allowed_scopes: frozenset[str] | None = None
     options: MemoryReflectionOptions = field(default_factory=MemoryReflectionOptions)
@@ -390,31 +397,50 @@ class MemoryReflectionEngine:
         *,
         call,
     ) -> DirectModelCallResult:
-        stream = self.llm_runtime.stream(
-            call=call,
-            context=LLMContext(
-                system_prompt=_reflection_system_prompt(self.allowed_scopes),
-                messages=(
-                    LLMMessage.user(
-                        "Reflect on this run and output JSON only:\n"
-                        + json.dumps(
-                            reflection_input.model_dump(mode="json"), ensure_ascii=False
-                        )
-                    ),
+        context = LLMContext(
+            system_prompt=_reflection_system_prompt(self.allowed_scopes),
+            messages=(
+                LLMMessage.user(
+                    "Reflect on this run and output JSON only:\n"
+                    + json.dumps(
+                        reflection_input.model_dump(mode="json"), ensure_ascii=False
+                    )
                 ),
-                tools=(),
-                context_id=f"context:reflection:{reflection_id}",
-                resolved_model_call_id=call.fact.resolved_model_call_id,
-                target_fingerprint=call.target.fact.target_fingerprint,
-                model_call_index=None,
             ),
-            event_context=EventContext(
-                run_id=reflection_input.run_id,
-                turn_id=reflection_input.turn_id,
-                reply_id=f"{reflection_input.reply_id}:{reflection_id}",
-            ),
+            tools=(),
+            context_id=f"context:reflection:{reflection_id}",
+            resolved_model_call_id=call.fact.resolved_model_call_id,
+            target_fingerprint=call.target.fact.target_fingerprint,
+            model_call_index=None,
         )
-        return await collect_direct_model_call(stream, expected_call=call)
+        event_context = EventContext(
+            run_id=reflection_input.run_id,
+            turn_id=reflection_input.turn_id,
+            reply_id=f"{reflection_input.reply_id}:{reflection_id}",
+        )
+        if self.runtime_session is None:
+            raise RuntimeError(
+                "memory reflection model execution requires RuntimeSession ownership"
+            )
+        start_bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=event_context,
+            runtime_session=self.runtime_session,
+            lifecycle_kind="direct_internal_call",
+        )
+        handle = self.llm_runtime.start_stream(
+            call=call,
+            context=context,
+            event_context=event_context,
+            start_bundle=start_bundle,
+            commit_port=RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=self.runtime_session,
+                state=None,
+            ),
+            execution_registry=self.runtime_session.model_stream_execution_registry,
+        )
+        return await collect_direct_model_call_handle(handle, expected_call=call)
 
 
 def _parse_reflection_output(text: str) -> MemoryReflectionOutput:

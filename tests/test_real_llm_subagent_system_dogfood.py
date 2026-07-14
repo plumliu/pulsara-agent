@@ -16,10 +16,14 @@ from tests.support.capability import preview_capability_plan
 
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
+    ContextWindowClosedEvent,
+    ContextWindowOpenedEvent,
     EventContext,
     ModelCallStartEvent,
     RunEndEvent,
     RunStartEvent,
+    RolloutBudgetAccountClosedEvent,
+    RolloutBudgetAccountOpenedEvent,
     SubagentEdgeRecordedEvent,
     SubagentPhaseReportedEvent,
     SubagentResultConsumedEvent,
@@ -41,6 +45,11 @@ from pulsara_agent.runtime import LoopBudget
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    empty_projection_state_fingerprint,
+    prepare_root_long_horizon_run,
+)
+from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.tools.base import ToolCall, ToolRuntimeContext
 from pulsara_agent.tools.builtins.subagent import CreateAgentTasksTool
@@ -219,8 +228,6 @@ async def _run_independent_parallel_explicit_result_dogfood(
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     wiring.agent_runtime.budget = LoopBudget(
-        max_turns=8,
-        max_tool_calls=8,
         max_consecutive_model_failures=2,
         max_consecutive_tool_failures=2,
         max_subagent_results_per_parent_compile=0,
@@ -283,14 +290,7 @@ async def _run_independent_parallel_explicit_result_dogfood(
             timeout_seconds=240,
         )
         assert len(waited) == 2, waited
-        await wiring.runtime_wiring.runtime_session.write_event(
-            RunEndEvent(
-                **run_end_contract_fields(context.run_id, status="finished"),
-                **context.event_fields(),
-                status="finished",
-                stop_reason="final",
-            )
-        )
+        await _write_seed_run_end(wiring, context)
 
         parent_events = wiring.runtime_wiring.event_log.iter()
         task_created = [
@@ -421,8 +421,6 @@ async def _run_durable_restart_wait_dogfood(
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     first.agent_runtime.budget = LoopBudget(
-        max_turns=6,
-        max_tool_calls=4,
         max_consecutive_model_failures=2,
         max_consecutive_tool_failures=2,
         max_subagent_results_per_parent_compile=0,
@@ -455,13 +453,10 @@ async def _run_durable_restart_wait_dogfood(
         completed_before_restart = first_subagents.result_for_run(subagent_run_id)
         assert completed_before_restart is not None
         assert RESTART_CHILD_SENTINEL in completed_before_restart.summary
-        await first.runtime_wiring.runtime_session.write_event(
-            RunEndEvent(
-                **run_end_contract_fields(seed_context.run_id, status="finished"),
-                **seed_context.event_fields(),
-                status="finished",
-                stop_reason="final",
-            )
+        await _write_seed_run_end(first, seed_context)
+        checkpoint_high_water = first.runtime_wiring.event_log.next_sequence() - 1
+        await first.runtime_wiring.runtime_session.subagent_graph_checkpoint_service.restore_for_selection(
+            requested_through_sequence=checkpoint_high_water
         )
     except Exception:
         first.agent_runtime.close()
@@ -485,8 +480,6 @@ async def _run_durable_restart_wait_dogfood(
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     second.agent_runtime.budget = LoopBudget(
-        max_turns=8,
-        max_tool_calls=8,
         max_consecutive_model_failures=2,
         max_consecutive_tool_failures=2,
         max_subagent_results_per_parent_compile=0,
@@ -570,8 +563,6 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     wiring.agent_runtime.budget = LoopBudget(
-        max_turns=12,
-        max_tool_calls=12,
         max_consecutive_model_failures=2,
         max_consecutive_tool_failures=3,
         max_subagent_results_per_parent_compile=0,
@@ -614,14 +605,7 @@ async def _run_failed_dependency_parent_self_verifies_dogfood(
             blocked_reason="dependency_failed",
             blocked_by_task_ids=(upstream.task_id,),
         )
-        await wiring.runtime_wiring.runtime_session.write_event(
-            RunEndEvent(
-                **run_end_contract_fields(seed_context.run_id, status="finished"),
-                **seed_context.event_fields(),
-                status="finished",
-                stop_reason="final",
-            )
-        )
+        await _write_seed_run_end(wiring, seed_context)
 
         run_result = await run_agent_task(
             wiring.agent_runtime,
@@ -680,8 +664,6 @@ async def _run_subagent_task_system_dogfood(
         permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
     )
     wiring.agent_runtime.budget = LoopBudget(
-        max_turns=18,
-        max_tool_calls=24,
         max_consecutive_model_failures=2,
         max_consecutive_tool_failures=4,
         max_subagent_results_per_parent_compile=0,
@@ -780,9 +762,42 @@ async def _run_subagent_task_system_dogfood(
         )
 
         child_raw_events = []
+        child_run_diagnostics = []
         for run in subagent_runtime.runs:
-            child_raw_events.extend(
+            run_events = tuple(
                 subagent_runtime.child_event_log(run.subagent_run_id).iter()
+            )
+            child_raw_events.extend(run_events)
+            child_end = next(
+                (
+                    event
+                    for event in reversed(run_events)
+                    if isinstance(event, RunEndEvent)
+                ),
+                None,
+            )
+            child_run_diagnostics.append(
+                {
+                    "subagent_run_id": run.subagent_run_id,
+                    "status": run.status,
+                    "model_call_count": sum(
+                        isinstance(event, ModelCallStartEvent) for event in run_events
+                    ),
+                    "tool_names": [
+                        event.tool_call_name
+                        for event in run_events
+                        if isinstance(event, ToolCallStartEvent)
+                    ],
+                    "run_end_status": child_end.status
+                    if child_end is not None
+                    else None,
+                    "run_end_stop_reason": (
+                        child_end.stop_reason if child_end is not None else None
+                    ),
+                    "run_end_error": (
+                        child_end.error_message if child_end is not None else None
+                    ),
+                }
             )
         child_metadata_missing = [
             event
@@ -832,6 +847,7 @@ async def _run_subagent_task_system_dogfood(
             "verify_started_after_review_completed": verify_started_after_review_completed,
             "child_raw_event_count": len(child_raw_events),
             "child_raw_events_missing_subagent_metadata": len(child_metadata_missing),
+            "child_run_diagnostics": child_run_diagnostics,
         }
     finally:
         subagent_runtime = wiring.agent_runtime.subagent_runtime
@@ -1007,23 +1023,110 @@ def _failed_dependency_parent_user_prompt(
 
 async def _write_seed_run_start(wiring, context: EventContext, user_input: str) -> None:
     runtime_session = wiring.runtime_wiring.runtime_session
-    await runtime_session.write_event(
-        RunStartEvent(
-            **context.event_fields(),
-            **run_start_permission_fields(
-                context.run_id,
-                turn_id=context.turn_id,
-                reply_id=context.reply_id,
-                user_input=user_input,
-                mcp_installation_id=runtime_session.mcp_installation_id,
-                mcp_installation_owner_runtime_session_id=(
-                    runtime_session.mcp_installation_owner_runtime_session_id
-                ),
-                model_target=wiring.agent_runtime.resolve_run_model_target().fact,
+    run_start = RunStartEvent(
+        **context.event_fields(),
+        **run_start_permission_fields(
+            context.run_id,
+            turn_id=context.turn_id,
+            reply_id=context.reply_id,
+            user_input=user_input,
+            mcp_installation_id=runtime_session.mcp_installation_id,
+            mcp_installation_owner_runtime_session_id=(
+                runtime_session.mcp_installation_owner_runtime_session_id
             ),
-            user_input_chars=len(user_input),
+            model_target=wiring.agent_runtime.resolve_run_model_target().fact,
+        ),
+        user_input_chars=len(user_input),
+    )
+    prepared = prepare_root_long_horizon_run(
+        runtime_session_id=runtime_session.runtime_session_id,
+        run_id=context.run_id,
+        run_start_event_id=run_start.id,
+        primary_target=run_start.model_target,
+        summarizer_target=run_start.model_target,
+        graph_reducer_contract=run_start.subagent_graph_reducer_contract,
+        source_through_sequence_at_open=runtime_session.event_log.next_sequence() - 1,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    run_start = run_start.model_copy(
+        update={"long_horizon": prepared.contract},
+        deep=True,
+    )
+    account = prepared.root_account
+    assert account is not None
+    await runtime_session.write_events(
+        (
+            run_start,
+            ContextWindowOpenedEvent(
+                id=prepared.contract.initial_window_open_event_id,
+                **context.event_fields(),
+                window=prepared.initial_window,
+                opening_batch_id=prepared.opening_batch_id,
+            ),
+            RolloutBudgetAccountOpenedEvent(
+                id=f"rollout_budget_account_opened:{account.account_id}",
+                **context.event_fields(),
+                account=account,
+            ),
         )
     )
+
+
+async def _write_seed_run_end(wiring, context: EventContext) -> None:
+    runtime_session = wiring.runtime_wiring.runtime_session
+    store = runtime_session.long_horizon_state_store
+    window_state = store.window_state(context.run_id)
+    assert window_state is not None and window_state.active_window_id is not None
+    window = window_state.windows[window_state.active_window_id]
+    projection_state = store.projection_state(window.window_id)
+    assert projection_state is not None
+    source_through_sequence = runtime_session.event_log.next_sequence() - 1
+    run_end = RunEndEvent(
+        **run_end_contract_fields(context.run_id, status="finished"),
+        **context.event_fields(),
+        status="finished",
+        stop_reason="final",
+    )
+    window_close = ContextWindowClosedEvent(
+        id=window.stable_close_event_id,
+        **context.event_fields(),
+        window_id=window.window_id,
+        window_generation=window.generation,
+        close_reason="run_finished",
+        final_projection_generation=projection_state.projection_generation,
+        final_projection_state_fingerprint=projection_state.state_semantic_fingerprint,
+        source_through_sequence=source_through_sequence,
+        next_window_id=None,
+        compaction_terminal_event_id=None,
+    )
+    run_start = next(
+        event
+        for event in runtime_session.event_log.iter(run_id=context.run_id)
+        if isinstance(event, RunStartEvent)
+    )
+    account = store.rollout_account(run_start.long_horizon.rollout_account_id)
+    rollout_state = store.rollout_state(run_start.long_horizon.rollout_account_id)
+    assert account is not None and rollout_state is not None
+    assert not rollout_state.active_reservations
+    _, state_before_close = apply_rollout_event(
+        account=account,
+        state=rollout_state,
+        event=window_close.model_copy(update={"sequence": source_through_sequence + 1}),
+    )
+    assert state_before_close is not None
+    rollout_close = RolloutBudgetAccountClosedEvent(
+        id=f"rollout_budget_account_closed:{account.account_id}",
+        **context.event_fields(),
+        account_id=account.account_id,
+        final_state_fingerprint=state_before_close.state_fingerprint,
+        charged_milliunits=state_before_close.charged_milliunits,
+        model_call_count=state_before_close.model_call_count,
+        tool_call_count=state_before_close.tool_call_count,
+        active_reservation_count=0,
+        run_end_event_id=run_end.id,
+    )
+    await runtime_session.write_events((window_close, rollout_close, run_end))
 
 
 def _prime_subagent_parent_capability_snapshot(wiring) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import math
 from dataclasses import dataclass, field
 from importlib import resources
+from time import monotonic
 from typing import Literal
 from uuid import uuid4
 
@@ -17,8 +18,9 @@ from pulsara_agent.event import (
     ContextCompactionFailedEvent,
     ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
-    ExceedMaxItersEvent,
     EventContext,
+    EventType,
+    ModelCallStartEvent,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
@@ -31,8 +33,14 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
 )
 from pulsara_agent.event_log import EventLog
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm import LLMRuntime, ModelRole
-from pulsara_agent.llm.direct import DirectModelCallResult, collect_direct_model_call
+from pulsara_agent.llm.direct import (
+    DirectModelCallResult,
+    collect_direct_model_call_handle,
+)
+from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.errors import (
     CompactionSummarizerInputBudgetExceeded,
     CompactionTargetUnreachable,
@@ -63,6 +71,7 @@ from pulsara_agent.message import (
     UserMsg,
 )
 from pulsara_agent.message.assembler import BlockAssembler
+from pulsara_agent.message.reducer import accepted_main_reply_ids
 from pulsara_agent.runtime.compaction.planner import (
     SUMMARY_ARTIFACT_KIND,
     latest_completed_boundary,
@@ -84,6 +93,7 @@ from pulsara_agent.runtime.compaction.commit import (
     CompactionPendingCommitNotDurable,
     DirectEventLogCompactionEventCommitPort,
     PendingCompactionEventCommit,
+    RuntimeSessionCompactionEventCommitPort,
 )
 
 ContextCompactionTrigger = Literal["manual", "auto"]
@@ -93,6 +103,11 @@ _PRODUCTION_PROMPT_FILE = "context_compaction_prompt.md"
 _COMPACTION_TEXT_CLIP_CHARS = 4_000
 _COMPACTION_TOOL_INPUT_CLIP_CHARS = 2_000
 _COMPACTION_TOOL_RESULT_CLIP_CHARS = 4_000
+_MAX_COMPACTION_SOURCE_EVENTS = 16_384
+_MAX_COMPACTION_SOURCE_BYTES = 16 * 1024 * 1024
+_MAX_COMPACTION_CHECKPOINT_CANDIDATES = 8
+_MAX_COMPACTION_LIFECYCLE_EVENTS = 16_384
+_MAX_COMPACTION_LIFECYCLE_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +183,7 @@ class ContextCompactionService:
     archive: ArtifactStore
     llm_runtime: LLMRuntime
     runtime_session_id: str
+    runtime_session: object | None = None
     policy: ContextCompactionPolicy = ContextCompactionPolicy()
     model_role: ModelRole = ModelRole.FLASH
     candidate_sink: CompactionMemoryCandidateSink | None = None
@@ -184,6 +200,10 @@ class ContextCompactionService:
             self.event_commit_port = DirectEventLogCompactionEventCommitPort(
                 self.event_log
             )
+        if self.runtime_session is None and isinstance(
+            self.event_commit_port, RuntimeSessionCompactionEventCommitPort
+        ):
+            self.runtime_session = self.event_commit_port.runtime_session
         self._recover_pending_terminalization_owners()
 
     @property
@@ -191,7 +211,21 @@ class ContextCompactionService:
         return len(self._pending_terminalizations)
 
     def _recover_pending_terminalization_owners(self) -> None:
-        events = tuple(self.event_log.iter())
+        deadline = monotonic() + 30.0
+        snapshot = self.event_log.read_raw_events_by_types(
+            (
+                str(EventType.CONTEXT_COMPACTION_STARTED),
+                str(EventType.CONTEXT_COMPACTION_COMPLETED),
+                str(EventType.CONTEXT_COMPACTION_FAILED),
+            ),
+            max_events=_MAX_COMPACTION_LIFECYCLE_EVENTS,
+            max_payload_bytes=_MAX_COMPACTION_LIFECYCLE_BYTES,
+            deadline_monotonic=deadline,
+        )
+        events = tuple(
+            event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for event in snapshot.events
+        )
         terminal_started_ids = {
             event.started_event_id
             for event in events
@@ -214,6 +248,66 @@ class ContextCompactionService:
                 owner.terminal_candidate = self._recovery_terminal_candidate(event)
                 owner.state = "candidate_frozen"
                 self._pending_terminalizations[event.id] = owner
+        terminal_events = tuple(
+            event
+            for event in events
+            if isinstance(
+                event,
+                (ContextCompactionCompletedEvent, ContextCompactionFailedEvent),
+            )
+        )
+        failures = 0
+        for event in reversed(terminal_events):
+            if isinstance(event, ContextCompactionCompletedEvent):
+                break
+            failures += 1
+        self._consecutive_failures = failures
+
+    def _read_bounded_source_events(self) -> list[AgentEvent]:
+        deadline = monotonic() + 30.0
+        minimum_sequence = 1
+        checkpoint_rows = self.event_log.read_raw_events_by_type(
+            str(EventType.CONTEXT_COMPACTION_COMPLETED),
+            limit=_MAX_COMPACTION_CHECKPOINT_CANDIDATES,
+            deadline_monotonic=deadline,
+        )
+        if not checkpoint_rows and self.event_log.next_sequence() == 1:
+            return []
+        for raw in checkpoint_rows:
+            event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            if not isinstance(event, ContextCompactionCompletedEvent):
+                raise ValueError("compaction checkpoint query returned another event type")
+            try:
+                self.archive.get_text(
+                    event.summary_artifact_id,
+                    session_id=self.runtime_session_id,
+                    deadline_monotonic=deadline,
+                )
+            except (KeyError, ValueError):
+                continue
+            minimum_sequence = event.keep_after_sequence + 1
+            break
+        snapshot = self.event_log.read_raw_range_snapshot(
+            minimum_sequence=minimum_sequence,
+            max_events=_MAX_COMPACTION_SOURCE_EVENTS,
+            max_payload_bytes=_MAX_COMPACTION_SOURCE_BYTES,
+            deadline_monotonic=deadline,
+        )
+        return [
+            event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for event in snapshot.events
+        ]
+
+    async def _read_bounded_source_events_async(self) -> list[AgentEvent]:
+        deadline = monotonic() + 30.0
+        io_service = getattr(self.runtime_session, "context_input_io_service", None)
+        if io_service is None:
+            return await asyncio.to_thread(self._read_bounded_source_events)
+        return await io_service.execute(
+            operation_name="context-compaction-source-read",
+            operation=self._read_bounded_source_events,
+            deadline_monotonic=deadline,
+        )
 
     def _register_started_owner(
         self,
@@ -401,7 +495,7 @@ class ContextCompactionService:
             return False
         if self._consecutive_failures >= self.policy.max_consecutive_failures:
             return False
-        events = self.event_log.iter()
+        events = self._read_bounded_source_events()
         try:
             plan = self._build_plan(
                 events,
@@ -437,18 +531,9 @@ class ContextCompactionService:
         host_boundary_id: str | None = None,
         host_boundary_kind: Literal["pre_run"] | None = None,
     ) -> bool:
-        if not self.should_auto_compact(
-            target_model_target=target_model_target,
-            current_user_input_if_not_already_represented=(
-                current_user_input_if_not_already_represented
-            ),
-            model_visible_messages_before=model_visible_messages_before,
-            protected_model_visible_messages_after=(
-                protected_model_visible_messages_after
-            ),
-            max_compactable_sequence=max_compactable_sequence,
-            keep_recent_runs_override=keep_recent_runs_override,
-        ):
+        if not self.policy.enabled or not self.policy.auto_enabled:
+            return False
+        if self._consecutive_failures >= self.policy.max_consecutive_failures:
             return False
         return (
             await self.compact(
@@ -501,7 +586,9 @@ class ContextCompactionService:
         ):
             return None
 
-        events = self.event_log.iter()
+        events = await self._read_bounded_source_events_async()
+        if not events:
+            return None
         compaction_id = f"context_compaction:{uuid4().hex}"
         started_event_id = f"context_compaction_started:{uuid4().hex}"
         terminal_event_id = f"context_compaction_terminal:{uuid4().hex}"
@@ -993,18 +1080,34 @@ class ContextCompactionService:
         context: LLMContext,
         event_context: EventContext,
     ) -> DirectModelCallResult:
-        return await collect_direct_model_call(
-            self.llm_runtime.stream(
-                call=call,
-                context=context,
-                event_context=EventContext(
-                    run_id=event_context.run_id,
-                    turn_id=event_context.turn_id,
-                    reply_id=f"{event_context.reply_id}:compaction-model",
-                ),
-            ),
-            expected_call=call,
+        model_event_context = EventContext(
+            run_id=event_context.run_id,
+            turn_id=event_context.turn_id,
+            reply_id=f"{event_context.reply_id}:compaction-model",
         )
+        if self.runtime_session is None:
+            raise RuntimeError(
+                "context compaction model execution requires RuntimeSession ownership"
+            )
+        start_bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=model_event_context,
+            runtime_session=self.runtime_session,
+            lifecycle_kind="direct_internal_call",
+        )
+        handle = self.llm_runtime.start_stream(
+            call=call,
+            context=context,
+            event_context=model_event_context,
+            start_bundle=start_bundle,
+            commit_port=RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=self.runtime_session,
+                state=None,
+            ),
+            execution_registry=self.runtime_session.model_stream_execution_registry,
+        )
+        return await collect_direct_model_call_handle(handle, expected_call=call)
 
     async def _append_memory_candidate_proposals_if_enabled(
         self,
@@ -1560,6 +1663,7 @@ def model_visible_messages_from_events(
 ) -> list[Msg]:
     """Build a lightweight model-visible transcript estimate without Host imports."""
 
+    accepted_reply_ids, controlled_reply_ids = _canonical_reply_control(events)
     messages: list[Msg] = []
     assistant_blocks_by_reply: dict[str, list[object]] = {}
     assembler = BlockAssembler()
@@ -1574,6 +1678,11 @@ def model_visible_messages_from_events(
                     metadata={"run_id": event.run_id},
                 )
             )
+            continue
+        if (
+            event.reply_id in controlled_reply_ids
+            and event.reply_id not in accepted_reply_ids
+        ):
             continue
         for completion in assembler.append(event).completed:
             block = completion.block
@@ -1600,6 +1709,7 @@ def model_visible_messages_from_events(
 def build_compaction_observation_text(
     events: list[AgentEvent] | tuple[AgentEvent, ...],
 ) -> str:
+    accepted_reply_ids, controlled_reply_ids = _canonical_reply_control(events)
     lines: list[str] = []
     assembler = BlockAssembler()
     for event in events:
@@ -1623,11 +1733,6 @@ def build_compaction_observation_text(
                 f"[run_error run_id={event.run_id} code={event.code}] {_clip_text(event.message, 1000)}"
             )
             continue
-        if isinstance(event, ExceedMaxItersEvent):
-            lines.append(
-                f"[exceed_max_iters run_id={event.run_id} name={event.name} max_iters={event.max_iters}]"
-            )
-            continue
         if isinstance(
             event,
             (
@@ -1641,11 +1746,29 @@ def build_compaction_observation_text(
         ):
             lines.append(_event_line(event))
             continue
+        if (
+            event.reply_id in controlled_reply_ids
+            and event.reply_id not in accepted_reply_ids
+        ):
+            continue
         for completion in assembler.append(event).completed:
             rendered = _render_completed_block(completion.block)
             if rendered:
                 lines.append(rendered)
     return "\n".join(lines)
+
+
+def _canonical_reply_control(
+    events: list[AgentEvent] | tuple[AgentEvent, ...],
+) -> tuple[frozenset[str], frozenset[str]]:
+    controlled = frozenset(
+        event.reply_id
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+        and event.recovery_plan.lifecycle_kind == "main_assistant_reply"
+    )
+    accepted = accepted_main_reply_ids(tuple(events))
+    return accepted, controlled
 
 
 def _render_completed_block(block: object) -> str:

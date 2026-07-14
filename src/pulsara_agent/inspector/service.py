@@ -15,6 +15,11 @@ from pulsara_agent.event import (
     ContextCompactionFailedEvent,
     ContextCompactionMemoryCandidatesProposedEvent,
     ContextCompactionStartedEvent,
+    ContextWindowClosedEvent,
+    ContextWindowCompactionCompletedEvent,
+    ContextWindowCompactionFailedEvent,
+    ContextWindowCompactionStartedEvent,
+    ContextWindowOpenedEvent,
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
     McpCapabilitySnapshotInstalledEvent,
@@ -23,11 +28,20 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     ProjectionReadyEvent,
     ReplyStartEvent,
+    RolloutBudgetAccountOpenedEvent,
+    RolloutBudgetReservationCreatedEvent,
+    RolloutBudgetReservationSettledEvent,
+    RolloutPhaseTransitionedEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
+    SubagentGraphCheckpointCommittedEvent,
     SubagentRunCompletedEvent,
 )
-from pulsara_agent.event_log import PostgresEventLog, dump_agent_event
+from pulsara_agent.event_log import (
+    DEFAULT_EVENT_SCHEMA_REGISTRY,
+    PostgresEventLog,
+    dump_agent_event,
+)
 from pulsara_agent.graph.oxigraph import OxigraphGraphStore
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.inspector.diagnostics import (
@@ -48,6 +62,24 @@ from pulsara_agent.message.blocks import (
 )
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime.timeline import build_run_timeline
+from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
+from pulsara_agent.runtime.context_input.replay import (
+    ContextInputReplayError,
+    ContextInputReplayStatus,
+    load_context_input_manifest,
+    replay_compiled_context,
+    replay_context_input,
+)
+from pulsara_agent.runtime.context_input.event_slice import (
+    ContextEventSliceError,
+    FrozenStoredEvent,
+)
+from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.runtime.long_horizon.status import (
+    derive_rollout_status_candidate,
+    derive_rollout_status_shadow,
+)
+from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
 from pulsara_agent.runtime.subagent.projection import project_subagent_graph
 from pulsara_agent.runtime.subagent.reducer import fold_subagent_graph
 
@@ -103,6 +135,23 @@ class InspectorService:
             for projection in boundary_projections
             for diagnostic in projection.get("diagnostics", [])
         )
+        rollout_status = _rollout_status_shadow_projection(
+            events,
+            runtime_session_id=session_id,
+        )
+        diagnostics.extend(rollout_status["diagnostics"])
+        context_windows = _context_window_projection(events, self.store)
+        diagnostics.extend(context_windows["diagnostics"])
+        context_compilations = _context_compilation_projection(
+            events,
+            store=self.store,
+        )
+        long_horizon = _long_horizon_run_projection(
+            events,
+            runtime_session_id=session_id,
+            context_compilations=context_compilations["contexts"],
+        )
+        diagnostics.extend(long_horizon["diagnostics"])
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -113,18 +162,25 @@ class InspectorService:
                 for row in self.store.working_context_for_session(session_id)
             ],
             "capability_surface_as_seen": _capability_surface_projection(events),
-            "context_compilations": _context_compilation_projection(events),
+            "context_compilations": context_compilations,
             "model_targets": model_contracts["model_targets"],
             "model_calls": model_contracts["model_calls"],
             "model_usage_by_run": model_contracts["usage_by_run"],
             "compaction_model_contracts": model_contracts["compaction_model_contracts"],
             "reflection_model_contracts": model_contracts["reflection_model_contracts"],
             "compaction_windows": _compaction_windows(events, self.store),
+            "context_windows": context_windows["windows"],
+            "context_window_compactions": context_windows["compactions"],
             "subagent_graph": _subagent_graph_projection(
                 session_id,
                 events,
                 self.store,
             ),
+            "subagent_graph_checkpoints": _subagent_graph_checkpoint_projection(
+                events
+            ),
+            "rollout_status_shadows": rollout_status["shadows"],
+            "long_horizon_runs": long_horizon["runs"],
             "mcp_installations": _mcp_installation_events_projection(events),
             "run_boundaries": boundary_projections,
             "events": _event_summaries(
@@ -214,6 +270,25 @@ class InspectorService:
         )
         if boundary_projection is not None:
             diagnostics.extend(boundary_projection.get("diagnostics", []))
+        rollout_status = _rollout_status_shadow_projection(
+            session_events,
+            runtime_session_id=session_id,
+            root_run_id=run_id,
+        )
+        diagnostics.extend(rollout_status["diagnostics"])
+        context_windows = _context_window_projection(run_events, self.store)
+        diagnostics.extend(context_windows["diagnostics"])
+        context_compilations = _context_compilation_projection(
+            run_events,
+            store=self.store,
+        )
+        long_horizon = _long_horizon_run_projection(
+            session_events,
+            runtime_session_id=session_id,
+            root_run_id=run_id,
+            context_compilations=context_compilations["contexts"],
+        )
+        diagnostics.extend(long_horizon["diagnostics"])
 
         return {
             "inspect_kind": "run",
@@ -238,8 +313,17 @@ class InspectorService:
                 if boundary_projection is not None
                 else None
             ),
+            "subagent_graph_checkpoints": _subagent_graph_checkpoint_projection(
+                session_events
+            ),
+            "rollout_status_shadows": rollout_status["shadows"],
+            "long_horizon": (
+                long_horizon["runs"][0] if long_horizon["runs"] else None
+            ),
             "timeline": timeline.to_dict(),
             "compaction_boundary_as_seen": compaction_boundary,
+            "context_windows": context_windows["windows"],
+            "context_window_compactions": context_windows["compactions"],
             "prior_messages_as_seen": [
                 _message_to_dict(message) for message in prior_messages
             ],
@@ -249,7 +333,7 @@ class InspectorService:
                 if isinstance(event, ProjectionReadyEvent)
             ],
             "capability_surface_as_seen": _capability_surface_projection(run_events),
-            "contexts_as_seen": _context_compilation_projection(run_events),
+            "contexts_as_seen": context_compilations,
             "model_targets": model_contracts["model_targets"],
             "model_calls": model_contracts["model_calls"],
             "model_usage_by_run": model_contracts["usage_by_run"],
@@ -507,8 +591,7 @@ def _mcp_installation_events_projection(
                 event.coalesced_attempt_summaries_omitted
             ),
             "server_snapshots": [
-                snapshot.model_dump(mode="json")
-                for snapshot in event.server_snapshots
+                snapshot.model_dump(mode="json") for snapshot in event.server_snapshots
             ],
             "total_installed_tool_count": event.total_installed_tool_count,
             "added_tool_count": event.added_tool_count,
@@ -516,8 +599,7 @@ def _mcp_installation_events_projection(
             "changed_tool_names": list(event.changed_tool_names_bounded),
             "changed_tool_names_omitted": event.changed_tool_names_omitted,
             "diagnostics": [
-                diagnostic.model_dump(mode="json")
-                for diagnostic in event.diagnostics
+                diagnostic.model_dump(mode="json") for diagnostic in event.diagnostics
             ],
         }
         for event in events
@@ -603,9 +685,7 @@ def _run_boundary_projection(
         ),
         key=lambda event: event.sequence or 0,
     )
-    exposure_by_id = {
-        event.exposure.exposure_id: event for event in exposures
-    }
+    exposure_by_id = {event.exposure.exposure_id: event for event in exposures}
     continuations: list[dict[str, Any]] = []
     for event in continuation_events:
         boundary = event.boundary
@@ -632,12 +712,8 @@ def _run_boundary_projection(
                 "boundary_id": boundary.identity.boundary_id,
                 "interaction_id": boundary.interaction_id,
                 "interaction_kind": boundary.interaction_kind,
-                "original_run_start_event_id": (
-                    boundary.original_run_start_event_id
-                ),
-                "original_run_start_sequence": (
-                    boundary.original_run_start_sequence
-                ),
+                "original_run_start_event_id": (boundary.original_run_start_event_id),
+                "original_run_start_sequence": (boundary.original_run_start_sequence),
                 "mcp_installation_id": boundary.mcp_installation_id,
                 "source_exposure_id": boundary.source_exposure_id,
                 "source_exposure_semantic_fingerprint": (
@@ -749,14 +825,10 @@ def _run_boundary_projection(
                 else None
             ),
             "exposure_semantic_fingerprint": (
-                exposure.exposure_semantic_fingerprint
-                if exposure is not None
-                else None
+                exposure.exposure_semantic_fingerprint if exposure is not None else None
             ),
             "exposure_fact_fingerprint": (
-                exposure.exposure_fact_fingerprint
-                if exposure is not None
-                else None
+                exposure.exposure_fact_fingerprint if exposure is not None else None
             ),
             "run_start_event_id": run_start.id,
             "run_start_sequence": run_start.sequence,
@@ -1577,7 +1649,11 @@ def _model_contract_diagnostic(
     return {"code": code, "severity": "error", "message": message, "details": details}
 
 
-def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, Any]:
+def _context_compilation_projection(
+    events: Iterable[AgentEvent],
+    *,
+    store: PostgresInspectorStore | None = None,
+) -> dict[str, Any]:
     context_events: list[ContextCompiledEvent] = []
     model_starts: list[ModelCallStartEvent] = []
     for event in events:
@@ -1657,17 +1733,30 @@ def _context_compilation_projection(events: Iterable[AgentEvent]) -> dict[str, A
                     },
                 }
             )
+    projected = [
+        _context_compiled_to_dict(
+            event,
+            input_replay=(
+                _context_input_replay_projection(event, store)
+                if store is not None
+                else None
+            ),
+        )
+        for event in context_events
+    ]
     return {
-        "latest": _context_compiled_to_dict(context_events[-1])
-        if context_events
-        else None,
-        "contexts": [_context_compiled_to_dict(event) for event in context_events],
+        "latest": projected[-1] if context_events else None,
+        "contexts": projected,
         "model_call_joins": joins,
         "diagnostics": diagnostics,
     }
 
 
-def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
+def _context_compiled_to_dict(
+    event: ContextCompiledEvent,
+    *,
+    input_replay: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     sections = [_json_safe(section) for section in event.sections]
     omitted = [
         section
@@ -1704,11 +1793,895 @@ def _context_compiled_to_dict(event: ContextCompiledEvent) -> dict[str, Any]:
         "tool_result_render_decisions": [
             _json_safe(decision) for decision in event.tool_result_render_decisions
         ],
+        "canonical_tool_result_render_decisions": [
+            decision.model_dump(mode="json")
+            for decision in event.tool_result_render_decision_facts
+        ],
+        "tool_result_render_operational": [
+            item.model_dump(mode="json")
+            for item in event.tool_result_render_operational_facts
+        ],
         "tool_result_timings": _tool_result_timing_projection(
             event.tool_result_render_decisions
         ),
         "tool_result_budget_report": _json_safe(event.tool_result_budget_report),
+        "long_horizon_context_budget_decision": (
+            event.long_horizon_context_budget_decision.model_dump(mode="json")
+            if event.long_horizon_context_budget_decision is not None
+            else None
+        ),
+        "long_horizon_projection_pressure_shadow": (
+            event.long_horizon_projection_pressure_shadow.model_dump(mode="json")
+            if event.long_horizon_projection_pressure_shadow is not None
+            else None
+        ),
+        "input_status": (
+            "audited" if event.input_audit is not None else "input_failed"
+        ),
+        "input_audit": (
+            event.input_audit.model_dump(mode="json")
+            if event.input_audit is not None
+            else None
+        ),
+        "input_failure": (
+            event.input_failure.model_dump(mode="json")
+            if event.input_failure is not None
+            else None
+        ),
+        "provider_neutral_payload_fingerprint": (
+            event.provider_neutral_payload_fingerprint
+        ),
+        "canonical_render_decisions_fingerprint": (
+            event.canonical_render_decisions_fingerprint
+        ),
+        "input_replay": input_replay,
     }
+
+
+def _context_input_replay_projection(
+    event: ContextCompiledEvent,
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    if event.input_audit is None:
+        failure = event.input_failure
+        reason = (
+            failure.reason_code.value
+            if failure is not None
+            else "missing_input_carrier"
+        )
+        status = (
+            ContextInputReplayStatus.LEDGER_UNTRUSTED
+            if reason == "ledger_untrusted"
+            else ContextInputReplayStatus.ARTIFACT_MISSING
+            if reason == "manifest_confirmed_absent"
+            else ContextInputReplayStatus.CONTRACT_MISMATCH
+        )
+        return {
+            "status": status.value,
+            "diagnostics": [
+                {
+                    "code": reason,
+                    "message": "Context compilation did not confirm a replay manifest.",
+                }
+            ],
+            "manifest": None,
+        }
+
+    audit = event.input_audit
+    archive = PostgresArtifactStore(store.dsn)
+    try:
+        manifest = load_context_input_manifest(audit=audit, archive=archive)
+        primary = _context_event_slice_for_range(
+            store=store,
+            runtime_session_id=manifest.snapshot.primary_event_range.runtime_session_id,
+            first_sequence=manifest.snapshot.primary_event_range.first_sequence,
+            through_sequence=manifest.snapshot.primary_event_range.through_sequence,
+        )
+        named = tuple(
+            _context_event_slice_for_range(
+                store=store,
+                runtime_session_id=item.runtime_session_id,
+                first_sequence=item.first_sequence,
+                through_sequence=item.through_sequence,
+            )
+            for item in manifest.snapshot.named_event_ranges
+        )
+        replay_event_log = PostgresEventLog(
+            dsn=store.dsn,
+            runtime_session_id=audit.source_runtime_session_id,
+        )
+        replayed = replay_context_input(
+            audit=audit,
+            archive=archive,
+            event_log=replay_event_log,
+            event_slice=primary,
+            named_slices=named,
+        )
+        try:
+            exact = replay_compiled_context(
+                event=event,
+                archive=archive,
+                event_log=replay_event_log,
+                event_slice=primary,
+                named_slices=named,
+            )
+        except ContextInputReplayError as exc:
+            if exc.status is not ContextInputReplayStatus.FACT_REPLAY_ONLY:
+                raise
+            replay_status = exc.status
+            replay_diagnostics = [{"code": exc.reason_code, "message": str(exc)}]
+        else:
+            replayed = exact.inputs
+            replay_status = ContextInputReplayStatus.EXACT_REPLAY
+            replay_diagnostics = []
+    except ContextInputReplayError as exc:
+        return {
+            "status": exc.status.value,
+            "diagnostics": [{"code": exc.reason_code, "message": str(exc)}],
+            "manifest": {
+                "artifact_id": audit.input_manifest_artifact_id,
+                "fingerprint": audit.input_manifest_fingerprint,
+                "write_outcome": audit.input_manifest_write_outcome,
+            },
+        }
+    except ContextEventSliceError as exc:
+        return {
+            "status": ContextInputReplayStatus.LEDGER_UNTRUSTED.value,
+            "diagnostics": [
+                {
+                    "code": "context_input_event_slice_untrusted",
+                    "message": str(exc),
+                }
+            ],
+            "manifest": {
+                "artifact_id": audit.input_manifest_artifact_id,
+                "fingerprint": audit.input_manifest_fingerprint,
+                "write_outcome": audit.input_manifest_write_outcome,
+            },
+        }
+
+    snapshot = replayed.manifest.snapshot
+    units = replayed.normalized_transcript.tool_result_units
+    candidates = replayed.prepared_candidates
+    profile_counts: dict[str, int] = {}
+    builder_contracts: dict[tuple[str, str, str], dict[str, str]] = {}
+    for unit in units:
+        variant = unit.render_profile.selected_variant.variant_code.value
+        profile_counts[variant] = profile_counts.get(variant, 0) + 1
+        contract = unit.render_profile.render_contract.semantics_builder_contract
+        key = (
+            contract.builder_id,
+            contract.builder_version,
+            contract.contract_fingerprint,
+        )
+        builder_contracts[key] = {
+            "builder_id": contract.builder_id,
+            "builder_version": contract.builder_version,
+            "contract_fingerprint": contract.contract_fingerprint,
+        }
+    source_counts: dict[str, int] = {}
+    lifecycle_counts: dict[str, int] = {}
+    for entry in candidates.entries:
+        source = entry.candidate.source_kind
+        source_counts[source] = source_counts.get(source, 0) + 1
+        lifecycle = entry.lifecycle.status
+        lifecycle_counts[lifecycle] = lifecycle_counts.get(lifecycle, 0) + 1
+    source_selections = [
+        item.model_dump(mode="json")
+        for item in snapshot.candidate_source_selections[:64]
+    ]
+    collection_decisions = [
+        item.model_dump(mode="json")
+        for item in candidates.collection_decisions[:128]
+    ]
+    window = snapshot.authority_slice_plan.transcript_window
+    try:
+        rollout_status_hint = _replayed_rollout_status_hint(
+            event=event,
+            snapshot=snapshot,
+            primary=primary,
+            named=named,
+        )
+    except ContextInputReplayError as exc:
+        return {
+            "status": exc.status.value,
+            "diagnostics": [{"code": exc.reason_code, "message": str(exc)}],
+            "manifest": {
+                "artifact_id": audit.input_manifest_artifact_id,
+                "fingerprint": replayed.manifest.manifest_fingerprint,
+                "write_outcome": audit.input_manifest_write_outcome,
+            },
+        }
+    return {
+        "status": replay_status.value,
+        "diagnostics": replay_diagnostics,
+        "manifest": {
+            "artifact_id": audit.input_manifest_artifact_id,
+            "fingerprint": replayed.manifest.manifest_fingerprint,
+            "write_outcome": audit.input_manifest_write_outcome,
+            "aggregate_fingerprint": replayed.manifest.input_aggregate_fingerprint,
+        },
+        "subagent_graph": {
+            "semantic_source": (
+                replayed.manifest.subagent_graph_semantic_source.model_dump(
+                    mode="json"
+                )
+            ),
+            "preferred_checkpoint_id": (
+                replayed.manifest.subagent_graph_acceleration.checkpoint_id
+            ),
+            "actual_checkpoint_id": (
+                replayed.subagent_graph_acceleration.checkpoint_id
+            ),
+            "rebased": (
+                replayed.manifest.subagent_graph_acceleration.checkpoint_id
+                != replayed.subagent_graph_acceleration.checkpoint_id
+            ),
+            "checkpoint_through_sequence": (
+                replayed.subagent_graph_acceleration.checkpoint_through_sequence
+            ),
+            "delta_from_sequence": (
+                replayed.subagent_graph_acceleration.delta_from_sequence
+            ),
+            "delta_through_sequence": (
+                replayed.subagent_graph_acceleration.delta_through_sequence
+            ),
+            "delta_count": replayed.subagent_graph_acceleration.delta_count,
+            "delta_byte_count": (
+                replayed.subagent_graph_acceleration.delta_byte_count
+            ),
+            "ledger_through_sequence": (
+                replayed.subagent_graph_acceleration.ledger_through_sequence
+            ),
+            "ledger_continuity_accumulator": (
+                replayed.subagent_graph_acceleration.ledger_continuity_accumulator
+            ),
+        },
+        "snapshot": {
+            "snapshot_id": snapshot.identity.snapshot_id,
+            "schema_version": snapshot.identity.schema_version,
+            "semantic_fingerprint": snapshot.snapshot_semantic_fingerprint,
+            "fact_fingerprint": snapshot.snapshot_fact_fingerprint,
+            "compiler_contract_version": snapshot.identity.compiler_contract_version,
+            "run_entry_kind": snapshot.run_entry.run_entry_kind,
+            "run_start": snapshot.run_entry.run_start.model_dump(mode="json"),
+            "continuation": (
+                snapshot.continuation.model_dump(mode="json")
+                if snapshot.continuation is not None
+                else None
+            ),
+            "primary_range": snapshot.primary_event_range.model_dump(mode="json"),
+            "named_ranges": [
+                item.model_dump(mode="json") for item in snapshot.named_event_ranges
+            ],
+            "authority_plan_fingerprint": snapshot.authority_slice_plan.plan_fingerprint,
+            "transcript_window": window.model_dump(mode="json"),
+            "resolved_model_call_id": snapshot.resolved_model_call.resolved_model_call_id,
+            "target_fingerprint": snapshot.resolved_model_call.target.target_fingerprint,
+        },
+        "transcript": {
+            "fingerprint": replayed.normalized_transcript.transcript.transcript_fingerprint,
+            "message_count": len(replayed.normalized_transcript.transcript.messages),
+            "pair_count": len(replayed.normalized_transcript.transcript.tool_pairs),
+            "stripped_unfinished_call_ids": list(
+                replayed.normalized_transcript.transcript.stripped_unfinished_call_ids
+            ),
+        },
+        "tool_results": {
+            "unit_count": len(units),
+            "profile_counts": profile_counts,
+            "builder_contracts": list(builder_contracts.values()),
+            "render_policy_fingerprint": (
+                replayed.prepared_tool_results.resolved_policy.policy_fingerprint
+            ),
+            "protected_unit_ids": list(
+                replayed.prepared_tool_results.resolved_policy.protected_unit_ids
+            ),
+        },
+        "candidates": {
+            "count": len(candidates.entries),
+            "source_counts": source_counts,
+            "lifecycle_counts": lifecycle_counts,
+            "source_selections": source_selections,
+            "source_selections_truncated": (
+                len(snapshot.candidate_source_selections) > len(source_selections)
+            ),
+            "collection_decisions": collection_decisions,
+            "collection_decisions_truncated": (
+                len(candidates.collection_decisions) > len(collection_decisions)
+            ),
+            "invalidation_count": len(candidates.invalidations),
+            "fingerprint": candidates.candidate_set_fingerprint,
+        },
+        "rollout_status_hint": rollout_status_hint,
+        "current_process_diagnostics": {
+            "semantics_builder_implementation_build_fingerprints": None,
+            "historical_fact": False,
+        },
+    }
+
+
+def _replayed_rollout_status_hint(
+    *,
+    event: ContextCompiledEvent,
+    snapshot,
+    primary: ContextEventSlice,
+    named: tuple[ContextEventSlice, ...],
+) -> dict[str, Any] | None:
+    included = tuple(
+        section
+        for section in event.sections
+        if isinstance(section, dict)
+        and section.get("id") == "rollout:status"
+        and section.get("included") is True
+    )
+    if not included:
+        return None
+    if len(included) != 1:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_input_rollout_status_section_ambiguous",
+            "compiled context contains multiple included rollout status sections",
+        )
+    owner_id = (
+        snapshot.long_horizon_attribution.rollout_account_owner_runtime_session_id
+    )
+    owner_slices = tuple(
+        item
+        for item in (primary, *named)
+        if item.runtime_session_id == owner_id
+    )
+    if len(owner_slices) != 1:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.LEDGER_UNTRUSTED,
+            "context_input_rollout_status_owner_slice_missing",
+            "rollout status replay requires one frozen account-owner slice",
+        )
+    starts = tuple(
+        decoded
+        for frozen in primary.events
+        if frozen.run_id == snapshot.identity.run_id
+        if isinstance(
+            (decoded := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            RunStartEvent,
+        )
+    )
+    if len(starts) != 1:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.LEDGER_UNTRUSTED,
+            "context_input_rollout_status_run_start_missing",
+            "rollout status replay requires one matching RunStart",
+        )
+    candidate = derive_rollout_status_candidate(
+        event_slice=owner_slices[0],
+        account_id=snapshot.long_horizon_attribution.rollout_account_id,
+        policy=starts[0].long_horizon.rollout_status_hint_policy,
+    )
+    authorities = tuple(
+        item
+        for item in snapshot.candidate_authorities
+        if item.source_instance_id == "rollout:status"
+    )
+    if (
+        candidate is None
+        or len(authorities) != 1
+        or authorities[0].lifecycle_dependency_fingerprint
+        != candidate.semantic_fingerprint
+    ):
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_input_rollout_status_hint_mismatch",
+            "included rollout status differs from the frozen ledger derivation",
+        )
+    return candidate.model_dump(mode="json")
+
+
+def _subagent_graph_checkpoint_projection(
+    events: Iterable[AgentEvent],
+    *,
+    limit: int = 64,
+) -> dict[str, Any]:
+    committed = [
+        event
+        for event in events
+        if isinstance(event, SubagentGraphCheckpointCommittedEvent)
+    ]
+    selected = committed[-limit:]
+    return {
+        "status": "available" if committed else "missing",
+        "confirmed_checkpoint_count": len(committed),
+        "checkpoints": [
+            {
+                "event_id": event.id,
+                "event_sequence": event.sequence,
+                "checkpoint_id": event.checkpoint.checkpoint_id,
+                "through_sequence": event.checkpoint.through_sequence,
+                "artifact_id": event.artifact.artifact_id,
+                "artifact_content_sha256": event.artifact.content_sha256,
+                "graph_reducer_id": event.checkpoint.graph_reducer_id,
+                "graph_reducer_version": event.checkpoint.graph_reducer_version,
+                "graph_reducer_contract_fingerprint": (
+                    event.checkpoint.graph_reducer_contract_fingerprint
+                ),
+                "graph_event_count": event.checkpoint.graph_event_count,
+                "graph_state_semantic_fingerprint": (
+                    event.checkpoint.graph_state_semantic_fingerprint
+                ),
+                "writer_status": "committed",
+            }
+            for event in selected
+        ],
+        "truncated": len(selected) < len(committed),
+    }
+
+
+def _rollout_status_shadow_projection(
+    events: Iterable[AgentEvent],
+    *,
+    runtime_session_id: str,
+    root_run_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    ordered = tuple(sorted(events, key=lambda event: event.sequence or 0))
+    openings = tuple(
+        event
+        for event in ordered
+        if isinstance(event, RolloutBudgetAccountOpenedEvent)
+        and (root_run_id is None or event.account.root_run_id == root_run_id)
+    )
+    if not openings:
+        return {"shadows": [], "diagnostics": []}
+    diagnostics: list[dict[str, Any]] = []
+    try:
+        frozen = tuple(
+            FrozenStoredEvent.from_stored_event(
+                event,
+                runtime_session_id=runtime_session_id,
+            )
+            for event in ordered
+        )
+        event_slice = ContextEventSlice(
+            runtime_session_id=runtime_session_id,
+            from_sequence=1,
+            through_sequence=len(frozen),
+            events=frozen,
+            event_ids_fingerprint=context_fingerprint(
+                "context-event-slice-ids:v1",
+                tuple(event.event_id for event in frozen),
+            ),
+            event_payloads_fingerprint=context_fingerprint(
+                "context-event-slice-payloads:v1",
+                tuple(event.payload_fingerprint for event in frozen),
+            ),
+        )
+    except Exception as exc:
+        return {
+            "shadows": [],
+            "diagnostics": [
+                {
+                    "severity": "error",
+                    "code": "rollout_status_source_slice_untrusted",
+                    "message": "Rollout status source slice is not canonical.",
+                    "details": {"error_type": type(exc).__name__},
+                }
+            ],
+        }
+
+    starts = {
+        event.run_id: event
+        for event in ordered
+        if isinstance(event, RunStartEvent)
+    }
+    shadows: list[dict[str, Any]] = []
+    for opening in openings:
+        start = starts.get(opening.account.root_run_id)
+        if (
+            start is None
+            or start.long_horizon.rollout_account_id != opening.account.account_id
+        ):
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "rollout_status_run_contract_missing",
+                    "message": "Rollout status cannot locate its RunStart contract.",
+                    "details": {
+                        "account_id": opening.account.account_id,
+                        "root_run_id": opening.account.root_run_id,
+                    },
+                }
+            )
+            continue
+        try:
+            shadow = derive_rollout_status_shadow(
+                event_slice=event_slice,
+                account_id=opening.account.account_id,
+                policy=start.long_horizon.rollout_status_hint_policy,
+            )
+        except Exception as exc:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "rollout_status_projection_failed",
+                    "message": "Rollout status shadow could not be derived.",
+                    "details": {
+                        "account_id": opening.account.account_id,
+                        "error_type": type(exc).__name__,
+                    },
+                }
+            )
+            continue
+        shadows.append(shadow.model_dump(mode="json"))
+    return {"shadows": shadows, "diagnostics": diagnostics}
+
+
+def _long_horizon_run_projection(
+    events: Iterable[AgentEvent],
+    *,
+    runtime_session_id: str,
+    context_compilations: Iterable[dict[str, Any]] = (),
+    root_run_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    ordered = tuple(sorted(events, key=lambda event: event.sequence or 0))
+    openings = tuple(
+        event
+        for event in ordered
+        if isinstance(event, RolloutBudgetAccountOpenedEvent)
+        and (root_run_id is None or event.account.root_run_id == root_run_id)
+    )
+    if not openings:
+        return {"runs": [], "diagnostics": []}
+    diagnostics: list[dict[str, Any]] = []
+    try:
+        event_slice = _inspector_context_event_slice(
+            ordered,
+            runtime_session_id=runtime_session_id,
+        )
+        state_store = LongHorizonStateStore(ordered)
+    except Exception as exc:
+        return {
+            "runs": [],
+            "diagnostics": [
+                {
+                    "severity": "error",
+                    "code": "long_horizon_projection_ledger_untrusted",
+                    "message": "Long-horizon state could not be folded from the ledger.",
+                    "details": {"error_type": type(exc).__name__},
+                }
+            ],
+        }
+
+    starts = {
+        event.run_id: event
+        for event in ordered
+        if isinstance(event, RunStartEvent)
+    }
+    latest_contexts: dict[str, dict[str, Any]] = {}
+    for context in context_compilations:
+        run_id = context.get("run_id")
+        if isinstance(run_id, str):
+            latest_contexts[run_id] = context
+
+    projected: list[dict[str, Any]] = []
+    for opening in openings:
+        account = opening.account
+        state = state_store.rollout_state(account.account_id)
+        chain = state_store.window_state(account.root_run_id)
+        start = starts.get(account.root_run_id)
+        if state is None or chain is None or start is None:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "long_horizon_projection_contract_missing",
+                    "message": "Long-horizon account lacks its run contract or reducer state.",
+                    "details": {
+                        "account_id": account.account_id,
+                        "root_run_id": account.root_run_id,
+                    },
+                }
+            )
+            continue
+        try:
+            shadow = derive_rollout_status_shadow(
+                event_slice=event_slice,
+                account_id=account.account_id,
+                policy=start.long_horizon.rollout_status_hint_policy,
+            )
+        except Exception as exc:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "long_horizon_rollout_status_projection_failed",
+                    "message": "Current rollout status could not be derived.",
+                    "details": {
+                        "account_id": account.account_id,
+                        "error_type": type(exc).__name__,
+                    },
+                }
+            )
+            shadow_payload = None
+        else:
+            shadow_payload = shadow.model_dump(mode="json")
+
+        context = latest_contexts.get(account.root_run_id)
+        input_replay = (
+            context.get("input_replay") if isinstance(context, dict) else None
+        )
+        actual_hint = (
+            input_replay.get("rollout_status_hint")
+            if isinstance(input_replay, dict)
+            else None
+        )
+        replay_status = (
+            input_replay.get("status")
+            if isinstance(input_replay, dict)
+            else None
+        )
+        graph = (
+            input_replay.get("subagent_graph")
+            if isinstance(input_replay, dict)
+            else None
+        )
+        semantic = (
+            graph.get("semantic_source") if isinstance(graph, dict) else None
+        )
+
+        active_or_final_window_id = chain.active_window_id or (
+            chain.ordered_window_ids[-1] if chain.ordered_window_ids else None
+        )
+        projection_state = (
+            state_store.projection_state(active_or_final_window_id)
+            if active_or_final_window_id is not None
+            else None
+        )
+        owner_counts = {"model_call": 0, "tool_call": 0, "subagent_run": 0}
+        for reservation in state.active_reservations:
+            owner_counts[reservation.owner_kind] += 1
+
+        transition_events = tuple(
+            event
+            for event in ordered
+            if isinstance(event, RolloutPhaseTransitionedEvent)
+            and event.account_id == account.account_id
+        )
+        reservation_events = tuple(
+            event
+            for event in ordered
+            if isinstance(event, RolloutBudgetReservationCreatedEvent)
+            and event.reservation.account_id == account.account_id
+        )
+        reservation_ids = {
+            event.reservation.reservation_id for event in reservation_events
+        }
+        settlement_events = tuple(
+            event
+            for event in ordered
+            if isinstance(event, RolloutBudgetReservationSettledEvent)
+            and event.reservation_id in reservation_ids
+        )
+        finalization_denials = tuple(
+            event
+            for event in ordered
+            if isinstance(event, CapabilityGateDecisionEvent)
+            and event.run_id == account.root_run_id
+            and event.reason_code in {
+                "rollout_phase_tool_denied",
+                "rollout_emergency_hard_stop",
+            }
+        )
+
+        final_agent_remaining = max(
+            0,
+            account.finalization_agent_reserve_milliunits
+            - state.finalization_agent_charged_milliunits
+            - state.finalization_agent_reserved_milliunits,
+        )
+        final_compaction_remaining = max(
+            0,
+            account.finalization_compaction_reserve_milliunits
+            - state.finalization_compaction_charged_milliunits
+            - state.finalization_compaction_reserved_milliunits,
+        )
+        final_tool_remaining = max(
+            0,
+            account.finalization_tool_reserve_milliunits
+            - state.finalization_tool_charged_milliunits
+            - state.finalization_tool_reserved_milliunits,
+        )
+        projected.append(
+            {
+                "run_id": account.root_run_id,
+                "account_id": account.account_id,
+                "active_or_final_window_id": active_or_final_window_id,
+                "window_count": len(chain.ordered_window_ids),
+                "projection_generation_count": (
+                    projection_state.projection_generation
+                    if projection_state is not None
+                    else 0
+                ),
+                "rollout_phase": state.phase.value,
+                "rollout_charged_milliunits": state.charged_milliunits,
+                "rollout_reserved_milliunits": state.reserved_milliunits,
+                "rollout_total_milliunits": account.total_budget_milliunits,
+                "finalization_reserve_remaining_milliunits": (
+                    final_agent_remaining
+                    + final_compaction_remaining
+                    + final_tool_remaining
+                ),
+                "finalization_agent_remaining_milliunits": final_agent_remaining,
+                "finalization_compaction_remaining_milliunits": (
+                    final_compaction_remaining
+                ),
+                "finalization_tool_remaining_milliunits": final_tool_remaining,
+                "model_call_count": state.model_call_count,
+                "tool_call_count": state.tool_call_count,
+                "rollout_status_shadow": shadow_payload,
+                "latest_rollout_status_hint": actual_hint,
+                "subagent_graph_event_count": (
+                    semantic.get("graph_event_count")
+                    if isinstance(semantic, dict)
+                    else None
+                ),
+                "subagent_graph_semantic_accumulator": (
+                    semantic.get("graph_semantic_accumulator")
+                    if isinstance(semantic, dict)
+                    else None
+                ),
+                "subagent_graph_state_semantic_fingerprint": (
+                    semantic.get("graph_state_semantic_fingerprint")
+                    if isinstance(semantic, dict)
+                    else None
+                ),
+                "graph_reducer_id": (
+                    semantic.get("graph_reducer_id")
+                    if isinstance(semantic, dict)
+                    else None
+                ),
+                "graph_reducer_version": (
+                    semantic.get("graph_reducer_version")
+                    if isinstance(semantic, dict)
+                    else None
+                ),
+                "graph_reducer_contract_fingerprint": (
+                    semantic.get("graph_reducer_contract_fingerprint")
+                    if isinstance(semantic, dict)
+                    else None
+                ),
+                "preferred_checkpoint_id": (
+                    graph.get("preferred_checkpoint_id")
+                    if isinstance(graph, dict)
+                    else None
+                ),
+                "checkpoint_id": (
+                    graph.get("actual_checkpoint_id")
+                    if isinstance(graph, dict)
+                    else None
+                ),
+                "checkpoint_through_sequence": (
+                    graph.get("checkpoint_through_sequence", 0)
+                    if isinstance(graph, dict)
+                    else 0
+                ),
+                "checkpoint_delta_count": (
+                    graph.get("delta_count", 0) if isinstance(graph, dict) else 0
+                ),
+                "ledger_through_sequence": (
+                    graph.get("ledger_through_sequence", state.through_sequence)
+                    if isinstance(graph, dict)
+                    else state.through_sequence
+                ),
+                "ledger_continuity_accumulator": (
+                    graph.get("ledger_continuity_accumulator")
+                    if isinstance(graph, dict)
+                    else None
+                ),
+                "checkpoint_rebased": (
+                    bool(graph.get("rebased")) if isinstance(graph, dict) else False
+                ),
+                "pending_owner_counts": {
+                    **owner_counts,
+                    "total": len(state.active_reservations),
+                },
+                "replay_status": replay_status,
+                "rollout_timeline": {
+                    "phase_transitions": [
+                        {
+                            "sequence": item.sequence,
+                            "from_phase": item.from_phase.value,
+                            "to_phase": item.to_phase.value,
+                            "reason_code": item.reason_code.value,
+                            "source_through_sequence": item.source_through_sequence,
+                        }
+                        for item in transition_events
+                    ],
+                    "reservations": [
+                        {
+                            "sequence": item.sequence,
+                            "reservation_id": item.reservation.reservation_id,
+                            "owner_kind": item.reservation.owner_kind,
+                            "owner_id": item.reservation.owner_id,
+                            "budget_bucket": item.reservation.budget_bucket.value,
+                            "reserved_milliunits": item.reservation.reserved_milliunits,
+                        }
+                        for item in reservation_events
+                    ],
+                    "settlements": [
+                        {
+                            "sequence": item.sequence,
+                            "reservation_id": item.reservation_id,
+                            "usage_status": item.usage_status,
+                            "charged_milliunits": item.charged_milliunits,
+                        }
+                        for item in settlement_events
+                    ],
+                    "finalization_denials": [
+                        {
+                            "sequence": item.sequence,
+                            "tool_call_id": item.tool_call_id,
+                            "tool_name": item.tool_name,
+                            "reason_code": item.reason_code,
+                            "action_classification": (
+                                item.action_classification.model_dump(mode="json")
+                                if item.action_classification is not None
+                                else None
+                            ),
+                        }
+                        for item in finalization_denials
+                    ],
+                },
+            }
+        )
+    return {"runs": projected, "diagnostics": diagnostics}
+
+
+def _inspector_context_event_slice(
+    events: tuple[AgentEvent, ...],
+    *,
+    runtime_session_id: str,
+) -> ContextEventSlice:
+    frozen = tuple(
+        FrozenStoredEvent.from_stored_event(
+            event,
+            runtime_session_id=runtime_session_id,
+        )
+        for event in events
+    )
+    sequences = tuple(event.sequence for event in frozen)
+    if sequences != tuple(range(1, len(frozen) + 1)):
+        raise ContextEventSliceError("Inspector event slice is not contiguous")
+    return ContextEventSlice(
+        runtime_session_id=runtime_session_id,
+        from_sequence=1,
+        through_sequence=len(frozen),
+        events=frozen,
+        event_ids_fingerprint=context_fingerprint(
+            "context-event-slice-ids:v1",
+            tuple(event.event_id for event in frozen),
+        ),
+        event_payloads_fingerprint=context_fingerprint(
+            "context-event-slice-payloads:v1",
+            tuple(event.payload_fingerprint for event in frozen),
+        ),
+    )
+
+
+def _context_event_slice_for_range(
+    *,
+    store: PostgresInspectorStore,
+    runtime_session_id: str,
+    first_sequence: int,
+    through_sequence: int,
+) -> ContextEventSlice:
+    snapshot = PostgresEventLog(
+        dsn=store.dsn,
+        runtime_session_id=runtime_session_id,
+    ).read_raw_range_snapshot(
+        minimum_sequence=first_sequence,
+        through_sequence=through_sequence,
+    )
+    return ContextEventSlice.from_read_snapshot(
+        runtime_session_id=runtime_session_id,
+        minimum_sequence=first_sequence,
+        snapshot=snapshot,
+    )
 
 
 def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
@@ -1737,10 +2710,21 @@ def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
             source = {}
             freshness = None
             status = "missing"
+        source_started_at = (
+            source.get("source_started_at_utc") or source.get("source_started_at")
+            if isinstance(source, dict)
+            else None
+        )
+        source_ended_at = (
+            source.get("source_ended_at_utc") or source.get("source_ended_at")
+            if isinstance(source, dict)
+            else None
+        )
         observed_at = (
-            source.get("observed_at")
-            or source.get("source_ended_at")
-            or source.get("source_started_at")
+            source.get("observed_at_utc")
+            or source.get("observed_at")
+            or source_ended_at
+            or source_started_at
             if isinstance(source, dict)
             else None
         )
@@ -1756,12 +2740,8 @@ def _section_timing_projection(sections: list[Any]) -> list[dict[str, Any]]:
                 if isinstance(timing, dict)
                 else None,
                 "observed_at": observed_at,
-                "source_started_at": source.get("source_started_at")
-                if isinstance(source, dict)
-                else None,
-                "source_ended_at": source.get("source_ended_at")
-                if isinstance(source, dict)
-                else None,
+                "source_started_at": source_started_at,
+                "source_ended_at": source_ended_at,
                 "age_seconds": timing.get("age_seconds")
                 if isinstance(timing, dict)
                 else None,
@@ -1932,6 +2912,242 @@ def _compaction_windows(
             }
         )
     return windows
+
+
+def _context_window_projection(
+    events: Iterable[AgentEvent], store: PostgresInspectorStore
+) -> dict[str, list[dict[str, Any]]]:
+    """Project the same-run window chain and its L4 compaction attempts."""
+
+    ordered = sorted(
+        events,
+        key=lambda event: (
+            event.sequence if event.sequence is not None else 2**63,
+            event.id,
+        ),
+    )
+    opened_by_id = {
+        event.window.window_id: event
+        for event in ordered
+        if isinstance(event, ContextWindowOpenedEvent)
+    }
+    closed_by_id = {
+        event.window_id: event
+        for event in ordered
+        if isinstance(event, ContextWindowClosedEvent)
+    }
+    starts = {
+        event.plan.compaction_id: event
+        for event in ordered
+        if isinstance(event, ContextWindowCompactionStartedEvent)
+    }
+    terminals: dict[
+        str, ContextWindowCompactionCompletedEvent | ContextWindowCompactionFailedEvent
+    ] = {}
+    diagnostics: list[dict[str, Any]] = []
+    for event in ordered:
+        if not isinstance(
+            event,
+            (ContextWindowCompactionCompletedEvent, ContextWindowCompactionFailedEvent),
+        ):
+            continue
+        prior = terminals.get(event.compaction_id)
+        if prior is not None and prior.id != event.id:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "context_window_compaction_terminal_conflict",
+                    "message": "Context-window compaction has multiple terminal facts.",
+                    "details": {"compaction_id": event.compaction_id},
+                }
+            )
+        terminals[event.compaction_id] = event
+
+    windows: list[dict[str, Any]] = []
+    for window_id, opened in sorted(
+        opened_by_id.items(), key=lambda item: item[1].window.generation
+    ):
+        closed = closed_by_id.get(window_id)
+        windows.append(
+            {
+                "window_id": window_id,
+                "generation": opened.window.generation,
+                "previous_window_id": opened.window.previous_window_id,
+                "open_reason": opened.window.open_reason.value,
+                "opened_event_id": opened.id,
+                "opened_sequence": opened.sequence,
+                "opening_batch_id": opened.opening_batch_id,
+                "window_semantic_fingerprint": (
+                    opened.window.window_semantic_fingerprint
+                ),
+                "window_fact_fingerprint": opened.window.window_fact_fingerprint,
+                "source_compaction_id": opened.window.source_compaction_id,
+                "source_summary_artifact_id": (
+                    opened.window.source_summary_artifact_id
+                ),
+                "status": "closed" if closed is not None else "active",
+                "closed_event_id": closed.id if closed is not None else None,
+                "closed_sequence": closed.sequence if closed is not None else None,
+                "close_reason": (
+                    closed.close_reason.value if closed is not None else None
+                ),
+                "next_window_id": (
+                    closed.next_window_id if closed is not None else None
+                ),
+            }
+        )
+
+    compactions: list[dict[str, Any]] = []
+    all_ids = sorted(
+        set(starts) | set(terminals),
+        key=lambda compaction_id: (
+            (
+                starts.get(compaction_id) or terminals[compaction_id]
+            ).sequence
+            or 2**63,
+            compaction_id,
+        ),
+    )
+    for compaction_id in all_ids:
+        started = starts.get(compaction_id)
+        terminal = terminals.get(compaction_id)
+        completed = (
+            terminal
+            if isinstance(terminal, ContextWindowCompactionCompletedEvent)
+            else None
+        )
+        failed = (
+            terminal
+            if isinstance(terminal, ContextWindowCompactionFailedEvent)
+            else None
+        )
+        plan = started.plan if started is not None else None
+        summary_present = (
+            store.artifact(completed.summary_artifact_id) is not None
+            if completed is not None
+            else None
+        )
+        compactions.append(
+            {
+                "compaction_id": compaction_id,
+                "status": (
+                    "completed"
+                    if completed is not None
+                    else "failed"
+                    if failed is not None
+                    else "started"
+                ),
+                "attempt_index": (
+                    plan.compaction_attempt_index
+                    if plan is not None
+                    else failed.compaction_attempt_index
+                    if failed is not None
+                    else None
+                ),
+                "started_event_id": started.id if started is not None else None,
+                "started_sequence": (
+                    started.sequence if started is not None else None
+                ),
+                "terminal_event_id": terminal.id if terminal is not None else None,
+                "terminal_sequence": (
+                    terminal.sequence if terminal is not None else None
+                ),
+                "source_window_id": (
+                    plan.source_window_id
+                    if plan is not None
+                    else failed.source_window_id
+                    if failed is not None
+                    else None
+                ),
+                "source_window_generation": (
+                    plan.source_window_generation
+                    if plan is not None
+                    else failed.source_window_generation
+                    if failed is not None
+                    else None
+                ),
+                "source_projection_generation": (
+                    plan.source_projection_generation if plan is not None else None
+                ),
+                "source_through_sequence": (
+                    plan.source_through_sequence if plan is not None else None
+                ),
+                "target_window_id": (
+                    plan.target_window_id if plan is not None else None
+                ),
+                "target_window_generation": (
+                    plan.target_window_generation if plan is not None else None
+                ),
+                "plan_fingerprint": (
+                    plan.plan_fingerprint
+                    if plan is not None
+                    else failed.plan_fingerprint
+                    if failed is not None
+                    else None
+                ),
+                "summarizer_call": (
+                    plan.summarizer_call.model_dump(mode="json")
+                    if plan is not None
+                    else failed.summarizer_call.model_dump(mode="json")
+                    if failed is not None and failed.summarizer_call is not None
+                    else None
+                ),
+                "rollout_settlement_event_id": (
+                    terminal.rollout_settlement_event_id
+                    if terminal is not None
+                    else None
+                ),
+                "summary_artifact_id": (
+                    completed.summary_artifact_id
+                    if completed is not None
+                    else None
+                ),
+                "summary_artifact_present": summary_present,
+                "actual_post_compaction_estimated_tokens": (
+                    completed.actual_post_compaction_estimated_tokens
+                    if completed is not None
+                    else failed.observed_post_compaction_tokens
+                    if failed is not None
+                    else None
+                ),
+                "post_compaction_target_tokens": (
+                    completed.post_compaction_target_tokens
+                    if completed is not None
+                    else plan.post_compaction_target_tokens
+                    if plan is not None
+                    else None
+                ),
+                "failure_stage": failed.failure_stage if failed is not None else None,
+                "reason_code": failed.reason_code if failed is not None else None,
+            }
+        )
+        if started is not None and terminal is None:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "context_window_compaction_dangling_started",
+                    "message": "Context-window compaction Started has no terminal fact.",
+                    "details": {"compaction_id": compaction_id},
+                }
+            )
+        if completed is not None and not summary_present:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "context_window_compaction_summary_artifact_missing",
+                    "message": "Completed context-window compaction summary artifact is missing.",
+                    "details": {
+                        "compaction_id": compaction_id,
+                        "summary_artifact_id": completed.summary_artifact_id,
+                    },
+                }
+            )
+
+    return {
+        "windows": windows,
+        "compactions": compactions,
+        "diagnostics": diagnostics,
+    }
 
 
 def _compaction_candidate_proposal_projection(

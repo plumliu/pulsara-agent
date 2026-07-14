@@ -81,7 +81,7 @@ class RunTimelinePersistenceHook:
 
 
 def _should_persist_timeline(event: Any) -> bool:
-    if event.type in {EventType.REPLY_END, EventType.RUN_ERROR, EventType.EXCEED_MAX_ITERS}:
+    if event.type in {EventType.REPLY_END, EventType.RUN_ERROR}:
         return True
     return isinstance(event, RunEndEvent)
 

@@ -152,7 +152,6 @@ async def _maybe_await(value: MaybeAwaitable) -> Any:
 _REPLY_CLEANUP_EVENT_TYPES = {
     EventType.REPLY_END,
     EventType.RUN_ERROR,
-    EventType.EXCEED_MAX_ITERS,
 }
 
 

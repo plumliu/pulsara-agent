@@ -24,7 +24,12 @@ from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime import EventPublicationAfterCommitError
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
-from pulsara_agent.event import McpCapabilitySnapshotInstalledEvent, RunStartEvent
+from pulsara_agent.event import (
+    ContextWindowOpenedEvent,
+    McpCapabilitySnapshotInstalledEvent,
+    RolloutBudgetAccountOpenedEvent,
+    RunStartEvent,
+)
 from pulsara_agent.primitives.mcp import McpServerLifecycleTimingFact
 from pulsara_agent.runtime.mcp.manager import MockMcpClientManager
 from pulsara_agent.runtime.plan import McpInputRequiredInteractionResolution
@@ -321,9 +326,7 @@ def test_manifest_written_before_publish_failure_is_closed_or_tombstoned(
             ("host:publish-manifest", runtime_session_id),
         )
         resumable = await core.list_resumable_sessions(limit=1)
-        assert [item.runtime_session_id for item in resumable] == [
-            "runtime:healthy"
-        ]
+        assert [item.runtime_session_id for item in resumable] == ["runtime:healthy"]
 
         await core.close_session(
             "host:publish-manifest",
@@ -400,13 +403,16 @@ def test_resume_audit_post_commit_publication_failure_acknowledges_pending(
 
         assert runtime_session._pending_mcp_installation_audits == []
         runtime_session.publisher.unsubscribe(failing)
-        assert len(
-            [
-                event
-                for event in runtime_session.event_log.iter()
-                if isinstance(event, McpCapabilitySnapshotInstalledEvent)
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    event
+                    for event in runtime_session.event_log.iter()
+                    if isinstance(event, McpCapabilitySnapshotInstalledEvent)
+                ]
+            )
+            == 1
+        )
         await core.shutdown()
 
     asyncio.run(run())
@@ -456,7 +462,21 @@ def test_background_ready_installs_only_at_next_safe_point_and_is_audited(
             and event.installation_id == installed.installation_id
         )
         assert run_start.mcp_installation_id == audit.installation_id
-        assert run_start.sequence is not None and audit.sequence == run_start.sequence + 1
+        assert run_start.sequence is not None and audit.sequence is not None
+        opening_batch = tuple(
+            event
+            for event in events
+            if run_start.sequence <= (event.sequence or 0) <= audit.sequence
+        )
+        assert tuple(type(event) for event in opening_batch) == (
+            RunStartEvent,
+            ContextWindowOpenedEvent,
+            RolloutBudgetAccountOpenedEvent,
+            McpCapabilitySnapshotInstalledEvent,
+        )
+        assert tuple(event.sequence for event in opening_batch) == tuple(
+            range(run_start.sequence, audit.sequence + 1)
+        )
         await core.shutdown()
 
     asyncio.run(run())
@@ -513,9 +533,9 @@ def test_mcp_lifecycle_prompt_tracks_the_run_frozen_tool_schema(
         await asyncio.wait_for(candidate_ready.wait(), timeout=0.2)
         await session.run_turn("Can you see MCP after the next safe point?")
         second = transport.contexts[1]
-        assert [tool.name for tool in second.tools if tool.name.startswith("mcp__")] == [
-            "mcp__slow-docs__lookup"
-        ]
+        assert [
+            tool.name for tool in second.tools if tool.name.startswith("mcp__")
+        ] == ["mcp__slow-docs__lookup"]
         second_text = visible_text(1)
         assert "server=slow-docs; status=ready; installed_tool_count=1" in second_text
         assert "actual tool schema remains the sole authority" in second_text

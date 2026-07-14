@@ -7,12 +7,17 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, EventContext
+from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
 from pulsara_agent.llm.config import LLMConfig, ModelSlotConfig
+from pulsara_agent.llm.control_contract import (
+    CURRENT_MODEL_CALL_CONTROL_DOWNSTREAM_CONTRACT,
+)
 from pulsara_agent.llm.adapters.mock import MockTransport
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.provider import ProviderProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.resolution import resolve_model_call, resolve_model_target
 from pulsara_agent.primitives.model_call import (
@@ -23,6 +28,12 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelCallFact,
     ResolvedModelTargetFact,
     ModelTokenUsageFact,
+    sha256_fingerprint,
+)
+from pulsara_agent.primitives.context import ContextCompileInputAuditFact
+from pulsara_agent.primitives.run_boundary import (
+    ModelStreamRecoveryPlanFact,
+    RunExecutionActivationFact,
 )
 
 
@@ -129,6 +140,7 @@ def context_compiled_contract_fields(
     status: str = "compiled",
     non_transcript_baseline_tokens: int | None = None,
     resolved_call: ResolvedModelCallFact | None = None,
+    model_call_index: int = 1,
 ) -> dict[str, object]:
     call = resolved_call or test_resolved_call_fact()
     target = call.target
@@ -162,24 +174,124 @@ def context_compiled_contract_fields(
     )
     return {
         "status": status,
+        "failure_stage": "context_compile" if status == "failed" else None,
         "compile_attempt_index": 1,
         "context_retry_index": 0,
         "resolved_call": call,
         "budget": budget,
+        "input_audit": ContextCompileInputAuditFact(
+            snapshot_id="context_snapshot:test",
+            snapshot_semantic_fingerprint="sha256:" + "1" * 64,
+            snapshot_fact_fingerprint="sha256:" + "2" * 64,
+            snapshot_schema_version="context-snapshot:v1",
+            compiler_contract_version="context-compiler-input:v1",
+            source_runtime_session_id="runtime:test",
+            authority_from_sequence=1,
+            source_through_sequence=1,
+            authority_slice_plan_fingerprint="sha256:" + "3" * 64,
+            transcript_projection_window_fingerprint="sha256:" + "4" * 64,
+            run_start_event_id="run-start:test",
+            run_start_sequence=1,
+            continuation_event_id=None,
+            continuation_sequence=None,
+            continuation_count=0,
+            resolved_model_call_id=call.resolved_model_call_id,
+            model_call_index=model_call_index,
+            compile_attempt_index=1,
+            context_retry_index=0,
+            transcript_fingerprint="sha256:" + "5" * 64,
+            transcript_message_count=1,
+            transcript_pair_count=0,
+            tool_result_units_fingerprint="sha256:" + "6" * 64,
+            tool_result_unit_count=0,
+            tool_result_render_policy_fingerprint="sha256:" + "7" * 64,
+            tool_result_render_input_fingerprint="sha256:" + "8" * 64,
+            prepared_candidate_set_fingerprint="sha256:" + "9" * 64,
+            section_candidate_count=1,
+            input_aggregate_fingerprint="sha256:" + "a" * 64,
+            input_manifest_artifact_id="context-input-manifest:test",
+            input_manifest_fingerprint="sha256:" + "b" * 64,
+            long_horizon_attribution_fingerprint="sha256:" + "e" * 64,
+            input_manifest_write_outcome="stored",
+        ),
+        "provider_neutral_payload_fingerprint": (
+            "sha256:" + "c" * 64 if status == "compiled" else None
+        ),
+        "canonical_render_decisions_fingerprint": (
+            "sha256:" + "d" * 64 if status == "compiled" else None
+        ),
     }
 
 
 def model_call_start_fields(
     *,
     context_id: str = "context:test",
-    model_call_index: int = 1,
+    model_call_index: int | None = 1,
     resolved_call: ResolvedModelCallFact | None = None,
+    lifecycle_kind: str = "main_assistant_reply",
+    pre_send_estimated_input_tokens: int = 0,
 ) -> dict[str, object]:
+    call = resolved_call or test_resolved_call_fact()
+    event_id = f"model_call_start:{uuid4().hex}"
+    main = lifecycle_kind == "main_assistant_reply"
+    activation = make_test_run_execution_activation()
+    contract = CURRENT_MODEL_CALL_CONTROL_DOWNSTREAM_CONTRACT
+    recovery_payload = {
+        "schema_version": "model_stream_recovery_plan.v1",
+        "lifecycle_kind": lifecycle_kind,
+        "model_call_start_event_id": event_id,
+        "stable_model_call_end_event_id": f"model_call_end:{call.resolved_model_call_id}",
+        "reply_start_event_id": (
+            f"reply_start:{call.resolved_model_call_id}" if main else None
+        ),
+        "stable_reply_end_event_id": (
+            f"reply_end:{call.resolved_model_call_id}" if main else None
+        ),
+        "reservation_id": None,
+        "reservation_quote_fingerprint": None,
+        "stable_settlement_event_id": None,
+        "window_compaction_started_event_id": None,
+        "pre_send_estimated_input_tokens": pre_send_estimated_input_tokens,
+        "run_execution_activation": activation if main else None,
+        "control_downstream_predicate_contract": contract if main else None,
+    }
+    recovery_plan = ModelStreamRecoveryPlanFact(
+        **recovery_payload,
+        recovery_plan_fingerprint=sha256_fingerprint(
+            "model-stream-recovery-plan:v1",
+            {
+                **recovery_payload,
+                "run_execution_activation": (
+                    activation.model_dump(mode="json") if main else None
+                ),
+                "control_downstream_predicate_contract": (
+                    contract.model_dump(mode="json") if main else None
+                ),
+            },
+        ),
+    )
     return {
-        "resolved_call": resolved_call or test_resolved_call_fact(),
+        "id": event_id,
+        "resolved_call": call,
         "context_id": context_id,
         "model_call_index": model_call_index,
+        "recovery_plan": recovery_plan,
     }
+
+
+def make_test_run_execution_activation() -> RunExecutionActivationFact:
+    activation_payload = {
+        "schema_version": "run_execution_activation.v1",
+        "activation_owner_kind": "host_run_boundary",
+        "activation_owner_id": "boundary:test",
+        "segment_generation": 1,
+    }
+    return RunExecutionActivationFact(
+        **activation_payload,
+        activation_fingerprint=sha256_fingerprint(
+            "run-execution-activation:v1", activation_payload
+        ),
+    )
 
 
 def model_call_end_fields(
@@ -200,6 +312,7 @@ def model_call_end_fields(
         "target_fingerprint": call.target.target_fingerprint,
         "reported_model_id": call.target.model_id,
         "outcome": "completed",
+        "provider_dispatch_status": "dispatched",
         "usage_status": "reported",
         "usage": usage,
         "estimated_input_tokens": (
@@ -215,7 +328,18 @@ async def run_agent_task(agent, user_input: str, **kwargs):
     draft, committed, _stored = await _commit_test_host_run_entry(
         agent, user_input, kwargs
     )
-    return await agent.run_committed_entry(draft, committed)
+    try:
+        return await agent.run_committed_entry(draft, committed)
+    finally:
+        state = kwargs["state"]
+        working_set = state.run_working_set
+        if (
+            state.status.value != "waiting_user"
+            and working_set is not None
+            and working_set.model_call_control_owner is not None
+        ):
+            await working_set.model_call_control_owner.retire()
+            working_set.model_call_control_owner = None
 
 
 def stream_agent_task(agent, user_input: str, **kwargs):
@@ -227,22 +351,41 @@ def stream_agent_task(agent, user_input: str, **kwargs):
         draft, committed, stored = await _commit_test_host_run_entry(
             agent, user_input, kwargs
         )
-        for event in stored:
-            yield event
-        async for event in agent.stream_committed_entry(draft, committed):
-            yield event
+        try:
+            for event in stored:
+                yield event
+            async for event in agent.stream_committed_entry(draft, committed):
+                yield event
+        finally:
+            state = kwargs["state"]
+            working_set = state.run_working_set
+            if (
+                state.status.value != "waiting_user"
+                and working_set is not None
+                and working_set.model_call_control_owner is not None
+            ):
+                await working_set.model_call_control_owner.retire()
+                working_set.model_call_control_owner = None
 
     return _stream()
 
 
 async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
-    from pulsara_agent.event import EventContext
+    from pulsara_agent.event import (
+        ContextWindowOpenedEvent,
+        EventContext,
+        RolloutBudgetAccountOpenedEvent,
+    )
     from pulsara_agent.runtime.run_entry import (
         CommittedHostRunEntry,
         install_run_working_set,
         prepare_agent_run_draft,
     )
     from pulsara_agent.runtime.session import EventPublicationAfterCommitError
+    from pulsara_agent.runtime.long_horizon.run_contract import (
+        empty_projection_state_fingerprint,
+        prepare_root_long_horizon_run,
+    )
 
     state = kwargs["state"]
     target = kwargs["run_model_target"]
@@ -253,13 +396,31 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
     ):
         await agent.subagent_runtime.repair_dangling_children()
         agent._subagent_dangling_repair_done = True
+    run_start_event_id = f"run_start:test:{uuid4().hex}"
+    long_horizon = prepare_root_long_horizon_run(
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        run_id=state.run_id,
+        run_start_event_id=run_start_event_id,
+        primary_target=target.fact,
+        summarizer_target=agent.llm_runtime.resolve_target(
+            role=ModelRole.FLASH
+        ).fact,
+        graph_reducer_contract=(
+            agent.runtime_session.subagent_graph_checkpoint_service.reducer_binding.contract
+        ),
+        source_through_sequence_at_open=(
+            agent.runtime_session.event_log.next_sequence() - 1
+        ),
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
     draft = await prepare_agent_run_draft(
         agent,
         state,
         run_model_target=target,
         permission_snapshot=state.permission_snapshot,
         current_user_message=state.scratchpad["current_user_message_fact"],
-        run_start_event_id=f"run_start:test:{uuid4().hex}",
+        run_start_event_id=run_start_event_id,
         terminal_run_end_event_id=state.scratchpad["terminal_run_end_event_id"],
         capability_basis=state.scratchpad["capability_resolve_basis"].fact,
         frozen_execution_surface=state.scratchpad[
@@ -267,6 +428,8 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
         ],
         new_run_boundary=state.scratchpad["new_run_boundary_fact"],
         subagent_run_entry=None,
+        long_horizon=long_horizon,
+        child_rollout_subaccount=None,
         prior_messages=kwargs.get("prior_messages"),
     )
     audits = agent.runtime_session.pending_mcp_installation_audit_events(
@@ -276,10 +439,28 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
             reply_id=state.reply_id,
         )
     )
+    event_context = EventContext(
+        run_id=state.run_id,
+        turn_id=state.turn_id,
+        reply_id=state.reply_id,
+    )
+    account = long_horizon.root_account
+    assert account is not None
+    window_open = ContextWindowOpenedEvent(
+        id=long_horizon.contract.initial_window_open_event_id,
+        **event_context.event_fields(),
+        window=long_horizon.initial_window,
+        opening_batch_id=long_horizon.opening_batch_id,
+    )
+    account_open = RolloutBudgetAccountOpenedEvent(
+        id=f"rollout_budget_account_opened:{account.account_id}",
+        **event_context.event_fields(),
+        account=account,
+    )
     try:
         stored = tuple(
             await agent.runtime_session.emit_many(
-                (draft.run_start_event, *audits),
+                (draft.run_start_event, window_open, account_open, *audits),
                 state=state,
             )
         )
@@ -298,7 +479,7 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
         committed_through_sequence=stored[-1].sequence or run_start.sequence,
         publication_status="completed",
         boundary_id=draft.run_start_event.new_run_boundary.identity.boundary_id,
-        committed_audit_event_ids=tuple(event.id for event in stored[1:]),
+        committed_audit_event_ids=tuple(event.id for event in stored[3:]),
     )
     install_run_working_set(
         state,
@@ -308,6 +489,30 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
         frozen_execution_surface=state.scratchpad[
             "frozen_capability_execution_surface"
         ],
+    )
+    from pulsara_agent.llm.control import RunModelCallControlOwner
+
+    working_set = state.run_working_set
+    assert working_set is not None
+    activation_payload = {
+        "schema_version": "run_execution_activation.v1",
+        "activation_owner_kind": "host_run_boundary",
+        "activation_owner_id": draft.run_start_event.new_run_boundary.identity.boundary_id,
+        "segment_generation": 1,
+    }
+    activation = RunExecutionActivationFact(
+        **activation_payload,
+        activation_fingerprint=sha256_fingerprint(
+            "run-execution-activation:v1", activation_payload
+        ),
+    )
+    working_set.run_execution_activation = activation
+    working_set.process_segment_id = f"test_segment:{state.run_id}:1"
+    working_set.model_call_control_owner = RunModelCallControlOwner(
+        run_id=state.run_id,
+        activation=activation,
+        segment_id=working_set.process_segment_id,
+        segment_generation=1,
     )
     return draft, committed, stored
 
@@ -409,6 +614,10 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
         source_through_sequence=0,
         source_event_count=0,
         compacted_window_id=None,
+        checkpoint_compaction_id=None,
+        checkpoint_terminal_event_id=None,
+        checkpoint_terminal_sequence=None,
+        checkpoint_keep_after_sequence=None,
         preflight_compaction_id=None,
         preflight_compaction_terminal_event_id=None,
         preflight_compaction_terminal_sequence=None,
@@ -444,9 +653,7 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
                     message.model_copy(deep=True)
                     for message in (kwargs.get("prior_messages") or ())
                 ),
-                active_skill_names=frozenset(
-                    kwargs.get("active_skill_names") or ()
-                ),
+                active_skill_names=frozenset(kwargs.get("active_skill_names") or ()),
                 workspace_root=agent.runtime_session.workspace_root,
                 memory_domain_id="memory_domain:test",
             ),
@@ -696,6 +903,36 @@ def bind_test_context(
             ),
         )
     return bound
+
+
+def start_test_direct_model_stream(
+    runtime,
+    *,
+    call,
+    context: LLMContext,
+    event_context: EventContext,
+    runtime_session,
+):
+    """Start a direct model call through the production durable lifecycle."""
+
+    bundle = prepare_model_lifecycle_start_bundle(
+        call=call,
+        context=context,
+        event_context=event_context,
+        runtime_session=runtime_session,
+        lifecycle_kind="direct_internal_call",
+    )
+    return runtime.start_stream(
+        call=call,
+        context=context,
+        event_context=event_context,
+        start_bundle=bundle,
+        commit_port=RuntimeSessionModelStreamEventCommitPort(
+            runtime_session=runtime_session,
+            state=None,
+        ),
+        execution_registry=runtime_session.model_stream_execution_registry,
+    )
 
 
 def test_llm_context(**kwargs) -> LLMContext:

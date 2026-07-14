@@ -397,7 +397,7 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
 
     async def run() -> None:
         await runtime.emit(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello"))
-        await runtime.emit(ReplyEndEvent(**ctx.event_fields()))
+        await runtime.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
     try:
         asyncio.run(run())

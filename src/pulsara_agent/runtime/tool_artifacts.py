@@ -11,11 +11,27 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from pulsara_agent.capability.descriptor import CapabilityArtifactMode, CapabilityDescriptor
+from pulsara_agent.capability.descriptor import (
+    CapabilityArtifactMode,
+    CapabilityDescriptor,
+)
 from pulsara_agent.event import EventContext
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
-from pulsara_agent.message import ToolResultArtifactRef, ToolResultPreviewMetadata, ToolResultState
-from pulsara_agent.tools.base import ToolCall, ToolExecutionResult, ToolResultArtifactCandidate
+from pulsara_agent.message import (
+    ToolResultArtifactRef,
+    ToolResultPreviewMetadata,
+    ToolResultState,
+)
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    freeze_json,
+    thaw_json,
+)
+from pulsara_agent.tools.base import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolResultArtifactCandidate,
+)
 
 
 DEFAULT_TOOL_ARTIFACT_THRESHOLD_BYTES = 8_000
@@ -24,7 +40,6 @@ DEFAULT_LARGE_PREVIEW_CHARS = 8_000
 DEFAULT_HUGE_OUTPUT_CHARS = 200_000
 DEFAULT_HUGE_PREVIEW_CHARS = 4_000
 DEFAULT_STREAMING_LIVE_HEAD_CAP_CHARS = 2_600
-DEFAULT_TOOL_RESULT_MESSAGE_CONTEXT_CHARS = 36_000
 _HEAD_RATIO = 0.65
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
@@ -37,12 +52,10 @@ class ToolResultArtifactOptions:
     huge_output_chars: int = DEFAULT_HUGE_OUTPUT_CHARS
     huge_preview_chars: int = DEFAULT_HUGE_PREVIEW_CHARS
     streaming_live_head_cap_chars: int = DEFAULT_STREAMING_LIVE_HEAD_CAP_CHARS
-    tool_result_message_context_chars: int = DEFAULT_TOOL_RESULT_MESSAGE_CONTEXT_CHARS
 
     def __post_init__(self) -> None:
         effective_archive_threshold = self.effective_archive_threshold_bytes
         effective_large_preview = self.effective_large_preview_chars
-        effective_message_context = self.effective_tool_result_message_context_chars
         if effective_archive_threshold < 1:
             raise ValueError("archive_threshold_bytes must be >= 1")
         if self.complete_preview_body_chars < 1:
@@ -55,10 +68,6 @@ class ToolResultArtifactOptions:
             raise ValueError("huge_preview_chars must be >= 1")
         if self.streaming_live_head_cap_chars < 1:
             raise ValueError("streaming_live_head_cap_chars must be >= 1")
-        if effective_message_context < 1:
-            raise ValueError("tool_result_message_context_chars must be >= 1")
-        if effective_archive_threshold > effective_message_context:
-            raise ValueError("archive_threshold_bytes must be <= tool_result_message_context_chars")
 
     @property
     def effective_archive_threshold_bytes(self) -> int:
@@ -67,11 +76,6 @@ class ToolResultArtifactOptions:
     @property
     def effective_large_preview_chars(self) -> int:
         return self.large_preview_chars
-
-    @property
-    def effective_tool_result_message_context_chars(self) -> int:
-        return self.tool_result_message_context_chars
-
 
 @dataclass(frozen=True, slots=True)
 class AdaptivePreview:
@@ -84,7 +88,9 @@ class AdaptivePreview:
     visible_tail_chars: int
     omitted_middle_chars: int
 
-    def to_metadata(self, *, artifact_id: str | None = None) -> ToolResultPreviewMetadata:
+    def to_metadata(
+        self, *, artifact_id: str | None = None
+    ) -> ToolResultPreviewMetadata:
         read_more: dict[str, object] = {
             "tool": "artifact_read",
             "suggested_offset_chars": self.visible_head_chars,
@@ -126,7 +132,9 @@ class ToolResultArtifactRecord:
 class ToolResultArtifactIndex(Protocol):
     def put(self, record: ToolResultArtifactRecord) -> None: ...
 
-    def get_for_session(self, artifact_id: str, *, session_id: str) -> ToolResultArtifactRecord | None: ...
+    def get_for_session(
+        self, artifact_id: str, *, session_id: str
+    ) -> ToolResultArtifactRecord | None: ...
 
 
 @dataclass(slots=True)
@@ -136,10 +144,14 @@ class InMemoryToolResultArtifactIndex:
     def put(self, record: ToolResultArtifactRecord) -> None:
         existing = self.records.get(record.id)
         if existing is not None and existing != record:
-            raise ValueError(f"tool result artifact record {record.id!r} already exists with different data")
+            raise ValueError(
+                f"tool result artifact record {record.id!r} already exists with different data"
+            )
         self.records[record.id] = record
 
-    def get_for_session(self, artifact_id: str, *, session_id: str) -> ToolResultArtifactRecord | None:
+    def get_for_session(
+        self, artifact_id: str, *, session_id: str
+    ) -> ToolResultArtifactRecord | None:
         matches = [
             record
             for record in self.records.values()
@@ -147,7 +159,9 @@ class InMemoryToolResultArtifactIndex:
         ]
         if not matches:
             return None
-        matches.sort(key=lambda record: (record.run_id, record.tool_call_id, record.ordinal))
+        matches.sort(
+            key=lambda record: (record.run_id, record.tool_call_id, record.ordinal)
+        )
         return matches[0]
 
 
@@ -205,7 +219,9 @@ class PostgresToolResultArtifactIndex:
                     ),
                 )
 
-    def get_for_session(self, artifact_id: str, *, session_id: str) -> ToolResultArtifactRecord | None:
+    def get_for_session(
+        self, artifact_id: str, *, session_id: str
+    ) -> ToolResultArtifactRecord | None:
         with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -242,7 +258,9 @@ class ToolResultArtifactService:
     archive: ArtifactStore
     index: ToolResultArtifactIndex
     runtime_session_id: str
-    options: ToolResultArtifactOptions = field(default_factory=ToolResultArtifactOptions)
+    options: ToolResultArtifactOptions = field(
+        default_factory=ToolResultArtifactOptions
+    )
 
     def process_result(
         self,
@@ -252,7 +270,11 @@ class ToolResultArtifactService:
         tool_call: ToolCall,
         descriptor: CapabilityDescriptor | None = None,
     ) -> tuple[ToolExecutionResult, tuple[ToolResultArtifactRef, ...]]:
-        artifact_mode = descriptor.artifact_mode if descriptor is not None else CapabilityArtifactMode.DEFAULT
+        artifact_mode = (
+            descriptor.artifact_mode
+            if descriptor is not None
+            else CapabilityArtifactMode.DEFAULT
+        )
         if result.tool_name == "artifact_read":
             return result, self._artifact_read_source_refs(result, tool_call)
 
@@ -265,11 +287,21 @@ class ToolResultArtifactService:
         options = _options_for_tool_call(self.options, tool_call)
         candidates = tuple(result.artifact_candidates)
         processed_output = result.output
-        force_archive = artifact_mode in {CapabilityArtifactMode.ALWAYS, CapabilityArtifactMode.STRUCTURED_JSON}
+        processed_display_payload = result.display_payload
+        force_archive = artifact_mode in {
+            CapabilityArtifactMode.ALWAYS,
+            CapabilityArtifactMode.STRUCTURED_JSON,
+        }
         if not candidates and (
-            force_archive or len(result.output.encode("utf-8")) > options.effective_archive_threshold_bytes
+            force_archive
+            or len(result.output.encode("utf-8"))
+            > options.effective_archive_threshold_bytes
         ):
-            media_type = "application/json" if artifact_mode is CapabilityArtifactMode.STRUCTURED_JSON else "text/plain; charset=utf-8"
+            media_type = (
+                "application/json"
+                if artifact_mode is CapabilityArtifactMode.STRUCTURED_JSON
+                else "text/plain; charset=utf-8"
+            )
             candidates = (
                 ToolResultArtifactCandidate(
                     role="output",
@@ -291,7 +323,10 @@ class ToolResultArtifactService:
         refs: list[ToolResultArtifactRef] = []
         for ordinal, candidate in enumerate(candidates):
             size_bytes = _candidate_size_bytes(candidate)
-            if not force_archive and size_bytes <= options.effective_archive_threshold_bytes:
+            if (
+                not force_archive
+                and size_bytes <= options.effective_archive_threshold_bytes
+            ):
                 continue
             refs.append(
                 self._archive_candidate(
@@ -305,15 +340,26 @@ class ToolResultArtifactService:
             )
 
         if refs:
-            final_preview = next((ref.preview for ref in refs if ref.preview is not None), None)
-            preview_for_output = final_preview or (primary_preview.to_metadata() if primary_preview is not None else None)
+            final_preview = next(
+                (ref.preview for ref in refs if ref.preview is not None), None
+            )
+            preview_for_output = final_preview or (
+                primary_preview.to_metadata() if primary_preview is not None else None
+            )
             if primary_preview is not None:
-                processed_output = _rewrite_result_output_with_preview(result, primary_preview, preview_for_output)
+                processed_output, processed_display_payload = (
+                    _rewrite_result_output_with_preview(
+                        result, primary_preview, preview_for_output
+                    )
+                )
             elif len(processed_output) > options.effective_large_preview_chars:
                 fallback_preview = build_adaptive_preview(processed_output, options)
                 processed_output = fallback_preview.text
 
-        if processed_output == result.output:
+        if (
+            processed_output == result.output
+            and processed_display_payload == result.display_payload
+        ):
             processed = result
         else:
             processed = ToolExecutionResult(
@@ -323,6 +369,10 @@ class ToolResultArtifactService:
                 output=processed_output,
                 metadata=result.metadata,
                 artifact_candidates=result.artifact_candidates,
+                display_payload=processed_display_payload,
+                semantics_input=result.semantics_input,
+                terminal_payload_timing=result.terminal_payload_timing,
+                semantics=result.semantics,
             )
         return processed, tuple(refs)
 
@@ -346,7 +396,9 @@ class ToolResultArtifactService:
         artifact_id = str(tool_call.arguments.get("artifact_id") or "")
         if not artifact_id:
             return ()
-        record = self.index.get_for_session(artifact_id, session_id=self.runtime_session_id)
+        record = self.index.get_for_session(
+            artifact_id, session_id=self.runtime_session_id
+        )
         if record is None:
             return ()
         return (_artifact_ref_from_record(record),)
@@ -390,7 +442,9 @@ class ToolResultArtifactService:
                 media_type=candidate.media_type,
                 metadata=metadata,
             )
-        final_preview = preview.to_metadata(artifact_id=write.id) if preview is not None else None
+        final_preview = (
+            preview.to_metadata(artifact_id=write.id) if preview is not None else None
+        )
         record_metadata = dict(metadata)
         if final_preview is not None:
             record_metadata["preview"] = final_preview.model_dump()
@@ -430,7 +484,9 @@ def _candidate_size_bytes(candidate: ToolResultArtifactCandidate) -> int:
     return len(candidate.data)
 
 
-def _artifact_ref_from_record(record: ToolResultArtifactRecord) -> ToolResultArtifactRef:
+def _artifact_ref_from_record(
+    record: ToolResultArtifactRecord,
+) -> ToolResultArtifactRef:
     preview: ToolResultPreviewMetadata | None = None
     raw_preview = record.metadata.get("preview")
     if isinstance(raw_preview, ToolResultPreviewMetadata):
@@ -451,7 +507,9 @@ def _artifact_ref_from_record(record: ToolResultArtifactRecord) -> ToolResultArt
     )
 
 
-def _options_for_tool_call(options: ToolResultArtifactOptions, tool_call: ToolCall) -> ToolResultArtifactOptions:
+def _options_for_tool_call(
+    options: ToolResultArtifactOptions, tool_call: ToolCall
+) -> ToolResultArtifactOptions:
     if tool_call.name not in {"terminal", "terminal_process"}:
         return options
     cap = effective_terminal_output_cap(tool_call.arguments.get("max_output_chars"))
@@ -465,17 +523,19 @@ def _options_for_tool_call(options: ToolResultArtifactOptions, tool_call: ToolCa
         huge_output_chars=options.huge_output_chars,
         huge_preview_chars=huge_preview,
         streaming_live_head_cap_chars=1,
-        tool_result_message_context_chars=options.effective_tool_result_message_context_chars,
     )
-    huge_head_cap = build_adaptive_preview("x" * (options.huge_output_chars + 1), streaming_options_seed).visible_head_chars
+    huge_head_cap = build_adaptive_preview(
+        "x" * (options.huge_output_chars + 1), streaming_options_seed
+    ).visible_head_chars
     return ToolResultArtifactOptions(
         archive_threshold_bytes=options.effective_archive_threshold_bytes,
         complete_preview_body_chars=min(options.complete_preview_body_chars, cap),
         large_preview_chars=min(options.effective_large_preview_chars, cap),
         huge_output_chars=options.huge_output_chars,
         huge_preview_chars=huge_preview,
-        streaming_live_head_cap_chars=max(1, min(options.streaming_live_head_cap_chars, huge_head_cap)),
-        tool_result_message_context_chars=options.effective_tool_result_message_context_chars,
+        streaming_live_head_cap_chars=max(
+            1, min(options.streaming_live_head_cap_chars, huge_head_cap)
+        ),
     )
 
 
@@ -484,12 +544,17 @@ def effective_terminal_output_cap(raw: object) -> int | None:
         return None
     if raw <= 0:
         return None
-    from pulsara_agent.tools.builtins.schemas import DEFAULT_MAX_OUTPUT_CHARS, MIN_TERMINAL_OUTPUT_CHARS
+    from pulsara_agent.tools.builtins.schemas import (
+        DEFAULT_MAX_OUTPUT_CHARS,
+        MIN_TERMINAL_OUTPUT_CHARS,
+    )
 
     return max(MIN_TERMINAL_OUTPUT_CHARS, min(raw, DEFAULT_MAX_OUTPUT_CHARS))
 
 
-def build_adaptive_preview(text: str, options: ToolResultArtifactOptions) -> AdaptivePreview:
+def build_adaptive_preview(
+    text: str, options: ToolResultArtifactOptions
+) -> AdaptivePreview:
     original_chars = len(text)
     original_bytes = len(text.encode("utf-8"))
     if original_chars <= options.complete_preview_body_chars:
@@ -530,10 +595,14 @@ def build_adaptive_preview(text: str, options: ToolResultArtifactOptions) -> Ada
         )
     omitted = max(0, original_chars - head_chars - tail_chars)
     notice = _preview_truncation_notice(omitted, head_chars)
-    text_preview = text[:head_chars] + notice + (text[-tail_chars:] if tail_chars else "")
+    text_preview = (
+        text[:head_chars] + notice + (text[-tail_chars:] if tail_chars else "")
+    )
     return AdaptivePreview(
         text=text_preview,
-        policy="head_tail_huge" if original_chars > options.huge_output_chars else "head_tail",
+        policy="head_tail_huge"
+        if original_chars > options.huge_output_chars
+        else "head_tail",
         original_chars=original_chars,
         original_bytes=original_bytes,
         preview_chars=len(text_preview),
@@ -551,7 +620,9 @@ def _preview_truncation_notice(omitted: int, suggested_offset_chars: int) -> str
     )
 
 
-def _primary_preview_candidate_ordinal(candidates: tuple[ToolResultArtifactCandidate, ...]) -> int | None:
+def _primary_preview_candidate_ordinal(
+    candidates: tuple[ToolResultArtifactCandidate, ...],
+) -> int | None:
     preferred_roles = {"combined_output", "output"}
     for idx, candidate in enumerate(candidates):
         if candidate.text is not None and candidate.role in preferred_roles:
@@ -566,17 +637,18 @@ def _rewrite_result_output_with_preview(
     result: ToolExecutionResult,
     preview: AdaptivePreview,
     metadata: ToolResultPreviewMetadata | None,
-) -> str:
+) -> tuple[str, FrozenJsonObjectFact | None]:
     if result.tool_name not in {"terminal", "terminal_process"}:
-        return preview.text
-    try:
-        payload = json.loads(result.output)
-    except json.JSONDecodeError:
-        return preview.text
-    if not isinstance(payload, dict):
-        return preview.text
+        return preview.text, result.display_payload
+    if result.display_payload is None:
+        raise ValueError(
+            "terminal artifact preview requires typed display payload; JSON inference is forbidden"
+        )
+    payload = thaw_json(result.display_payload)
     payload["output"] = preview.text
-    payload["truncated"] = preview.omitted_middle_chars > 0 or bool(payload.get("truncated"))
+    payload["truncated"] = preview.omitted_middle_chars > 0 or bool(
+        payload.get("truncated")
+    )
     payload["preview_policy"] = preview.policy
     payload["output_preview_chars"] = preview.preview_chars
     payload["output_original_chars"] = preview.original_chars
@@ -586,6 +658,13 @@ def _rewrite_result_output_with_preview(
     payload["visible_tail_chars"] = preview.visible_tail_chars
     if metadata is not None:
         payload["preview"] = metadata.model_dump()
+    frozen = freeze_json(payload)
+    if not isinstance(frozen, FrozenJsonObjectFact):
+        raise AssertionError("rewritten terminal display payload must be an object")
+    return _json_display_text(payload), frozen
+
+
+def _json_display_text(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 

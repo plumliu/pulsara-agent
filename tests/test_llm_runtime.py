@@ -1,3 +1,6 @@
+import asyncio
+from pathlib import Path
+
 import pytest
 
 from pulsara_agent.event import (
@@ -8,6 +11,8 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     ReplyEndEvent,
     ReplyStartEvent,
+    RolloutBudgetReservationCreatedEvent,
+    RolloutBudgetReservationSettledEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -46,7 +51,10 @@ from tests.support import (
     test_llm_config,
     test_llm_context,
     test_model_limits,
+    make_test_run_execution_activation,
 )
+from tests.support.runtime_session import in_memory_runtime_session
+from tests.conftest import open_test_root_rollout_run
 from pulsara_agent.llm.factory import build_llm_runtime
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
@@ -57,11 +65,33 @@ from pulsara_agent.llm.provider import (
     ThinkingProfile,
     ThinkingReplayPolicy,
 )
-from pulsara_agent.llm.registry import LLMTransportRegistry
+from pulsara_agent.llm.registry import (
+    LLMTransportBindingUntrusted,
+    LLMTransportRegistry,
+)
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.llm.runtime import LLMRuntime
+from pulsara_agent.llm.commit import (
+    ModelStreamCommitContractError,
+    RuntimeSessionModelStreamEventCommitPort,
+)
+from pulsara_agent.llm.control import RunModelCallControlOwner
+from pulsara_agent.llm.control import ModelCallControlResolutionError
+from pulsara_agent.event_log import (
+    EventIdConflict,
+    FrozenEventWriteCandidate,
+    decode_event_write_candidate,
+)
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
+from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
 from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.model_call import (
+    ModelCallControlDisposition,
+    ModelCallPurpose,
+    RunTerminationIntentAttributionFact,
+    sha256_fingerprint,
+)
+from pulsara_agent.runtime.state import LoopState
 
 
 EVENT_CONTEXT = EventContext(
@@ -73,20 +103,72 @@ async def no_retry_sleep(_delay: float) -> None:
     return None
 
 
+def _start_test_stream(
+    runtime: LLMRuntime,
+    *,
+    call,
+    context: LLMContext,
+    event_context: EventContext,
+    runtime_session,
+    run_execution_activation=None,
+    commit_port=None,
+):
+    lifecycle_kind = (
+        "main_assistant_reply"
+        if context.model_call_index is not None
+        else "direct_internal_call"
+    )
+    if lifecycle_kind == "main_assistant_reply":
+        open_test_root_rollout_run(
+            runtime_session,
+            event_context=event_context,
+            model_target=call.target.fact,
+        )
+    bundle = prepare_model_lifecycle_start_bundle(
+        call=call,
+        context=context,
+        event_context=event_context,
+        runtime_session=runtime_session,
+        lifecycle_kind=lifecycle_kind,
+        run_execution_activation=run_execution_activation,
+    )
+    return runtime.start_stream(
+        call=call,
+        context=context,
+        event_context=event_context,
+        start_bundle=bundle,
+        commit_port=(
+            commit_port
+            if commit_port is not None
+            else RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=runtime_session,
+                state=None,
+            )
+        ),
+        execution_registry=runtime_session.model_stream_execution_registry,
+    )
+
+
 async def collect_events(runtime: LLMRuntime, role: ModelRole, context: LLMContext):
     target = runtime.resolve_target(role=role, requested_options=None)
     call = runtime.resolve_call(
         target=target, purpose=ModelCallPurpose.AGENT_MODEL_LOOP
     )
     context = bind_test_context(call, context)
-    return [
-        event
-        async for event in runtime.stream(
-            call=call,
-            context=context,
-            event_context=EVENT_CONTEXT,
-        )
-    ]
+    session = in_memory_runtime_session(Path.cwd())
+    handle = _start_test_stream(runtime,
+        call=call,
+        context=context,
+        event_context=EVENT_CONTEXT,
+        runtime_session=session,
+        run_execution_activation=(
+            make_test_run_execution_activation()
+            if context.model_call_index is not None
+            else None
+        ),
+    )
+    completion = await handle.wait_completed()
+    return list(completion.committed_events)
 
 
 async def collect_transport_events(transport, config, role, context):
@@ -99,6 +181,77 @@ async def collect_transport_events(transport, config, role, context):
             event_context=EVENT_CONTEXT,
         )
     ]
+
+
+async def _completed_control_fixture(tmp_path):
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api="mock",
+    )
+    registry = LLMTransportRegistry()
+    registry.register(MockTransport(text="control result"))
+    runtime = LLMRuntime(config=config, registry=registry)
+    session = in_memory_runtime_session(tmp_path)
+    target = runtime.resolve_target(role=ModelRole.FLASH)
+    call = runtime.resolve_call(
+        target=target,
+        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+    )
+    context = bind_test_context(
+        call,
+        test_llm_context(
+            messages=(LLMMessage.user("Say hi"),),
+            context_id="context:control",
+            model_call_index=1,
+        ),
+    )
+    activation = make_test_run_execution_activation()
+    handle = _start_test_stream(runtime,
+        call=call,
+        context=context,
+        event_context=EVENT_CONTEXT,
+        runtime_session=session,
+        run_execution_activation=activation,
+    )
+    result = await handle.wait_result()
+    owner = RunModelCallControlOwner(
+        run_id=EVENT_CONTEXT.run_id,
+        activation=activation,
+        segment_id="segment:test:1",
+        segment_generation=activation.segment_generation,
+    )
+    return (
+        session,
+        result,
+        owner,
+        LoopState(
+            session_id=session.runtime_session_id,
+            run_id=EVENT_CONTEXT.run_id,
+        ),
+        activation,
+    )
+
+
+def _termination_intent(activation) -> RunTerminationIntentAttributionFact:
+    payload = {
+        "schema_version": "run_termination_intent_attribution.v1",
+        "intent_id": "termination-intent:test",
+        "kind": "user_stop",
+        "requested_at_utc": "2026-07-14T00:00:00Z",
+        "requester_id": "host-session:test",
+        "target_run_execution_activation_fingerprint": (
+            activation.activation_fingerprint
+        ),
+    }
+    return RunTerminationIntentAttributionFact(
+        **payload,
+        attribution_fingerprint=sha256_fingerprint(
+            "run-termination-intent-attribution:v1", payload
+        ),
+    )
 
 
 def payload_call(config, *, role=ModelRole.PRO, options=None, api="responses"):
@@ -155,17 +308,1707 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
     )
 
     assert isinstance(events[0], ReplyStartEvent)
-    assert isinstance(events[1], ModelCallStartEvent)
-    assert events[1].resolved_call.target.model_id == "flash"
-    assert events[1].context_id == "context:test"
-    assert events[1].model_call_index == 3
-    assert isinstance(events[2], TextBlockStartEvent)
-    assert isinstance(events[3], TextBlockDeltaEvent)
-    assert events[3].block_id == events[2].block_id
-    assert events[3].delta == "hello"
-    assert isinstance(events[4], TextBlockEndEvent)
-    assert isinstance(events[5], ModelCallEndEvent)
-    assert isinstance(events[6], ReplyEndEvent)
+    assert isinstance(events[1], RolloutBudgetReservationCreatedEvent)
+    assert isinstance(events[2], ModelCallStartEvent)
+    assert events[2].resolved_call.target.model_id == "flash"
+    assert events[2].context_id == "context:test"
+    assert events[2].model_call_index == 3
+    assert isinstance(events[3], TextBlockStartEvent)
+    assert isinstance(events[4], TextBlockDeltaEvent)
+    assert events[4].block_id == events[3].block_id
+    assert events[4].delta == "hello"
+    assert isinstance(events[5], TextBlockEndEvent)
+    assert isinstance(events[6], ModelCallEndEvent)
+    assert isinstance(events[7], RolloutBudgetReservationSettledEvent)
+    assert isinstance(events[8], ReplyEndEvent)
+
+
+def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -> None:
+    class BurstTransport:
+        api = "mock"
+        binding_id = "test.burst"
+        contract_version = "v1"
+
+        async def stream(self, *, call, context, event_context):
+            del call, context
+            block_id = "text:burst"
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id=block_id
+            )
+            for _ in range(40):
+                yield TextBlockDeltaEvent(
+                    **event_context.event_fields(), block_id=block_id, delta="x"
+                )
+            yield TextBlockEndEvent(
+                **event_context.event_fields(), block_id=block_id
+            )
+
+    class RecordingCommitPort(RuntimeSessionModelStreamEventCommitPort):
+        def __init__(self, *, runtime_session):
+            super().__init__(runtime_session=runtime_session, state=None)
+            self.semantic_batch_sizes: list[int] = []
+
+        async def commit_semantic(self, candidates, *, guard, live_cursor):
+            self.semantic_batch_sizes.append(len(candidates))
+            return await super().commit_semantic(
+                candidates,
+                guard=guard,
+                live_cursor=live_cursor,
+            )
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(BurstTransport())
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        port = RecordingCommitPort(runtime_session=session)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:semantic-batch",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+            commit_port=port,
+        )
+
+        completion = await handle.wait_completed()
+
+        assert completion.terminal_outcome == "completed"
+        assert sum(port.semantic_batch_sizes) == 42
+        assert len(port.semantic_batch_sizes) < 10
+        assert max(port.semantic_batch_sizes) > 1
+
+    asyncio.run(scenario())
+
+
+def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> None:
+    async def scenario() -> None:
+        release = asyncio.Event()
+        delta_committed = asyncio.Event()
+
+        class StallingTransport:
+            api = "mock"
+            binding_id = "test.stalling"
+            contract_version = "v1"
+
+            async def stream(self, *, call, context, event_context):
+                del call, context
+                block_id = "text:stall"
+                yield TextBlockStartEvent(
+                    **event_context.event_fields(), block_id=block_id
+                )
+                yield TextBlockDeltaEvent(
+                    **event_context.event_fields(), block_id=block_id, delta="x"
+                )
+                await release.wait()
+                yield TextBlockEndEvent(
+                    **event_context.event_fields(), block_id=block_id
+                )
+
+        class ObservingCommitPort(RuntimeSessionModelStreamEventCommitPort):
+            async def commit_semantic(self, candidates, *, guard, live_cursor):
+                decoded = tuple(
+                    decode_event_write_candidate(candidate)
+                    for candidate in candidates
+                )
+                result = await super().commit_semantic(
+                    candidates,
+                    guard=guard,
+                    live_cursor=live_cursor,
+                )
+                if any(isinstance(event, TextBlockDeltaEvent) for event in decoded):
+                    delta_committed.set()
+                return result
+
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(StallingTransport())
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:semantic-age-deadline",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+            commit_port=ObservingCommitPort(
+                runtime_session=session,
+                state=None,
+            ),
+        )
+        await asyncio.wait_for(delta_committed.wait(), timeout=0.5)
+        assert handle.completion.done() is False
+        release.set()
+        completion = await asyncio.wait_for(handle.wait_completed(), timeout=1)
+        assert completion.terminal_outcome == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_session_owned_model_stream_persists_before_notifying(tmp_path) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="owned"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:owned",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        observed = [event async for event in handle.subscribe()]
+        completion = await handle.wait_completed()
+
+        assert completion.terminal_outcome == "completed"
+        all_events = tuple(session.event_log.iter())
+        assert all_events[-len(completion.committed_events) :] == (
+            completion.committed_events
+        )
+        assert tuple(observed) == completion.committed_events
+        assert [event.sequence for event in observed] == list(
+            range(observed[0].sequence, observed[-1].sequence + 1)
+        )
+
+    asyncio.run(scenario())
+
+
+def test_main_model_start_freezes_event_safe_run_activation_in_recovery_plan(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="owned"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:activation",
+                model_call_index=1,
+            ),
+        )
+        activation = make_test_run_execution_activation()
+        open_test_root_rollout_run(
+            session,
+            event_context=EVENT_CONTEXT,
+            model_target=call.target.fact,
+        )
+        bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            lifecycle_kind="main_assistant_reply",
+            run_execution_activation=activation,
+        )
+
+        assert bundle.recovery_plan.run_execution_activation == activation
+        assert bundle.recovery_plan.control_downstream_predicate_contract is not None
+        assert bundle.rollout_accounting_mode == "root_account"
+        assert bundle.expected_rollout_account_state_fingerprint is not None
+        assert all(
+            isinstance(candidate, FrozenEventWriteCandidate)
+            for candidate in bundle.companion_candidates
+        )
+        assert [
+            type(decode_event_write_candidate(candidate))
+            for candidate in bundle.companion_candidates
+        ] == [
+            ReplyStartEvent,
+            RolloutBudgetReservationCreatedEvent,
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_direct_model_start_has_no_reply_reservation_or_run_activation(tmp_path) -> None:
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="direct"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.MEMORY_REFLECTION,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Reflect"),),
+                context_id="context:direct",
+                model_call_index=None,
+            ),
+        )
+        bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            lifecycle_kind="direct_internal_call",
+        )
+        handle = runtime.start_stream(
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            start_bundle=bundle,
+            commit_port=RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=session,
+                state=None,
+            ),
+            execution_registry=session.model_stream_execution_registry,
+        )
+        completion = await handle.wait_completed()
+
+        assert bundle.companion_candidates == ()
+        assert bundle.rollout_accounting_mode == "not_rollout_accounted"
+        assert bundle.recovery_plan.run_execution_activation is None
+        assert bundle.recovery_plan.control_downstream_predicate_contract is None
+        assert not any(
+            isinstance(
+                event,
+                (
+                    ReplyStartEvent,
+                    ReplyEndEvent,
+                    RolloutBudgetReservationCreatedEvent,
+                    RolloutBudgetReservationSettledEvent,
+                ),
+            )
+            for event in completion.committed_events
+        )
+
+    asyncio.run(scenario())
+
+
+def test_model_call_start_rejects_stale_rollout_account_fingerprint(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="must not dispatch"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:stale-account",
+                model_call_index=1,
+            ),
+        )
+        activation = make_test_run_execution_activation()
+        open_test_root_rollout_run(
+            session,
+            event_context=EVENT_CONTEXT,
+            model_target=call.target.fact,
+        )
+        bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            lifecycle_kind="main_assistant_reply",
+            run_execution_activation=activation,
+        )
+        await session.write_event(
+            RunErrorEvent(
+                **EVENT_CONTEXT.event_fields(),
+                message="synthetic concurrent durable fact",
+                code="test_rollout_state_drift",
+            )
+        )
+        handle = runtime.start_stream(
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            start_bundle=bundle,
+            commit_port=RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=session,
+                state=None,
+            ),
+            execution_registry=session.model_stream_execution_registry,
+        )
+
+        with pytest.raises(
+            ModelStreamCommitContractError,
+            match="state changed after preparation",
+        ):
+            await handle.wait_completed()
+        assert not any(
+            isinstance(event, ModelCallStartEvent)
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_detaching_model_stream_observer_does_not_cancel_owner(tmp_path) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="continues"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:detach",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        observer = handle.subscribe()
+        closed = await observer.detach()
+        completion = await handle.wait_completed()
+
+        assert closed.close_reason == "detached_by_caller"
+        assert completion.terminal_outcome == "completed"
+        assert any(
+            isinstance(event, ModelCallEndEvent)
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_late_subscription_catches_up_from_model_start_without_notification_gap(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="late observer"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:late-observer",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        completion = await handle.wait_completed()
+
+        observer = handle.subscribe()
+        observed = [event async for event in observer]
+        closed = await observer.wait_closed()
+
+        assert tuple(observed) == completion.committed_events
+        assert closed.close_reason == "terminal_observed"
+        assert closed.last_confirmed_sequence == observed[-1].sequence
+
+    asyncio.run(scenario())
+
+
+def test_subscription_break_detaches_without_stopping_transport_or_terminalization(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="owner continues"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:break-observer",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+
+        observer = handle.subscribe()
+        first_event = None
+        async with observer:
+            async for event in observer:
+                first_event = event
+                break
+        closed = await observer.wait_closed()
+        completion = await handle.wait_completed()
+
+        assert first_event is not None
+        assert closed.close_reason == "detached_by_caller"
+        assert closed.last_confirmed_sequence == first_event.sequence
+        assert completion.terminal_outcome == "completed"
+        assert any(
+            isinstance(event, ModelCallEndEvent)
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_subscription_task_cancel_detaches_without_cancelling_stream_worker(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="owner survives subscriber cancel"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:cancel-observer-task",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        observer = handle.subscribe()
+        first_seen = asyncio.Event()
+        hold_subscriber = asyncio.Event()
+
+        async def consume() -> None:
+            async with observer:
+                await anext(observer)
+                first_seen.set()
+                await hold_subscriber.wait()
+
+        consumer = asyncio.create_task(consume())
+        await first_seen.wait()
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+        closed = await observer.wait_closed()
+        completion = await handle.wait_completed()
+        result = await handle.wait_result()
+
+        assert closed.close_reason == "detached_by_caller"
+        assert completion.terminal_outcome == "completed"
+        assert result.terminal_outcome == "completed"
+        assert any(
+            isinstance(event, ModelCallEndEvent)
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_provider_error_terminal_waits_for_inner_physical_drain(tmp_path) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+
+        class FailingIterator:
+            def __init__(self) -> None:
+                self._delivered = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._delivered:
+                    raise StopAsyncIteration
+                self._delivered = True
+                return RunErrorEvent(
+                    **EVENT_CONTEXT.event_fields(),
+                    code="provider_failed",
+                    message="provider unavailable",
+                )
+
+            async def aclose(self) -> None:
+                close_started.set()
+                await allow_close.wait()
+
+        class RawFailureTransport:
+            api = "mock"
+            binding_id = "test.raw-failure"
+            contract_version = "v1"
+
+            def stream(self, **_kwargs):
+                return FailingIterator()
+
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(RawFailureTransport())
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        call = runtime.resolve_call(
+            target=runtime.resolve_target(role=ModelRole.FLASH),
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("fail"),),
+                context_id="context:provider-error-drain",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+
+        await close_started.wait()
+        assert not any(
+            isinstance(event, ModelCallEndEvent)
+            for event in session.event_log.iter()
+        )
+
+        allow_close.set()
+        completion = await handle.wait_completed()
+
+        assert completion.terminal_outcome == "provider_error"
+        assert any(
+            isinstance(event, ModelCallEndEvent)
+            and event.outcome == "provider_error"
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_physical_completion_blocked_untrusted_preserves_owner_and_forbids_terminal_commit(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        class FailingIterator:
+            def __init__(self) -> None:
+                self._delivered = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._delivered:
+                    raise StopAsyncIteration
+                self._delivered = True
+                return RunErrorEvent(
+                    **EVENT_CONTEXT.event_fields(),
+                    code="provider_failed",
+                    message="provider unavailable",
+                )
+
+            async def aclose(self) -> None:
+                raise OSError("raw close failure")
+
+        class RawFailureTransport:
+            api = "mock"
+            binding_id = "test.raw-blocked-drain"
+            contract_version = "v1"
+
+            def stream(self, **_kwargs):
+                return FailingIterator()
+
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(RawFailureTransport())
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        call = runtime.resolve_call(
+            target=runtime.resolve_target(role=ModelRole.FLASH),
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("fail"),),
+                context_id="context:provider-error-blocked-drain",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+
+        completion = await handle.wait_completed()
+
+        assert completion.terminal_outcome == "reconciliation_blocked"
+        assert session.reconciliation_required is True
+        assert session.model_stream_execution_registry.active_handle_count() == 1
+        assert not any(
+            isinstance(event, ModelCallEndEvent)
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_unexpected_public_wrapper_exception_before_error_uses_constant_runtime_containment_and_latches_binding(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        transport = SanitizingLLMTransport(MockTransport(text="unused"))
+        registry.register(transport)
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        call = runtime.resolve_call(
+            target=runtime.resolve_target(role=ModelRole.FLASH),
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("fail"),),
+                context_id="context:public-wrapper-fault",
+                model_call_index=1,
+            ),
+        )
+
+        def fail_open_stream(*_args, **_kwargs):
+            raise RuntimeError("secret-token-should-never-be-retained")
+
+        monkeypatch.setattr(transport, "open_stream", fail_open_stream)
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+
+        completion = await handle.wait_completed()
+        result = await handle.wait_result()
+        events = tuple(session.event_log.iter())
+        model_end = next(
+            event for event in events if isinstance(event, ModelCallEndEvent)
+        )
+
+        assert completion.terminal_outcome == "runtime_error"
+        assert completion.diagnostic_code == "public_transport_open_stream_fault"
+        assert result.terminal_outcome == "runtime_error"
+        assert model_end.provider_dispatch_status == "not_started"
+        assert "secret-token" not in repr(events)
+        with pytest.raises(LLMTransportBindingUntrusted):
+            runtime.resolve_target(role=ModelRole.FLASH)
+
+    asyncio.run(scenario())
+
+
+def test_control_disposition_publication_after_commit_folds_full_before_permit(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        session, result, owner, state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        event_log_type = type(session.event_log)
+        original_extend = event_log_type.extend
+
+        def commit_then_cancel(self, events, *args, **kwargs):
+            original_extend(self, events, *args, **kwargs)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(event_log_type, "extend", commit_then_cancel)
+        resolution = await owner.resolve_completed_call(
+            result=result,
+            model_call_index=1,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            state=state,
+        )
+
+        assert resolution.accepted_permit is not None
+        assert await owner.permit_is_active(resolution.accepted_permit)
+        durable = tuple(
+            event
+            for event in session.event_log.iter()
+            if event.type is EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
+        )
+        assert durable == (resolution.disposition_event,)
+
+    asyncio.run(scenario())
+
+
+def test_control_disposition_observer_failure_does_not_revoke_durable_winner_or_permit(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        session, result, owner, state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+
+        class FailingObserver:
+            async def on_published_event(self, _published) -> None:
+                raise RuntimeError("synthetic control observer failure")
+
+        session.publisher.subscribe(FailingObserver())
+        resolution = await owner.resolve_completed_call(
+            result=result,
+            model_call_index=1,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            state=state,
+        )
+        for _ in range(20):
+            if session.publisher.errors:
+                break
+            await asyncio.sleep(0)
+
+        assert session.publisher.errors
+        assert resolution.accepted_permit is not None
+        assert await owner.permit_is_active(resolution.accepted_permit)
+        assert resolution.disposition_event in tuple(session.event_log.iter())
+
+    asyncio.run(scenario())
+
+
+def test_control_disposition_reducer_failure_never_installs_execution_permit(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        session, result, owner, state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+
+        def fail_fold(_events) -> None:
+            raise RuntimeError("synthetic control reducer failure")
+
+        session.register_committed_reducer(
+            reducer_id="test:control-fold-failure",
+            through_sequence=session.event_log.next_sequence() - 1,
+            apply_committed=fail_fold,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="reducer state is untrusted",
+        ):
+            await owner.resolve_completed_call(
+                result=result,
+                model_call_index=1,
+                event_context=EVENT_CONTEXT,
+                runtime_session=session,
+                state=state,
+            )
+
+        assert session.reconciliation_required is True
+        assert any(
+            event.type is EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_control_disposition_event_requires_exact_call_result_and_start_activation_join(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        session, result, _owner, state, activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        wrong_context = EventContext(
+            run_id=EVENT_CONTEXT.run_id,
+            turn_id="turn:other",
+            reply_id=EVENT_CONTEXT.reply_id,
+        )
+        owner = RunModelCallControlOwner(
+            run_id=EVENT_CONTEXT.run_id,
+            activation=activation,
+            segment_id="segment:test",
+            segment_generation=activation.segment_generation,
+        )
+
+        with pytest.raises(
+            ModelCallControlResolutionError,
+            match="attribution mismatch",
+        ):
+            await owner.resolve_completed_call(
+                result=result,
+                model_call_index=1,
+                event_context=wrong_context,
+                runtime_session=session,
+                state=state,
+            )
+
+        assert not any(
+            event.type is EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_control_disposition_partial_unknown_or_conflict_latches_and_blocks_execution(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        session, result, owner, state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+
+        def conflict(*_args, **_kwargs):
+            raise EventIdConflict("model-control-conflict")
+
+        session_type = type(session)
+        monkeypatch.setattr(
+            session_type,
+            "commit_reduce_events_from_thread",
+            conflict,
+        )
+        monkeypatch.setattr(
+            session_type,
+            "confirm_and_reduce_event_batch",
+            conflict,
+        )
+
+        with pytest.raises(
+            ModelCallControlResolutionError,
+            match="structurally untrusted",
+        ):
+            await owner.resolve_completed_call(
+                result=result,
+                model_call_index=1,
+                event_context=EVENT_CONTEXT,
+                runtime_session=session,
+                state=state,
+            )
+
+        assert session.reconciliation_required is True
+
+    asyncio.run(scenario())
+
+
+def test_termination_intent_wins_shared_control_lock_and_commits_suppressed_disposition(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        session, result, owner, state, activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        intent = _termination_intent(activation)
+        assert await owner.install_termination_intent(intent) == "installed"
+
+        resolution = await owner.resolve_completed_call(
+            result=result,
+            model_call_index=1,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            state=state,
+        )
+
+        assert resolution.accepted_permit is None
+        assert (
+            resolution.disposition_event.disposition
+            is ModelCallControlDisposition.SUPPRESSED_BY_TERMINATION
+        )
+        assert resolution.disposition_event.termination_intent == intent
+
+    asyncio.run(scenario())
+
+
+def test_accepted_first_then_later_stop_does_not_rewrite_disposition_but_cancels_downstream(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        session, result, owner, state, activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        resolution = await owner.resolve_completed_call(
+            result=result,
+            model_call_index=1,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            state=state,
+        )
+        permit = resolution.accepted_permit
+        assert permit is not None and await owner.permit_is_active(permit)
+
+        await owner.install_termination_intent(_termination_intent(activation))
+
+        assert not await owner.permit_is_active(permit)
+        repeated = await owner.resolve_completed_call(
+            result=result,
+            model_call_index=1,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            state=state,
+        )
+        assert repeated == resolution
+        assert (
+            repeated.disposition_event.disposition
+            is ModelCallControlDisposition.ACCEPTED
+        )
+
+    asyncio.run(scenario())
+
+
+def test_subscription_close_state_records_typed_reason_last_sequence_and_terminal_cursor(
+    tmp_path,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="cursor"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:cursor",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        completion = await handle.wait_completed()
+        after_sequence = completion.committed_events[1].sequence
+        assert after_sequence is not None
+
+        observer = handle.subscribe(after_sequence=after_sequence)
+        observed = [event async for event in observer]
+        closed = await observer.wait_closed()
+        model_end = next(
+            event
+            for event in completion.committed_events
+            if isinstance(event, ModelCallEndEvent)
+        )
+
+        assert observed == [
+            event
+            for event in completion.committed_events
+            if event.sequence is not None and event.sequence > after_sequence
+        ]
+        assert closed.close_reason == "terminal_observed"
+        assert closed.last_confirmed_sequence == observed[-1].sequence
+        assert closed.terminal_sequence == model_end.sequence
+        assert closed.can_resume_from_cursor is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure_phase", ("start", "semantic", "terminal"))
+def test_model_stream_phase_commit_baseexception_confirms_stable_batch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str,
+) -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="stable commit"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        session_type = type(session)
+        original_write = session_type.write_events_from_thread
+        injected = False
+
+        def commit_then_raise(self, events, **kwargs):
+            nonlocal injected
+            result = original_write(self, events, **kwargs)
+            phase = (
+                "start"
+                if any(isinstance(event, ModelCallStartEvent) for event in events)
+                else "terminal"
+                if any(isinstance(event, ModelCallEndEvent) for event in events)
+                else "semantic"
+                if any(
+                    getattr(event, "model_stream_attribution", None) is not None
+                    for event in events
+                )
+                else "other"
+            )
+            if phase == failure_phase and not injected:
+                injected = True
+                raise asyncio.CancelledError(
+                    f"synthetic acknowledgement loss after {phase} commit"
+                )
+            return result
+
+        monkeypatch.setattr(
+            session_type,
+            "write_events_from_thread",
+            commit_then_raise,
+        )
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id=f"context:commit-{failure_phase}",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        completion = await handle.wait_completed()
+
+        assert injected is True
+        assert completion.terminal_outcome == "completed"
+        events = tuple(session.event_log.iter())
+        assert sum(isinstance(event, ModelCallStartEvent) for event in events) == 1
+        assert sum(isinstance(event, ModelCallEndEvent) for event in events) == 1
+        assert tuple(event.sequence for event in events) == tuple(
+            range(1, len(events) + 1)
+        )
+
+    asyncio.run(scenario())
+
+
+def test_model_terminal_precommit_failure_retries_same_provider_outcome(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.runtime.session import EventCommitError
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="provider completed"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        session_type = type(session)
+        original_write = session_type.write_events_from_thread
+        failed_once = False
+
+        def fail_before_terminal_commit(self, events, **kwargs):
+            nonlocal failed_once
+            if not failed_once and any(
+                isinstance(event, ModelCallEndEvent) for event in events
+            ):
+                failed_once = True
+                raise EventCommitError("synthetic terminal pre-commit failure")
+            return original_write(self, events, **kwargs)
+
+        monkeypatch.setattr(
+            session_type,
+            "write_events_from_thread",
+            fail_before_terminal_commit,
+        )
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:stable-terminal-retry",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        completion = await handle.wait_completed()
+
+        assert failed_once is True
+        assert completion.terminal_outcome == "completed"
+        ends = tuple(
+            event
+            for event in session.event_log.iter()
+            if isinstance(event, ModelCallEndEvent)
+        )
+        assert len(ends) == 1
+        assert ends[0].outcome == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_naked_model_worker_cancellation_retains_physical_owner_until_read_exits(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class CancellationResistantTransport:
+            api = "cancel-resistant"
+            binding_id = "test.cancel-resistant"
+            contract_version = "v1"
+
+            async def stream(self, *, call, context, event_context):
+                del call, context
+                started.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                async for event in MockTransport(text="late").stream(
+                    call=None,
+                    context=None,
+                    event_context=event_context,
+                ):
+                    yield event
+
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="cancel-resistant",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(CancellationResistantTransport())
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("wait"),),
+                context_id="context:naked-cancel",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert handle._task is not None
+        handle._task.cancel()
+        await asyncio.sleep(0.02)
+
+        assert handle.completion.done() is False
+        assert handle.has_physical_operations() is True
+        assert session.model_stream_execution_registry.active_handle_count() == 1
+
+        release.set()
+        completion = await asyncio.wait_for(handle.wait_completed(), timeout=1)
+        assert completion.terminal_outcome == "runtime_error"
+        assert handle.has_physical_operations() is False
+
+    asyncio.run(scenario())
+
+
+def test_model_commit_unknown_keeps_stream_owner_and_blocks_close() -> None:
+    import asyncio
+
+    from pulsara_agent.llm.execution import (
+        ModelStreamCompletion,
+        ModelStreamExecutionDrainBlocked,
+        ModelStreamExecutionRegistry,
+    )
+
+    async def scenario() -> None:
+        registry = ModelStreamExecutionRegistry()
+
+        async def blocked_worker(_handle):
+            return ModelStreamCompletion(
+                resolved_model_call_id="model_call:" + "a" * 32,
+                terminal_outcome="reconciliation_blocked",
+                committed_events=(),
+                diagnostic_code="synthetic_commit_outcome_unknown",
+            )
+
+        handle = registry.install_and_start(
+            handle_id="model_stream:blocked",
+            run_id="run:blocked",
+            resolved_model_call_id="model_call:" + "a" * 32,
+            subscription_start_sequence=0,
+            worker=blocked_worker,
+        )
+        completion = await handle.wait_completed()
+        await asyncio.sleep(0)
+
+        assert completion.terminal_outcome == "reconciliation_blocked"
+        assert registry.active_handle_count() == 1
+        with pytest.raises(
+            ModelStreamExecutionDrainBlocked,
+            match="blocks teardown",
+        ):
+            await registry.drain_run(
+                "run:blocked",
+                reason="host_teardown",
+                deadline_monotonic=asyncio.get_running_loop().time() + 1.0,
+            )
+        assert registry.active_handle_count() == 1
+
+    asyncio.run(scenario())
+
+
+def test_semantic_partial_or_unknown_keeps_stream_owner_and_blocks_close(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from pulsara_agent.llm.execution import ModelStreamExecutionDrainBlocked
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="unknown semantic ack"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        session_type = type(session)
+        original_write = session_type.write_events_from_thread
+        original_confirm = session_type.confirm_and_handoff_event_batch
+        injected = False
+
+        def commit_then_raise(self, events, **kwargs):
+            nonlocal injected
+            result = original_write(self, events, **kwargs)
+            is_semantic = any(
+                getattr(event, "model_stream_attribution", None) is not None
+                for event in events
+            )
+            if is_semantic and not injected:
+                injected = True
+                raise asyncio.CancelledError(
+                    "synthetic semantic acknowledgement loss"
+                )
+            return result
+
+        def unknown_confirmation(self, candidates, **kwargs):
+            if any(
+                getattr(event, "model_stream_attribution", None) is not None
+                for event in candidates
+            ):
+                raise OSError("synthetic confirmation read unavailable")
+            return original_confirm(self, candidates, **kwargs)
+
+        monkeypatch.setattr(
+            session_type,
+            "write_events_from_thread",
+            commit_then_raise,
+        )
+        monkeypatch.setattr(
+            session_type,
+            "confirm_and_handoff_event_batch",
+            unknown_confirmation,
+        )
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:semantic-unknown",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        completion = await handle.wait_completed()
+
+        assert injected is True
+        assert completion.terminal_outcome == "reconciliation_blocked"
+        assert session.ledger_reconciliation_required is True
+        with pytest.raises(OSError, match="confirmation read unavailable"):
+            await handle.wait_result()
+        assert session.model_stream_execution_registry.active_handle_count() == 1
+        with pytest.raises(ModelStreamExecutionDrainBlocked):
+            await session.model_stream_execution_registry.drain_all(
+                deadline_monotonic=asyncio.get_running_loop().time() + 1.0
+            )
+        assert not any(
+            isinstance(event, ModelCallEndEvent)
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_start_stream_registers_handle_before_worker_enters_validation_or_transport(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import pulsara_agent.llm.runtime as runtime_module
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="must not dispatch"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.MEMORY_REFLECTION,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(messages=(LLMMessage.user("invalid"),)),
+        )
+        validation_saw_registered_owner = False
+
+        def reject_after_owner_install(*, call, context):
+            del call, context
+            nonlocal validation_saw_registered_owner
+            validation_saw_registered_owner = (
+                session.model_stream_execution_registry.active_handle_count() == 1
+            )
+            raise ValueError("synthetic pre-start validation rejection")
+
+        monkeypatch.setattr(
+            runtime_module,
+            "validate_model_context_for_call",
+            reject_after_owner_install,
+        )
+        handle = _start_test_stream(runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+        )
+        completion = await handle.wait_completed()
+
+        assert validation_saw_registered_owner is True
+        assert completion.terminal_outcome == "rejected_before_start"
+        assert completion.committed_events == ()
+        with pytest.raises(
+            ValueError,
+            match="synthetic pre-start validation rejection",
+        ):
+            await handle.wait_result()
+        assert not session.event_log.iter()
+        assert session.model_stream_execution_registry.active_handle_count() == 0
+
+    asyncio.run(scenario())
+
+
+def test_model_stream_worker_task_start_failure_removes_prestart_owner_without_run_fact(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import pulsara_agent.llm.execution as execution_module
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="must not dispatch"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.MEMORY_REFLECTION,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(messages=(LLMMessage.user("never starts"),)),
+        )
+
+        def fail_task_start(*_args, **_kwargs):
+            raise RuntimeError("synthetic model worker task start failure")
+
+        monkeypatch.setattr(execution_module.asyncio, "create_task", fail_task_start)
+        with pytest.raises(
+            RuntimeError,
+            match="synthetic model worker task start failure",
+        ):
+            _start_test_stream(runtime,
+                call=call,
+                context=context,
+                event_context=EVENT_CONTEXT,
+                runtime_session=session,
+            )
+
+        assert session.model_stream_execution_registry.active_handle_count() == 0
+        assert not session.event_log.iter()
+
+    asyncio.run(scenario())
 
 
 def test_openai_responses_payload_uses_internal_context() -> None:
@@ -1074,7 +2917,7 @@ def test_openai_responses_transport_retry_exhausted_has_trace() -> None:
     assert retry["traces"][0]["error_message"] == "reset one"
 
 
-def test_llm_runtime_preserves_retry_custom_event_in_reply_stream() -> None:
+def test_model_stream_retry_remains_adapter_private_and_reuses_call() -> None:
     import asyncio
 
     fake_client = FakeOpenAIClient(
@@ -1112,14 +2955,13 @@ def test_llm_runtime_preserves_retry_custom_event_in_reply_stream() -> None:
         )
     )
 
-    retry_index = next(
-        index
-        for index, event in enumerate(events)
-        if isinstance(event, CustomEvent) and event.name == "llm.retry"
-    )
     assert isinstance(events[0], ReplyStartEvent)
-    assert isinstance(events[1], ModelCallStartEvent)
-    assert retry_index > 1
+    assert isinstance(events[1], RolloutBudgetReservationCreatedEvent)
+    assert isinstance(events[2], ModelCallStartEvent)
+    assert not any(
+        isinstance(event, CustomEvent) and event.name == "llm.retry"
+        for event in events
+    )
     assert any(
         isinstance(event, TextBlockDeltaEvent) and event.delta == "ok"
         for event in events
@@ -1133,20 +2975,6 @@ def test_llm_runtime_preserves_retry_custom_event_in_reply_stream() -> None:
     assert len(fake_client.responses.calls) == 2
     assert fake_client.responses.calls[0] == fake_client.responses.calls[1]
     assert isinstance(events[-1], ReplyEndEvent)
-
-
-def test_network_retry_reuses_resolved_call_id() -> None:
-    test_llm_runtime_preserves_retry_custom_event_in_reply_stream()
-
-
-def test_network_retry_reuses_payload() -> None:
-    test_llm_runtime_preserves_retry_custom_event_in_reply_stream()
-
-
-def test_network_retry_records_one_canonical_usage_fact() -> None:
-    test_llm_runtime_preserves_retry_custom_event_in_reply_stream()
-
-
 def test_provider_error_data_includes_exception_chain() -> None:
     try:
         try:
@@ -1259,6 +3087,36 @@ def test_openai_chat_completions_payload_uses_internal_context() -> None:
     assert payload["max_completion_tokens"] == 64
     assert payload["reasoning_effort"] == "medium"
     assert payload["stream_options"] == {"include_usage": True}
+
+
+def test_openai_chat_completions_lowers_runtime_observation_with_frozen_carrier() -> None:
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+    )
+    call = payload_call(config, options=LLMOptions(), api="chat")
+    carrier = call.target.fact.runtime_observation_carrier
+    assert carrier is not None
+    assert carrier.carrier_id == "pulsara.runtime_observation.system_message"
+    context = bind_test_context(
+        call,
+        test_llm_context(
+            messages=(
+                LLMMessage.user("continue"),
+                LLMMessage.runtime_observation("rollout_phase=finalization_only"),
+            )
+        ),
+    )
+
+    payload = build_chat_completions_payload(call=call, context=context)
+
+    assert payload["messages"][-1] == {
+        "role": "system",
+        "content": "rollout_phase=finalization_only",
+    }
 
 
 def test_openai_chat_completions_payload_groups_adjacent_tool_calls() -> None:
@@ -1860,12 +3718,14 @@ def test_default_llm_runtime_registers_openai_responses_transport() -> None:
 
     responses_transport = runtime._registry.get(OPENAI_RESPONSES_API)
     chat_transport = runtime._registry.get(OPENAI_CHAT_COMPLETIONS_API)
-    assert isinstance(responses_transport, OpenAIResponsesTransport)
-    assert isinstance(chat_transport, OpenAIChatCompletionsTransport)
-    assert responses_transport.retry_config is retry_config
-    assert chat_transport.retry_config is retry_config
-    assert responses_transport.openai_sdk_max_retries == 0
-    assert chat_transport.openai_sdk_max_retries == 0
+    assert isinstance(responses_transport, SanitizingLLMTransport)
+    assert isinstance(chat_transport, SanitizingLLMTransport)
+    assert isinstance(responses_transport._raw_transport, OpenAIResponsesTransport)
+    assert isinstance(chat_transport._raw_transport, OpenAIChatCompletionsTransport)
+    assert responses_transport._raw_transport.retry_config is retry_config
+    assert chat_transport._raw_transport.retry_config is retry_config
+    assert responses_transport._raw_transport.openai_sdk_max_retries == 0
+    assert chat_transport._raw_transport.openai_sdk_max_retries == 0
 
 
 def transport_builder_for_test(config: LLMConfig | None = None):

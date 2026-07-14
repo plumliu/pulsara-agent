@@ -49,7 +49,13 @@ from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.runtime import AbortKind, ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime import (
+    AbortKind,
+    ApprovalResolution,
+    EventBatchCommitOutcome,
+    EventWriteCancelled,
+    ToolApprovalDecision,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.runtime.terminal import (
@@ -1225,6 +1231,8 @@ def test_close_active_streaming_run_emits_auditable_host_teardown(
             try:
                 async for event in s.stream_turn("go"):
                     events.append(event)
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
 
@@ -1377,13 +1385,20 @@ def test_cancel_after_run_start_commit_terminalizes_stable_run(
 
         async def commit_then_cancel(self, events, *, state=None):
             nonlocal injected
-            stored = await original(self, events, state=state)
-            if not injected and any(
+            should_cancel = not injected and any(
                 isinstance(event, RunStartEvent) for event in events
-            ):
+            )
+            if should_cancel:
                 injected = True
-                raise asyncio.CancelledError
-            return stored
+                result = await self.write_events(tuple(events), state=state)
+                raise EventWriteCancelled(
+                    EventBatchCommitOutcome(
+                        status="full",
+                        deadline_monotonic=time.monotonic(),
+                        result=result,
+                    )
+                )
+            return await original(self, events, state=state)
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
         with pytest.raises(asyncio.CancelledError):
@@ -1436,14 +1451,20 @@ def test_cancel_after_resume_boundary_commit_terminalizes_original_run(
 
         async def commit_then_cancel(self, events, *, state=None):
             nonlocal injected
-            stored = await original(self, events, state=state)
-            if not injected and any(
-                isinstance(event, RunInteractionResumeBoundaryEvent)
-                for event in events
-            ):
+            should_cancel = not injected and any(
+                isinstance(event, RunInteractionResumeBoundaryEvent) for event in events
+            )
+            if should_cancel:
                 injected = True
-                raise asyncio.CancelledError
-            return stored
+                result = await self.write_events(tuple(events), state=state)
+                raise EventWriteCancelled(
+                    EventBatchCommitOutcome(
+                        status="full",
+                        deadline_monotonic=time.monotonic(),
+                        result=result,
+                    )
+                )
+            return await original(self, events, state=state)
 
         monkeypatch.setattr(type(runtime), "emit_many", commit_then_cancel)
         with pytest.raises(asyncio.CancelledError):
@@ -1517,10 +1538,9 @@ def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(
         assert produced_while_attached <= _STREAM_QUEUE_MAX_ITEMS + 4
 
         await stream.aclose()  # transport observer detaches; execution stays owned
-        for _ in range(100):
-            if session._active_task is None:
-                break
-            await asyncio.sleep(0.01)
+        boundary_task = session._boundary_task
+        assert boundary_task is not None
+        await asyncio.wait_for(asyncio.shield(boundary_task), timeout=10.0)
         assert session._active_task is None
         await core.shutdown()
         return produced_while_attached, transport.produced

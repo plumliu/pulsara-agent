@@ -1,14 +1,22 @@
 import asyncio
 import json
+import shlex
+from collections.abc import Callable
 from typing import AsyncIterator
 
 import pytest
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    run_end_contract_fields,
+    run_start_permission_fields,
+    tool_result_end_contract_fields,
+)
 
 from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
     EventContext,
+    ModelCallControlDispositionResolvedEvent,
+    ModelCallEndEvent,
     ModelCallStartEvent,
     PlanExitRequestedEvent,
     PlanExitResolvedEvent,
@@ -17,6 +25,7 @@ from pulsara_agent.event import (
     PlanQuestionAnsweredEvent,
     PlanQuestionAskedEvent,
     ReplyEndEvent,
+    ReplyStartEvent,
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
@@ -46,13 +55,12 @@ from pulsara_agent.host.transcript import (
     rebuild_prior_messages,
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
-from tests.support import model_call_start_fields, test_llm_config
+from tests.support import model_call_end_fields, model_call_start_fields, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import (
     ToolCallBlock,
     ToolCallState,
-    ToolResultBlock,
     ToolResultState,
 )
 from pulsara_agent.message.message import AssistantMsg
@@ -73,10 +81,91 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.model_call import (
+    ModelCallControlDisposition,
+    sha256_fingerprint,
+)
 from pulsara_agent.runtime.publisher import RuntimePublishedEvent
 from pulsara_agent.runtime.terminal import TerminalStatus
 from pulsara_agent.settings import PulsaraSettings
 from tests.support.settings import compatibility_storage_config
+
+
+def _accepted_text_reply_events(
+    ctx: EventContext,
+    *,
+    text: str | None,
+    block_id: str,
+) -> tuple[AgentEvent, ...]:
+    start = ModelCallStartEvent(
+        **ctx.event_fields(),
+        **model_call_start_fields(),
+    )
+    end = ModelCallEndEvent(
+        id=start.recovery_plan.stable_model_call_end_event_id,
+        **ctx.event_fields(),
+        **model_call_end_fields(resolved_call=start.resolved_call),
+    )
+    fields = {
+        "id": (
+            f"model_call_control_disposition:{ctx.run_id}:"
+            f"{start.resolved_call.resolved_model_call_id}:1"
+        ),
+        **ctx.event_fields(),
+        "resolved_model_call_id": start.resolved_call.resolved_model_call_id,
+        "model_call_start_event_id": start.id,
+        "model_call_end_event_id": end.id,
+        "model_call_index": 1,
+        "source_result_fingerprint": "sha256:" + "c" * 64,
+        "run_execution_activation": start.recovery_plan.run_execution_activation,
+        "disposition": ModelCallControlDisposition.ACCEPTED,
+        "termination_intent": None,
+        "recovery_reason_code": None,
+    }
+    provisional = ModelCallControlDispositionResolvedEvent.model_construct(
+        **fields,
+        event_fingerprint="pending",
+    )
+    payload = provisional.model_dump(
+        mode="json",
+        exclude={"event_fingerprint", "sequence"},
+    )
+    disposition = ModelCallControlDispositionResolvedEvent(
+        **payload,
+        event_fingerprint=sha256_fingerprint(
+            "model-call-control-disposition-event:v1",
+            payload,
+        ),
+    )
+    semantic_events: tuple[AgentEvent, ...] = (
+        ()
+        if text is None
+        else (
+            TextBlockStartEvent(**ctx.event_fields(), block_id=block_id),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(),
+                block_id=block_id,
+                delta=text,
+            ),
+            TextBlockEndEvent(**ctx.event_fields(), block_id=block_id),
+        )
+    )
+    return (
+        ReplyStartEvent(
+            id=start.recovery_plan.reply_start_event_id,
+            **ctx.event_fields(),
+            name="assistant",
+        ),
+        start,
+        *semantic_events,
+        end,
+        ReplyEndEvent(
+            id=start.recovery_plan.stable_reply_end_event_id,
+            **ctx.event_fields(),
+            model_terminal_outcome="completed",
+        ),
+        disposition,
+    )
 
 
 class ScriptedTransport:
@@ -84,10 +173,17 @@ class ScriptedTransport:
     binding_id = "test.scripted"
     contract_version = "v1"
 
-    def __init__(self, replies: list[dict], *, delay: float = 0) -> None:
+    def __init__(
+        self,
+        replies: list[dict],
+        *,
+        delay: float = 0,
+        on_context_captured: Callable[[int, LLMContext], None] | None = None,
+    ) -> None:
         self.replies = replies
         self.delay = delay
         self.contexts: list[LLMContext] = []
+        self.on_context_captured = on_context_captured
 
     async def stream(
         self,
@@ -98,6 +194,8 @@ class ScriptedTransport:
     ) -> AsyncIterator[AgentEvent]:
         del call
         self.contexts.append(context)
+        if self.on_context_captured is not None:
+            self.on_context_captured(len(self.contexts), context)
         if self.delay:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
@@ -286,6 +384,10 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
     ctx = EventContext(
         run_id="run:failed", turn_id="turn:failed", reply_id="reply:failed"
     )
+    model_start = ModelCallStartEvent(
+        **ctx.event_fields(),
+        **model_call_start_fields(),
+    )
     log = InMemoryEventLog()
     log.extend(
         [
@@ -295,7 +397,7 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
                 user_input_chars=len("first user"),
                 metadata={"user_input": "first user"},
             ),
-            ModelCallStartEvent(**ctx.event_fields(), **model_call_start_fields()),
+            model_start,
             RunErrorEvent(
                 **ctx.event_fields(),
                 message="APIConnectionError: sk-secret https://api.deepseek.com retry trace",
@@ -307,7 +409,25 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
                     }
                 },
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            ModelCallEndEvent(
+                id=model_start.recovery_plan.stable_model_call_end_event_id,
+                **ctx.event_fields(),
+                resolved_model_call_id=(
+                    model_start.resolved_call.resolved_model_call_id
+                ),
+                target_fingerprint=model_start.resolved_call.target.target_fingerprint,
+                reported_model_id=model_start.resolved_call.target.model_id,
+                outcome="provider_error",
+                provider_dispatch_status="dispatched",
+                usage_status="missing",
+                usage=None,
+                estimated_input_tokens=0,
+            ),
+            ReplyEndEvent(
+                id=model_start.recovery_plan.stable_reply_end_event_id,
+                **ctx.event_fields(),
+                model_terminal_outcome="provider_error",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(
                     ctx.run_id,
@@ -325,10 +445,8 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
 
     assert messages[0].role == "user"
     assert messages[0].content[0].text == "first user"
-    assert messages[1].role == "assistant"
-    assert messages[1].content == []
-    assert messages[2].role == "system"
-    assert messages[2].content[0].text == FAILURE_NOTE_TEXT
+    assert messages[1].role == "system"
+    assert messages[1].content[0].text == FAILURE_NOTE_TEXT
     rendered = "\n".join(
         getattr(block, "text", "")
         for message in messages
@@ -339,7 +457,7 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
     assert "retry trace" not in rendered
 
 
-def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> None:
+def test_rebuild_prior_messages_drops_audit_only_partial_reply_before_failure_note() -> None:
     from pulsara_agent.event_log import InMemoryEventLog
 
     ctx = EventContext(
@@ -363,20 +481,23 @@ def test_rebuild_prior_messages_keeps_partial_reply_before_failure_note() -> Non
                 message="provider failed",
                 code="openai_responses_error",
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            ReplyEndEvent(
+                **ctx.event_fields(),
+                model_terminal_outcome="runtime_error",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="model_error"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
 
     messages = rebuild_prior_messages(log)
 
-    assert messages[1].role == "assistant"
-    assert messages[1].content[0].text == "partial answer"
-    assert messages[2].role == "system"
-    assert messages[2].content[0].text == FAILURE_NOTE_TEXT
+    assert [message.role for message in messages] == ["user", "system"]
+    assert messages[1].content[0].text == FAILURE_NOTE_TEXT
 
 
 def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -> None:
@@ -404,10 +525,15 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
                 message="provider failed",
                 code="openai_responses_error",
             ),
-            ReplyEndEvent(**failed_ctx.event_fields()),
+            ReplyEndEvent(
+                **failed_ctx.event_fields(),
+                model_terminal_outcome="runtime_error",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(failed_ctx.run_id, status="failed"),
-                **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
+                **failed_ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
             RunStartEvent(
                 **done_ctx.event_fields(),
@@ -415,15 +541,16 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
                 user_input_chars=len("done user"),
                 metadata={"user_input": "done user"},
             ),
-            TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
-            TextBlockDeltaEvent(
-                **done_ctx.event_fields(), block_id="text:done", delta="done"
+            *_accepted_text_reply_events(
+                done_ctx,
+                text="done",
+                block_id="text:done",
             ),
-            TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
-            ReplyEndEvent(**done_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(done_ctx.run_id, status="finished"),
-                **done_ctx.event_fields(), status="finished", stop_reason="final"
+                **done_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -432,7 +559,6 @@ def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -
 
     assert [message.role for message in messages] == [
         "user",
-        "assistant",
         "user",
         "assistant",
     ]
@@ -465,7 +591,7 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
             TextBlockDeltaEvent(
                 **ctx.event_fields(), block_id="text:1", delta="partial answer"
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
             RunEndEvent(
                 **run_end_contract_fields(
                     ctx.run_id, status="aborted", abort_kind="user_stop"
@@ -480,10 +606,9 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
 
     messages = rebuild_prior_messages(log)
 
-    assert [message.role for message in messages] == ["user", "assistant", "system"]
-    assert messages[1].content[0].text == "partial answer"
-    assert messages[2].content[0].text == INTERRUPTED_NOTE_TEXT
-    assert messages[2].metadata == {
+    assert [message.role for message in messages] == ["user", "system"]
+    assert messages[1].content[0].text == INTERRUPTED_NOTE_TEXT
+    assert messages[1].metadata == {
         "run_id": "run:aborted",
         "kind": "previous_turn_aborted",
     }
@@ -519,7 +644,7 @@ def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active(
                 user_input_chars=len("ask plan question"),
                 metadata={"user_input": "ask plan question"},
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
             RunEndEvent(
                 **run_end_contract_fields(
                     ctx.run_id, status="aborted", abort_kind="user_stop"
@@ -534,9 +659,9 @@ def test_rebuild_prior_messages_uses_plan_aborted_note_when_plan_remains_active(
 
     messages = rebuild_prior_messages(log)
 
-    assert [message.role for message in messages] == ["user", "assistant", "system"]
-    assert "plan workflow turn was stopped by the user" in messages[2].content[0].text
-    assert "Planning remains active and read-only" in messages[2].content[0].text
+    assert [message.role for message in messages] == ["user", "system"]
+    assert "plan workflow turn was stopped by the user" in messages[1].content[0].text
+    assert "Planning remains active and read-only" in messages[1].content[0].text
 
 
 def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -> None:
@@ -575,7 +700,7 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
                     )
                 ],
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
             RunEndEvent(
                 **run_end_contract_fields(
                     ctx.run_id, status="aborted", abort_kind="user_stop"
@@ -633,7 +758,9 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
             ),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="tool_error_budget"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="tool_error_budget",
             ),
         ]
     )
@@ -674,7 +801,7 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
                 delta='{"command": "printf done"}',
             ),
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
-            ReplyEndEvent(**ctx.event_fields()),
+            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
             ToolResultStartEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
@@ -694,6 +821,9 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
             ),
             ToolResultEndEvent(
                 **ctx.event_fields(),
+                **tool_result_end_contract_fields(
+                    "call:terminal", tool_name="terminal"
+                ),
                 tool_call_id="call:terminal",
                 state=ToolResultState.SUCCESS,
                 metadata={
@@ -705,17 +835,8 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
 
     messages = rebuild_prior_messages(log)
 
-    assert [message.role for message in messages] == ["user", "assistant", "system"]
-    assistant_blocks = messages[1].content
-    assert any(
-        isinstance(block, ToolCallBlock) and block.id == "call:terminal"
-        for block in assistant_blocks
-    )
-    assert any(
-        isinstance(block, ToolResultBlock) and block.id == "call:terminal"
-        for block in assistant_blocks
-    )
-    assert messages[2].content[0].text == INTERRUPTED_NOTE_TEXT
+    assert [message.role for message in messages] == ["user", "system"]
+    assert messages[1].content[0].text == INTERRUPTED_NOTE_TEXT
 
 
 def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> None:
@@ -757,7 +878,9 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:term"),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="model_error"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
@@ -817,7 +940,10 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
                     )
                 ],
             ),
-            ReplyEndEvent(**aborted_ctx.event_fields()),
+            ReplyEndEvent(
+                **aborted_ctx.event_fields(),
+                model_terminal_outcome="cancelled",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(
                     aborted_ctx.run_id, status="aborted", abort_kind="user_stop"
@@ -842,7 +968,9 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
             ),
             RunEndEvent(
                 **run_end_contract_fields(failed_ctx.run_id, status="failed"),
-                **failed_ctx.event_fields(), status="failed", stop_reason="model_error"
+                **failed_ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
@@ -880,7 +1008,10 @@ def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succ
                 user_input_chars=len("aborted user"),
                 metadata={"user_input": "aborted user"},
             ),
-            ReplyEndEvent(**aborted_ctx.event_fields()),
+            ReplyEndEvent(
+                **aborted_ctx.event_fields(),
+                model_terminal_outcome="cancelled",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(
                     aborted_ctx.run_id, status="aborted", abort_kind="user_stop"
@@ -896,15 +1027,16 @@ def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succ
                 user_input_chars=len("done user"),
                 metadata={"user_input": "done user"},
             ),
-            TextBlockStartEvent(**done_ctx.event_fields(), block_id="text:done"),
-            TextBlockDeltaEvent(
-                **done_ctx.event_fields(), block_id="text:done", delta="done"
+            *_accepted_text_reply_events(
+                done_ctx,
+                text="done",
+                block_id="text:done",
             ),
-            TextBlockEndEvent(**done_ctx.event_fields(), block_id="text:done"),
-            ReplyEndEvent(**done_ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(done_ctx.run_id, status="finished"),
-                **done_ctx.event_fields(), status="finished", stop_reason="final"
+                **done_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -913,7 +1045,6 @@ def test_rebuild_prior_messages_does_not_inject_aborted_note_when_newer_run_succ
 
     assert [message.role for message in messages] == [
         "user",
-        "assistant",
         "user",
         "assistant",
     ]
@@ -951,7 +1082,9 @@ def test_rebuild_prior_messages_injects_note_for_failed_last_run_without_reply_e
             ),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
-                **ctx.event_fields(), status="failed", stop_reason="model_error"
+                **ctx.event_fields(),
+                status="failed",
+                stop_reason="model_error",
             ),
         ]
     )
@@ -982,10 +1115,16 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
                 user_input_chars=len("run tests"),
                 metadata={"user_input": "run tests"},
             ),
-            ReplyEndEvent(**first_ctx.event_fields()),
+            *_accepted_text_reply_events(
+                first_ctx,
+                text=None,
+                block_id="text:first",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(first_ctx.run_id, status="finished"),
-                **first_ctx.event_fields(), status="finished", stop_reason="final"
+                **first_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
             TerminalProcessCompletedEvent(
                 **first_ctx.event_fields(),
@@ -1015,10 +1154,16 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_once_after_prev
                 user_input_chars=len("continue"),
                 metadata={"user_input": "continue"},
             ),
-            ReplyEndEvent(**second_ctx.event_fields()),
+            *_accepted_text_reply_events(
+                second_ctx,
+                text=None,
+                block_id="text:second",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(second_ctx.run_id, status="finished"),
-                **second_ctx.event_fields(), status="finished", stop_reason="final"
+                **second_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -1049,14 +1194,22 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
         [
             RunStartEvent(
                 **first_ctx.event_fields(),
-                **run_start_permission_fields(first_ctx.run_id, user_input="start server"),
+                **run_start_permission_fields(
+                    first_ctx.run_id, user_input="start server"
+                ),
                 user_input_chars=len("start server"),
                 metadata={"user_input": "start server"},
             ),
-            ReplyEndEvent(**first_ctx.event_fields()),
+            *_accepted_text_reply_events(
+                first_ctx,
+                text=None,
+                block_id="text:first",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(first_ctx.run_id, status="finished"),
-                **first_ctx.event_fields(), status="finished", stop_reason="final"
+                **first_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
             RunStartEvent(
                 **second_ctx.event_fields(),
@@ -1076,10 +1229,16 @@ def test_rebuild_prior_messages_injects_terminal_completion_note_when_completion
                 cwd="/workspace",
                 duration_seconds=2.0,
             ),
-            ReplyEndEvent(**second_ctx.event_fields()),
+            *_accepted_text_reply_events(
+                second_ctx,
+                text=None,
+                block_id="text:second",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(second_ctx.run_id, status="finished"),
-                **second_ctx.event_fields(), status="finished", stop_reason="final"
+                **second_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
             ),
         ]
     )
@@ -1108,7 +1267,11 @@ def test_rebuild_prior_messages_terminal_completion_note_is_lifecycle_only_proje
                 user_input_chars=len("start background"),
                 metadata={"user_input": "start background"},
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            *_accepted_text_reply_events(
+                ctx,
+                text=None,
+                block_id="text:first",
+            ),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="finished"),
                 **ctx.event_fields(),
@@ -1161,7 +1324,11 @@ def test_rebuild_prior_messages_terminal_completion_note_caps_projected_processe
             user_input_chars=len("start background"),
             metadata={"user_input": "start background"},
         ),
-        ReplyEndEvent(**ctx.event_fields()),
+        *_accepted_text_reply_events(
+            ctx,
+            text=None,
+            block_id="text:first",
+        ),
         RunEndEvent(
             **run_end_contract_fields(ctx.run_id, status="finished"),
             **ctx.event_fields(),
@@ -1344,6 +1511,16 @@ def test_host_session_terminal_completion_event_replays_and_injects_one_shot_not
 def test_host_session_terminal_completion_during_later_turn_appears_in_following_context(
     tmp_path, monkeypatch
 ) -> None:
+    completion_gate = tmp_path / "release-late-terminal-completion"
+
+    def release_after_second_turn_context(
+        context_index: int, _context: LLMContext
+    ) -> None:
+        # Calls 1 and 2 belong to the first tool-using turn. Call 3 is the
+        # following turn whose frozen context must not contain this completion.
+        if context_index == 3:
+            completion_gate.touch()
+
     transport = ScriptedTransport(
         [
             {
@@ -1353,7 +1530,11 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
                         "name": "terminal",
                         "arguments": json.dumps(
                             {
-                                "command": "sleep 0.25 && printf LATE_DONE",
+                                    "command": (
+                                        "while [ ! -f "
+                                        f"{shlex.quote(str(completion_gate))}"
+                                        " ]; do sleep 0.01; done; printf LATE_DONE"
+                                    ),
                                 "yield_time_ms": 0,
                             }
                         ),
@@ -1364,7 +1545,8 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
             {"text": "slow unrelated turn"},
             {"text": "after late completion"},
         ],
-        delay=0.2,
+        delay=0.05,
+        on_context_captured=release_after_second_turn_context,
     )
     core = _core(monkeypatch, transport)
 
@@ -1375,6 +1557,11 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
         await session.run_turn("start background task")
         await session.run_turn("do slow unrelated work")
         second_context = transport.contexts[-1]
+        manager = session.wiring.runtime_wiring.runtime_session.terminal_sessions
+        process = manager.list_processes(owner_host_session_id=session.host_session_id)[
+            0
+        ]
+        manager.wait_process(process.process_id, timeout_seconds=2)
         events = [
             event
             for event in session.replay_events()
@@ -1976,11 +2163,11 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(
             {
                 "tool_calls": [
                     {
-                        "id": "call:accept-terminal",
-                        "name": "terminal",
-                        "arguments": json.dumps(
-                            {"command": "printf PULSARA_ACCEPT_TERMINAL_OK"}
-                        ),
+                            "id": "call:accept-terminal",
+                            "name": "terminal",
+                            "arguments": json.dumps(
+                                {"command": "touch accept_terminal_ok"}
+                            ),
                     }
                 ]
             },
@@ -2013,19 +2200,12 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(
         return session, first, resolved, write_exists_at_pause
 
     session, first, resolved, write_exists_at_pause = asyncio.run(run())
-    terminal_output = "".join(
-        event.delta
-        for event in session.replay_events()
-        if isinstance(event, ToolResultTextDeltaEvent)
-        and event.tool_call_id == "call:accept-terminal"
-    )
-
     assert first.status.value == "waiting_user"
     assert write_exists_at_pause is True
     assert (tmp_path / "accept_edits.txt").read_text() == "PULSARA_ACCEPT_EDITS_OK\n"
     assert resolved.status.value == "finished"
     assert resolved.final_text == "accept-edits continuation"
-    assert "PULSARA_ACCEPT_TERMINAL_OK" in terminal_output
+    assert (tmp_path / "accept_terminal_ok").exists()
 
 
 def test_bypass_permissions_preset_runs_without_pending_approval(
@@ -2572,6 +2752,21 @@ def test_exit_plan_approve_restores_pre_plan_permission(tmp_path, monkeypatch) -
 def test_exit_plan_revise_keeps_plan_active_and_read_only(
     tmp_path, monkeypatch
 ) -> None:
+    import pulsara_agent.runtime.agent as agent_module
+
+    prepared_snapshots = []
+    original_prepare = agent_module.prepare_live_context_snapshot
+
+    async def capture_prepare(**kwargs):
+        prepared = await original_prepare(**kwargs)
+        prepared_snapshots.append(prepared)
+        return prepared
+
+    monkeypatch.setattr(
+        agent_module,
+        "prepare_live_context_snapshot",
+        capture_prepare,
+    )
     transport = ScriptedTransport(
         [
             {
@@ -2632,6 +2827,23 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(
     assert "add tests" in revision_context
     retry_context = _context_text(transport.contexts[2])
     assert "Plan revision is still pending" in retry_context
+    revise_event = next(
+        event
+        for event in session.replay_events()
+        if isinstance(event, PlanExitResolvedEvent) and event.decision == "revise"
+    )
+    revision_authorities = [
+        authority
+        for prepared in prepared_snapshots
+        for authority in prepared.invocation.fact.candidate_authorities
+        if authority.source_instance_id == "plan:revision"
+    ]
+    assert revision_authorities
+    assert all(
+        tuple(ref.event_id for ref in authority.source_fact_refs)
+        == (revise_event.id,)
+        for authority in revision_authorities
+    )
 
 
 def test_cancel_plan_exits_plan_mode_and_aborts_suspended_exit_run(

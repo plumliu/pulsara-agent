@@ -10,6 +10,10 @@ from pulsara_agent.runtime.subagent.immutable import (
     freeze_json_mapping,
     thaw_json_mapping,
 )
+from pulsara_agent.primitives.long_horizon import (
+    ChildRolloutReservationPolicyFact,
+    default_child_rollout_policy,
+)
 
 
 SubagentStatus = Literal["running", "suspended", "completed", "failed", "cancelled"]
@@ -68,6 +72,9 @@ class SubagentBudget:
     max_result_summary_chars_per_child: int = 4_000
     max_result_artifact_refs_per_child: int = 32
     max_subagent_results_per_parent_compile: int = 8
+    child_rollout_policy: ChildRolloutReservationPolicyFact = field(
+        default_factory=default_child_rollout_policy
+    )
 
     @classmethod
     def from_event_snapshot(cls, snapshot: object) -> SubagentBudget:
@@ -96,6 +103,7 @@ class SubagentBudget:
             max_subagent_results_per_parent_compile=int(
                 getattr(snapshot, "max_subagent_results_per_parent_compile")
             ),
+            child_rollout_policy=getattr(snapshot, "child_rollout_policy"),
         )
 
     def to_event_value(self) -> dict[str, Any]:
@@ -108,6 +116,7 @@ class SubagentBudget:
             "max_result_summary_chars_per_child": self.max_result_summary_chars_per_child,
             "max_result_artifact_refs_per_child": self.max_result_artifact_refs_per_child,
             "max_subagent_results_per_parent_compile": self.max_subagent_results_per_parent_compile,
+            "child_rollout_policy": self.child_rollout_policy.model_dump(mode="json"),
         }
 
 

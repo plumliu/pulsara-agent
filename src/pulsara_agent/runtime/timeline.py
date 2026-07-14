@@ -7,7 +7,6 @@ from typing import Any, Iterable, Literal
 
 from pulsara_agent.event import (
     AgentEvent,
-    ExceedMaxItersEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
     PlanExitRequestedEvent,
@@ -472,18 +471,6 @@ def build_run_timeline(
                         "restored_permission_mode": event.restored_permission_mode,
                         "accepted_plan_artifact_id": event.accepted_plan_artifact_id,
                     },
-                )
-            )
-            continue
-        if isinstance(event, ExceedMaxItersEvent):
-            failed = True
-            items.append(
-                _item(
-                    "error",
-                    event.name,
-                    event,
-                    status="error",
-                    summary=f"Exceeded max turns: {event.max_iters}",
                 )
             )
             continue

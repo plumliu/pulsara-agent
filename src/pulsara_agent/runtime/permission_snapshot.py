@@ -18,6 +18,12 @@ from pulsara_agent.runtime.permission import (
     preset_to_policy,
 )
 from pulsara_agent.primitives.permission import PermissionMode, parse_permission_mode
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    RunPermissionSnapshotFact,
+    context_fingerprint,
+    freeze_json,
+)
 
 RunPermissionSnapshotSource = Literal["session_default", "plan_mode", "child_profile"]
 
@@ -48,6 +54,36 @@ class RunPermissionSnapshot:
             mode=self.permission_mode,
         )
 
+    def to_context_fact(self) -> RunPermissionSnapshotFact:
+        expanded = freeze_json(self.permission_policy)
+        if not isinstance(expanded, FrozenJsonObjectFact):
+            raise AssertionError("permission policy must freeze as a JSON object")
+        payload = {
+            "snapshot_id": self.snapshot_id,
+            "runtime_session_id": self.runtime_session_id,
+            "run_id": self.run_id,
+            "mode": self.permission_mode,
+            "expanded_policy": expanded,
+            "expanded_policy_fingerprint": context_fingerprint(
+                "run-permission-expanded-policy:v1", expanded
+            ),
+            "source": self.permission_snapshot_source,
+            "plan_restriction_active": self.permission_snapshot_source == "plan_mode",
+        }
+        provisional = RunPermissionSnapshotFact.model_construct(
+            **payload,
+            fingerprint="pending",
+        )
+        fingerprint_payload = provisional.model_dump(
+            mode="json", exclude={"fingerprint"}
+        )
+        return RunPermissionSnapshotFact(
+            **payload,
+            fingerprint=context_fingerprint(
+                "run-permission-snapshot:v1", fingerprint_payload
+            ),
+        )
+
 
 def require_preset_permission_mode_for_policy(
     policy: EffectivePermissionPolicy,
@@ -56,7 +92,9 @@ def require_preset_permission_mode_for_policy(
 ) -> PermissionMode:
     mode = mode_for_policy(policy)
     if mode is None:
-        raise ValueError(f"{context} requires a preset permission mode; custom policies are not supported")
+        raise ValueError(
+            f"{context} requires a preset permission mode; custom policies are not supported"
+        )
     validate_preset_policy_payload(mode, policy.to_dict(), context=context)
     return mode
 
@@ -106,7 +144,9 @@ def snapshot_from_run_start_event(
     )
     source = getattr(event, "permission_snapshot_source")
     if source not in {"session_default", "plan_mode", "child_profile"}:
-        raise ValueError(f"invalid RunStartEvent permission_snapshot_source: {source!r}")
+        raise ValueError(
+            f"invalid RunStartEvent permission_snapshot_source: {source!r}"
+        )
     return RunPermissionSnapshot(
         snapshot_id=str(getattr(event, "permission_snapshot_id")),
         runtime_session_id=runtime_session_id,

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import pytest
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
-from tests.support import test_resolved_call
+from tests.conftest import (
+    run_end_contract_fields,
+    run_start_permission_fields,
+    tool_result_end_contract_fields,
+)
 
 from pulsara_agent.event import (
     EventContext,
@@ -15,7 +18,6 @@ from pulsara_agent.event import (
     ToolResultStartEvent,
 )
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.runtime.context import build_llm_context
 from pulsara_agent.runtime.plan import PlanWorkflowState
 from pulsara_agent.runtime.recovery import (
     AbortKind,
@@ -96,7 +98,7 @@ def test_project_recovery_from_events_aborted_plan_turn_uses_plan_aborted_guidan
             user_input_chars=len("ask"),
             metadata={"user_input": "ask"},
         ),
-        ReplyEndEvent(**CTX.event_fields()),
+        ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         RunEndEvent(
             **run_end_contract_fields(
                 CTX.run_id, status="aborted", abort_kind="user_stop"
@@ -152,6 +154,7 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
         ),
         ToolResultEndEvent(
             **CTX.event_fields(),
+            **tool_result_end_contract_fields("call:terminal", tool_name="terminal"),
             tool_call_id="call:terminal",
             state=ToolResultState.SUCCESS,
             metadata={
@@ -216,27 +219,6 @@ def test_project_recovery_from_state_uses_in_run_step_failed_guidance() -> None:
     )
 
 
-def test_build_llm_context_appends_prompt_text_from_in_run_projection() -> None:
-    state = LoopState(session_id="runtime:test")
-    state.in_run_recovery = InRunRecoveryState(
-        cause=InRunRecoveryCause.MODEL_FAILURE,
-        consecutive_failures=1,
-    )
-
-    context = build_llm_context(
-        state=state,
-        tools=(),
-        system_prompt="System",
-        budget=state.budget,
-        resolved_call=test_resolved_call(),
-    )
-
-    assert context.messages[-1].role.value == "user"
-    assert "Recover by inspecting the latest observation" in "\n".join(
-        context.messages[-1].content
-    )
-
-
 def test_typed_recovery_control_state_rejects_ambiguous_values() -> None:
     request = StopRequest(reason=AbortKind.USER_STOP)
     recovery = InRunRecoveryState(
@@ -269,6 +251,7 @@ def test_classify_unfinished_tool_calls_omits_completed_terminal_after_late_resu
         ),
         ToolResultEndEvent(
             **CTX.event_fields(),
+            **tool_result_end_contract_fields("call:terminal", tool_name="terminal"),
             tool_call_id="call:terminal",
             state=ToolResultState.SUCCESS,
             metadata={

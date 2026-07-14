@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import asyncio
 
-from pulsara_agent.event import RunStartEvent
+from pulsara_agent.event import ContextWindowOpenedEvent, EventContext, RunStartEvent
 from pulsara_agent.primitives.run_entry import DurableRunExistence
 from pulsara_agent.primitives.run_lifecycle import RunStopReason
 from pulsara_agent.runtime.run_entry import (
@@ -26,7 +26,6 @@ from pulsara_agent.primitives.permission import (
 from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.runtime.session import (
     EventPublicationAfterCommitError,
-    EventReconciliationRequired,
 )
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.message import Msg
@@ -40,7 +39,7 @@ if TYPE_CHECKING:
 class CommittedSubagentRunEntryBundle:
     draft: AgentRunDraft
     committed: CommittedSubagentRunEntry
-    stored_events: tuple[RunStartEvent, ...]
+    stored_events: tuple[RunStartEvent | ContextWindowOpenedEvent, ...]
 
 
 class SubagentRunEntryCommitUntrusted(RuntimeError):
@@ -83,6 +82,8 @@ class SubagentRunEntryDriver:
             frozen_execution_surface=prepared.frozen_execution_surface,
             new_run_boundary=None,
             subagent_run_entry=prepared.entry_fact,
+            long_horizon=prepared.long_horizon,
+            child_rollout_subaccount=prepared.child_rollout_subaccount,
             prior_messages=prior_messages,
         )
         candidate = draft.run_start_event
@@ -92,9 +93,20 @@ class SubagentRunEntryDriver:
         if entry is None:
             raise RuntimeError("child RunStart is missing SubagentRunEntryFact")
         original_error: BaseException | None = None
+        window_open = ContextWindowOpenedEvent(
+            id=prepared.long_horizon.contract.initial_window_open_event_id,
+            **EventContext(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+            ).event_fields(),
+            window=prepared.long_horizon.initial_window,
+            opening_batch_id=prepared.long_horizon.opening_batch_id,
+        )
+        candidates = (candidate, window_open)
         try:
             stored = tuple(
-                await child_agent.runtime_session.emit_many((candidate,), state=state)
+                await child_agent.runtime_session.emit_many(candidates, state=state)
             )
             publication_status = "completed"
         except EventPublicationAfterCommitError as exc:
@@ -102,33 +114,25 @@ class SubagentRunEntryDriver:
             publication_status = "failed_after_commit"
             original_error = exc
         except BaseException as exc:
-            try:
-                confirmation = child_agent.runtime_session.confirm_event_batch(
-                    (candidate,)
-                )
-            except EventReconciliationRequired as confirmation_error:
-                raise SubagentRunEntryCommitUntrusted(
-                    durable_run_existence=DurableRunExistence.PARTIAL_UNTRUSTED,
-                    child_runtime_session_id=(
-                        child_agent.runtime_session.runtime_session_id
-                    ),
-                    child_run_id=state.run_id,
-                ) from confirmation_error
-            except BaseException as confirmation_error:
-                child_agent.runtime_session.latch_event_commit_outcome_unknown()
+            outcome = child_agent.runtime_session.resolved_event_write_outcome(exc)
+            if outcome.status == "unknown":
                 raise SubagentRunEntryCommitUntrusted(
                     durable_run_existence=DurableRunExistence.UNKNOWN,
                     child_runtime_session_id=(
                         child_agent.runtime_session.runtime_session_id
                     ),
                     child_run_id=state.run_id,
-                ) from confirmation_error
-            if confirmation.missing_event_ids:
+                ) from exc
+            if outcome.status == "none":
                 raise
-            stored = confirmation.committed_events
+            stored = outcome.committed_events
             publication_status = "failed_after_commit"
             original_error = exc
-        if len(stored) != 1 or not isinstance(stored[0], RunStartEvent):
+        if (
+            len(stored) != 2
+            or not isinstance(stored[0], RunStartEvent)
+            or not isinstance(stored[1], ContextWindowOpenedEvent)
+        ):
             raise RuntimeError("child RunStart commit returned an invalid batch")
         run_start = stored[0]
         if run_start.sequence is None:
@@ -136,7 +140,7 @@ class SubagentRunEntryDriver:
         committed = CommittedSubagentRunEntry(
             run_start_event=run_start,
             run_start_sequence=run_start.sequence,
-            committed_through_sequence=run_start.sequence,
+            committed_through_sequence=stored[-1].sequence or run_start.sequence,
             publication_status=publication_status,
             subagent_run_id=entry.subagent_run_id,
         )
@@ -180,7 +184,7 @@ class SubagentRunEntryDriver:
         return CommittedSubagentRunEntryBundle(
             draft=draft,
             committed=committed,
-            stored_events=(run_start,),
+            stored_events=(run_start, stored[1]),
         )
 
 

@@ -20,7 +20,6 @@ from pulsara_agent.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
-    ToolObservationTiming,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -28,6 +27,7 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.message import (
+    AssistantMsg,
     Base64Source,
     TextBlock,
     ToolCallBlock,
@@ -36,23 +36,35 @@ from pulsara_agent.message import (
     ToolResultBlock,
     ToolResultState,
 )
+from pulsara_agent.message.reducer import MessageReducer
 from tests.support import model_call_end_fields
+from tests.conftest import (
+    external_tool_call_requirement_fact,
+    external_tool_result_ingress_fact,
+    tool_result_end_contract_fields,
+)
+from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
 
 
-def _external_timing(tool_call_id: str, tool_name: str) -> dict[str, object]:
-    return {
-        "observed_at": "2026-07-09T00:00:00+00:00",
-        "source_started_at": "2026-07-09T00:00:00+00:00",
-        "source_ended_at": "2026-07-09T00:00:00+00:00",
-        "freshness": "current_tool_observation",
-        "clock_source": "tool_runtime_metadata",
-        "tool_origin": "unknown",
-        "tool_name": tool_name,
-        "tool_call_id": tool_call_id,
-    }
+def _reduce_message_events(event_log: InMemoryEventLog):
+    events = event_log.iter(reply_id=CTX.reply_id)
+    start = next(
+        (event for event in events if isinstance(event, ReplyStartEvent)), None
+    )
+    reducer = MessageReducer(
+        AssistantMsg(
+            id=CTX.reply_id,
+            name=start.name if start is not None else "assistant",
+            content=[],
+            created_at=start.created_at if start is not None else None,
+        )
+    )
+    for event in events:
+        reducer.append(event)
+    return reducer.message
 
 
 def test_message_reducer_replays_text_thinking_tool_events() -> None:
@@ -103,6 +115,7 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
             ),
             ToolResultEndEvent(
                 **CTX.event_fields(),
+                **tool_result_end_contract_fields("call:1", tool_name="lookup"),
                 tool_call_id="call:1",
                 state=ToolResultState.SUCCESS,
                 metadata={
@@ -111,21 +124,16 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
             ),
             ExternalExecutionResultEvent(
                 **CTX.event_fields(),
-                metadata={
-                    "tool_observation_timing_by_call_id": {
-                        "call:external": _external_timing(
-                            "call:external", "external_lookup"
+                external_results=(
+                    external_tool_result_ingress_fact(
+                        ToolResultBlock(
+                            id="call:external",
+                            name="external_lookup",
+                            output=[TextBlock(text="external result")],
+                            state=ToolResultState.SUCCESS,
                         )
-                    }
-                },
-                execution_results=[
-                    ToolResultBlock(
-                        id="call:external",
-                        name="external_lookup",
-                        output=[TextBlock(text="external result")],
-                        state=ToolResultState.SUCCESS,
-                    )
-                ],
+                    ),
+                ),
             ),
             ModelCallEndEvent(
                 **CTX.event_fields(),
@@ -135,11 +143,11 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
                 **CTX.event_fields(),
                 **model_call_end_fields(input_tokens=1, output_tokens=2),
             ),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
 
     assert msg.id == "reply:test"
     assert msg.content[0].type == "text"
@@ -160,7 +168,7 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
         msg.metadata["tool_observation_timing_by_call_id"]["call:external"][
             "observed_at"
         ]
-        == "2026-07-09T00:00:00Z"
+        == "2026-07-09T00:00:00.000000Z"
     )
     assert msg.usage is not None
     assert msg.usage.input_tokens == 4
@@ -178,6 +186,7 @@ def test_tool_result_end_event_artifacts_round_trip_into_block() -> None:
     )
     event = ToolResultEndEvent(
         **CTX.event_fields(),
+        **tool_result_end_contract_fields("call:1", tool_name="lookup"),
         tool_call_id="call:1",
         state=ToolResultState.SUCCESS,
         artifacts=[artifact],
@@ -200,142 +209,68 @@ def test_tool_result_end_event_artifacts_round_trip_into_block() -> None:
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
     assert isinstance(msg.content[0], ToolResultBlock)
     assert msg.content[0].artifacts == [artifact]
 
 
-def test_external_execution_result_requires_tool_observation_timing_map() -> None:
-    with pytest.raises(ValueError, match="tool_observation_timing_by_call_id"):
+def test_external_execution_result_requires_typed_non_empty_ingress() -> None:
+    with pytest.raises(ValueError, match="requires external results"):
         ExternalExecutionResultEvent(
             **CTX.event_fields(),
-            execution_results=[
-                ToolResultBlock(
-                    id="call:external",
-                    name="external_lookup",
-                    output=[TextBlock(text="external result")],
-                    state=ToolResultState.SUCCESS,
-                )
-            ],
-        )
-
-    with pytest.raises(ValueError, match="ExternalExecutionResultEvent timing"):
-        ExternalExecutionResultEvent(
-            **CTX.event_fields(),
-            metadata={"tool_observation_timing_by_call_id": {"call:external": {}}},
-            execution_results=[
-                ToolResultBlock(
-                    id="call:external",
-                    name="external_lookup",
-                    output=[TextBlock(text="external result")],
-                    state=ToolResultState.SUCCESS,
-                )
-            ],
-        )
-
-    with pytest.raises(ValueError, match="unknown tool result ids"):
-        ExternalExecutionResultEvent(
-            **CTX.event_fields(),
-            metadata={
-                "tool_observation_timing_by_call_id": {
-                    "call:external": _external_timing(
-                        "call:external", "external_lookup"
-                    ),
-                    "junk": {},
-                }
-            },
-            execution_results=[
-                ToolResultBlock(
-                    id="call:external",
-                    name="external_lookup",
-                    output=[TextBlock(text="external result")],
-                    state=ToolResultState.SUCCESS,
-                )
-            ],
-        )
-
-    with pytest.raises(ValueError, match="tool_call_id mismatch"):
-        ExternalExecutionResultEvent(
-            **CTX.event_fields(),
-            metadata={
-                "tool_observation_timing_by_call_id": {
-                    "call:external": _external_timing("call:other", "external_lookup")
-                }
-            },
-            execution_results=[
-                ToolResultBlock(
-                    id="call:external",
-                    name="external_lookup",
-                    output=[TextBlock(text="external result")],
-                    state=ToolResultState.SUCCESS,
-                )
-            ],
+            external_results=(),
         )
 
 
 def test_tool_observation_timing_requires_utc_iso_and_non_negative_duration() -> None:
-    normalized = ToolObservationTiming(observed_at="2026-07-09T08:00:00+08:00")
-    assert normalized.observed_at == "2026-07-09T00:00:00Z"
+    normalized = ToolObservationTimingFact(observed_at_utc="2026-07-09T08:00:00+08:00")
+    assert normalized.observed_at_utc == "2026-07-09T00:00:00.000000Z"
 
-    with pytest.raises(ValueError, match="UTC offset"):
-        ToolObservationTiming(observed_at="2026-07-09T00:00:00")
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ToolObservationTimingFact(observed_at_utc="2026-07-09T00:00:00")
 
-    with pytest.raises(ValueError, match="duration must be finite and non-negative"):
-        ToolObservationTiming(
-            observed_at="2026-07-09T00:00:00Z",
+    with pytest.raises(ValueError):
+        ToolObservationTimingFact(
+            observed_at_utc="2026-07-09T00:00:00Z",
             observation_duration_seconds=-0.1,
         )
 
     for value in (float("nan"), float("inf")):
-        with pytest.raises(
-            ValueError, match="duration must be finite and non-negative"
-        ):
-            ToolObservationTiming(
-                observed_at="2026-07-09T00:00:00Z",
+        with pytest.raises(ValueError):
+            ToolObservationTimingFact(
+                observed_at_utc="2026-07-09T00:00:00Z",
                 observation_duration_seconds=value,
             )
 
 
 def test_tool_result_end_timing_tool_call_id_must_match_carrier() -> None:
+    fields = tool_result_end_contract_fields("call:a", tool_name="lookup")
+    fields["observation_timing"] = ToolObservationTimingFact(
+        observed_at_utc="2026-07-09T00:00:00Z",
+        tool_call_id="call:b",
+    )
     with pytest.raises(ValueError, match="tool_call_id mismatch"):
         ToolResultEndEvent(
             **CTX.event_fields(),
+            **fields,
             tool_call_id="call:a",
             state=ToolResultState.SUCCESS,
-            metadata={
-                "tool_observation_timing": {
-                    "observed_at": "2026-07-09T00:00:00Z",
-                    "tool_call_id": "call:b",
-                }
-            },
         )
 
 
 def test_external_execution_result_rejects_duplicate_result_ids() -> None:
+    ingress = external_tool_result_ingress_fact(
+        ToolResultBlock(
+            id="call:external",
+            name="external_lookup",
+            output=[TextBlock(text="first")],
+            state=ToolResultState.SUCCESS,
+        )
+    )
     with pytest.raises(ValueError, match="duplicate ids"):
         ExternalExecutionResultEvent(
             **CTX.event_fields(),
-            metadata={
-                "tool_observation_timing_by_call_id": {
-                    "call:external": _external_timing(
-                        "call:external", "external_lookup"
-                    )
-                }
-            },
-            execution_results=[
-                ToolResultBlock(
-                    id="call:external",
-                    name="external_lookup",
-                    output=[TextBlock(text="first")],
-                    state=ToolResultState.SUCCESS,
-                ),
-                ToolResultBlock(
-                    id="call:external",
-                    name="external_lookup",
-                    output=[TextBlock(text="second")],
-                    state=ToolResultState.SUCCESS,
-                ),
-            ],
+            external_results=(ingress, ingress),
         )
 
 
@@ -356,11 +291,11 @@ def test_message_reducer_preserves_block_start_order_for_interleaved_events() ->
             ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:later"),
             TextBlockEndEvent(**CTX.event_fields(), block_id="text:first"),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
 
     assert [block.type for block in msg.content] == ["text", "tool_call"]
     assert msg.content[0].text == "before tool"
@@ -372,6 +307,10 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
 ):
     event_log = InMemoryEventLog()
     tool_call = ToolCallBlock(id="call:external", name="external_lookup", input="{}")
+    requirement = external_tool_call_requirement_fact(
+        tool_call.id, tool_name=tool_call.name
+    )
+    require_event_id = "require-external:message-reducer"
     event_log.extend(
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
@@ -384,28 +323,31 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
                 **CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input
             ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id),
-            RequireExternalExecutionEvent(**CTX.event_fields(), tool_calls=[tool_call]),
+            RequireExternalExecutionEvent(
+                id=require_event_id,
+                **CTX.event_fields(),
+                external_tool_calls=(requirement,),
+            ),
             ExternalExecutionResultEvent(
                 **CTX.event_fields(),
-                metadata={
-                    "tool_observation_timing_by_call_id": {
-                        tool_call.id: _external_timing(tool_call.id, tool_call.name)
-                    }
-                },
-                execution_results=[
-                    ToolResultBlock(
-                        id=tool_call.id,
-                        name=tool_call.name,
-                        output=[TextBlock(text="external result")],
-                        state=ToolResultState.SUCCESS,
-                    )
-                ],
+                external_results=(
+                    external_tool_result_ingress_fact(
+                        ToolResultBlock(
+                            id=tool_call.id,
+                            name=tool_call.name,
+                            output=[TextBlock(text="external result")],
+                            state=ToolResultState.SUCCESS,
+                        ),
+                        requirement=requirement,
+                        require_event_id=require_event_id,
+                    ),
+                ),
             ),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
 
     call = msg.content[0]
     result = msg.content[1]
@@ -426,6 +368,7 @@ def test_projection_events_are_not_written_as_canonical_memory() -> None:
             role="DA",
             scope="ctx:test",
             token_budget=1000,
+            projection_kind="memory",
             included_memory_ids=["claim:1"],
             filtered_memory_ids=["claim:stale"],
             summary="Projection summary.",

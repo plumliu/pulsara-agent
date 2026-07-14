@@ -14,8 +14,13 @@ from uuid import uuid4
 import pytest
 
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
-from tests.support import bind_test_context, test_llm_context
+from tests.support import (
+    bind_test_context,
+    start_test_direct_model_stream,
+    test_llm_context,
+)
 from tests.support.capability import preview_capability_plan
+from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.capability import (
     sync_bundled_skills,
@@ -164,12 +169,19 @@ class RealLLMUserSimulator:
                 target=target,
                 purpose=ModelCallPurpose.MEMORY_REFLECTION,
             )
-            async for event in self._runtime.stream(
-                call=call,
-                context=bind_test_context(call, context),
-                event_context=event_context,
-            ):
-                events.append(event)
+            runtime_session = in_memory_runtime_session(Path.cwd())
+            try:
+                handle = start_test_direct_model_stream(
+                    self._runtime,
+                    call=call,
+                    context=bind_test_context(call, context),
+                    event_context=event_context,
+                    runtime_session=runtime_session,
+                )
+                completion = await handle.wait_completed()
+                events.extend(completion.committed_events)
+            finally:
+                runtime_session.close()
             errors = [
                 _run_error_diagnostic(event)
                 for event in events

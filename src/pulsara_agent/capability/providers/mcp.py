@@ -14,6 +14,7 @@ from pulsara_agent.capability.descriptor import (
     CapabilityProviderKind,
     CapabilityProvenance,
 )
+from pulsara_agent.capability.result_contracts import generic_result_render_contract
 from pulsara_agent.capability.provider import (
     CapabilityDescriptorSnapshotOutput,
     CapabilityProjectionOutput,
@@ -33,6 +34,7 @@ from pulsara_agent.runtime.mcp.types import (
     McpServerStatus,
     mangle_mcp_tool_name,
 )
+from pulsara_agent.runtime.tool_action import mcp_tool_action_policy
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 
 
@@ -89,7 +91,9 @@ def build_mcp_installation(
     used_model_names: dict[str, str] = {}
     previous_snapshots = {
         snapshot.server_id: snapshot
-        for snapshot in (previous_installation.snapshots if previous_installation else ())
+        for snapshot in (
+            previous_installation.snapshots if previous_installation else ()
+        )
     }
     previous_descriptors = {
         descriptor.name: descriptor
@@ -304,8 +308,16 @@ def _descriptor_from_tool(
 ) -> CapabilityDescriptor:
     annotations = tool.annotations
     read_only = annotations.read_only_hint is True
-    destructive = True if annotations.destructive_hint is None else bool(annotations.destructive_hint)
-    open_world = True if annotations.open_world_hint is None else bool(annotations.open_world_hint)
+    destructive = (
+        True
+        if annotations.destructive_hint is None
+        else bool(annotations.destructive_hint)
+    )
+    open_world = (
+        True
+        if annotations.open_world_hint is None
+        else bool(annotations.open_world_hint)
+    )
     return CapabilityDescriptor(
         id=f"mcp:{snapshot.server_id}:{tool.name}",
         name=model_name,
@@ -321,6 +333,8 @@ def _descriptor_from_tool(
         is_open_world=open_world,
         requires_user_interaction=False,
         permission_category="mcp",
+        result_render_contract=generic_result_render_contract(),
+        long_horizon_policy=mcp_tool_action_policy(),
         approval_policy_hint=config.default_approval_mode,
         advertise_policy=CapabilityAdvertisePolicy.DIRECT,
         availability=CapabilityAvailability.AVAILABLE,

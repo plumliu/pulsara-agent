@@ -7,10 +7,16 @@ import time
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
 
-from pulsara_agent.event import EventContext, TerminalProcessCompletedEvent, ToolResultEndEvent, ToolResultTextDeltaEvent
+from pulsara_agent.event import (
+    EventContext,
+    TerminalProcessCompletedEvent,
+    ToolResultEndEvent,
+    ToolResultTextDeltaEvent,
+)
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolResultBlock, ToolResultState
+from pulsara_agent.message.assembler import completed_tool_result_from_events
 from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
@@ -25,6 +31,7 @@ from pulsara_agent.runtime.tool_artifacts import (
     ToolResultArtifactRecord,
     ToolResultArtifactService,
 )
+from pulsara_agent.runtime.tool_execution import build_tool_result_terminal_event
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import (
     ToolCall,
@@ -35,7 +42,10 @@ from pulsara_agent.tools import (
     ToolRuntimeContext,
     build_core_tool_registry,
 )
-from pulsara_agent.tools.builtins.terminal import TerminalTool
+from pulsara_agent.tools.builtins.terminal import (
+    TerminalTool,
+    freeze_tool_display_payload,
+)
 from pulsara_agent.tools.builtins.terminal_process import TerminalProcessTool
 from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.registry import ToolRegistry, build_tool_binding_contract
@@ -114,6 +124,30 @@ def execute_tool(tmp_path, name: str, arguments: dict) -> tuple[ToolExecutor, ob
     return executor, result
 
 
+def _commit_prepared_terminal(
+    event_log: InMemoryEventLog,
+    result: ToolExecutionResult,
+) -> ToolResultEndEvent:
+    prepared = result.prepared_terminal_result
+    assert prepared is not None
+    return event_log.append(
+        build_tool_result_terminal_event(
+            event_context=CTX,
+            prepared=prepared,
+        )
+    )
+
+
+def _completed_tool_result(
+    event_log: InMemoryEventLog,
+    tool_call_id: str,
+) -> ToolResultBlock:
+    return completed_tool_result_from_events(
+        event_log.iter(reply_id=CTX.reply_id),
+        tool_call_id,
+    )
+
+
 def test_async_tool_runs_on_calling_loop_with_runtime_context() -> None:
     probe = _AsyncContextProbeTool()
     registry = ToolRegistry()
@@ -142,7 +176,9 @@ def test_async_suspended_tool_payload_gets_observation_timing_seed() -> None:
     tool = _AsyncSuspendingTool()
     registry = ToolRegistry()
     registry.register(tool)
-    executor = ToolExecutor(registry=registry, runtime_session_id="runtime:async-suspend")
+    executor = ToolExecutor(
+        registry=registry, runtime_session_id="runtime:async-suspend"
+    )
 
     async def run_probe() -> ToolExecutionSuspended:
         result = await executor.execute_async(
@@ -251,7 +287,9 @@ def test_core_tool_registry_registers_all_tools_under_read_only(tmp_path) -> Non
     assert {"enter_plan", "ask_plan_question", "exit_plan"}.issubset(names)
 
 
-def test_core_tool_registry_keeps_terminal_tools_registered_when_terminal_off(tmp_path) -> None:
+def test_core_tool_registry_keeps_terminal_tools_registered_when_terminal_off(
+    tmp_path,
+) -> None:
     registry = build_core_tool_registry(
         in_memory_runtime_session(tmp_path),
         permission_state=PermissionState.from_policy(
@@ -265,7 +303,9 @@ def test_core_tool_registry_keeps_terminal_tools_registered_when_terminal_off(tm
 
     # terminal/terminal_process are visible even with terminal=off; the gate
     # denies them at call time rather than hiding them from the registry.
-    assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(registry.names())
+    assert {"edit_file", "write_file", "terminal", "terminal_process"}.issubset(
+        registry.names()
+    )
 
 
 def test_core_tool_registry_is_constant_across_permission_modes(tmp_path) -> None:
@@ -276,14 +316,22 @@ def test_core_tool_registry_is_constant_across_permission_modes(tmp_path) -> Non
             build_core_tool_registry(
                 in_memory_runtime_session(tmp_path),
                 permission_state=PermissionState.from_policy(
-                    EffectivePermissionPolicy(profile=profile, approval=approval, terminal=terminal)
+                    EffectivePermissionPolicy(
+                        profile=profile, approval=approval, terminal=terminal
+                    )
                 ),
             ).names()
         )
 
-    read_only = names_for(PermissionProfile.READ_ONLY, ApprovalPolicy.ON_REQUEST, TerminalAccess.OFF)
-    bypass = names_for(PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ALLOW)
-    ask = names_for(PermissionProfile.TRUSTED_HOST, ApprovalPolicy.ON_REQUEST, TerminalAccess.ASK)
+    read_only = names_for(
+        PermissionProfile.READ_ONLY, ApprovalPolicy.ON_REQUEST, TerminalAccess.OFF
+    )
+    bypass = names_for(
+        PermissionProfile.TRUSTED_HOST, ApprovalPolicy.NEVER, TerminalAccess.ALLOW
+    )
+    ask = names_for(
+        PermissionProfile.TRUSTED_HOST, ApprovalPolicy.ON_REQUEST, TerminalAccess.ASK
+    )
 
     assert read_only == bypass == ask
 
@@ -306,7 +354,9 @@ def test_read_file_reads_workspace_and_host_local_text_files(tmp_path) -> None:
     target = tmp_path / "note.txt"
     target.write_text("hello Pulsara\nsecond line\n", encoding="utf-8")
 
-    _, result = execute_tool(tmp_path, "read_file", {"path": "note.txt", "offset": 2, "limit": 1})
+    _, result = execute_tool(
+        tmp_path, "read_file", {"path": "note.txt", "offset": 2, "limit": 1}
+    )
 
     assert result.status is ToolResultState.SUCCESS
     assert result.metadata["access_scope"] == "workspace"
@@ -338,7 +388,9 @@ def test_read_file_reads_workspace_and_host_local_text_files(tmp_path) -> None:
     assert "escapes workspace root" in relative_escape.output
 
 
-def test_read_file_allows_explicit_host_local_sensitive_text_path_by_design(tmp_path) -> None:
+def test_read_file_allows_explicit_host_local_sensitive_text_path_by_design(
+    tmp_path,
+) -> None:
     env_file = tmp_path.parent / f"{tmp_path.name}.env"
     env_file.write_text("TOKEN=plain-text-secret\n", encoding="utf-8")
 
@@ -355,7 +407,9 @@ def test_write_and_edit_file_still_block_path_escape(tmp_path) -> None:
     outside = tmp_path.parent / "outside-write.txt"
     outside.write_text("before", encoding="utf-8")
 
-    _, write_result = execute_tool(tmp_path, "write_file", {"path": str(outside), "content": "after"})
+    _, write_result = execute_tool(
+        tmp_path, "write_file", {"path": str(outside), "content": "after"}
+    )
     _, edit_result = execute_tool(
         tmp_path,
         "edit_file",
@@ -407,15 +461,23 @@ def test_search_files_finds_matching_text(tmp_path) -> None:
     assert payload["matches"][0]["content"] == "JSON-LD memory"
 
 
-def test_search_files_can_search_specific_host_local_directory_and_blocks_broad_roots(tmp_path) -> None:
+def test_search_files_can_search_specific_host_local_directory_and_blocks_broad_roots(
+    tmp_path,
+) -> None:
     external_dir = tmp_path.parent / f"{tmp_path.name}-external-search"
     external_dir.mkdir()
-    (external_dir / "skill.md").write_text("HOST_LOCAL_SEARCH_SENTINEL\n", encoding="utf-8")
+    (external_dir / "skill.md").write_text(
+        "HOST_LOCAL_SEARCH_SENTINEL\n", encoding="utf-8"
+    )
 
     _, result = execute_tool(
         tmp_path,
         "search_files",
-        {"pattern": "HOST_LOCAL_SEARCH_SENTINEL", "path": str(external_dir), "limit": 5},
+        {
+            "pattern": "HOST_LOCAL_SEARCH_SENTINEL",
+            "path": str(external_dir),
+            "limit": 5,
+        },
     )
 
     assert result.status is ToolResultState.SUCCESS
@@ -429,7 +491,11 @@ def test_search_files_can_search_specific_host_local_directory_and_blocks_broad_
     _, broad = execute_tool(
         tmp_path,
         "search_files",
-        {"pattern": "SHOULD_NOT_SCAN_TEMP_ROOT", "path": tempfile.gettempdir(), "limit": 1},
+        {
+            "pattern": "SHOULD_NOT_SCAN_TEMP_ROOT",
+            "path": tempfile.gettempdir(),
+            "limit": 1,
+        },
     )
 
     assert broad.status is ToolResultState.ERROR
@@ -490,7 +556,9 @@ def test_write_file_warns_when_file_changed_after_read(tmp_path) -> None:
     executor = ToolExecutor(registry=registry)
 
     executor.execute(
-        ToolCall(id="call:read", name="read_file", arguments={"path": "docs/design.md"}),
+        ToolCall(
+            id="call:read", name="read_file", arguments={"path": "docs/design.md"}
+        ),
         event_context=CTX,
     )
     target.write_text("external", encoding="utf-8")
@@ -567,11 +635,17 @@ def test_terminal_runs_command_in_workspace(tmp_path) -> None:
 def test_terminal_tool_exposes_workdir_and_structured_json(tmp_path) -> None:
     (tmp_path / "src").mkdir()
     registry = make_registry(tmp_path)
-    terminal_spec = next(spec for spec in registry.tool_specs() if spec.name == "terminal")
+    terminal_spec = next(
+        spec for spec in registry.tool_specs() if spec.name == "terminal"
+    )
     executor = ToolExecutor(registry=registry)
 
     result = executor.execute(
-        ToolCall(id="call:terminal", name="terminal", arguments={"command": "pwd", "workdir": "src"}),
+        ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "pwd", "workdir": "src"},
+        ),
         event_context=CTX,
     )
     payload = json.loads(result.output)
@@ -652,7 +726,10 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
         ToolCall(
             id="call:terminal",
             name="terminal",
-            arguments={"command": "sleep 0.05 && printf LIST_LOG_OK", "yield_time_ms": 0},
+            arguments={
+                "command": "sleep 0.05 && printf LIST_LOG_OK",
+                "yield_time_ms": 0,
+            },
         ),
         event_context=CTX,
     )
@@ -661,7 +738,11 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
         ToolCall(
             id="call:wait",
             name="terminal_process",
-            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+            arguments={
+                "action": "wait",
+                "process_id": process_id,
+                "timeout_seconds": 2,
+            },
         ),
         event_context=CTX,
     )
@@ -699,7 +780,9 @@ def test_terminal_process_tool_lists_and_logs_retained_processes(tmp_path) -> No
     assert logged.metadata["timing"] == log_payload["timing"]
 
 
-def test_terminal_process_wait_without_timeout_uses_finite_default(monkeypatch, tmp_path) -> None:
+def test_terminal_process_wait_without_timeout_uses_finite_default(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setattr(
         "pulsara_agent.tools.builtins.terminal_process.DEFAULT_WAIT_TIMEOUT_SECONDS",
         1,
@@ -737,7 +820,9 @@ def test_terminal_process_wait_without_timeout_uses_finite_default(monkeypatch, 
     assert json.loads(kill.output)["status"] == "killed"
 
 
-def test_terminal_process_wait_zero_timeout_uses_finite_default(monkeypatch, tmp_path) -> None:
+def test_terminal_process_wait_zero_timeout_uses_finite_default(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setattr(
         "pulsara_agent.tools.builtins.terminal_process.DEFAULT_WAIT_TIMEOUT_SECONDS",
         1,
@@ -758,7 +843,11 @@ def test_terminal_process_wait_zero_timeout_uses_finite_default(monkeypatch, tmp
         ToolCall(
             id="call:wait",
             name="terminal_process",
-            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 0},
+            arguments={
+                "action": "wait",
+                "process_id": process_id,
+                "timeout_seconds": 0,
+            },
         ),
         event_context=CTX,
     )
@@ -785,7 +874,11 @@ def test_terminal_removed_background_arguments_are_hard_cut(tmp_path) -> None:
 
 
 def test_terminal_long_running_command_yields_to_process_id(tmp_path) -> None:
-    _, result = execute_tool(tmp_path, "terminal", {"command": "sleep 0.2 && printf done", "yield_time_ms": 10})
+    _, result = execute_tool(
+        tmp_path,
+        "terminal",
+        {"command": "sleep 0.2 && printf done", "yield_time_ms": 10},
+    )
     payload = json.loads(result.output)
 
     assert result.status is ToolResultState.SUCCESS
@@ -797,7 +890,9 @@ def test_terminal_long_running_command_yields_to_process_id(tmp_path) -> None:
     assert result.metadata["timing"] == payload["timing"]
 
 
-def test_terminal_result_timing_is_shared_by_payload_metadata_and_artifact(tmp_path) -> None:
+def test_terminal_result_timing_is_shared_by_payload_metadata_and_artifact(
+    tmp_path,
+) -> None:
     _, result = execute_tool(tmp_path, "terminal", {"command": "printf TIMING_OK"})
     payload = json.loads(result.output)
 
@@ -967,7 +1062,11 @@ def test_terminal_process_tool_submit_and_close_stdin(tmp_path) -> None:
         ToolCall(
             id="call:wait",
             name="terminal_process",
-            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+            arguments={
+                "action": "wait",
+                "process_id": process_id,
+                "timeout_seconds": 2,
+            },
         ),
         event_context=CTX,
     )
@@ -1001,7 +1100,11 @@ def test_terminal_process_tool_rejects_write_after_finished_process(tmp_path) ->
         ToolCall(
             id="call:wait",
             name="terminal_process",
-            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+            arguments={
+                "action": "wait",
+                "process_id": process_id,
+                "timeout_seconds": 2,
+            },
         ),
         event_context=CTX,
     )
@@ -1032,7 +1135,9 @@ def test_terminal_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> N
         ),
     )
 
-    result = tool.execute(ToolCall(id="call:terminal", name="terminal", arguments={"command": "pwd"}))
+    result = tool.execute(
+        ToolCall(id="call:terminal", name="terminal", arguments={"command": "pwd"})
+    )
     payload = json.loads(result.output)
 
     assert result.status is ToolResultState.ERROR
@@ -1040,7 +1145,9 @@ def test_terminal_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> N
     assert payload["policy_code"] == "terminal_access_off"
 
 
-def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(tmp_path) -> None:
+def test_terminal_process_tool_fails_closed_when_policy_disables_terminal(
+    tmp_path,
+) -> None:
     tool = TerminalProcessTool(
         tmp_path,
         permission_state=PermissionState.from_policy(
@@ -1075,7 +1182,10 @@ def test_terminal_tool_context_records_yielded_completion_event(tmp_path) -> Non
         ToolCall(
             id="call:terminal",
             name="terminal",
-            arguments={"command": "sleep 0.05 && printf TOOL_COMPLETE", "yield_time_ms": 0},
+            arguments={
+                "command": "sleep 0.05 && printf TOOL_COMPLETE",
+                "yield_time_ms": 0,
+            },
         ),
         event_context=CTX,
     )
@@ -1084,11 +1194,19 @@ def test_terminal_tool_context_records_yielded_completion_event(tmp_path) -> Non
         ToolCall(
             id="call:wait",
             name="terminal_process",
-            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 2},
+            arguments={
+                "action": "wait",
+                "process_id": process_id,
+                "timeout_seconds": 2,
+            },
         ),
         event_context=CTX,
     )
-    completion = next(event for event in event_log.iter() if isinstance(event, TerminalProcessCompletedEvent))
+    completion = next(
+        event
+        for event in event_log.iter()
+        if isinstance(event, TerminalProcessCompletedEvent)
+    )
 
     assert completion.run_id == CTX.run_id
     assert completion.turn_id == CTX.turn_id
@@ -1133,7 +1251,11 @@ def test_terminal_tool_yielded_tty_reports_io_mode(tmp_path) -> None:
         ToolCall(
             id="call:wait",
             name="terminal_process",
-            arguments={"action": "wait", "process_id": start_payload["process_id"], "timeout_seconds": 2},
+            arguments={
+                "action": "wait",
+                "process_id": start_payload["process_id"],
+                "timeout_seconds": 2,
+            },
         ),
         event_context=CTX,
     )
@@ -1151,7 +1273,11 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     executor = ToolExecutor(registry=registry)
 
     added = executor.execute(
-        ToolCall(id="call:todo:add", name="todo", arguments={"action": "add", "text": "write tests"}),
+        ToolCall(
+            id="call:todo:add",
+            name="todo",
+            arguments={"action": "add", "text": "write tests"},
+        ),
         event_context=CTX,
     )
     payload = json.loads(added.output)
@@ -1191,27 +1317,33 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     assert json.loads(cleared.output)["items"] == []
 
 
-def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) -> None:
+def test_tool_executor_prepares_terminal_for_runtime_owned_commit(tmp_path) -> None:
     registry = make_registry(tmp_path)
     event_log = InMemoryEventLog()
     executor = ToolExecutor(registry=registry, record_event=event_log.append)
 
     result = executor.execute(
-        ToolCall(id="call:terminal", name="terminal", arguments={"command": "printf ok"}),
+        ToolCall(
+            id="call:terminal", name="terminal", arguments={"command": "printf ok"}
+        ),
         event_context=CTX,
     )
-    msg = event_log.replay("reply:tools")
+    end_event = _commit_prepared_terminal(event_log, result)
+    block = _completed_tool_result(event_log, "call:terminal")
 
     assert result.status is ToolResultState.SUCCESS
-    assert [event.sequence for event in event_log.iter(reply_id="reply:tools")] == [1, 2, 3, 4, 5]
-    assert isinstance(msg.content[0], ToolResultBlock)
-    assert msg.content[0].name == "terminal"
-    assert msg.content[0].state is ToolResultState.SUCCESS
-    assert json.loads(msg.content[0].output[0].text)["output"] == "ok"
+    assert [event.sequence for event in event_log.iter(reply_id="reply:tools")] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+    assert block.name == "terminal"
+    assert block.state is ToolResultState.SUCCESS
+    assert json.loads(block.output[0].text)["output"] == "ok"
     result_timing = result.metadata["tool_observation_timing"]
-    end_event = next(event for event in event_log.iter(reply_id="reply:tools") if isinstance(event, ToolResultEndEvent))
-    assert end_event.metadata["tool_observation_timing"] == result_timing
-    assert msg.metadata["tool_observation_timing_by_call_id"]["call:terminal"] == result_timing
+    assert end_event.observation_timing.to_message_projection_payload() == result_timing
     assert result_timing["tool_call_id"] == "call:terminal"
     assert result_timing["tool_name"] == "terminal"
     assert result_timing["observed_at"] == end_event.created_at.replace("+00:00", "Z")
@@ -1244,9 +1376,11 @@ def test_tool_executor_archives_generic_large_output(tmp_path) -> None:
         artifact_service=runtime_session.artifact_service,
     )
 
-    result = executor.execute(ToolCall(id="call:large", name="large_output"), event_context=CTX)
-    msg = runtime_session.event_log.replay("reply:tools")
-    block = msg.content[0]
+    result = executor.execute(
+        ToolCall(id="call:large", name="large_output"), event_context=CTX
+    )
+    _commit_prepared_terminal(runtime_session.event_log, result)
+    block = _completed_tool_result(runtime_session.event_log, "call:large")
 
     assert result.status is ToolResultState.SUCCESS
     assert isinstance(block, ToolResultBlock)
@@ -1265,38 +1399,57 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
     index = InMemoryToolResultArtifactIndex()
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
-    session_a = in_memory_runtime_session(tmp_path / "a", archive=archive, tool_result_artifacts=index)
-    session_b = in_memory_runtime_session(tmp_path / "b", archive=archive, tool_result_artifacts=index)
-    executor_a = session_a.create_tool_executor(record_event=session_a.make_thread_recorder())
-    executor_b = session_b.create_tool_executor(record_event=session_b.make_thread_recorder())
+    session_a = in_memory_runtime_session(
+        tmp_path / "a", archive=archive, tool_result_artifacts=index
+    )
+    session_b = in_memory_runtime_session(
+        tmp_path / "b", archive=archive, tool_result_artifacts=index
+    )
+    executor_a = session_a.create_tool_executor(
+        record_event=session_a.make_thread_recorder()
+    )
+    executor_b = session_b.create_tool_executor(
+        record_event=session_b.make_thread_recorder()
+    )
 
     terminal_result = executor_a.execute(
         ToolCall(
             id="call:terminal",
             name="terminal",
             arguments={
-                "command": "python -c 'print(\"OWNER_HEAD\"); print(\"o\" * 50000); print(\"OWNER_TAIL\")'",
+                "command": 'python -c \'print("OWNER_HEAD"); print("o" * 50000); print("OWNER_TAIL")\'',
                 "max_output_chars": 200,
             },
         ),
         event_context=CTX,
     )
     assert terminal_result.status is ToolResultState.SUCCESS
-    block = session_a.event_log.replay("reply:tools").content[0]
+    _commit_prepared_terminal(session_a.event_log, terminal_result)
+    block = _completed_tool_result(session_a.event_log, "call:terminal")
     assert isinstance(block, ToolResultBlock)
     artifact_id = block.artifacts[0].artifact_id
 
     missing = executor_b.execute(
-        ToolCall(id="call:missing", name="artifact_read", arguments={"artifact_id": "artifact:missing"}),
+        ToolCall(
+            id="call:missing",
+            name="artifact_read",
+            arguments={"artifact_id": "artifact:missing"},
+        ),
         event_context=CTX,
     )
     forbidden = executor_b.execute(
-        ToolCall(id="call:forbidden", name="artifact_read", arguments={"artifact_id": artifact_id}),
+        ToolCall(
+            id="call:forbidden",
+            name="artifact_read",
+            arguments={"artifact_id": artifact_id},
+        ),
         event_context=CTX,
     )
 
     assert json.loads(missing.output)["status"] == "not_found"
-    assert json.loads(forbidden.output) == json.loads(missing.output) | {"artifact_id": artifact_id}
+    assert json.loads(forbidden.output) == json.loads(missing.output) | {
+        "artifact_id": artifact_id
+    }
 
 
 def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
@@ -1325,14 +1478,22 @@ def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
             size_bytes=write.size_bytes,
         )
     )
-    executor = runtime_session.create_tool_executor(record_event=runtime_session.make_thread_recorder())
+    executor = runtime_session.create_tool_executor(
+        record_event=runtime_session.make_thread_recorder()
+    )
 
     info = executor.execute(
-        ToolCall(id="call:info", name="artifact_read", arguments={"artifact_id": artifact_id, "mode": "info"}),
+        ToolCall(
+            id="call:info",
+            name="artifact_read",
+            arguments={"artifact_id": artifact_id, "mode": "info"},
+        ),
         event_context=CTX,
     )
     text = executor.execute(
-        ToolCall(id="call:text", name="artifact_read", arguments={"artifact_id": artifact_id}),
+        ToolCall(
+            id="call:text", name="artifact_read", arguments={"artifact_id": artifact_id}
+        ),
         event_context=CTX,
     )
 
@@ -1342,7 +1503,9 @@ def test_artifact_read_text_mode_rejects_binary_artifact(tmp_path) -> None:
     assert "not a text artifact" in text_payload["error"]
 
 
-def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(tmp_path) -> None:
+def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(
+    tmp_path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     artifact_id = "artifact:tool-result:run-tools:call-large:output:0"
     content = "ARTIFACT_HEAD\n" + ("x" * 12_000) + "\nARTIFACT_TAIL"
@@ -1369,7 +1532,9 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(tm
             size_bytes=write.size_bytes,
         )
     )
-    executor = runtime_session.create_tool_executor(record_event=runtime_session.make_thread_recorder())
+    executor = runtime_session.create_tool_executor(
+        record_event=runtime_session.make_thread_recorder()
+    )
 
     result = executor.execute(
         ToolCall(
@@ -1379,8 +1544,8 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(tm
         ),
         event_context=CTX,
     )
-    msg = runtime_session.event_log.replay("reply:tools")
-    block = msg.content[0]
+    _commit_prepared_terminal(runtime_session.event_log, result)
+    block = _completed_tool_result(runtime_session.event_log, "call:artifact-read")
 
     assert result.status is ToolResultState.SUCCESS
     assert len(result.output) > 8_000
@@ -1389,12 +1554,9 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(tm
     assert len(runtime_session.archive.blobs) == 1
 
 
-def test_tool_result_artifact_options_reject_unrecoverable_threshold_band() -> None:
-    with pytest.raises(ValueError, match="archive_threshold_bytes"):
-        ToolResultArtifactOptions(archive_threshold_bytes=20_000, tool_result_message_context_chars=8_000)
-
-
-def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_preview() -> None:
+def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_preview() -> (
+    None
+):
     archive = InMemoryArchiveStore()
     index = InMemoryToolResultArtifactIndex()
     service = ToolResultArtifactService(
@@ -1408,11 +1570,25 @@ def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_previe
         call_id="call:terminal",
         tool_name="terminal",
         status=ToolResultState.SUCCESS,
-        output=json.dumps({"status": "success", "output": "OLD_PREVIEW", "truncated": True}, ensure_ascii=False),
+        output=json.dumps(
+            {"status": "success", "output": "OLD_PREVIEW", "truncated": True},
+            ensure_ascii=False,
+        ),
+        display_payload=freeze_tool_display_payload(
+            {"status": "success", "output": "OLD_PREVIEW", "truncated": True}
+        ),
         artifact_candidates=(
             # Non-primary text artifact must not receive the primary output preview.
-            ToolResultArtifactCandidate(role="diagnostics", media_type="text/plain; charset=utf-8", text="diag" * 20),
-            ToolResultArtifactCandidate(role="combined_output", media_type="text/plain; charset=utf-8", text=full_output),
+            ToolResultArtifactCandidate(
+                role="diagnostics",
+                media_type="text/plain; charset=utf-8",
+                text="diag" * 20,
+            ),
+            ToolResultArtifactCandidate(
+                role="combined_output",
+                media_type="text/plain; charset=utf-8",
+                text=full_output,
+            ),
         ),
     )
 
@@ -1436,7 +1612,9 @@ def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_previe
     assert record.metadata["preview"] == refs[1].preview.model_dump()
 
 
-def test_tool_result_artifact_service_archives_multibyte_text_by_bytes_but_previews_by_chars() -> None:
+def test_tool_result_artifact_service_archives_multibyte_text_by_bytes_but_previews_by_chars() -> (
+    None
+):
     archive = InMemoryArchiveStore()
     index = InMemoryToolResultArtifactIndex()
     service = ToolResultArtifactService(
@@ -1473,45 +1651,46 @@ def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) ->
     executor = ToolExecutor(registry=registry, record_event=event_log.append)
     result_holder = {}
 
-    thread = threading.Thread(
-        target=lambda: result_holder.setdefault(
-            "result",
-            executor.execute(
-                ToolCall(
-                    id="call:terminal",
-                    name="terminal",
-                    arguments={
-                        "command": (
-                            "python -c 'import time; "
-                            'print("STREAM_FIRST", flush=True); '
-                            "time.sleep(1.0); "
-                            'print("STREAM_SECOND", end="", flush=True)\''
-                        )
-                    },
-                ),
-                event_context=CTX,
+    def execute_and_commit() -> None:
+        result = executor.execute(
+            ToolCall(
+                id="call:terminal",
+                name="terminal",
+                arguments={
+                    "command": (
+                        "python -c 'import time; "
+                        'print("STREAM_FIRST", flush=True); '
+                        "time.sleep(1.0); "
+                        'print("STREAM_SECOND", end="", flush=True)\''
+                    )
+                },
             ),
+            event_context=CTX,
         )
-    )
+        result_holder["result"] = result
+        _commit_prepared_terminal(event_log, result)
+
+    thread = threading.Thread(target=execute_and_commit)
     thread.start()
     deadline = time.monotonic() + 3.0
     saw_first_delta_before_end = False
     while time.monotonic() < deadline:
         events = list(event_log.iter(reply_id="reply:tools"))
         if any(
-            isinstance(event, ToolResultTextDeltaEvent) and "STREAM_FIRST" in event.delta
+            isinstance(event, ToolResultTextDeltaEvent)
+            and "STREAM_FIRST" in event.delta
             for event in events
         ) and not any(isinstance(event, ToolResultEndEvent) for event in events):
             saw_first_delta_before_end = True
             break
         time.sleep(0.02)
     thread.join(timeout=2)
-    msg = event_log.replay("reply:tools")
+    block = _completed_tool_result(event_log, "call:terminal")
 
     assert saw_first_delta_before_end is True
     assert thread.is_alive() is False
     assert result_holder["result"].status is ToolResultState.SUCCESS
-    payload = json.loads(msg.content[0].output[0].text)
+    payload = json.loads(block.output[0].text)
     assert payload["output"] == "STREAM_FIRST\nSTREAM_SECOND"
 
 
@@ -1528,6 +1707,7 @@ def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
         ),
         event_context=CTX,
     )
+    _commit_prepared_terminal(event_log, result)
     deltas = [
         event.delta
         for event in event_log.iter(reply_id="reply:tools")
@@ -1539,7 +1719,9 @@ def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
     assert json.loads(streamed_json)["output"] == "JSON_A\nJSON_B"
 
 
-def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(tmp_path) -> None:
+def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(
+    tmp_path,
+) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
     result = executor.execute(
@@ -1547,11 +1729,12 @@ def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(t
             id="call:terminal",
             name="terminal",
             arguments={
-                "command": "python -c 'print(\"HEAD\"); print(\"z\" * 60000); print(\"TAIL\")'",
+                "command": 'python -c \'print("HEAD"); print("z" * 60000); print("TAIL")\'',
             },
         ),
         event_context=CTX,
     )
+    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
     deltas = [
         event.delta
         for event in runtime_session.event_log.iter(reply_id="reply:tools")
@@ -1559,12 +1742,6 @@ def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(t
     ]
     streamed_json = "".join(deltas)
     streamed_payload = json.loads(streamed_json)
-    end_event = next(
-        event
-        for event in runtime_session.event_log.iter(reply_id="reply:tools")
-        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:terminal"
-    )
-
     assert result.status is ToolResultState.SUCCESS
     assert len(streamed_json) < 15_000
     assert streamed_payload["preview_policy"] == "head_tail"
@@ -1574,10 +1751,15 @@ def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(t
     assert "artifact_id" not in streamed_payload["preview"]["read_more"]
     assert end_event.artifacts
     assert end_event.artifacts[0].preview is not None
-    assert end_event.artifacts[0].preview.read_more["artifact_id"] == end_event.artifacts[0].artifact_id
+    assert (
+        end_event.artifacts[0].preview.read_more["artifact_id"]
+        == end_event.artifacts[0].artifact_id
+    )
 
 
-def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(tmp_path) -> None:
+def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(
+    tmp_path,
+) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
     result = executor.execute(
@@ -1585,21 +1767,17 @@ def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(tmp_path)
             id="call:terminal",
             name="terminal",
             arguments={
-                "command": "python -c 'print(\"HEAD\"); print(\"z\" * 50000); print(\"TAIL\")'",
+                "command": 'python -c \'print("HEAD"); print("z" * 50000); print("TAIL")\'',
                 "max_output_chars": 1,
             },
         ),
         event_context=CTX,
     )
+    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
 
     payload = json.loads(result.output)
     assert result.status is ToolResultState.SUCCESS
     assert payload["truncated"] is True
-    end_event = next(
-        event
-        for event in runtime_session.event_log.iter(reply_id="reply:tools")
-        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:terminal"
-    )
     assert end_event.artifacts
     assert end_event.artifacts[0].preview is not None
 
@@ -1607,16 +1785,17 @@ def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(tmp_path)
 def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
-    executor.execute(
+    result = executor.execute(
         ToolCall(
             id="call:terminal",
             name="terminal",
             arguments={
-                "command": "python -c 'print(\"H\" * 210000); print(\"TAIL\")'",
+                "command": 'python -c \'print("H" * 210000); print("TAIL")\'',
             },
         ),
         event_context=CTX,
     )
+    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
     streamed_json = "".join(
         event.delta
         for event in runtime_session.event_log.iter(reply_id="reply:tools")
@@ -1626,11 +1805,8 @@ def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None
 
     assert payload["preview_policy"] == "head_tail_huge"
     visible_head_chars = payload["preview"]["visible_head_chars"]
-    assert payload["output"][visible_head_chars:].startswith("\n\n[OUTPUT TRUNCATED / PREVIEW")
-    end_event = next(
-        event
-        for event in runtime_session.event_log.iter(reply_id="reply:tools")
-        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == "call:terminal"
+    assert payload["output"][visible_head_chars:].startswith(
+        "\n\n[OUTPUT TRUNCATED / PREVIEW"
     )
     assert end_event.artifacts[0].preview is not None
     assert end_event.artifacts[0].preview.visible_head_chars == visible_head_chars
@@ -1641,20 +1817,20 @@ def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -
 
     result = executor.execute(
         ToolCall(
-                id="call:terminal",
-                name="terminal",
-                arguments={
-                    "command": "python -c 'print(\"HEAD\"); print(\"z\" * 50000); print(\"TAIL\")'",
-                    "max_output_chars": 512,
-                },
+            id="call:terminal",
+            name="terminal",
+            arguments={
+                "command": 'python -c \'print("HEAD"); print("z" * 50000); print("TAIL")\'',
+                "max_output_chars": 512,
+            },
         ),
         event_context=CTX,
     )
     payload = json.loads(result.output)
-    msg = runtime_session.event_log.replay("reply:tools")
-    block = msg.content[0]
+    _commit_prepared_terminal(runtime_session.event_log, result)
+    block = _completed_tool_result(runtime_session.event_log, "call:terminal")
     assert isinstance(block, ToolResultBlock)
-    replay_payload = json.loads(msg.content[0].output[0].text)
+    replay_payload = json.loads(block.output[0].text)
 
     assert result.status is ToolResultState.SUCCESS
     assert payload["truncated"] is True
@@ -1677,41 +1853,57 @@ def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -
     assert "TAIL" in read_payload["text"]
 
 
-def test_terminal_process_log_artifact_metadata_uses_real_process_status(tmp_path) -> None:
+def test_terminal_process_log_artifact_metadata_uses_real_process_status(
+    tmp_path,
+) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
     start = executor.execute(
         ToolCall(
             id="call:start",
             name="terminal",
             arguments={
-                "command": "python -c 'import time; print(\"ERR_HEAD\"); print(\"e\" * 50000); print(\"ERR_TAIL\"); time.sleep(0.2); raise SystemExit(7)'",
+                "command": 'python -c \'import time; print("ERR_HEAD"); print("e" * 50000); print("ERR_TAIL"); time.sleep(0.2); raise SystemExit(7)\'',
                 "yield_time_ms": 0,
                 "max_output_chars": 200,
             },
         ),
         event_context=CTX,
     )
+    _commit_prepared_terminal(runtime_session.event_log, start)
     process_id = json.loads(start.output)["process_id"]
     assert process_id
-    executor.execute(
+    waited = executor.execute(
         ToolCall(
             id="call:wait",
             name="terminal_process",
-            arguments={"action": "wait", "process_id": process_id, "timeout_seconds": 5, "max_output_chars": 200},
+            arguments={
+                "action": "wait",
+                "process_id": process_id,
+                "timeout_seconds": 5,
+                "max_output_chars": 200,
+            },
         ),
         event_context=CTX,
     )
-    executor.execute(
+    _commit_prepared_terminal(runtime_session.event_log, waited)
+    logged = executor.execute(
         ToolCall(
             id="call:log",
             name="terminal_process",
-            arguments={"action": "log", "process_id": process_id, "max_output_chars": 200},
+            arguments={
+                "action": "log",
+                "process_id": process_id,
+                "max_output_chars": 200,
+            },
         ),
         event_context=CTX,
     )
+    _commit_prepared_terminal(runtime_session.event_log, logged)
 
-    msg = runtime_session.event_log.replay("reply:tools")
-    log_block = next(block for block in msg.content if isinstance(block, ToolResultBlock) and block.id == "call:log")
+    log_block = _completed_tool_result(
+        runtime_session.event_log,
+        "call:log",
+    )
     artifact_id = log_block.artifacts[0].artifact_id
     artifact_info = runtime_session.archive.get_info(
         artifact_id,

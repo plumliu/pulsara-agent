@@ -12,7 +12,9 @@ from tests.conftest import run_start_permission_fields
 
 from pulsara_agent.event import (
     AgentEvent,
+    ContextWindowOpenedEvent,
     EventContext,
+    RolloutBudgetAccountOpenedEvent,
     RunEndEvent,
     RunStartEvent,
     TextBlockDeltaEvent,
@@ -22,6 +24,7 @@ from pulsara_agent.event import (
     ToolCallStartEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog
+from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.host.identity import resolve_workspace
 from pulsara_agent.host.session_manifest import (
@@ -42,6 +45,16 @@ from pulsara_agent.runtime.permission import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.recovery import HOST_TEARDOWN_NOTE_TEXT
+from pulsara_agent.runtime.long_horizon.checkpoint import (
+    prepare_subagent_graph_checkpoint,
+)
+from pulsara_agent.runtime.long_horizon.reducer_contract import (
+    build_default_subagent_graph_reducer_binding,
+)
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    empty_projection_state_fingerprint,
+    prepare_root_long_horizon_run,
+)
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 
 
@@ -366,18 +379,44 @@ def test_resume_repairs_dangling_running_run_before_replay(
         runtime_session_id=runtime_session_id,
         workspace_root=tmp_path,
     )
+    run_start_id = f"run_start:test:{ctx.run_id}"
+    start_fields = run_start_permission_fields(
+        ctx.run_id,
+        user_input="dangling user",
+        turn_id=ctx.turn_id,
+        reply_id=ctx.reply_id,
+        mcp_installation_owner_runtime_session_id=runtime_session_id,
+    )
+    long_horizon = prepare_root_long_horizon_run(
+        runtime_session_id=runtime_session_id,
+        run_id=ctx.run_id,
+        run_start_event_id=run_start_id,
+        primary_target=start_fields["model_target"],
+        summarizer_target=start_fields["model_target"],
+        graph_reducer_contract=start_fields["subagent_graph_reducer_contract"],
+        source_through_sequence_at_open=0,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    start_fields["long_horizon"] = long_horizon.contract
     log.extend(
         [
             RunStartEvent(
+                id=run_start_id,
                 **ctx.event_fields(),
-                **run_start_permission_fields(
-                    ctx.run_id,
-                    user_input="dangling user",
-                    turn_id=ctx.turn_id,
-                    reply_id=ctx.reply_id,
-                ),
+                **start_fields,
                 user_input_chars=13,
                 metadata={"user_input": "dangling user"},
+            ),
+            ContextWindowOpenedEvent(
+                id=long_horizon.contract.initial_window_open_event_id,
+                **ctx.event_fields(),
+                window=long_horizon.initial_window,
+                opening_batch_id=long_horizon.opening_batch_id,
+            ),
+            RolloutBudgetAccountOpenedEvent(
+                **ctx.event_fields(),
+                account=long_horizon.root_account,
             ),
             ToolCallStartEvent(
                 **ctx.event_fields(),
@@ -387,6 +426,28 @@ def test_resume_repairs_dangling_running_run_before_replay(
             ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:dangling"),
         ]
     )
+    binding = build_default_subagent_graph_reducer_binding()
+    checkpoint = prepare_subagent_graph_checkpoint(
+        runtime_session_id=runtime_session_id,
+        prefix_events=log.read_raw_range_snapshot(minimum_sequence=1).events,
+        reducer_binding=binding,
+    )
+    PostgresArtifactStore(dsn=settings.storage.postgres_dsn).put_text_if_absent_or_confirm_identical(
+        checkpoint.artifact.artifact_id,
+        checkpoint.artifact_payload_bytes.decode("utf-8"),
+        session_id=runtime_session_id,
+        run_id=None,
+        media_type=checkpoint.artifact.media_type,
+        semantic_metadata={
+            "artifact_kind": "subagent_graph_checkpoint",
+            "checkpoint_id": checkpoint.checkpoint.checkpoint_id,
+            "content_sha256": checkpoint.artifact.content_sha256,
+            "semantic_metadata_fingerprint": (
+                checkpoint.artifact.semantic_metadata_fingerprint
+            ),
+        },
+    )
+    log.append(checkpoint.event)
 
     async def run():
         core = HostCore(settings=settings)

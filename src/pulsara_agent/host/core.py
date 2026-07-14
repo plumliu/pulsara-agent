@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -44,6 +45,14 @@ from pulsara_agent.runtime.terminal import (
 from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
 from pulsara_agent.runtime.mcp.supervisor import McpServerSupervisor
 from pulsara_agent.runtime.mcp.types import McpReconcileTicket
+from pulsara_agent.runtime.long_horizon.checkpoint_maintenance import (
+    CheckpointMaintenanceAuthority,
+    PostgresCheckpointMaintenanceAuthority,
+)
+from pulsara_agent.runtime.long_horizon.feasibility import (
+    ProductionRolloutBudgetFeasibilityReport,
+    require_production_rollout_budget_configuration,
+)
 from pulsara_agent.runtime.wiring import build_agent_runtime_wiring
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources, build_retrieval_runtime_resources
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
@@ -70,6 +79,12 @@ class HostCore:
     durable: bool = True
     scratch_root: Path | None = None
     registry: HostSessionRegistry = field(default_factory=HostSessionRegistry)
+    checkpoint_maintenance_authority: CheckpointMaintenanceAuthority | None = None
+    rollout_budget_feasibility: ProductionRolloutBudgetFeasibilityReport | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
     _supervisors: dict[str, WorkspaceTerminalSupervisor] = field(default_factory=dict, init=False, repr=False)
     _session_leases: dict[str, WorkspaceTerminalLease] = field(default_factory=dict, init=False, repr=False)
     _supervisor_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -89,6 +104,27 @@ class HostCore:
         init=False,
         repr=False,
     )
+
+    def __post_init__(self) -> None:
+        if self.durable:
+            # Resolve feasibility through the same composition-root factory used
+            # by AgentRuntime wiring. Embedders may install a trusted transport
+            # binding there; constructing an unrelated default registry would
+            # validate a different execution surface.
+            from pulsara_agent.runtime import wiring as runtime_wiring
+
+            self.rollout_budget_feasibility = (
+                require_production_rollout_budget_configuration(
+                    self.settings.llm,
+                    resolver=runtime_wiring.build_llm_runtime(self.settings.llm),
+                )
+            )
+        if self.durable and self.checkpoint_maintenance_authority is None:
+            self.checkpoint_maintenance_authority = (
+                PostgresCheckpointMaintenanceAuthority(
+                    self.settings.storage.postgres_dsn
+                )
+            )
 
     # -- Lifecycle gate -------------------------------------------------------
 
@@ -146,26 +182,38 @@ class HostCore:
         if not self.durable:
             raise RuntimeError("resume_session requires durable HostCore wiring")
         self._raise_if_not_accepting("resume a session")
-        manifest = self._manifest_store().get(runtime_session_id)
-        if manifest is None:
-            raise KeyError(f"runtime session not found: {runtime_session_id}")
-        if not manifest.resumable:
-            raise RuntimeError(f"runtime session is closed or archived: {runtime_session_id}")
-        resolved_workspace_input = workspace_input or manifest.to_workspace_input()
-        resolved_model_role = model_role or ModelRole(manifest.model_role)
-        return await self._open_session_with_runtime_id(
-            resolved_workspace_input,
-            runtime_session_id=runtime_session_id,
-            conversation_id=conversation_id or manifest.conversation_id,
-            host_session_id=host_session_id,
-            model_role=resolved_model_role,
-            options=options,
-            system_prompt=system_prompt,
-            memory_reflection=memory_reflection,
-            permission_policy=permission_policy or permission_policy_from_manifest(manifest),
-            created_by="host_resume",
-            repair_dangling_on_resume=repair_dangling,
+        guard = (
+            self.checkpoint_maintenance_authority.acquire_shared(
+                runtime_session_id
+            )
+            if self.checkpoint_maintenance_authority is not None
+            else nullcontext()
         )
+        with guard:
+            manifest = self._manifest_store().get(runtime_session_id)
+            if manifest is None:
+                raise KeyError(f"runtime session not found: {runtime_session_id}")
+            if not manifest.resumable:
+                raise RuntimeError(
+                    f"runtime session is closed or archived: {runtime_session_id}"
+                )
+            resolved_workspace_input = workspace_input or manifest.to_workspace_input()
+            resolved_model_role = model_role or ModelRole(manifest.model_role)
+            return await self._open_session_with_runtime_id(
+                resolved_workspace_input,
+                runtime_session_id=runtime_session_id,
+                conversation_id=conversation_id or manifest.conversation_id,
+                host_session_id=host_session_id,
+                model_role=resolved_model_role,
+                options=options,
+                system_prompt=system_prompt,
+                memory_reflection=memory_reflection,
+                permission_policy=(
+                    permission_policy or permission_policy_from_manifest(manifest)
+                ),
+                created_by="host_resume",
+                repair_dangling_on_resume=repair_dangling,
+            )
 
     async def resume_most_recent_session(
         self,
@@ -227,14 +275,22 @@ class HostCore:
     async def repair_session_for_resume(self, runtime_session_id: str) -> DanglingRunRepairResult:
         if not self.durable:
             raise RuntimeError("repair_session_for_resume requires durable HostCore wiring")
-        manifest = self._manifest_store().get(runtime_session_id)
-        if manifest is None:
-            raise KeyError(f"runtime session not found: {runtime_session_id}")
-        return repair_dangling_runs_for_resume(
-            dsn=self.settings.storage.postgres_dsn,
-            runtime_session_id=runtime_session_id,
-            workspace_root=manifest.workspace_root,
+        guard = (
+            self.checkpoint_maintenance_authority.acquire_shared(
+                runtime_session_id
+            )
+            if self.checkpoint_maintenance_authority is not None
+            else nullcontext()
         )
+        with guard:
+            manifest = self._manifest_store().get(runtime_session_id)
+            if manifest is None:
+                raise KeyError(f"runtime session not found: {runtime_session_id}")
+            return repair_dangling_runs_for_resume(
+                dsn=self.settings.storage.postgres_dsn,
+                runtime_session_id=runtime_session_id,
+                workspace_root=manifest.workspace_root,
+            )
 
     async def _open_session_with_runtime_id(
         self,
@@ -301,6 +357,9 @@ class HostCore:
                 retrieval_resources=await self._get_retrieval_resources() if self.durable else None,
                 governance_coordinator=self._governance_coordinator if self.durable else None,
                 mcp_supervisor=mcp_supervisor,
+            )
+            wiring.agent_runtime.rollout_budget_feasibility_report = (
+                self.rollout_budget_feasibility
             )
             session = HostSession(
                 host_session_id=host_session_id,

@@ -12,8 +12,10 @@ from pulsara_agent.llm.errors import (
     ModelTargetCapabilityMismatch,
 )
 from pulsara_agent.llm.estimator import TokenEstimate, estimate_model_context_for_call
+from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.runtime_observation import resolve_runtime_observation_binding
 from pulsara_agent.primitives.model_call import ModelContextMode
 
 
@@ -44,6 +46,29 @@ def validate_model_context_for_call(
         )
     if context.tools and not target_fact.supports_tools:
         raise ModelTargetCapabilityMismatch("model target does not support tools")
+    runtime_observations = tuple(
+        message
+        for message in context.messages
+        if message.role is MessageRole.RUNTIME_OBSERVATION
+    )
+    if runtime_observations:
+        carrier = target_fact.runtime_observation_carrier
+        if carrier is None:
+            raise ModelTargetCapabilityMismatch(
+                "model target does not support runtime observations"
+            )
+        resolve_runtime_observation_binding(carrier)
+        if any(
+            message.tool_call_id is not None
+            or message.name is not None
+            or message.arguments is not None
+            or message.tool_calls
+            or message.thinking
+            for message in runtime_observations
+        ):
+            raise ModelContextIdentityMismatch(
+                "runtime observation cannot carry tool or thinking identity"
+            )
     transport = call.target.transport
     if (
         transport.binding_id != target_fact.transport_binding_id

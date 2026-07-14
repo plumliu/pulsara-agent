@@ -7,6 +7,7 @@ from pulsara_agent.llm.adapters.openai.responses import OpenAIResponsesTransport
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.runtime import LLMRuntime
+from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
 
 
 def build_llm_runtime(config: LLMConfig) -> LLMRuntime:
@@ -16,19 +17,23 @@ def build_llm_runtime(config: LLMConfig) -> LLMRuntime:
     selects the concrete transport for each role.
     """
 
-    registry = LLMTransportRegistry()
+    registry = LLMTransportRegistry(production_mode=True)
     registry.register(
-        OpenAIResponsesTransport(
-            api_key=config.api_key,
-            retry_config=config.retry,
-            openai_sdk_max_retries=config.openai_sdk_max_retries,
+        SanitizingLLMTransport(
+            OpenAIResponsesTransport(
+                api_key=config.api_key,
+                retry_config=config.retry,
+                openai_sdk_max_retries=config.openai_sdk_max_retries,
+            )
         )
     )
     registry.register(
-        OpenAIChatCompletionsTransport(
-            api_key=config.api_key,
-            retry_config=config.retry,
-            openai_sdk_max_retries=config.openai_sdk_max_retries,
+        SanitizingLLMTransport(
+            OpenAIChatCompletionsTransport(
+                api_key=config.api_key,
+                retry_config=config.retry,
+                openai_sdk_max_retries=config.openai_sdk_max_retries,
+            )
         )
     )
     return LLMRuntime(config=config, registry=registry)

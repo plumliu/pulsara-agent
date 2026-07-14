@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from math import ceil
+from time import monotonic
 from typing import Any
 
 import psycopg
@@ -35,7 +37,9 @@ class PostgresArtifactStore:
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactWriteResult:
         if run_id is not None and session_id is None:
-            raise ValueError("PostgresArtifactStore.put_text requires session_id when run_id is provided")
+            raise ValueError(
+                "PostgresArtifactStore.put_text requires session_id when run_id is provided"
+            )
 
         encoded = content.encode("utf-8")
         digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
@@ -103,7 +107,9 @@ class PostgresArtifactStore:
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactWriteResult:
         if run_id is not None and session_id is None:
-            raise ValueError("PostgresArtifactStore.put_bytes requires session_id when run_id is provided")
+            raise ValueError(
+                "PostgresArtifactStore.put_bytes requires session_id when run_id is provided"
+            )
 
         digest = "sha256:" + hashlib.sha256(content).hexdigest()
         stored_at = f"postgres://artifacts/{blob_id}"
@@ -168,6 +174,7 @@ class PostgresArtifactStore:
         run_id: str | None,
         media_type: str,
         semantic_metadata: dict[str, Any],
+        deadline_monotonic: float | None = None,
     ) -> ArtifactPutConfirmation:
         if run_id is not None and session_id is None:
             raise ValueError(
@@ -178,8 +185,9 @@ class PostgresArtifactStore:
         encoded = content.encode("utf-8")
         digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
         stored_at = f"postgres://artifacts/{blob_id}"
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+        with self._connect(deadline_monotonic) as connection:
             with connection.cursor() as cursor:
+                self._apply_statement_deadline(cursor, deadline_monotonic)
                 self._lock_artifact(cursor, blob_id)
                 self._validate_owner(cursor, session_id=session_id, run_id=run_id)
                 cursor.execute(
@@ -233,9 +241,16 @@ class PostgresArtifactStore:
                     ),
                 )
 
-    def get_info(self, blob_id: str, *, session_id: str | None = None) -> ArtifactRecord:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+    def get_info(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> ArtifactRecord:
+        with self._connect(deadline_monotonic) as connection:
             with connection.cursor() as cursor:
+                self._apply_statement_deadline(cursor, deadline_monotonic)
                 row = self._artifact_row(cursor, blob_id)
                 self._validate_read_owner(row, session_id=session_id)
                 return ArtifactRecord(
@@ -244,7 +259,9 @@ class PostgresArtifactStore:
                     digest=row["digest"],
                     size_bytes=row["size_bytes"],
                     stored_at=row["stored_at"],
-                    created_at=row["created_at"].isoformat() if row["created_at"] is not None else None,
+                    created_at=row["created_at"].isoformat()
+                    if row["created_at"] is not None
+                    else None,
                     metadata=dict(row["metadata"] or {}),
                 )
 
@@ -276,7 +293,9 @@ class PostgresArtifactStore:
                         digest=row["digest"],
                         size_bytes=row["size_bytes"],
                         stored_at=row["stored_at"],
-                        created_at=row["created_at"].isoformat() if row["created_at"] is not None else None,
+                        created_at=row["created_at"].isoformat()
+                        if row["created_at"] is not None
+                        else None,
                         metadata=dict(row["metadata"] or {}),
                     ),
                     text=sliced,
@@ -286,15 +305,46 @@ class PostgresArtifactStore:
                     has_more=offset_chars + len(sliced) < total_chars,
                 )
 
-    def get_text(self, blob_id: str, *, session_id: str | None = None) -> str:
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+    def get_text(
+        self,
+        blob_id: str,
+        *,
+        session_id: str | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> str:
+        with self._connect(deadline_monotonic) as connection:
             with connection.cursor() as cursor:
+                self._apply_statement_deadline(cursor, deadline_monotonic)
                 row = self._artifact_row(cursor, blob_id)
                 self._validate_read_owner(row, session_id=session_id)
                 text_body = row["text_body"]
                 if text_body is None:
                     raise ValueError(f"Artifact {blob_id!r} is not a text artifact")
                 return text_body
+
+    def _connect(self, deadline_monotonic: float | None):
+        if deadline_monotonic is None:
+            return psycopg.connect(self.dsn, row_factory=dict_row)
+        remaining = deadline_monotonic - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("artifact database deadline exceeded before connect")
+        return psycopg.connect(
+            self.dsn,
+            row_factory=dict_row,
+            connect_timeout=max(1, ceil(remaining)),
+        )
+
+    @staticmethod
+    def _apply_statement_deadline(cursor, deadline_monotonic: float | None) -> None:
+        if deadline_monotonic is None:
+            return
+        remaining_ms = int((deadline_monotonic - monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise TimeoutError("artifact database deadline exceeded before statement")
+        cursor.execute(
+            "select set_config('statement_timeout', %s, true)",
+            (f"{remaining_ms}ms",),
+        )
 
     def get_bytes(self, blob_id: str, *, session_id: str | None = None) -> bytes:
         with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
@@ -306,10 +356,56 @@ class PostgresArtifactStore:
                     raise ValueError(f"Artifact {blob_id!r} is not a binary artifact")
                 return bytes(binary_body)
 
-    def _lock_artifact(self, cursor, blob_id: str) -> None:
-        cursor.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"artifact:{blob_id}",))
+    def delete_if_identity(
+        self,
+        blob_id: str,
+        *,
+        session_id: str,
+        digest: str,
+        media_type: str,
+        semantic_metadata_fingerprint: str,
+    ) -> bool:
+        """Delete one cache artifact only when every durable identity matches."""
 
-    def _validate_owner(self, cursor, *, session_id: str | None, run_id: str | None) -> None:
+        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+            with connection.cursor() as cursor:
+                self._lock_artifact(cursor, blob_id)
+                cursor.execute(
+                    """
+                    select id, session_id, media_type, digest, metadata
+                    from artifacts
+                    where id = %s
+                    for update
+                    """,
+                    (blob_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return False
+                if (
+                    row["session_id"] != session_id
+                    or row["digest"] != digest
+                    or row["media_type"] != media_type
+                    or (row["metadata"] or {}).get(
+                        "semantic_metadata_fingerprint"
+                    )
+                    != semantic_metadata_fingerprint
+                ):
+                    raise ArtifactContentConflict(
+                        f"artifact {blob_id!r} maintenance identity mismatch"
+                    )
+                cursor.execute("delete from artifacts where id = %s", (blob_id,))
+                return cursor.rowcount == 1
+
+    def _lock_artifact(self, cursor, blob_id: str) -> None:
+        cursor.execute(
+            "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"artifact:{blob_id}",),
+        )
+
+    def _validate_owner(
+        self, cursor, *, session_id: str | None, run_id: str | None
+    ) -> None:
         if session_id is None:
             return
 
@@ -325,7 +421,9 @@ class PostgresArtifactStore:
         if row is None:
             raise ValueError(f"run_id {run_id!r} does not exist")
         if row["session_id"] != session_id:
-            raise ValueError(f"run_id {run_id!r} already belongs to runtime session {row['session_id']!r}")
+            raise ValueError(
+                f"run_id {run_id!r} already belongs to runtime session {row['session_id']!r}"
+            )
 
     def _artifact_row(self, cursor, blob_id: str) -> dict[str, Any]:
         cursor.execute(
@@ -352,7 +450,9 @@ class PostgresArtifactStore:
             raise KeyError(blob_id)
         return row
 
-    def _validate_read_owner(self, row: dict[str, Any], *, session_id: str | None) -> None:
+    def _validate_read_owner(
+        self, row: dict[str, Any], *, session_id: str | None
+    ) -> None:
         if session_id is not None and row["session_id"] != session_id:
             raise KeyError(row["id"])
 
@@ -372,17 +472,28 @@ class PostgresArtifactStore:
         if (
             row["digest"] != digest
             or row["text_body"] != text_content
-            or (row["binary_body"] is not None and bytes(row["binary_body"]) != binary_content)
+            or (
+                row["binary_body"] is not None
+                and bytes(row["binary_body"]) != binary_content
+            )
             or (row["binary_body"] is None and binary_content is not None)
             or row["size_bytes"] != size_bytes
         ):
-            raise ValueError(f"artifact {blob_id!r} already exists with different content")
+            raise ValueError(
+                f"artifact {blob_id!r} already exists with different content"
+            )
         if row["media_type"] != media_type:
-            raise ValueError(f"artifact {blob_id!r} already exists with media_type {row['media_type']!r}")
+            raise ValueError(
+                f"artifact {blob_id!r} already exists with media_type {row['media_type']!r}"
+            )
         if session_id is not None and row["session_id"] != session_id:
-            raise ValueError(f"artifact {blob_id!r} already belongs to runtime session {row['session_id']!r}")
+            raise ValueError(
+                f"artifact {blob_id!r} already belongs to runtime session {row['session_id']!r}"
+            )
         if run_id is not None and row["run_id"] != run_id:
-            raise ValueError(f"artifact {blob_id!r} already belongs to run {row['run_id']!r}")
+            raise ValueError(
+                f"artifact {blob_id!r} already belongs to run {row['run_id']!r}"
+            )
 
     def _validate_deterministic_text_row(
         self,

@@ -526,6 +526,7 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         memory_governance_engine=MemoryGovernanceEngine(
             llm_runtime=llm_runtime,
             executor=runtime_wiring.memory_governance_executor,
+            runtime_session=runtime_wiring.runtime_session,
             options=MemoryGovernanceOptions(),
             relatedness_service=runtime_wiring.governance_relatedness,
         ),
@@ -555,6 +556,7 @@ def _build_memory_hooks(
         llm_runtime=llm_runtime,
         candidate_pool=runtime_wiring.candidate_pool,
         graph=runtime_wiring.graph,
+        runtime_session=runtime_wiring.runtime_session,
         graph_id=runtime_wiring.graph_id,
         allowed_scopes=_allowed_write_scopes(runtime_wiring.memory_domain),
         options=memory_reflection_options or MemoryReflectionOptions(),

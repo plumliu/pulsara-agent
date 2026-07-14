@@ -29,14 +29,21 @@ from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.timeline import build_run_timeline
 from pulsara_agent.memory.foundation.run_timeline_query import summarize_run_timeline
 from pulsara_agent.settings import StorageConfig
+from tests.conftest import tool_result_end_contract_fields
 
 
 def test_working_context_guard_rejects_low_signal_run() -> None:
     ctx = _ctx()
     timeline = build_run_timeline(
         [
-            TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="ok", sequence=1),
-            ReplyEndEvent(**ctx.event_fields(), sequence=2),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(), block_id="text:1", delta="ok", sequence=1
+            ),
+            ReplyEndEvent(
+                **ctx.event_fields(),
+                sequence=2,
+                model_terminal_outcome="completed",
+            ),
         ],
         runtime_session_id="runtime:test",
     )
@@ -72,9 +79,14 @@ def test_working_context_guard_rejects_empty_memory_search_run() -> None:
             ),
             ToolResultEndEvent(
                 **ctx.event_fields(),
+                **tool_result_end_contract_fields(
+                    "call:search", tool_name="memory_search"
+                ),
                 tool_call_id="call:search",
                 state=ToolResultState.SUCCESS,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             ),
             TextBlockDeltaEvent(
                 **ctx.event_fields(),
@@ -84,7 +96,7 @@ def test_working_context_guard_rejects_empty_memory_search_run() -> None:
                     "Please tell me what you were working on and I will continue from there."
                 ),
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
         ],
         runtime_session_id="runtime:test",
     )
@@ -133,7 +145,9 @@ def test_working_context_store_upserts_domain_latest() -> None:
 def test_durable_hook_injects_and_updates_working_context() -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     _connect_or_skip(dsn).close()
-    domain = MemoryDomainContext(memory_domain_id=f"u_{uuid4().hex[:16]}", workspace_kind="transient")
+    domain = MemoryDomainContext(
+        memory_domain_id=f"u_{uuid4().hex[:16]}", workspace_kind="transient"
+    )
     store = PostgresWorkingContextStore(dsn=dsn)
     event_log = InMemoryEventLog()
     hooks = DurableMemoryHooks(
@@ -144,11 +158,21 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
         working_context_domain=domain,
     )
     state = LoopState(session_id="runtime:test")
-    ctx = EventContext(run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id)
+    ctx = EventContext(
+        run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
+    )
     try:
         for event in [
-            ToolCallStartEvent(**ctx.event_fields(), tool_call_id="call:read", tool_call_name="read_file"),
-            ToolResultStartEvent(**ctx.event_fields(), tool_call_id="call:read", tool_call_name="read_file"),
+            ToolCallStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:read",
+                tool_call_name="read_file",
+            ),
+            ToolResultStartEvent(
+                **ctx.event_fields(),
+                tool_call_id="call:read",
+                tool_call_name="read_file",
+            ),
             ToolResultTextDeltaEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:read",
@@ -156,16 +180,19 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
             ),
             ToolResultEndEvent(
                 **ctx.event_fields(),
+                **tool_result_end_contract_fields("call:read", tool_name="read_file"),
                 tool_call_id="call:read",
                 state=ToolResultState.SUCCESS,
-                metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+                metadata={
+                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+                },
             ),
             TextBlockDeltaEvent(
                 **ctx.event_fields(),
                 block_id="text:1",
                 delta="I inspected the implementation plan and validated the scope/domain wiring.",
             ),
-            ReplyEndEvent(**ctx.event_fields()),
+            ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
         ]:
             event_log.append(event)
 
@@ -211,7 +238,9 @@ def test_merge_projection_preserves_mixed_projection_metadata() -> None:
 
 
 def _ctx() -> EventContext:
-    return EventContext(run_id=f"run:test:{uuid4().hex}", turn_id="turn:test", reply_id="reply:test")
+    return EventContext(
+        run_id=f"run:test:{uuid4().hex}", turn_id="turn:test", reply_id="reply:test"
+    )
 
 
 def _connect_or_skip(dsn: str):

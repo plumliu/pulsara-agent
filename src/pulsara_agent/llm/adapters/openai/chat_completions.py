@@ -37,6 +37,9 @@ from pulsara_agent.llm.provider import (
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.runtime_observation import (
+    resolve_runtime_observation_binding,
+)
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -270,11 +273,27 @@ def build_chat_completions_payload(
     model = call.target.model_profile
     options = call.target.effective_options
     provider_profile = model.provider_profile
+    runtime_observation_role: str | None = None
+    if any(
+        message.role is MessageRole.RUNTIME_OBSERVATION
+        for message in context.messages
+    ):
+        carrier = call.target.fact.runtime_observation_carrier
+        if carrier is None:
+            raise ValueError("resolved target does not support runtime observations")
+        binding = resolve_runtime_observation_binding(carrier)
+        if binding.wire_role != "system":
+            raise ValueError("resolved runtime observation carrier is not chat-compatible")
+        runtime_observation_role = binding.wire_role
     messages: list[dict[str, Any]] = []
     if context.system_prompt:
         messages.append({"role": "system", "content": context.system_prompt})
     messages.extend(
-        _messages_to_chat_messages(context.messages, provider_profile=provider_profile)
+        _messages_to_chat_messages(
+            context.messages,
+            provider_profile=provider_profile,
+            runtime_observation_role=runtime_observation_role,
+        )
     )
 
     payload: dict[str, Any] = {
@@ -302,6 +321,7 @@ def _messages_to_chat_messages(
     messages: tuple[LLMMessage, ...],
     *,
     provider_profile: ProviderProfile | None = None,
+    runtime_observation_role: str | None = None,
 ) -> list[dict[str, Any]]:
     provider_profile = provider_profile or ProviderProfile(
         wire_api=OPENAI_CHAT_COMPLETIONS_API
@@ -322,7 +342,11 @@ def _messages_to_chat_messages(
             )
             pending_tool_calls = []
         chat_messages.append(
-            _message_to_chat_message(message, provider_profile=provider_profile)
+            _message_to_chat_message(
+                message,
+                provider_profile=provider_profile,
+                runtime_observation_role=runtime_observation_role,
+            )
         )
     if pending_tool_calls:
         chat_messages.append(
@@ -457,6 +481,7 @@ def _message_to_chat_message(
     message: LLMMessage,
     *,
     provider_profile: ProviderProfile,
+    runtime_observation_role: str | None = None,
 ) -> dict[str, Any]:
     if message.role is MessageRole.TOOL_CALL:
         return {
@@ -486,6 +511,13 @@ def _message_to_chat_message(
                 _tool_call_to_chat_tool_call(call) for call in message.tool_calls
             ]
         return payload
+    if message.role is MessageRole.RUNTIME_OBSERVATION:
+        if runtime_observation_role != "system":
+            raise ValueError("Chat runtime observation carrier is unavailable")
+        return {
+            "role": runtime_observation_role,
+            "content": "\n".join(message.content),
+        }
     return {
         "role": _chat_role(message.role),
         "content": "\n".join(message.content),

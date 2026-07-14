@@ -9,7 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from pulsara_agent.event import AgentEvent
-from pulsara_agent.event_log import load_agent_event
+from pulsara_agent.event_log import PostgresEventLog
 
 
 @dataclass(slots=True)
@@ -62,28 +62,26 @@ class PostgresInspectorStore:
         )
 
     def events_for_session(self, session_id: str) -> list[AgentEvent]:
-        rows = self._fetchall(
-            """
-            select payload
-            from agent_events
-            where session_id = %s
-            order by sequence asc
-            """,
-            (session_id,),
-        )
-        return [load_agent_event(row["payload"]) for row in rows]
+        return PostgresEventLog(
+            dsn=self.dsn,
+            runtime_session_id=session_id,
+        ).iter()
 
     def events_for_run(self, run_id: str) -> list[AgentEvent]:
-        rows = self._fetchall(
+        owner = self._fetchone(
             """
-            select payload
-            from agent_events
-            where run_id = %s
-            order by sequence asc
+            select session_id
+            from runs
+            where id = %s
             """,
             (run_id,),
         )
-        return [load_agent_event(row["payload"]) for row in rows]
+        if owner is None:
+            return []
+        return PostgresEventLog(
+            dsn=self.dsn,
+            runtime_session_id=str(owner["session_id"]),
+        ).iter(run_id=run_id)
 
     def event_counts_for_session(self, session_id: str) -> dict[str, int]:
         rows = self._fetchall(

@@ -186,7 +186,7 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(
                 **ctx.event_fields(), block_id="text:1", delta="hello oxigraph"
             )
         )
-        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields()))
+        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
     try:
         import asyncio
@@ -245,7 +245,7 @@ def test_durable_runtime_delete_graph_clears_oxigraph_named_graph(tmp_path) -> N
                 **ctx.event_fields(), block_id="text:1", delta="hello delete graph"
             )
         )
-        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields()))
+        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
     try:
         import asyncio

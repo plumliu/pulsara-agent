@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -25,7 +26,7 @@ class RuntimeEventSubscriber(Protocol):
 @dataclass(slots=True)
 class _PublishItem:
     published: RuntimePublishedEvent
-    delivered: asyncio.Future[None] | None = None
+    delivered: Future[None] | None = None
     error: Exception | None = None
 
 
@@ -33,7 +34,7 @@ class _PublishItem:
 class PublisherEnqueueResult:
     status: str
     enqueued_through_sequence: int | None
-    delivery_futures: tuple[asyncio.Future[None], ...] = ()
+    delivery_futures: tuple[Future[None], ...] = ()
 
 
 class RuntimeEventPublisher:
@@ -94,10 +95,10 @@ class RuntimeEventPublisher:
                     enqueued_through_sequence=sequences[-1],
                 )
             current_thread = threading.get_ident() == self._loop_thread_id
-            futures: list[asyncio.Future[None]] = []
+            futures: list[Future[None]] = []
             items: list[_PublishItem] = []
             for published in events:
-                delivered = loop.create_future() if await_delivery and current_thread else None
+                delivered = Future() if await_delivery else None
                 if delivered is not None:
                     futures.append(delivered)
                 items.append(_PublishItem(published=published, delivered=delivered))
@@ -128,7 +129,7 @@ class RuntimeEventPublisher:
         result = self.enqueue_committed_batch((published,), await_delivery=True)
         if not result.delivery_futures:
             raise RuntimeError("RuntimeEventPublisher loop is unavailable")
-        await result.delivery_futures[0]
+        await asyncio.wrap_future(result.delivery_futures[0])
 
     def publish_from_thread(self, published: RuntimePublishedEvent) -> bool:
         result = self.enqueue_committed_batch((published,), await_delivery=False)

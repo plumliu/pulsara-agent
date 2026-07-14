@@ -262,8 +262,9 @@ async def test_cancelled_sync_tool_keeps_borrow_until_worker_thread_finishes() -
 
     release_worker.set()
     await asyncio.to_thread(worker_finished.wait)
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    # The helper returns the worker outcome so its enclosing tool-batch driver
+    # can durably settle the admitted call before propagating cancellation.
+    assert await task is not None
     await registry.wait_until_retired("run:1", timeout_seconds=1.0)
     assert handles.state == "closed"
     assert registry.owner_count == 0
@@ -463,22 +464,22 @@ def test_run_end_persistent_failure_keeps_owner_until_retry(
 ) -> None:
     from tests.test_host_lifecycle_contract import ScriptedTransport, _core, _open
     from pulsara_agent.event import RunEndEvent
-    from pulsara_agent.runtime.session import RuntimeSession
+    from pulsara_agent.runtime.session import EventCommitError, RuntimeSession
 
     async def scenario() -> None:
         core = _core(monkeypatch, ScriptedTransport([{"text": "done"}]))
         session = await _open(core, tmp_path, host_session_id="host:run-end-retry")
-        original_emit = RuntimeSession.emit
+        original_emit_many = RuntimeSession.emit_many
         failures = 0
 
-        async def fail_run_end(self, event, **kwargs):
+        async def fail_run_end(self, events, **kwargs):
             nonlocal failures
-            if isinstance(event, RunEndEvent):
+            if any(isinstance(event, RunEndEvent) for event in events):
                 failures += 1
-                raise RuntimeError("synthetic RunEnd store outage")
-            return await original_emit(self, event, **kwargs)
+                raise EventCommitError("synthetic RunEnd store outage")
+            return await original_emit_many(self, events, **kwargs)
 
-        monkeypatch.setattr(RuntimeSession, "emit", fail_run_end)
+        monkeypatch.setattr(RuntimeSession, "emit_many", fail_run_end)
         with pytest.raises(RuntimeError, match="RunEnd store outage"):
             await session.run_turn("hello")
         assert failures >= 2
@@ -490,7 +491,7 @@ def test_run_end_persistent_failure_keeps_owner_until_retry(
         assert owner.terminal_state != "confirmed"
         assert owner.run_completion.done() is False
 
-        monkeypatch.setattr(RuntimeSession, "emit", original_emit)
+        monkeypatch.setattr(RuntimeSession, "emit_many", original_emit_many)
         result = await session.stop_current_turn()
         assert result is not None
         assert result.state.finalized is True
@@ -501,7 +502,7 @@ def test_run_end_persistent_failure_keeps_owner_until_retry(
     asyncio.run(scenario())
 
 
-def test_boundary_confirmation_detects_same_id_different_payload(
+def test_boundary_projection_uses_writer_owned_outcome_without_ledger_requery(
     tmp_path, monkeypatch
 ) -> None:
     from tests.test_host_lifecycle_contract import ScriptedTransport, _core, _open
@@ -536,13 +537,17 @@ def test_boundary_confirmation_detects_same_id_different_payload(
             value={"value": 1},
         )
         session._set_boundary_candidates((candidate,))
+        session._set_boundary_commit_state("commit_outcome_unknown")
+        session._set_boundary_commit_confirmation(
+            BoundaryBatchCommitStatus.UNKNOWN
+        )
         session.wiring.runtime_wiring.event_log.append(
             candidate.model_copy(update={"value": {"value": 2}})
         )
         confirmation = session._boundary_batch_confirmation(attempt)
         assert confirmation is not None
-        assert confirmation.status is BoundaryBatchCommitStatus.CONFLICT
-        assert session.wiring.runtime_wiring.runtime_session.reconciliation_required
+        assert confirmation.status is BoundaryBatchCommitStatus.UNKNOWN
+        assert confirmation.committed_event_ids == ()
         release.set()
         await asyncio.gather(session._boundary_task, return_exceptions=True)
         await stream.aclose()

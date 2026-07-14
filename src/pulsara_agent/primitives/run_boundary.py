@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pulsara_agent.primitives.capability import CapabilityResolveBasisFact
 from pulsara_agent.primitives.model_call import canonical_json_bytes
+from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.permission import PresetPermissionPolicyFact
 from pulsara_agent.primitives.run_entry import (
     HostRunBoundaryIdentityFact,
@@ -42,6 +43,160 @@ class HostRunBoundaryDisposition(StrEnum):
     COMMITTED_EXECUTION_FAILED = "committed_execution_failed"
 
 
+class RunExecutionActivationFact(BaseModel):
+    """Durable attribution for the process-local segment owning a model call."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["run_execution_activation.v1"] = (
+        "run_execution_activation.v1"
+    )
+    activation_owner_kind: Literal[
+        "host_run_boundary",
+        "host_resume_boundary",
+        "subagent_run_start",
+    ]
+    activation_owner_id: str = Field(min_length=1)
+    segment_generation: int = Field(ge=1)
+    activation_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_fingerprint(self) -> "RunExecutionActivationFact":
+        expected = sha256_fingerprint(
+            "run-execution-activation:v1",
+            self.model_dump(mode="json", exclude={"activation_fingerprint"}),
+        )
+        if self.activation_fingerprint != expected:
+            raise ValueError("run execution activation fingerprint mismatch")
+        return self
+
+
+class ModelCallControlDownstreamPredicateFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    predicate_code: Literal[
+        "capability_gate_decision",
+        "tool_rollout_reservation",
+        "tool_execution_suspended",
+        "tool_result_terminal",
+        "run_end_normal",
+        "run_end_user_stop",
+        "run_end_host_teardown",
+        "run_end_execution_failure",
+        "run_end_recovered_interrupted",
+    ]
+    event_type: str = Field(min_length=1)
+    event_schema_version: str = Field(min_length=1)
+    event_variant_contract_fingerprint: str = Field(min_length=1)
+    required_prior_disposition_policy: Literal[
+        "accepted_only",
+        "accepted_or_termination_suppressed",
+        "accepted_or_recovery_suppressed",
+    ]
+    predicate_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_fingerprint(self) -> "ModelCallControlDownstreamPredicateFact":
+        expected = sha256_fingerprint(
+            "model-call-control-downstream-predicate:v1",
+            self.model_dump(mode="json", exclude={"predicate_fingerprint"}),
+        )
+        if self.predicate_fingerprint != expected:
+            raise ValueError("model call downstream predicate fingerprint mismatch")
+        return self
+
+
+class ModelCallControlDownstreamPredicateContractFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["model_call_control_downstream_contract.v1"] = (
+        "model_call_control_downstream_contract.v1"
+    )
+    contract_id: str = Field(min_length=1)
+    contract_version: str = Field(min_length=1)
+    predicates: tuple[ModelCallControlDownstreamPredicateFact, ...]
+    control_event_domain_registry_fingerprint: str = Field(min_length=1)
+    contract_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_contract(self) -> "ModelCallControlDownstreamPredicateContractFact":
+        codes = tuple(item.predicate_code for item in self.predicates)
+        if len(codes) != len(set(codes)):
+            raise ValueError("model control downstream predicate codes must be unique")
+        expected = sha256_fingerprint(
+            "model-call-control-downstream-contract:v1",
+            self.model_dump(mode="json", exclude={"contract_fingerprint"}),
+        )
+        if self.contract_fingerprint != expected:
+            raise ValueError("model call downstream contract fingerprint mismatch")
+        return self
+
+
+class ModelStreamRecoveryPlanFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["model_stream_recovery_plan.v1"] = (
+        "model_stream_recovery_plan.v1"
+    )
+    lifecycle_kind: Literal[
+        "main_assistant_reply",
+        "direct_internal_call",
+        "window_compaction_summary",
+    ]
+    model_call_start_event_id: str = Field(min_length=1)
+    stable_model_call_end_event_id: str = Field(min_length=1)
+    reply_start_event_id: str | None
+    stable_reply_end_event_id: str | None
+    reservation_id: str | None
+    reservation_quote_fingerprint: str | None
+    stable_settlement_event_id: str | None
+    window_compaction_started_event_id: str | None
+    pre_send_estimated_input_tokens: int = Field(ge=0)
+    run_execution_activation: RunExecutionActivationFact | None
+    control_downstream_predicate_contract: (
+        ModelCallControlDownstreamPredicateContractFact | None
+    )
+    recovery_plan_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_recovery_plan(self) -> "ModelStreamRecoveryPlanFact":
+        main = self.lifecycle_kind == "main_assistant_reply"
+        if main != (
+            self.reply_start_event_id is not None
+            and self.stable_reply_end_event_id is not None
+            and self.run_execution_activation is not None
+            and self.control_downstream_predicate_contract is not None
+        ):
+            raise ValueError("main model recovery plan attribution mismatch")
+        if not main and (
+            self.reply_start_event_id is not None
+            or self.stable_reply_end_event_id is not None
+            or self.run_execution_activation is not None
+            or self.control_downstream_predicate_contract is not None
+        ):
+            raise ValueError("direct/window recovery plan cannot carry main attribution")
+        reservation_fields = (
+            self.reservation_id,
+            self.reservation_quote_fingerprint,
+            self.stable_settlement_event_id,
+        )
+        if any(item is None for item in reservation_fields) and any(
+            item is not None for item in reservation_fields
+        ):
+            raise ValueError("model stream reservation recovery identity is all-or-none")
+        if (self.lifecycle_kind == "window_compaction_summary") != (
+            self.window_compaction_started_event_id is not None
+        ):
+            raise ValueError("window compaction recovery attribution mismatch")
+        expected = sha256_fingerprint(
+            "model-stream-recovery-plan:v1",
+            self.model_dump(mode="json", exclude={"recovery_plan_fingerprint"}),
+        )
+        if self.recovery_plan_fingerprint != expected:
+            raise ValueError("model stream recovery plan fingerprint mismatch")
+        return self
+
+
 class HostRunBoundaryDiagnostic(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -70,12 +225,35 @@ class BoundaryTranscriptSnapshotFact(BaseModel):
     source_through_sequence: int = Field(ge=0)
     source_event_count: int = Field(ge=0)
     compacted_window_id: str | None
+    checkpoint_compaction_id: str | None
+    checkpoint_terminal_event_id: str | None
+    checkpoint_terminal_sequence: int | None
+    checkpoint_keep_after_sequence: int | None
     preflight_compaction_id: str | None
     preflight_compaction_terminal_event_id: str | None
     preflight_compaction_terminal_sequence: int | None
 
     @model_validator(mode="after")
     def _validate_compaction_branch(self) -> "BoundaryTranscriptSnapshotFact":
+        checkpoint_fields = (
+            self.checkpoint_compaction_id,
+            self.checkpoint_terminal_event_id,
+            self.checkpoint_terminal_sequence,
+            self.checkpoint_keep_after_sequence,
+            self.compacted_window_id,
+        )
+        if any(value is not None for value in checkpoint_fields) and any(
+            value is None for value in checkpoint_fields
+        ):
+            raise ValueError("transcript checkpoint basis must be all-or-none")
+        if self.checkpoint_terminal_sequence is not None and int(
+            self.checkpoint_terminal_sequence
+        ) < 1:
+            raise ValueError("transcript checkpoint sequence must be positive")
+        if self.checkpoint_keep_after_sequence is not None and int(
+            self.checkpoint_keep_after_sequence
+        ) < 0:
+            raise ValueError("transcript checkpoint keep-after cannot be negative")
         attempt = self.preflight_compaction_id is not None
         terminal_fields = (
             self.preflight_compaction_terminal_event_id,
@@ -86,7 +264,7 @@ class BoundaryTranscriptSnapshotFact(BaseModel):
                 raise ValueError("preflight compaction requires terminal attribution")
             if int(self.preflight_compaction_terminal_sequence or 0) < 1:
                 raise ValueError("preflight compaction terminal sequence must be positive")
-        elif any(value is not None for value in (*terminal_fields, self.compacted_window_id)):
+        elif any(value is not None for value in terminal_fields):
             raise ValueError("non-attempted preflight cannot carry compaction facts")
         return self
 
@@ -296,9 +474,13 @@ __all__ = [
     "HostRunBoundaryDisposition",
     "HostRunBoundaryPhase",
     "InteractionResumeBoundaryFact",
+    "ModelCallControlDownstreamPredicateContractFact",
+    "ModelCallControlDownstreamPredicateFact",
+    "ModelStreamRecoveryPlanFact",
     "NewRunBoundaryFact",
     "PlanWorkflowStateFact",
     "ResumeGatePolicy",
+    "RunExecutionActivationFact",
     "RunEntryFact",
     "resume_gate_policy_for",
 ]

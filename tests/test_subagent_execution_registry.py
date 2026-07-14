@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from pulsara_agent.event import EventContext
+from pulsara_agent.event import EventContext, RunStartEvent
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.runtime import EventCommitError
 from pulsara_agent.runtime.execution_handles import (
@@ -20,9 +20,25 @@ from pulsara_agent.runtime.subagent import (
     fold_subagent_graph,
 )
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.conftest import run_start_permission_fields
 
 
 CTX = EventContext(run_id="run:parent", turn_id="turn:parent", reply_id="reply:parent")
+
+
+async def _start_parent_run(parent) -> None:
+    await parent.write_event(
+        RunStartEvent(
+            **CTX.event_fields(),
+            **run_start_permission_fields(
+                CTX.run_id,
+                user_input="delegate",
+                turn_id=CTX.turn_id,
+                reply_id=CTX.reply_id,
+            ),
+            user_input_chars=8,
+        )
+    )
 
 
 def test_registry_handle_never_appears_in_graph_projection(tmp_path) -> None:
@@ -117,14 +133,27 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
     backing = InMemoryEventLog()
 
     class FailingCommitEventLog:
-        def append(self, event, *, expected_last_sequence=None):
+        def append(
+            self,
+            event,
+            *,
+            expected_last_sequence=None,
+            deadline_monotonic=None,
+        ):
             return self.extend(
                 (event,),
                 expected_last_sequence=expected_last_sequence,
+                deadline_monotonic=deadline_monotonic,
             )[0]
 
-        def extend(self, events, *, expected_last_sequence=None):
-            del events, expected_last_sequence
+        def extend(
+            self,
+            events,
+            *,
+            expected_last_sequence=None,
+            deadline_monotonic=None,
+        ):
+            del events, expected_last_sequence, deadline_monotonic
             raise RuntimeError("synthetic event commit failure")
 
         def iter(self, **kwargs):
@@ -133,7 +162,17 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
         def next_sequence(self):
             return backing.next_sequence()
 
-    parent = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
+        def __getattr__(self, name):
+            # This double only faults writes; checkpoint/raw reads still use the
+            # complete EventLog contract provided by the backing store.
+            return getattr(backing, name)
+
+    parent = in_memory_runtime_session(
+        tmp_path,
+        runtime_session_id="runtime:parent",
+        event_log=backing,
+    )
+    asyncio.run(_start_parent_run(parent))
     parent.event_log = FailingCommitEventLog()  # type: ignore[assignment]
     runtime = SubagentRuntime(
         parent_runtime_session=parent,
@@ -165,6 +204,7 @@ def test_terminal_graph_reconciles_and_cancels_live_handle(tmp_path) -> None:
     )
 
     async def run() -> None:
+        await _start_parent_run(parent)
         child = await runtime.spawn_fake(task="task", event_context=CTX)
         child_session = runtime.child_runtime_session(child.subagent_run_id)
         await runtime.complete_fake(child.subagent_run_id, summary="done")
@@ -203,6 +243,7 @@ def test_graph_active_registry_missing_reports_dangling(tmp_path) -> None:
     )
 
     async def seed() -> None:
+        await _start_parent_run(parent)
         await runtime.spawn_fake(task="task", event_context=CTX)
 
     asyncio.run(seed())

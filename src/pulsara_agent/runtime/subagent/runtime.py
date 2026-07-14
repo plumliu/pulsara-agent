@@ -19,10 +19,13 @@ from uuid import uuid4
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
+    EventType,
     ModelCallStartEvent,
     ModelCallEndEvent,
     RunEndEvent,
     RunStartEvent,
+    RolloutBudgetReservationCreatedEvent,
+    SubagentRolloutBudgetResolvedEvent,
     SubagentEdgeRecordedEvent,
     SubagentMessageSentEvent,
     SubagentPhaseReportedEvent,
@@ -45,6 +48,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
 )
 from pulsara_agent.event_log import EventLog
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.model_call import ModelTokenUsageFact
 from pulsara_agent.primitives.subagent import (
@@ -75,6 +79,7 @@ from pulsara_agent.runtime.subagent.hydration import (
     SubagentGraphHydrator,
 )
 from pulsara_agent.runtime.subagent.immutable import thaw_json_mapping
+from pulsara_agent.runtime.subagent.reducer import pending_subagent_result_ids
 from pulsara_agent.runtime.subagent.facts import (
     SubagentGraphState,
     SubagentResultFact,
@@ -86,6 +91,7 @@ from pulsara_agent.runtime.subagent.execution import ChildExecutionRegistry
 from pulsara_agent.runtime.subagent.commands import (
     PlannedChildReservation,
     PlannedSubagentWrite,
+    SubagentCommandPlanError,
     SubagentCommandPlanner,
 )
 from pulsara_agent.runtime.subagent.store import SubagentGraphStateStore
@@ -111,9 +117,14 @@ from pulsara_agent.primitives.run_lifecycle import (
 _ACTIVE_STATUSES: set[SubagentStatus] = {"running", "suspended"}
 _TERMINAL_STATUSES: set[SubagentStatus] = {"completed", "failed", "cancelled"}
 _CHILD_REPORT_TOOL_NAMES = ("report_agent_phase", "report_agent_result")
-_CHILD_REPORT_DESCRIPTOR_IDS = ("workflow:report_agent_phase", "workflow:report_agent_result")
+_CHILD_REPORT_DESCRIPTOR_IDS = (
+    "workflow:report_agent_phase",
+    "workflow:report_agent_result",
+)
 _READ_ONLY_WORKER_TOOL_NAMES = frozenset({"read_file", "search_files", "artifact_read"})
-_VERIFICATION_WORKER_TOOL_NAMES = frozenset({"read_file", "search_files", "artifact_read", "terminal", "terminal_process"})
+_VERIFICATION_WORKER_TOOL_NAMES = frozenset(
+    {"read_file", "search_files", "artifact_read", "terminal", "terminal_process"}
+)
 _WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file"})
 _TERMINAL_TOOL_NAMES = frozenset({"terminal", "terminal_process"})
 
@@ -135,7 +146,15 @@ class SubagentNotReady(SubagentRuntimeError):
 
 
 ChildEventLogFactory = Callable[[str], EventLog]
-SubagentChildRunner = Callable[["SubagentRuntime", HydratedSubagentRunView], Awaitable[None]]
+SubagentChildRunner = Callable[
+    ["SubagentRuntime", HydratedSubagentRunView], Awaitable[None]
+]
+SubagentRolloutAdmission = Callable[
+    [tuple[SubagentRunStartedEvent, ...]], tuple[AgentEvent, ...]
+]
+SubagentRolloutTerminalAugmenter = Callable[
+    [tuple[AgentEvent, ...]], tuple[AgentEvent, ...]
+]
 
 
 class SubagentRuntime:
@@ -147,17 +166,32 @@ class SubagentRuntime:
         event_log_locator: EventLogLocator | None = None,
         default_budget: SubagentBudget | None = None,
         child_runner: SubagentChildRunner | None = None,
+        rollout_admission: SubagentRolloutAdmission | None = None,
+        rollout_terminal_augmenter: SubagentRolloutTerminalAugmenter | None = None,
     ) -> None:
         self.parent_runtime_session = parent_runtime_session
         self._child_event_log_factory = child_event_log_factory
         self.event_log_locator = event_log_locator or InMemoryEventLogLocator()
+        if hasattr(self.event_log_locator, "register"):
+            self.event_log_locator.register(  # type: ignore[attr-defined]
+                parent_runtime_session.runtime_session_id,
+                parent_runtime_session.event_log,
+            )
         self.default_budget = default_budget or SubagentBudget()
         self._child_runner = child_runner
+        self._rollout_admission = rollout_admission
+        self._rollout_terminal_augmenter = rollout_terminal_augmenter
         self._execution_registry = ChildExecutionRegistry()
         self._command_planner = SubagentCommandPlanner()
         self._parent_capability_snapshot: SubagentCapabilityProfile | None = None
-        initial_events = self.parent_runtime_session.event_log.iter()
-        self._graph_store = SubagentGraphStateStore(initial_events)
+        graph_state = (
+            self.parent_runtime_session.subagent_graph_checkpoint_service.restore_for_live_store(
+                requested_through_sequence=(
+                    self.parent_runtime_session.long_horizon_state_store.through_sequence
+                )
+            )
+        )
+        self._graph_store = SubagentGraphStateStore.from_state(graph_state)
         self._graph_reducer_id = (
             f"subagent_graph:{self.parent_runtime_session.runtime_session_id}"
         )
@@ -184,6 +218,47 @@ class SubagentRuntime:
         """
 
         self._child_runner = child_runner
+
+    def bind_rollout_admission(
+        self,
+        rollout_admission: SubagentRolloutAdmission | None,
+    ) -> None:
+        """Bind the parent-owned child budget admission service."""
+
+        self._rollout_admission = rollout_admission
+
+    def bind_rollout_terminal_augmenter(
+        self,
+        augmenter: SubagentRolloutTerminalAugmenter | None,
+    ) -> None:
+        """Bind the parent-ledger child terminal settlement planner."""
+
+        self._rollout_terminal_augmenter = augmenter
+
+    def _rollout_admission_events(
+        self,
+        started_events: tuple[SubagentRunStartedEvent, ...],
+    ) -> tuple[AgentEvent, ...]:
+        if not started_events or self._rollout_admission is None:
+            return ()
+        events = self._rollout_admission(started_events)
+        resolved_ids = {
+            event.subagent_run_id
+            for event in events
+            if isinstance(event, SubagentRolloutBudgetResolvedEvent)
+        }
+        reservation_ids = {
+            event.reservation.owner_id
+            for event in events
+            if isinstance(event, RolloutBudgetReservationCreatedEvent)
+            and event.reservation.owner_kind == "subagent_run"
+        }
+        expected_ids = {event.subagent_run_id for event in started_events}
+        if resolved_ids != expected_ids or reservation_ids != expected_ids:
+            raise SubagentRuntimeError(
+                "child rollout admission did not cover every started child"
+            )
+        return events
 
     def detach_from_parent_session(self) -> None:
         """Detach the live reducer registration during parent session teardown."""
@@ -251,22 +326,160 @@ class SubagentRuntime:
         )
 
     async def _commit_plan(self, plan: PlannedSubagentWrite) -> tuple[AgentEvent, ...]:
-        plan = self._command_planner.validate(plan, state=self._graph_store.state)
-        result = await self.parent_runtime_session.write_events(
-            plan.events,
+        if self._rollout_terminal_augmenter is not None:
+            augmented = self._rollout_terminal_augmenter(plan.events)
+            if augmented != plan.events:
+                plan = replace(plan, events=augmented)
+        for _attempt in range(4):
+            state_before = self._graph_store.state
+            if plan.expected_through_sequence != state_before.through_sequence:
+                stale_sequence = plan.expected_through_sequence
+                rebased = replace(
+                    plan,
+                    expected_through_sequence=state_before.through_sequence,
+                )
+                try:
+                    plan = self._command_planner.validate(
+                        rebased,
+                        state=state_before,
+                    )
+                except SubagentCommandPlanError as exc:
+                    raise EventWriteConflict(
+                        runtime_session_id=(
+                            self.parent_runtime_session.runtime_session_id
+                        ),
+                        expected_last_sequence=stale_sequence,
+                        actual_last_sequence=state_before.through_sequence,
+                    ) from exc
+            plan_was_current = (
+                plan.expected_through_sequence == state_before.through_sequence
+            )
+            plan = self._command_planner.validate(plan, state=state_before)
+            try:
+                result = await self.parent_runtime_session.write_events(
+                    plan.events,
+                    expected_last_sequence=plan.expected_through_sequence,
+                )
+            except EventWriteConflict:
+                state_after = self._graph_store.state
+                if not plan_was_current or not _same_graph_semantics(
+                    state_before,
+                    state_after,
+                ):
+                    raise
+                plan = replace(
+                    plan,
+                    expected_through_sequence=state_after.through_sequence,
+                )
+                continue
+            result.require_reduced(self._graph_reducer_id)
+            return result.committed_events
+        raise EventWriteConflict(
+            runtime_session_id=self.parent_runtime_session.runtime_session_id,
             expected_last_sequence=plan.expected_through_sequence,
+            actual_last_sequence=self._graph_store.state.through_sequence,
         )
-        result.require_reduced(self._graph_reducer_id)
-        return result.committed_events
 
-    def _commit_plan_from_thread(self, plan: PlannedSubagentWrite) -> tuple[AgentEvent, ...]:
-        plan = self._command_planner.validate(plan, state=self._graph_store.state)
-        result = self.parent_runtime_session.write_events_from_thread(
-            plan.events,
-            expected_last_sequence=plan.expected_through_sequence,
+    def _terminal_commit_is_fully_applied(self, subagent_run_id: str) -> bool:
+        """Return whether durable graph and rollout reducers released the child.
+
+        Await cancellation can race after the atomic batch is committed and both
+        reducers have applied it.  Process-owner cleanup follows those durable
+        facts, not whether the awaiting caller received a normal acknowledgement.
+        """
+
+        if self.parent_runtime_session.reconciliation_required:
+            return False
+        run = self._graph_store.state.runs.get(subagent_run_id)
+        if run is None or run.status not in _TERMINAL_STATUSES:
+            return False
+        parent_start = self.parent_runtime_session.long_horizon_state_store.run_start(
+            run.parent_run_id
         )
-        result.require_reduced(self._graph_reducer_id)
-        return result.committed_events
+        admission = self.parent_runtime_session.event_log.get_by_id(
+            f"subagent_rollout_budget_resolved:{subagent_run_id}"
+        )
+        if not isinstance(admission, SubagentRolloutBudgetResolvedEvent):
+            return True
+        if parent_start is None:
+            return False
+        account_state = self.parent_runtime_session.long_horizon_state_store.rollout_state(
+            parent_start.long_horizon.rollout_account_id
+        )
+        if account_state is None:
+            return False
+        return not any(
+            reservation.owner_kind == "subagent_run"
+            and reservation.owner_id == subagent_run_id
+            for reservation in account_state.active_reservations
+        )
+
+    def _commit_plan_from_thread(
+        self, plan: PlannedSubagentWrite
+    ) -> tuple[AgentEvent, ...]:
+        if self._rollout_terminal_augmenter is not None and any(
+            isinstance(
+                event,
+                (
+                    SubagentRunCompletedEvent,
+                    SubagentRunFailedEvent,
+                    SubagentRunCancelledEvent,
+                ),
+            )
+            for event in plan.events
+        ):
+            raise SubagentRuntimeError(
+                "rollout-admitted child terminalization requires the async native-terminal path"
+            )
+        for _attempt in range(4):
+            state_before = self._graph_store.state
+            if plan.expected_through_sequence != state_before.through_sequence:
+                stale_sequence = plan.expected_through_sequence
+                rebased = replace(
+                    plan,
+                    expected_through_sequence=state_before.through_sequence,
+                )
+                try:
+                    plan = self._command_planner.validate(
+                        rebased,
+                        state=state_before,
+                    )
+                except SubagentCommandPlanError as exc:
+                    raise EventWriteConflict(
+                        runtime_session_id=(
+                            self.parent_runtime_session.runtime_session_id
+                        ),
+                        expected_last_sequence=stale_sequence,
+                        actual_last_sequence=state_before.through_sequence,
+                    ) from exc
+            plan_was_current = (
+                plan.expected_through_sequence == state_before.through_sequence
+            )
+            plan = self._command_planner.validate(plan, state=state_before)
+            try:
+                result = self.parent_runtime_session.write_events_from_thread(
+                    plan.events,
+                    expected_last_sequence=plan.expected_through_sequence,
+                )
+            except EventWriteConflict:
+                state_after = self._graph_store.state
+                if not plan_was_current or not _same_graph_semantics(
+                    state_before,
+                    state_after,
+                ):
+                    raise
+                plan = replace(
+                    plan,
+                    expected_through_sequence=state_after.through_sequence,
+                )
+                continue
+            result.require_reduced(self._graph_reducer_id)
+            return result.committed_events
+        raise EventWriteConflict(
+            runtime_session_id=self.parent_runtime_session.runtime_session_id,
+            expected_last_sequence=plan.expected_through_sequence,
+            actual_last_sequence=self._graph_store.state.through_sequence,
+        )
 
     def refresh_parent_capability_snapshot(
         self,
@@ -290,8 +503,14 @@ class SubagentRuntime:
             allowed_tool_names.append(name)
             allowed_descriptor_ids.append(str(getattr(descriptor, "id", name)))
             metadata = getattr(descriptor, "metadata", {}) or {}
-            provider_kind = getattr(getattr(descriptor, "provider_kind", None), "value", None)
-            if provider_kind == "mcp" and isinstance(metadata, dict) and isinstance(metadata.get("server_id"), str):
+            provider_kind = getattr(
+                getattr(descriptor, "provider_kind", None), "value", None
+            )
+            if (
+                provider_kind == "mcp"
+                and isinstance(metadata, dict)
+                and isinstance(metadata.get("server_id"), str)
+            ):
                 allowed_mcp_server_ids.append(metadata["server_id"])
                 mcp_tool_names.append(name)
         for name in _CHILD_REPORT_TOOL_NAMES:
@@ -311,13 +530,17 @@ class SubagentRuntime:
             allowed_mcp_server_ids=tuple(dict.fromkeys(allowed_mcp_server_ids)),
             can_spawn_subagents=False,
             memory_enabled=False,
-            computed_from_parent_exposure_generation=getattr(exposure, "registry_generation", None),
+            computed_from_parent_exposure_generation=getattr(
+                exposure, "registry_generation", None
+            ),
             diagnostics=(
                 {
                     "code": "subagent_parent_snapshot_mcp_tools",
                     "tool_names": list(dict.fromkeys(mcp_tool_names)),
                 },
-            ) if mcp_tool_names else (),
+            )
+            if mcp_tool_names
+            else (),
         )
 
     async def create_task(
@@ -355,17 +578,17 @@ class SubagentRuntime:
             },
         )
         event = SubagentTaskCreatedEvent(
-                **event_context.event_fields(),
-                task_id=task_id,
-                batch_id=batch_id,
-                create_tool_call_id=create_tool_call_id,
-                task_key=task_key,
-                label=label,
-                profile_id=profile_id,
-                display_role=display_role,
-                objective_preview=objective_preview,
-                objective_artifact_id=objective_artifact_id,
-                depends_on=list(depends_on),
+            **event_context.event_fields(),
+            task_id=task_id,
+            batch_id=batch_id,
+            create_tool_call_id=create_tool_call_id,
+            task_key=task_key,
+            label=label,
+            profile_id=profile_id,
+            display_role=display_role,
+            objective_preview=objective_preview,
+            objective_artifact_id=objective_artifact_id,
+            depends_on=list(depends_on),
         )
         await self._commit_plan(
             PlannedSubagentWrite(
@@ -391,24 +614,26 @@ class SubagentRuntime:
         self._require_task(task_id)
         state = self._graph_store.state
         if status not in {"waiting_dependency", "blocked_dependency_failed"}:
-            raise ValueError("status must be waiting_dependency or blocked_dependency_failed")
+            raise ValueError(
+                "status must be waiting_dependency or blocked_dependency_failed"
+            )
         terminal_event_ids = self._dependency_terminal_event_ids(
             blocked_by_task_ids,
             overrides=dependency_terminal_event_ids,
         )
         event = SubagentTaskBlockedEvent(
-                **event_context.event_fields(),
-                task_id=task_id,
-                status=status,  # type: ignore[arg-type]
-                blocked_reason=blocked_reason,  # type: ignore[arg-type]
-                blocked_by_task_ids=list(blocked_by_task_ids),
-                dependency_status_snapshot={
-                    dependency_id: state.tasks[dependency_id].status
-                    for dependency_id in blocked_by_task_ids
-                    if dependency_id in state.tasks
-                },
-                dependency_terminal_event_ids=terminal_event_ids,
-                dependency_generation=subagent_dependency_generation(terminal_event_ids),
+            **event_context.event_fields(),
+            task_id=task_id,
+            status=status,  # type: ignore[arg-type]
+            blocked_reason=blocked_reason,  # type: ignore[arg-type]
+            blocked_by_task_ids=list(blocked_by_task_ids),
+            dependency_status_snapshot={
+                dependency_id: state.tasks[dependency_id].status
+                for dependency_id in blocked_by_task_ids
+                if dependency_id in state.tasks
+            },
+            dependency_terminal_event_ids=terminal_event_ids,
+            dependency_generation=subagent_dependency_generation(terminal_event_ids),
         )
         events: tuple[AgentEvent, ...] = (event,)
         if status == "blocked_dependency_failed":
@@ -555,7 +780,9 @@ class SubagentRuntime:
                         blocked_by_task_ids=list(blocked_by_task_ids),
                         dependency_status_snapshot=dependency_status_snapshot,
                         dependency_terminal_event_ids=terminal_event_ids,
-                        dependency_generation=subagent_dependency_generation(terminal_event_ids),
+                        dependency_generation=subagent_dependency_generation(
+                            terminal_event_ids
+                        ),
                     )
                 )
                 continue
@@ -586,7 +813,9 @@ class SubagentRuntime:
                     "profile_id": profile_id,
                     "batch_id": batch_id,
                     "create_tool_call_id": create_tool_call_id,
-                    "spawn_initiator_id": spawn_initiator_id or create_tool_call_id or task_id,
+                    "spawn_initiator_id": spawn_initiator_id
+                    or create_tool_call_id
+                    or task_id,
                     "parent_context_id": parent_context_id,
                     "parent_model_call_index": parent_model_call_index,
                 }
@@ -617,7 +846,9 @@ class SubagentRuntime:
                     parent_model_call_index=parent_model_call_index,
                     spawning_tool_name="create_agent_tasks",
                     spawn_initiator_kind="tool_call",
-                    spawn_initiator_id=spawn_initiator_id or create_tool_call_id or task_id,
+                    spawn_initiator_id=spawn_initiator_id
+                    or create_tool_call_id
+                    or task_id,
                     child_runtime_session_id=child_runtime_session_id,
                     label=label,
                     role="worker",
@@ -650,9 +881,16 @@ class SubagentRuntime:
                     create_tool_call_id=create_tool_call_id,
                     run_index=1,
                     spawn_initiator_kind="tool_call",
-                    spawn_initiator_id=spawn_initiator_id or create_tool_call_id or task_id,
+                    spawn_initiator_id=spawn_initiator_id
+                    or create_tool_call_id
+                    or task_id,
                 )
             )
+
+        started_events = tuple(
+            event for event in events if isinstance(event, SubagentRunStartedEvent)
+        )
+        events.extend(self._rollout_admission_events(started_events))
 
         reservation = None
         if run_infos:
@@ -710,7 +948,9 @@ class SubagentRuntime:
                     reservation=reservation,
                     mcp_binding_identities=_mcp_binding_identities(
                         child_runtime,
-                        allowed_tool_names=info["capability_profile"].allowed_tool_names,
+                        allowed_tool_names=info[
+                            "capability_profile"
+                        ].allowed_tool_names,
                     ),
                 )
                 run = self._require_run(subagent_run_id)
@@ -763,7 +1003,9 @@ class SubagentRuntime:
         if task.has_child_run:
             raise SubagentRuntimeError(f"Task already has a child run: {task_id}")
         if task.status not in {"created", "waiting_dependency"}:
-            raise SubagentRuntimeError(f"Task cannot be started from status {task.status}: {task_id}")
+            raise SubagentRuntimeError(
+                f"Task cannot be started from status {task.status}: {task_id}"
+            )
         state = self._graph_store.state
         self.validate_can_start_batch(event_context.run_id, count=1)
         reservation = self._execution_registry.reserve(
@@ -805,7 +1047,9 @@ class SubagentRuntime:
                 parent_context_id=parent_context_id,
                 parent_model_call_index=parent_model_call_index,
                 spawning_tool_name=(
-                    "create_agent_tasks" if spawn_initiator_kind == "tool_call" else None
+                    "create_agent_tasks"
+                    if spawn_initiator_kind == "tool_call"
+                    else None
                 ),
                 spawn_initiator_kind=spawn_initiator_kind,  # type: ignore[arg-type]
                 spawn_initiator_id=initiator_id,
@@ -840,6 +1084,10 @@ class SubagentRuntime:
                 spawn_initiator_id=initiator_id,
             ),
         )
+        started_event = next(
+            event for event in events if isinstance(event, SubagentRunStartedEvent)
+        )
+        events = (*events, *self._rollout_admission_events((started_event,)))
         try:
             await self._commit_plan(
                 PlannedSubagentWrite(
@@ -939,9 +1187,14 @@ class SubagentRuntime:
         task_artifact_id: str | None = None,
     ) -> SubagentRunFact:
         budget = budget or self.default_budget
-        capability_profile = capability_profile or self._default_capability_profile(budget)
+        capability_profile = capability_profile or self._default_capability_profile(
+            budget
+        )
         context_policy = context_policy or SubagentContextPolicy()
-        if context_policy.mode == "fork" and context_policy.fork_source_context_id is None:
+        if (
+            context_policy.mode == "fork"
+            and context_policy.fork_source_context_id is None
+        ):
             if parent_context_id is None:
                 raise SubagentRuntimeError(
                     "fork context policy requires parent_context_id attribution"
@@ -1016,12 +1269,13 @@ class SubagentRuntime:
             message_preview=task_preview,
             delivery_kind="spawn_task",
         )
+        rollout_events = self._rollout_admission_events((started,))
         try:
             await self._commit_plan(
                 PlannedSubagentWrite(
                     operation="spawn_agent",
                     expected_through_sequence=state.through_sequence,
-                    events=(started, message),
+                    events=(started, message, *rollout_events),
                     batch_id=batch_id,
                     create_tool_call_id=create_tool_call_id,
                     required_reservations=(
@@ -1153,8 +1407,10 @@ class SubagentRuntime:
             )
         ctx = event_context or _spawn_event_context(run)
         summary = _clip(summary, run.budget.max_result_summary_chars_per_child)
-        resolved_child_run_id = child_run_id or run.child_run_id or (
-            f"run:synthetic-child:{subagent_run_id}"
+        resolved_child_run_id = (
+            child_run_id
+            or run.child_run_id
+            or (f"run:synthetic-child:{subagent_run_id}")
         )
         result_id = f"subagent_result:{uuid4().hex}"
         result_artifact_id = f"{subagent_run_id}:result:{uuid4().hex}"
@@ -1221,7 +1477,9 @@ class SubagentRuntime:
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
-            await self._schedule_dependents_after_completion(run.task_id, event_context=ctx)
+            await self._schedule_dependents_after_completion(
+                run.task_id, event_context=ctx
+            )
         result_fact = self._graph_store.state.results[result_id]
         return _legacy_result_from_fact(result_fact)
 
@@ -1371,7 +1629,9 @@ class SubagentRuntime:
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
-            await self._schedule_dependents_after_completion(run.task_id, event_context=ctx)
+            await self._schedule_dependents_after_completion(
+                run.task_id, event_context=ctx
+            )
         return _legacy_result_from_fact(self._graph_store.state.results[result_id])
 
     # Compatibility/test seam.  Production child execution calls
@@ -1384,10 +1644,12 @@ class SubagentRuntime:
         run: SubagentRunFact,
         child_run_id: str,
     ) -> tuple[tuple[AgentEvent, ...], RunStartEvent, RunEndEvent]:
-        child_events = tuple(
-            self.event_log_locator.event_log_for_runtime_session(
-                run.child_runtime_session_id
-            ).iter(run_id=child_run_id)
+        child_log = self.event_log_locator.event_log_for_runtime_session(
+            run.child_runtime_session_id
+        )
+        child_events = _read_child_run_events(
+            child_log,
+            run_id=child_run_id,
         )
         starts = [event for event in child_events if isinstance(event, RunStartEvent)]
         terminals = [event for event in child_events if isinstance(event, RunEndEvent)]
@@ -1486,7 +1748,9 @@ class SubagentRuntime:
             explicit_evidence = (
                 ChildExplicitResultEvidenceFact(
                     source_result_submitted_event_id=(
-                        submitted_event.id if submitted_event is not None else "submitted:test"
+                        submitted_event.id
+                        if submitted_event is not None
+                        else "submitted:test"
                     ),
                     source_result_submitted_event_sequence=(
                         submitted_event.sequence
@@ -1551,13 +1815,13 @@ class SubagentRuntime:
         # and the child runtime's own raw event stream.
         parent_context = _spawn_event_context(run)
         event = SubagentPhaseReportedEvent(
-                **parent_context.event_fields(),
-                subagent_run_id=subagent_run_id,
-                task_id=run.task_id,
-                phase=_clip(phase, 120),
-                message=_clip(message, 1_000) if message else None,
-                progress=dict(progress or {}),
-                source_tool_call_id=source_tool_call_id,
+            **parent_context.event_fields(),
+            subagent_run_id=subagent_run_id,
+            task_id=run.task_id,
+            phase=_clip(phase, 120),
+            message=_clip(message, 1_000) if message else None,
+            progress=dict(progress or {}),
+            source_tool_call_id=source_tool_call_id,
         )
         await self._commit_plan(
             PlannedSubagentWrite(
@@ -1581,11 +1845,16 @@ class SubagentRuntime:
         state = self._graph_store.state
         run = self._require_run(subagent_run_id)
         if run.status not in _ACTIVE_STATUSES:
-            raise SubagentRuntimeError(f"Subagent run is already terminal: {subagent_run_id}")
+            raise SubagentRuntimeError(
+                f"Subagent run is already terminal: {subagent_run_id}"
+            )
         existing = _result_for_run(state, subagent_run_id, status="submitted")
         if existing is not None:
             return _legacy_result_from_fact(existing)
-        summary = _clip(summary.strip() or "(child agent submitted an empty result)", run.budget.max_result_summary_chars_per_child)
+        summary = _clip(
+            summary.strip() or "(child agent submitted an empty result)",
+            run.budget.max_result_summary_chars_per_child,
+        )
         result_id = f"subagent_result:{uuid4().hex}"
         result_artifact_id = f"{subagent_run_id}:result:{uuid4().hex}"
         self.parent_runtime_session.archive.put_text(
@@ -1608,16 +1877,16 @@ class SubagentRuntime:
         # identity reuse.
         parent_context = _spawn_event_context(run)
         event = SubagentResultSubmittedEvent(
-                **parent_context.event_fields(),
-                subagent_run_id=subagent_run_id,
-                task_id=run.task_id,
-                result_id=result_id,
-                summary=summary,
-                output_preview=output_preview,
-                result_artifact_id=result_artifact_id,
-                artifact_ids=[result_artifact_id, *artifact_ids],
-                source_tool_call_id=source_tool_call_id,
-                diagnostics=[dict(item) for item in diagnostics],
+            **parent_context.event_fields(),
+            subagent_run_id=subagent_run_id,
+            task_id=run.task_id,
+            result_id=result_id,
+            summary=summary,
+            output_preview=output_preview,
+            result_artifact_id=result_artifact_id,
+            artifact_ids=[result_artifact_id, *artifact_ids],
+            source_tool_call_id=source_tool_call_id,
+            diagnostics=[dict(item) for item in diagnostics],
         )
         await self._commit_plan(
             PlannedSubagentWrite(
@@ -1673,19 +1942,19 @@ class SubagentRuntime:
                 return _legacy_result_from_fact(completed)
             raise SubagentNotReady(subagent_run_id)
         ctx = event_context or _spawn_event_context(run)
-        submitted_events = [
-            event
-            for event in self.parent_runtime_session.event_log.iter()
-            if isinstance(event, SubagentResultSubmittedEvent)
-            and event.result_id == result_fact.result_id
-        ]
-        if len(submitted_events) != 1:
+        submitted_event = self.parent_runtime_session.event_log.get_by_id(
+            result_fact.provenance.created_event_id
+        )
+        if not isinstance(submitted_event, SubagentResultSubmittedEvent) or (
+            submitted_event.result_id != result_fact.result_id
+        ):
             raise SubagentRuntimeError(
                 "explicit child completion requires one durable result submission"
             )
-        submitted_event = submitted_events[0]
-        resolved_child_run_id = child_run_id or run.child_run_id or (
-            f"run:synthetic-child:{subagent_run_id}"
+        resolved_child_run_id = (
+            child_run_id
+            or run.child_run_id
+            or (f"run:synthetic-child:{subagent_run_id}")
         )
         handoff = self._build_result_handoff(
             run=run,
@@ -1706,16 +1975,13 @@ class SubagentRuntime:
             else None
         )
         child_terminal_event_id = handoff.child_terminal_reference.terminal_event_id
-        child_terminal_created_at = next(
-            (
-                event.created_at
-                for event in self.event_log_locator.event_log_for_runtime_session(
-                    run.child_runtime_session_id
-                ).iter(run_id=resolved_child_run_id)
-                if isinstance(event, RunEndEvent)
-                and event.id == child_terminal_event_id
-            ),
-            submitted_event.created_at,
+        child_terminal = self.event_log_locator.event_log_for_runtime_session(
+            run.child_runtime_session_id
+        ).get_by_id(child_terminal_event_id)
+        child_terminal_created_at = (
+            child_terminal.created_at
+            if isinstance(child_terminal, RunEndEvent)
+            else submitted_event.created_at
         )
         events: list[AgentEvent] = [
             SubagentRunCompletedEvent(
@@ -1769,7 +2035,9 @@ class SubagentRuntime:
         )
         self._execution_registry.release_handle(subagent_run_id)
         if run.task_id is not None:
-            await self._schedule_dependents_after_completion(run.task_id, event_context=ctx)
+            await self._schedule_dependents_after_completion(
+                run.task_id, event_context=ctx
+            )
         return _legacy_result_from_fact(
             self._graph_store.state.results[result_fact.result_id]
         )
@@ -1794,7 +2062,11 @@ class SubagentRuntime:
         ctx = event_context or _spawn_event_context(run)
         run_failed = SubagentRunFailedEvent(
             id=terminal_event_id or uuid4().hex,
-            **({"created_at": terminal_created_at} if terminal_created_at is not None else {}),
+            **(
+                {"created_at": terminal_created_at}
+                if terminal_created_at is not None
+                else {}
+            ),
             **ctx.event_fields(),
             subagent_run_id=subagent_run_id,
             parent_runtime_session_id=run.parent_runtime_session_id,
@@ -1918,7 +2190,6 @@ class SubagentRuntime:
         cancelled_by: str = "parent_agent",
         repair_id: str | None = None,
         drain_timeout_seconds: float | None = 5.0,
-        _request_only: bool = False,
         child_terminal_reference: ChildNativeTerminalReferenceFact | None = None,
         terminal_event_id: str | None = None,
         terminal_created_at: str | None = None,
@@ -1927,25 +2198,78 @@ class SubagentRuntime:
         run = self._require_run(subagent_run_id)
         if run.status in _TERMINAL_STATUSES:
             return run
-        ctx = event_context or _spawn_event_context(run)
-        await self._commit_plan(
-            _plan_run_cancellation(
-                state,
-                run=run,
-                event_context=ctx,
-                reason_code=reason_code,
-                reason_message=reason_message,
-                cancelled_by=cancelled_by,
-                repair_id=repair_id,
-                operation="cancel_run",
-                child_terminal_reference=child_terminal_reference,
-                terminal_event_id=terminal_event_id,
-                terminal_created_at=terminal_created_at,
-            )
+        handle = self._execution_registry.get(subagent_run_id)
+        admission = self.parent_runtime_session.event_log.get_by_id(
+            f"subagent_rollout_budget_resolved:{subagent_run_id}"
         )
-        if _request_only:
-            self._execution_registry.request_cancel(subagent_run_id)
-        else:
+        has_rollout_admission = self._rollout_terminal_augmenter is not None and (
+            isinstance(admission, SubagentRolloutBudgetResolvedEvent)
+        )
+        native_child_owner = (
+            has_rollout_admission
+            and
+            handle is not None
+            and handle.child_session is not None
+            and handle.coroutine is not None
+        )
+        if native_child_owner and child_terminal_reference is None:
+            await self._execution_registry.cancel_for_terminal_handoff(
+                subagent_run_id,
+                timeout_seconds=drain_timeout_seconds,
+            )
+            child_log = self.event_log_locator.event_log_for_runtime_session(
+                run.child_runtime_session_id
+            )
+            lifecycle = child_log.read_raw_events_by_types(
+                (EventType.RUN_END.value,),
+                run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                max_events=1,
+                max_payload_bytes=512 * 1024,
+            )
+            terminals = tuple(
+                raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                for raw in lifecycle.events
+            )
+            if len(terminals) != 1:
+                raise SubagentRuntimeError(
+                    "cancelled child requires one confirmed native terminal"
+                )
+            native_terminal = terminals[0]
+            child_terminal_reference = _child_terminal_reference(
+                run=run,
+                child_run_id=native_terminal.run_id,
+                terminal=native_terminal,
+            )
+            terminal_event_id = deterministic_parent_subagent_terminal_event_id(
+                parent_runtime_session_id=run.parent_runtime_session_id,
+                subagent_run_id=subagent_run_id,
+                child_terminal_event_id=native_terminal.id,
+                parent_terminal_event_type="subagent_run_cancelled",
+            )
+            terminal_created_at = native_terminal.created_at
+        ctx = event_context or _spawn_event_context(run)
+        try:
+            await self._commit_plan(
+                _plan_run_cancellation(
+                    state,
+                    run=run,
+                    event_context=ctx,
+                    reason_code=reason_code,
+                    reason_message=reason_message,
+                    cancelled_by=cancelled_by,
+                    repair_id=repair_id,
+                    operation="cancel_run",
+                    child_terminal_reference=child_terminal_reference,
+                    terminal_event_id=terminal_event_id,
+                    terminal_created_at=terminal_created_at,
+                )
+            )
+        finally:
+            if native_child_owner and self._terminal_commit_is_fully_applied(
+                subagent_run_id
+            ):
+                self._execution_registry.release_handle(subagent_run_id)
+        if not native_child_owner:
             await self._execution_registry.cancel(
                 subagent_run_id,
                 timeout_seconds=drain_timeout_seconds,
@@ -1962,9 +2286,9 @@ class SubagentRuntime:
     ) -> tuple[SubagentRunFact, ...]:
         """Cancel all live child tasks owned by this runtime.
 
-        This is the HostSession/HostCore close hook.  It is deliberately
-        parent-graph-first: every child that was active gets a durable
-        cancellation fact before we wait for cooperative task teardown.
+        This is the HostSession/HostCore close hook.  Native child terminal
+        facts are confirmed before the parent graph terminal and rollout
+        settlement are committed atomically.
         """
 
         active_runs = [run for run in self.runs if run.status in _ACTIVE_STATUSES]
@@ -1976,14 +2300,29 @@ class SubagentRuntime:
                     reason_code=reason_code,
                     reason_message=reason_message,
                     cancelled_by=cancelled_by,
-                    _request_only=True,
+                    drain_timeout_seconds=timeout_seconds,
                 )
             )
-        # Also drain handles whose durable graph was terminalized earlier by a
-        # synchronous safety callback. Graph status alone is not proof that the
-        # child coroutine and its finally blocks have exited.
-        await self._execution_registry.drain(timeout_seconds=timeout_seconds)
         return tuple(cancelled)
+
+    async def drain_children_for_parent_run(
+        self,
+        parent_run_id: str,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        """Wait for child owners charged to one parent rollout account."""
+
+        run_ids = tuple(
+            sorted(
+                self._execution_registry.occupied_run_ids(parent_run_id=parent_run_id)
+            )
+        )
+        if run_ids:
+            await self._execution_registry.wait_run_ids(
+                run_ids,
+                timeout_seconds=timeout_seconds,
+            )
 
     async def repair_dangling_children(
         self,
@@ -2066,9 +2405,10 @@ class SubagentRuntime:
                     terminal = stored[0]
                 except BaseException:
                     confirmation = child_log.confirm_batch((recovered,))
-                    if confirmation.missing_event_ids or len(
-                        confirmation.committed_events
-                    ) != 1:
+                    if (
+                        confirmation.missing_event_ids
+                        or len(confirmation.committed_events) != 1
+                    ):
                         raise
                     terminal = confirmation.committed_events[0]
                 if not isinstance(terminal, RunEndEvent):
@@ -2081,17 +2421,12 @@ class SubagentRuntime:
                 )
 
             if terminal.terminalization_kind == "normal":
-                submitted = [
-                    event
-                    for event in self.parent_runtime_session.event_log.iter()
-                    if isinstance(event, SubagentResultSubmittedEvent)
-                    and event.subagent_run_id == run.subagent_run_id
-                ]
-                if len(submitted) > 1:
-                    raise SubagentRuntimeError(
-                        "child repair found multiple explicit result submissions"
-                    )
-                if submitted:
+                submitted = _result_for_run(
+                    self._graph_store.state,
+                    run.subagent_run_id,
+                    status="submitted",
+                )
+                if submitted is not None:
                     await self.complete_submitted_result(
                         run.subagent_run_id,
                         child_run_id=start.run_id,
@@ -2325,7 +2660,9 @@ class SubagentRuntime:
                 is None
             ):
                 try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, timeout_seconds))
+                    await asyncio.wait_for(
+                        asyncio.shield(task), timeout=max(0.0, timeout_seconds)
+                    )
                 except TimeoutError:
                     pass
         return await self.wait_result(
@@ -2354,14 +2691,20 @@ class SubagentRuntime:
         for task_id in task_ids:
             self._require_task(task_id)
 
-        deadline = None if timeout_seconds is None else asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+        deadline = (
+            None
+            if timeout_seconds is None
+            else asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+        )
         while True:
             settled = [
                 self._task_wait_payload(task_id, include_consumed=include_consumed)
                 for task_id in task_ids
             ]
             settled = [item for item in settled if item is not None]
-            if (settle == "first" and settled) or (settle == "all" and len(settled) == len(task_ids)):
+            if (settle == "first" and settled) or (
+                settle == "all" and len(settled) == len(task_ids)
+            ):
                 chosen = settled[:1] if settle == "first" else settled
                 await self._consume_task_wait_results(
                     chosen,
@@ -2378,7 +2721,9 @@ class SubagentRuntime:
                     include_consumed=include_consumed,
                 )
                 return tuple(settled)
-            await asyncio.sleep(min(0.01, max(0.0, deadline - asyncio.get_running_loop().time())))
+            await asyncio.sleep(
+                min(0.01, max(0.0, deadline - asyncio.get_running_loop().time()))
+            )
 
     async def cancel_task(
         self,
@@ -2401,7 +2746,12 @@ class SubagentRuntime:
                     cancelled_by=cancelled_by,
                 )
                 return self._require_task(task_id)
-        if task.status in {"completed", "failed", "cancelled", "blocked_dependency_failed"}:
+        if task.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "blocked_dependency_failed",
+        }:
             return task
         return await self.cancel_materialized_task(
             task_id,
@@ -2431,15 +2781,15 @@ class SubagentRuntime:
             return task
         state = self._graph_store.state
         event = SubagentTaskCancelledEvent(
-                **event_context.event_fields(),
-                task_id=task_id,
-                subagent_run_id=task.current_run_id,
-                batch_id=task.batch_id,
-                create_tool_call_id=task.create_tool_call_id,
-                repair_id=repair_id,
-                reason_code=reason_code,
-                reason_message=reason_message,
-                cancelled_by=cancelled_by,  # type: ignore[arg-type]
+            **event_context.event_fields(),
+            task_id=task_id,
+            subagent_run_id=task.current_run_id,
+            batch_id=task.batch_id,
+            create_tool_call_id=task.create_tool_call_id,
+            repair_id=repair_id,
+            reason_code=reason_code,
+            reason_message=reason_message,
+            cancelled_by=cancelled_by,  # type: ignore[arg-type]
         )
         events: tuple[AgentEvent, ...] = (event,)
         events += _plan_dependency_failure_cascade(
@@ -2484,7 +2834,12 @@ class SubagentRuntime:
                     diagnostics=diagnostics,
                 )
                 return self._require_task(task_id)
-        if task.status in {"completed", "failed", "cancelled", "blocked_dependency_failed"}:
+        if task.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "blocked_dependency_failed",
+        }:
             return task
         state = self._graph_store.state
         failed = SubagentTaskFailedEvent(
@@ -2540,25 +2895,98 @@ class SubagentRuntime:
                 key=lambda run: run.subagent_run_id,
             )
         )
-        create_tool_call_ids = {
-            task.create_tool_call_id
-            for task in task_facts
-        } | {
-            run.create_tool_call_id
-            for run in run_facts
+        create_tool_call_ids = {task.create_tool_call_id for task in task_facts} | {
+            run.create_tool_call_id for run in run_facts
         }
         if len(create_tool_call_ids) > 1:
             raise SubagentRuntimeError(
                 f"Materialized batch has conflicting creation attribution: {batch_id}"
             )
         create_tool_call_id = next(iter(create_tool_call_ids), None)
+        native_terminal_by_run_id: dict[
+            str, ChildNativeTerminalReferenceFact
+        ] = {}
+        native_terminal_created_at_by_run_id: dict[str, str] = {}
+        if self._rollout_terminal_augmenter is not None:
+            for run in run_facts:
+                if run.status in _TERMINAL_STATUSES:
+                    continue
+                handle = self._execution_registry.get(run.subagent_run_id)
+                if handle is not None and handle.coroutine is not None:
+                    await self._execution_registry.cancel_for_terminal_handoff(
+                        run.subagent_run_id,
+                        timeout_seconds=5.0,
+                    )
+                child_log = self.event_log_locator.event_log_for_runtime_session(
+                    run.child_runtime_session_id
+                )
+                lifecycle = child_log.read_raw_events_by_types(
+                    (EventType.RUN_START.value, EventType.RUN_END.value),
+                    run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                    max_events=2,
+                    max_payload_bytes=1024 * 1024,
+                )
+                decoded_lifecycle = tuple(
+                    raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    for raw in lifecycle.events
+                )
+                starts = tuple(
+                    event
+                    for event in decoded_lifecycle
+                    if isinstance(event, RunStartEvent)
+                )
+                terminals = tuple(
+                    event
+                    for event in decoded_lifecycle
+                    if isinstance(event, RunEndEvent)
+                )
+                if starts and len(terminals) != 1:
+                    raise SubagentRuntimeError(
+                        "materialized batch repair lost a native child terminal"
+                    )
+                if terminals:
+                    terminal = terminals[0]
+                    native_terminal_by_run_id[run.subagent_run_id] = (
+                        _child_terminal_reference(
+                            run=run,
+                            child_run_id=terminal.run_id,
+                            terminal=terminal,
+                        )
+                    )
+                    native_terminal_created_at_by_run_id[run.subagent_run_id] = (
+                        terminal.created_at
+                    )
         events: list[AgentEvent] = []
         active_run_ids: list[str] = []
         for run in run_facts:
             if run.status in _TERMINAL_STATUSES:
                 continue
+            child_terminal_reference = native_terminal_by_run_id.get(
+                run.subagent_run_id
+            )
             events.append(
                 SubagentRunCancelledEvent(
+                    id=(
+                        deterministic_parent_subagent_terminal_event_id(
+                            parent_runtime_session_id=run.parent_runtime_session_id,
+                            subagent_run_id=run.subagent_run_id,
+                            child_terminal_event_id=(
+                                child_terminal_reference.terminal_event_id
+                            ),
+                            parent_terminal_event_type="subagent_run_cancelled",
+                        )
+                        if child_terminal_reference is not None
+                        else uuid4().hex
+                    ),
+                    **(
+                        {
+                            "created_at": native_terminal_created_at_by_run_id[
+                                run.subagent_run_id
+                            ]
+                        }
+                        if child_terminal_reference is not None
+                        else {}
+                    ),
                     **event_context.event_fields(),
                     subagent_run_id=run.subagent_run_id,
                     parent_runtime_session_id=run.parent_runtime_session_id,
@@ -2569,6 +2997,7 @@ class SubagentRuntime:
                     reason_code=reason_code,
                     reason_message=reason_message,
                     cancelled_by="runtime",
+                    child_terminal_reference=child_terminal_reference,
                 )
             )
             active_run_ids.append(run.subagent_run_id)
@@ -2600,30 +3029,31 @@ class SubagentRuntime:
                 excluded_task_ids=batch_task_ids,
             )
         )
-        if events:
-            await self._commit_plan(
-                PlannedSubagentWrite(
-                    operation="repair_materialized_batch",
-                    expected_through_sequence=state.through_sequence,
-                    events=tuple(events),
-                    batch_id=batch_id,
-                    create_tool_call_id=create_tool_call_id,
-                    repair_id=repair_id,
+        try:
+            if events:
+                await self._commit_plan(
+                    PlannedSubagentWrite(
+                        operation="repair_materialized_batch",
+                        expected_through_sequence=state.through_sequence,
+                        events=tuple(events),
+                        batch_id=batch_id,
+                        create_tool_call_id=create_tool_call_id,
+                        repair_id=repair_id,
+                    )
                 )
+        finally:
+            if self._rollout_terminal_augmenter is not None:
+                for run_id in active_run_ids:
+                    if self._terminal_commit_is_fully_applied(run_id):
+                        self._execution_registry.release_handle(run_id)
+        if self._rollout_terminal_augmenter is None:
+            await self._execution_registry.drain_run_ids(
+                tuple(active_run_ids),
+                timeout_seconds=5.0,
             )
-        await self._execution_registry.drain_run_ids(
-            tuple(active_run_ids),
-            timeout_seconds=5.0,
-        )
         return (
-            tuple(
-                self._require_task(task.task_id)
-                for task in task_facts
-            ),
-            tuple(
-                self._require_run(run.subagent_run_id)
-                for run in run_facts
-            ),
+            tuple(self._require_task(task.task_id) for task in task_facts),
+            tuple(self._require_run(run.subagent_run_id) for run in run_facts),
         )
 
     async def _schedule_dependents_after_completion(
@@ -2663,7 +3093,10 @@ class SubagentRuntime:
                     )
                 except EventWriteConflict:
                     refreshed = self._require_task(task.task_id)
-                    if refreshed.status == "running" or refreshed.current_run_id is not None:
+                    if (
+                        refreshed.status == "running"
+                        or refreshed.current_run_id is not None
+                    ):
                         continue
                     raise
                 except (SubagentLimitExceeded, SubagentRuntimeError) as exc:
@@ -2709,11 +3142,15 @@ class SubagentRuntime:
         state = self._graph_store.state
         for task_id in task_ids:
             task = state.tasks.get(task_id)
-            terminal_event_id = task.provenance.terminal_event_id if task is not None else None
+            terminal_event_id = (
+                task.provenance.terminal_event_id if task is not None else None
+            )
             if isinstance(terminal_event_id, str) and terminal_event_id:
                 terminal_event_ids[task_id] = terminal_event_id
         if overrides:
-            terminal_event_ids.update({key: value for key, value in overrides.items() if value})
+            terminal_event_ids.update(
+                {key: value for key, value in overrides.items() if value}
+            )
         return terminal_event_ids
 
     def _dependency_status_snapshot(
@@ -2732,7 +3169,9 @@ class SubagentRuntime:
             planned_status = planned.get(task_id)
             if planned_status is None:
                 continue
-            snapshot[task_id] = "running" if planned_status == "start" else planned_status
+            snapshot[task_id] = (
+                "running" if planned_status == "start" else planned_status
+            )
         return snapshot
 
     def _dependencies_satisfied(self, task: SubagentTaskFact) -> bool:
@@ -2759,7 +3198,12 @@ class SubagentRuntime:
         include_consumed: bool,
     ) -> dict[str, object] | None:
         task = self._require_task(task_id)
-        if task.status not in {"completed", "failed", "cancelled", "blocked_dependency_failed"}:
+        if task.status not in {
+            "completed",
+            "failed",
+            "cancelled",
+            "blocked_dependency_failed",
+        }:
             return None
         state = self._graph_store.state
         run_fact = state.runs.get(task.current_run_id or "")
@@ -2769,7 +3213,9 @@ class SubagentRuntime:
             else None
         )
         run = run_fact
-        result = _legacy_result_from_fact(result_fact) if result_fact is not None else None
+        result = (
+            _legacy_result_from_fact(result_fact) if result_fact is not None else None
+        )
         consumed_task_ids, consumed_result_ids = _consumed_ids(state)
         consumed = bool(
             task_id in consumed_task_ids
@@ -2782,11 +3228,15 @@ class SubagentRuntime:
             "task_key": task.task_key,
             "status": task.status,
             "subagent_run_id": task.current_run_id,
-            "child_runtime_session_id": run.child_runtime_session_id if run is not None else None,
+            "child_runtime_session_id": run.child_runtime_session_id
+            if run is not None
+            else None,
             "result_id": result.result_id if result is not None else None,
             "summary": result.summary if result is not None else None,
             "output_preview": result.output_preview if result is not None else None,
-            "result_artifact_id": result.final_message_artifact_id if result is not None else None,
+            "result_artifact_id": result.final_message_artifact_id
+            if result is not None
+            else None,
             "artifact_ids": list(result.artifact_ids) if result is not None else [],
             "result_source": result.result_source if result is not None else "none",
             "consumed": consumed,
@@ -2818,7 +3268,9 @@ class SubagentRuntime:
             terminal_event_id = (
                 None
                 if isinstance(result_id, str)
-                else task_fact.provenance.terminal_event_id if task_fact is not None else None
+                else task_fact.provenance.terminal_event_id
+                if task_fact is not None
+                else None
             )
             events.append(
                 SubagentResultConsumedEvent(
@@ -2827,11 +3279,19 @@ class SubagentRuntime:
                     consumer_tool_call_id=consumer_tool_call_id,
                     kind="wait_task",
                     task_id=task_id,
-                    subagent_run_id=payload.get("subagent_run_id") if isinstance(payload.get("subagent_run_id"), str) else None,
+                    subagent_run_id=payload.get("subagent_run_id")
+                    if isinstance(payload.get("subagent_run_id"), str)
+                    else None,
                     result_id=result_id if isinstance(result_id, str) else None,
                     consumed_status=(
                         consumed_status
-                        if consumed_status in {"completed", "failed", "cancelled", "blocked_dependency_failed"}
+                        if consumed_status
+                        in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "blocked_dependency_failed",
+                        }
                         else "failed"
                     ),  # type: ignore[arg-type]
                     terminal_event_id=terminal_event_id,
@@ -2871,26 +3331,35 @@ class SubagentRuntime:
             run.child_runtime_session_id
         )
 
-    def pending_results_for_delivery(self, *, max_results: int = 8) -> tuple[SubagentResult, ...]:
-        results: list[SubagentResult] = []
+    def pending_results_for_delivery(
+        self, *, max_results: int = 8
+    ) -> tuple[SubagentResult, ...]:
+        if max_results <= 0:
+            return ()
         state = self._graph_store.state
-        _consumed_task_ids, consumed_result_ids = _consumed_ids(state)
-        for result_fact in sorted(
-            state.results.values(),
-            key=lambda item: item.provenance.created_sequence,
-        ):
-            if result_fact.status != "completed":
-                continue
-            if result_fact.result_id in consumed_result_ids:
-                continue
-            if result_fact.result_id in state.deliveries:
-                continue
-            results.append(_legacy_result_from_fact(result_fact))
-            if len(results) >= max_results:
-                break
-        return tuple(results)
+        return tuple(
+            _legacy_result_from_fact(state.results[result_id])
+            for result_id in pending_subagent_result_ids(state)[:max_results]
+        )
 
-    def render_pending_results_section(self, *, max_results: int = 8) -> tuple[str | None, tuple[SubagentResult, ...]]:
+    def materialize_result_selection(
+        self, result_ids: tuple[str, ...]
+    ) -> tuple[SubagentResult, ...]:
+        """Materialize an already-frozen canonical selection without reselecting."""
+
+        state = self._graph_store.state
+        facts = tuple(state.results.get(result_id) for result_id in result_ids)
+        if any(fact is None or fact.status != "completed" for fact in facts):
+            raise SubagentRuntimeError(
+                "frozen subagent result selection is unavailable in graph state"
+            )
+        return tuple(
+            _legacy_result_from_fact(fact) for fact in facts if fact is not None
+        )
+
+    def render_pending_results_section(
+        self, *, max_results: int = 8
+    ) -> tuple[str | None, tuple[SubagentResult, ...]]:
         results = self.pending_results_for_delivery(max_results=max_results)
         if not results:
             return None, ()
@@ -2909,6 +3378,17 @@ class SubagentRuntime:
             )
         return "\n".join(lines), results
 
+    def pending_result_delivery_count(self) -> int:
+        state = self._graph_store.state
+        _consumed_task_ids, consumed_result_ids = _consumed_ids(state)
+        return sum(
+            1
+            for result in state.results.values()
+            if result.status == "completed"
+            and result.result_id not in consumed_result_ids
+            and result.result_id not in state.deliveries
+        )
+
     async def mark_results_delivered(
         self,
         results: tuple[SubagentResult, ...],
@@ -2918,15 +3398,22 @@ class SubagentRuntime:
         model_call_index: int,
         section_id: str,
     ) -> list[SubagentResultDeliveredEvent]:
+        starts = self.parent_runtime_session.event_log.read_raw_events_by_types(
+            (EventType.MODEL_CALL_START.value,),
+            run_ids=(event_context.run_id,),
+            max_events=256,
+            max_payload_bytes=4 * 1024 * 1024,
+        )
         matching_model_start = any(
             isinstance(event, ModelCallStartEvent)
-            and event.run_id == event_context.run_id
             and event.turn_id == event_context.turn_id
             and event.reply_id == event_context.reply_id
             and event.context_id == context_id
             and event.model_call_index == model_call_index
-            for event in self.parent_runtime_session.event_log.iter(
-                run_id=event_context.run_id
+            for raw in starts.events
+            if isinstance(
+                event := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                ModelCallStartEvent,
             )
         )
         if not matching_model_start:
@@ -2937,7 +3424,10 @@ class SubagentRuntime:
         _consumed_task_ids, consumed_result_ids = _consumed_ids(state)
         events: list[SubagentResultDeliveredEvent] = []
         for result in results:
-            if result.result_id in state.deliveries or result.result_id in consumed_result_ids:
+            if (
+                result.result_id in state.deliveries
+                or result.result_id in consumed_result_ids
+            ):
                 continue
             run = self._require_run(result.subagent_run_id)
             events.append(
@@ -2965,7 +3455,11 @@ class SubagentRuntime:
                 events=tuple(events),
             )
         )
-        return [event for event in committed if isinstance(event, SubagentResultDeliveredEvent)]
+        return [
+            event
+            for event in committed
+            if isinstance(event, SubagentResultDeliveredEvent)
+        ]
 
     def _create_child_runtime_session(
         self,
@@ -2998,6 +3492,10 @@ class SubagentRuntime:
                     "capability_profile_id": capability_profile_id,
                 }
             },
+            context_event_log_locator=self.event_log_locator,
+            rollout_account_owner_state_store=(
+                self.parent_runtime_session.long_horizon_state_store
+            ),
         )
         child.mcp_supervisor = self.parent_runtime_session.mcp_supervisor
         child.set_mcp_installation_contract(
@@ -3028,9 +3526,12 @@ class SubagentRuntime:
                     diagnostics=[{"timeout_seconds": run.budget.child_timeout_seconds}],
                 )
         except asyncio.CancelledError:
-            # Explicit stop_agent/cancel already writes the canonical parent
-            # graph event. Do not convert cooperative cancellation into an
-            # additional failure.
+            # The child ledger terminalizes first.  Keep the execution owner
+            # until cancel() atomically commits the parent graph terminal and
+            # root rollout settlement.
+            retain_handle_for_reconciliation = (
+                not self._terminal_commit_is_fully_applied(run.subagent_run_id)
+            )
             raise
         except SubagentRunEntryCommitUntrusted as exc:
             retain_handle_for_reconciliation = True
@@ -3045,8 +3546,7 @@ class SubagentRuntime:
                 child_runtime_session_id=run.child_runtime_session_id,
                 pending_kind="child_ledger_reconciliation",
                 reason_code=(
-                    "child_run_start_commit_"
-                    + exc.durable_run_existence.value
+                    "child_run_start_commit_" + exc.durable_run_existence.value
                 ),
                 reason_message=(
                     "Child RunStart commit existence is untrusted; the execution "
@@ -3066,10 +3566,15 @@ class SubagentRuntime:
                 child_log = self.event_log_locator.event_log_for_runtime_session(
                     run.child_runtime_session_id
                 )
+                terminal_snapshot = child_log.read_raw_events_by_types(
+                    (EventType.RUN_END.value,),
+                    run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                    max_events=1,
+                    max_payload_bytes=512 * 1024,
+                )
                 child_terminals = [
-                    event
-                    for event in child_log.iter()
-                    if isinstance(event, RunEndEvent)
+                    raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    for raw in terminal_snapshot.events
                 ]
                 if child_terminals:
                     child_terminal = child_terminals[-1]
@@ -3136,9 +3641,7 @@ class SubagentRuntime:
             if run.parent_run_id == parent_run_id and run.status in _ACTIVE_STATUSES
         }
         active_for_session = {
-            run.subagent_run_id
-            for run in runs
-            if run.status in _ACTIVE_STATUSES
+            run.subagent_run_id for run in runs if run.status in _ACTIVE_STATUSES
         }
         # Durable terminal status does not release physical capacity. A child
         # whose cancellation cleanup is still running remains in the union via
@@ -3154,16 +3657,28 @@ class SubagentRuntime:
         reserved_for_session = self._execution_registry.uncommitted_reservation_count()
         if count < 1:
             raise ValueError("count must be positive")
-        if len(active_for_run) + reserved_for_run + count > budget.max_concurrent_children_per_parent_run:
-            raise SubagentLimitExceeded("max_concurrent_children_per_parent_run exceeded")
-        if len(active_for_session) + reserved_for_session + count > budget.max_concurrent_children_per_host_session:
-            raise SubagentLimitExceeded("max_concurrent_children_per_host_session exceeded")
+        if (
+            len(active_for_run) + reserved_for_run + count
+            > budget.max_concurrent_children_per_parent_run
+        ):
+            raise SubagentLimitExceeded(
+                "max_concurrent_children_per_parent_run exceeded"
+            )
+        if (
+            len(active_for_session) + reserved_for_session + count
+            > budget.max_concurrent_children_per_host_session
+        ):
+            raise SubagentLimitExceeded(
+                "max_concurrent_children_per_host_session exceeded"
+            )
         if len(total_for_run) + count > budget.max_total_child_runs_per_parent_run:
             raise SubagentLimitExceeded("max_total_child_runs_per_parent_run exceeded")
         if budget.max_spawn_depth_from_root < 0:
             raise SubagentLimitExceeded("max_spawn_depth_from_root exceeded")
 
-    def _default_capability_profile(self, budget: SubagentBudget) -> SubagentCapabilityProfile:
+    def _default_capability_profile(
+        self, budget: SubagentBudget
+    ) -> SubagentCapabilityProfile:
         if self._parent_capability_snapshot is None:
             return _default_capability_profile(budget)
         return replace(
@@ -3179,19 +3694,29 @@ class SubagentRuntime:
         budget: SubagentBudget | None = None,
     ) -> SubagentCapabilityProfile:
         budget = budget or self.default_budget
-        if profile_name not in {"research_worker", "review_worker", "verification_worker"}:
+        if profile_name not in {
+            "research_worker",
+            "review_worker",
+            "verification_worker",
+        }:
             return self._default_capability_profile(budget)
         base = self._parent_capability_snapshot or _default_capability_profile(budget)
         inherited_names = set(base.allowed_tool_names)
         inherited_descriptor_ids = set(base.allowed_descriptor_ids)
         if profile_name in {"research_worker", "review_worker"}:
-            allowed_names = _profile_tool_subset(inherited_names, _READ_ONLY_WORKER_TOOL_NAMES)
+            allowed_names = _profile_tool_subset(
+                inherited_names, _READ_ONLY_WORKER_TOOL_NAMES
+            )
             if profile_name == "research_worker":
                 allowed_names.update(_mcp_tool_names_from_profile(base))
             profile_summary = "read-only investigation/review profile"
         else:
-            allowed_names = _profile_tool_subset(inherited_names, _VERIFICATION_WORKER_TOOL_NAMES)
-            profile_summary = "verification profile with terminal access but no file writes"
+            allowed_names = _profile_tool_subset(
+                inherited_names, _VERIFICATION_WORKER_TOOL_NAMES
+            )
+            profile_summary = (
+                "verification profile with terminal access but no file writes"
+            )
         allowed_names.update(_CHILD_REPORT_TOOL_NAMES)
         allowed_descriptor_ids = {
             descriptor_id
@@ -3222,6 +3747,7 @@ class SubagentRuntime:
             diagnostics=tuple(diagnostics),
         )
 
+
 def _final_child_assistant_text(
     child_events: tuple[AgentEvent, ...],
     *,
@@ -3238,7 +3764,9 @@ def _final_child_assistant_text(
             continue
         update = assembler.append(event)
         for item in update.completed:
-            if item.reply_id != terminal.reply_id or not isinstance(item.block, TextBlock):
+            if item.reply_id != terminal.reply_id or not isinstance(
+                item.block, TextBlock
+            ):
                 continue
             completed.append((item.end_sequence or 0, item.block.text))
     completed.sort(key=lambda item: item[0])
@@ -3323,8 +3851,7 @@ def _explicit_result_evidence(
     results = [
         event
         for event in child_events
-        if isinstance(event, ToolResultEndEvent)
-        and event.tool_call_id == tool_call_id
+        if isinstance(event, ToolResultEndEvent) and event.tool_call_id == tool_call_id
     ]
     if len(starts) != 1 or len(results) != 1:
         raise SubagentRuntimeError(
@@ -3379,11 +3906,7 @@ def _single_optional_value(
     rows: list[dict[str, Any]],
     key: str,
 ) -> str | None:
-    values = {
-        str(row[key])
-        for row in rows
-        if row.get(key) is not None
-    }
+    values = {str(row[key]) for row in rows if row.get(key) is not None}
     if len(values) > 1:
         raise ValueError(f"Batch contains conflicting {key} values")
     return next(iter(values), None)
@@ -3466,7 +3989,11 @@ def _plan_run_cancellation(
 ) -> PlannedSubagentWrite:
     run_cancelled = SubagentRunCancelledEvent(
         id=terminal_event_id or uuid4().hex,
-        **({"created_at": terminal_created_at} if terminal_created_at is not None else {}),
+        **(
+            {"created_at": terminal_created_at}
+            if terminal_created_at is not None
+            else {}
+        ),
         **event_context.event_fields(),
         subagent_run_id=run.subagent_run_id,
         parent_runtime_session_id=run.parent_runtime_session_id,
@@ -3539,12 +4066,10 @@ def _plan_dependency_failure_cascade_many(
     excluded_task_ids: set[str] | None = None,
 ) -> tuple[SubagentTaskBlockedEvent, ...]:
     planned_statuses = {
-        task_id: status
-        for task_id, (status, _event_id) in roots.items()
+        task_id: status for task_id, (status, _event_id) in roots.items()
     }
     terminal_event_ids = {
-        task_id: event_id
-        for task_id, (_status, event_id) in roots.items()
+        task_id: event_id for task_id, (_status, event_id) in roots.items()
     }
     excluded = excluded_task_ids or set()
     queue = sorted(roots)
@@ -3597,7 +4122,9 @@ def _default_capability_profile(budget: SubagentBudget) -> SubagentCapabilityPro
     )
 
 
-def _profile_tool_subset(inherited_names: set[str], allowed_core_names: frozenset[str]) -> set[str]:
+def _profile_tool_subset(
+    inherited_names: set[str], allowed_core_names: frozenset[str]
+) -> set[str]:
     allowed = set(inherited_names) & allowed_core_names
     allowed.difference_update(_WRITE_TOOL_NAMES)
     if "terminal" not in allowed_core_names:
@@ -3614,6 +4141,33 @@ def _mcp_tool_names_from_profile(profile: SubagentCapabilityProfile) -> set[str]
         if isinstance(tool_names, list):
             names.update(str(item) for item in tool_names if isinstance(item, str))
     return names
+
+
+def _same_graph_semantics(
+    before: SubagentGraphState,
+    after: SubagentGraphState,
+) -> bool:
+    """Allow a CAS rebase only when non-graph events advanced the ledger."""
+
+    return replace(before, through_sequence=0) == replace(
+        after,
+        through_sequence=0,
+    )
+
+
+def _read_child_run_events(
+    event_log: EventLog,
+    *,
+    run_id: str,
+) -> tuple[AgentEvent, ...]:
+    raw = event_log.read_raw_run_events(
+        run_id,
+        max_events=16_384,
+        max_payload_bytes=16 * 1024 * 1024,
+    )
+    return tuple(
+        item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in raw
+    )
 
 
 def _mcp_binding_identities(
@@ -3661,8 +4215,10 @@ def _optional_str_value(value: object) -> str | None:
 def _spawn_event_context(run: SubagentRunFact) -> EventContext:
     return EventContext(
         run_id=run.parent_run_id,
-        turn_id=run.parent_turn_id or f"turn:subagent-maintenance:{run.subagent_run_id}",
-        reply_id=run.parent_reply_id or f"reply:subagent-maintenance:{run.subagent_run_id}",
+        turn_id=run.parent_turn_id
+        or f"turn:subagent-maintenance:{run.subagent_run_id}",
+        reply_id=run.parent_reply_id
+        or f"reply:subagent-maintenance:{run.subagent_run_id}",
     )
 
 
@@ -3673,7 +4229,9 @@ def _parse_dt(value: str) -> datetime:
 def _event_ref(event: Any) -> str:
     event_id = getattr(event, "id", None)
     if not isinstance(event_id, str) or not event_id:
-        raise SubagentRuntimeError("Subagent dependency terminal event requires a durable event id")
+        raise SubagentRuntimeError(
+            "Subagent dependency terminal event requires a durable event id"
+        )
     return event_id
 
 

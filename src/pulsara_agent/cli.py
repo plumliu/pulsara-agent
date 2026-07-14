@@ -34,6 +34,7 @@ from pulsara_agent.host import (
     resolve_workspace,
 )
 from pulsara_agent.event import ContextCompactionCompletedEvent, ContextCompactionFailedEvent
+from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.runtime.agent import AgentRunResult
@@ -60,6 +61,23 @@ from pulsara_agent.runtime.mcp.store import (
     WORKSPACE_MCP_CONFIG,
     load_mcp_server_configs,
     mcp_config_sources,
+)
+from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
+from pulsara_agent.runtime.long_horizon.checkpoint_doctor import (
+    verify_or_rebuild_subagent_graph_checkpoint,
+)
+from pulsara_agent.runtime.long_horizon.checkpoint_gc import (
+    garbage_collect_subagent_graph_checkpoint_artifacts,
+)
+from pulsara_agent.runtime.long_horizon.checkpoint_maintenance import (
+    PostgresCheckpointMaintenanceAuthority,
+)
+from pulsara_agent.runtime.long_horizon.feasibility import (
+    check_production_rollout_budget_configuration,
+)
+from pulsara_agent.runtime.long_horizon.reducer_contract import (
+    DEFAULT_SUBAGENT_GRAPH_REDUCER_REGISTRY,
+    build_default_subagent_graph_reducer_binding,
 )
 from pulsara_agent.runtime.permission import (
     PermissionState,
@@ -156,7 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_mcp_common_args(mcp_subcommands.add_parser("reconnect", help="Reconnect configured MCP servers and print capabilities."))
     config_check = subcommands.add_parser(
         "config-check",
-        help="Load Pulsara configuration from environment variables.",
+        help=(
+            "Load Pulsara configuration and validate production model-slot "
+            "rollout budgets."
+        ),
     )
     config_check.add_argument(
         "--prefix",
@@ -188,6 +209,33 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_memory = _add_inspect_common_args(inspect_subcommands.add_parser("memory", help="Inspect a memory node."))
     inspect_memory.add_argument("memory_id")
     _add_inspect_common_args(inspect_subcommands.add_parser("health", help="Inspect durable subsystem health."))
+    checkpoint = subcommands.add_parser(
+        "checkpoint",
+        help="Privileged offline subagent graph checkpoint maintenance.",
+    )
+    checkpoint_subcommands = checkpoint.add_subparsers(dest="checkpoint_command")
+    checkpoint_doctor = _add_checkpoint_common_args(
+        checkpoint_subcommands.add_parser(
+            "doctor",
+            help="Verify or deterministically rebuild a closed session checkpoint.",
+        )
+    )
+    checkpoint_doctor.add_argument("runtime_session_id")
+    checkpoint_doctor.add_argument(
+        "--mode",
+        choices=("verify", "rebuild"),
+        default="verify",
+    )
+    checkpoint_doctor.add_argument("--through-sequence", type=int, default=None)
+    checkpoint_gc = _add_checkpoint_common_args(
+        checkpoint_subcommands.add_parser(
+            "gc",
+            help="Delete stale checkpoint artifact bytes for a closed session.",
+        )
+    )
+    checkpoint_gc.add_argument("runtime_session_id")
+    checkpoint_gc.add_argument("--retain", type=int, default=2)
+    checkpoint_gc.add_argument("--max-catalog-events", type=int, default=10_000)
     return parser
 
 
@@ -275,6 +323,25 @@ def _add_inspect_common_args(parser: argparse.ArgumentParser) -> argparse.Argume
     return parser
 
 
+def _add_checkpoint_common_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--env-file", default=None, help="Load settings before maintenance."
+    )
+    parser.add_argument(
+        "--override-env",
+        action="store_true",
+        help="Let --env-file override existing env.",
+    )
+    parser.add_argument(
+        "--prefix",
+        default="PULSARA",
+        help="Environment variable prefix. Defaults to PULSARA.",
+    )
+    return parser
+
+
 def _add_mcp_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--env-file", default=None, help="Load a .env file before resolving MCP env vars.")
     parser.add_argument("--override-env", action="store_true", help="Let --env-file override existing env.")
@@ -312,9 +379,18 @@ def main() -> None:
                 )
             else:
                 settings = PulsaraSettings.from_env(prefix=args.prefix)
+            rollout_feasibility = check_production_rollout_budget_configuration(
+                settings.llm
+            )
         except ValueError as exc:
             parser.error(str(exc))
-        print(json.dumps(settings.redacted_dict(), indent=2))
+        report = settings.redacted_dict()
+        report["rollout_budget_feasibility"] = (
+            rollout_feasibility.model_dump(mode="json")
+        )
+        print(json.dumps(report, indent=2))
+        if not rollout_feasibility.feasible:
+            raise SystemExit(2)
         return
 
     if args.command == "host":
@@ -356,6 +432,14 @@ def main() -> None:
             parser.error(str(exc))
         except KeyError as exc:
             parser.error(f"not found: {exc.args[0]}")
+        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        return
+
+    if args.command == "checkpoint":
+        try:
+            report = _checkpoint_command(args)
+        except (ValueError, RuntimeError) as exc:
+            parser.error(str(exc))
         print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
         return
 
@@ -486,6 +570,50 @@ def _inspect(args) -> dict[str, object]:
     raise ValueError(f"unsupported inspect command: {args.inspect_command}")
 
 
+def _checkpoint_command(args) -> dict[str, object]:
+    if args.checkpoint_command is None:
+        raise ValueError("checkpoint requires a subcommand")
+    settings = _settings_from_inspect_args(args)
+    runtime_session_id = str(args.runtime_session_id)
+    event_log = PostgresEventLog(
+        dsn=settings.storage.postgres_dsn,
+        runtime_session_id=runtime_session_id,
+    )
+    archive = PostgresArtifactStore(settings.storage.postgres_dsn)
+    maintenance = PostgresCheckpointMaintenanceAuthority(
+        settings.storage.postgres_dsn
+    )
+    if args.checkpoint_command == "doctor":
+        through_sequence = args.through_sequence
+        if through_sequence is None:
+            through_sequence = event_log.next_sequence() - 1
+        if through_sequence < 1:
+            raise ValueError("checkpoint doctor requires a non-empty event ledger")
+        binding = build_default_subagent_graph_reducer_binding()
+        report = verify_or_rebuild_subagent_graph_checkpoint(
+            runtime_session_id=runtime_session_id,
+            through_sequence=through_sequence,
+            reducer_contract=binding.contract,
+            mode=args.mode,
+            event_log=event_log,
+            archive=archive,
+            reducer_registry=DEFAULT_SUBAGENT_GRAPH_REDUCER_REGISTRY,
+            maintenance_authority=maintenance,
+        )
+        return report.model_dump(mode="json")
+    if args.checkpoint_command == "gc":
+        report = garbage_collect_subagent_graph_checkpoint_artifacts(
+            runtime_session_id=runtime_session_id,
+            event_log=event_log,
+            archive=archive,
+            maintenance_authority=maintenance,
+            retained_checkpoint_min_count=args.retain,
+            max_catalog_events=args.max_catalog_events,
+        )
+        return report.model_dump(mode="json")
+    raise ValueError(f"unsupported checkpoint command: {args.checkpoint_command}")
+
+
 PLAN_APPROVE_TOKENS = frozenset({"approve", "yes", "是", "好", "可以", "同意", "好的", "批准", "y", "Y"})
 
 
@@ -539,6 +667,7 @@ def _host_session_status_payload(session) -> dict:
         "effective_next_run_mode": effective_mode.value if effective_mode is not None else None,
         "effective_next_run_policy": session.effective_next_run_permission_policy().to_dict(),
         "plan_active": session.plan_state.active,
+        "long_horizon": summary.get("long_horizon"),
         "mcp": summary.get("mcp"),
     }
 

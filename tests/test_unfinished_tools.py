@@ -14,6 +14,7 @@ from pulsara_agent.host.unfinished_tools import (
     render_unfinished_summary,
 )
 from pulsara_agent.message import ToolCallBlock, ToolResultState
+from tests.conftest import tool_result_end_contract_fields
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
@@ -21,10 +22,14 @@ CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test"
 
 def test_classifies_pending_approval_as_not_executed() -> None:
     events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
+        ),
         RequireUserConfirmEvent(
             **CTX.event_fields(),
-            tool_calls=[ToolCallBlock(id="call:write", name="write_file", input='{"path": "x"}')],
+            tool_calls=[
+                ToolCallBlock(id="call:write", name="write_file", input='{"path": "x"}')
+            ],
         ),
     ]
 
@@ -41,12 +46,24 @@ def test_classifies_pending_approval_as_not_executed() -> None:
 
 def test_started_call_takes_priority_over_pending_approval() -> None:
     events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
+        ToolCallStartEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:terminal",
+            tool_call_name="terminal",
+        ),
         RequireUserConfirmEvent(
             **CTX.event_fields(),
-            tool_calls=[ToolCallBlock(id="call:terminal", name="terminal", input='{"command": "pytest"}')],
+            tool_calls=[
+                ToolCallBlock(
+                    id="call:terminal", name="terminal", input='{"command": "pytest"}'
+                )
+            ],
         ),
-        ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
+        ToolResultStartEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:terminal",
+            tool_call_name="terminal",
+        ),
     ]
 
     unfinished = classify_unfinished_tool_calls(events)
@@ -54,21 +71,31 @@ def test_started_call_takes_priority_over_pending_approval() -> None:
 
     assert unfinished[0].state is UnfinishedState.STARTED
     assert unfinished[0].severity is ToolSeverity.TERMINAL
-    assert "may have partially run and may still be running in the background" in summary
+    assert (
+        "may have partially run and may still be running in the background" in summary
+    )
     assert "did not execute" not in summary
 
 
 def test_name_falls_back_to_confirmation_or_result_start_event() -> None:
     pending_events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:pending", tool_call_name=""),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:pending", tool_call_name=""
+        ),
         RequireUserConfirmEvent(
             **CTX.event_fields(),
-            tool_calls=[ToolCallBlock(id="call:pending", name="write_file", input="{}")],
+            tool_calls=[
+                ToolCallBlock(id="call:pending", name="write_file", input="{}")
+            ],
         ),
     ]
     started_events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:started", tool_call_name=""),
-        ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:started", tool_call_name="terminal"),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:started", tool_call_name=""
+        ),
+        ToolResultStartEvent(
+            **CTX.event_fields(), tool_call_id="call:started", tool_call_name="terminal"
+        ),
     ]
 
     assert classify_unfinished_tool_calls(pending_events)[0].tool_name == "write_file"
@@ -77,13 +104,24 @@ def test_name_falls_back_to_confirmation_or_result_start_event() -> None:
 
 def test_completed_call_is_not_unfinished_even_when_result_end_is_late() -> None:
     events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
-        ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:terminal", tool_call_name="terminal"),
-        ToolResultEndEvent(
+        ToolCallStartEvent(
             **CTX.event_fields(),
             tool_call_id="call:terminal",
+            tool_call_name="terminal",
+        ),
+        ToolResultStartEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:terminal",
+            tool_call_name="terminal",
+        ),
+        ToolResultEndEvent(
+            **CTX.event_fields(),
+            **tool_result_end_contract_fields("call:terminal", tool_name="terminal"),
+            tool_call_id="call:terminal",
             state=ToolResultState.SUCCESS,
-            metadata={"tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}},
+            metadata={
+                "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+            },
         ),
     ]
 
@@ -93,25 +131,47 @@ def test_completed_call_is_not_unfinished_even_when_result_end_is_late() -> None
 
 def test_rendering_uses_conservative_wording_and_truncates_tool_names() -> None:
     events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"),
-        ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"),
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
-        ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:term", tool_call_name="terminal"),
-        ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:term", tool_call_name="terminal"),
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:unknown", tool_call_name="custom_tool"),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"
+        ),
+        ToolResultStartEvent(
+            **CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"
+        ),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
+        ),
+        ToolResultStartEvent(
+            **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
+        ),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:term", tool_call_name="terminal"
+        ),
+        ToolResultStartEvent(
+            **CTX.event_fields(), tool_call_id="call:term", tool_call_name="terminal"
+        ),
+        ToolCallStartEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:unknown",
+            tool_call_name="custom_tool",
+        ),
     ]
 
-    summary = render_unfinished_summary(classify_unfinished_tool_calls(events), run_status="failed")
+    summary = render_unfinished_summary(
+        classify_unfinished_tool_calls(events), run_status="failed"
+    )
 
     assert "failed turn" in summary
     assert "read_file, write_file, terminal, +1 more" in summary
-    assert "may have partially run and may still be running in the background" in summary
+    assert (
+        "may have partially run and may still be running in the background" in summary
+    )
 
 
 def test_read_only_pending_call_is_omitted_from_summary() -> None:
     events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"
+        ),
         RequireUserConfirmEvent(
             **CTX.event_fields(),
             tool_calls=[ToolCallBlock(id="call:read", name="read_file", input="{}")],
@@ -142,7 +202,9 @@ def test_terminal_process_is_terminal_severity_without_action_parsing() -> None:
     summary = render_unfinished_summary(unfinished, run_status="aborted")
 
     assert unfinished[0].severity is ToolSeverity.TERMINAL
-    assert "may have partially run and may still be running in the background" in summary
+    assert (
+        "may have partially run and may still be running in the background" in summary
+    )
 
 
 def test_classifies_known_tool_severities() -> None:
@@ -227,11 +289,17 @@ def test_empty_tool_name_uses_unknown_effect_wording() -> None:
 
 def test_bounded_write_started_wording_does_not_claim_background_running() -> None:
     events = [
-        ToolCallStartEvent(**CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
-        ToolResultStartEvent(**CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"),
+        ToolCallStartEvent(
+            **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
+        ),
+        ToolResultStartEvent(
+            **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
+        ),
     ]
 
-    summary = render_unfinished_summary(classify_unfinished_tool_calls(events), run_status="aborted")
+    summary = render_unfinished_summary(
+        classify_unfinished_tool_calls(events), run_status="aborted"
+    )
 
     assert "may have partially run; re-read to verify" in summary
     assert "still be running in the background" not in summary

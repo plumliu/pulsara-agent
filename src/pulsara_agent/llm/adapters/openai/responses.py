@@ -37,6 +37,7 @@ from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.provider import mutable_provider_value
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.runtime_observation import resolve_runtime_observation_binding
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -293,6 +294,14 @@ def build_responses_payload(
 ) -> dict[str, Any]:
     model = call.target.model_profile
     options = call.target.effective_options
+    if any(
+        message.role is MessageRole.RUNTIME_OBSERVATION
+        for message in context.messages
+    ):
+        carrier = call.target.fact.runtime_observation_carrier
+        if carrier is None:
+            raise ValueError("resolved target does not support runtime observations")
+        resolve_runtime_observation_binding(carrier)
     payload: dict[str, Any] = {
         "model": model.id,
         "input": _messages_to_responses_inputs(context.messages),
@@ -463,8 +472,11 @@ def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
 
 
 def _textual_responses_input(message: LLMMessage) -> dict[str, Any]:
+    role = message.role.value
+    if message.role is MessageRole.RUNTIME_OBSERVATION:
+        role = "developer"
     return {
-        "role": message.role.value,
+        "role": role,
         # Use Responses' EasyInputMessage string form for maximum compatibility
         # with OpenAI-compatible gateways. Some gateways parse prior assistant
         # messages incorrectly when they are sent as input_text content parts.

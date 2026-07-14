@@ -28,6 +28,14 @@ from pulsara_agent.capability.provider import (
     CapabilityProjectionOutput,
 )
 from pulsara_agent.capability.render import render_active_skill_prompt
+from pulsara_agent.capability.result_contracts import (
+    result_render_contract_for_tool,
+    terminal_process_result_render_contract,
+)
+from pulsara_agent.capability.result_semantics import (
+    FrozenToolResultSemanticsRuntimeInput,
+    build_terminal_payload_timing,
+)
 from pulsara_agent.capability.registry import CapabilityRegistry
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
@@ -40,8 +48,15 @@ from pulsara_agent.event import (
     AgentEvent,
     CapabilityExposureResolvedEvent,
     CapabilityGateDecisionEvent,
+    ContextWindowOpenedEvent,
     EventContext,
+    ModelCallControlDispositionResolvedEvent,
+    ModelCallEndEvent,
+    ModelCallStartEvent,
     PlanModeEnteredEvent,
+    ReplyEndEvent,
+    ReplyStartEvent,
+    RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -52,9 +67,15 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
 )
 from pulsara_agent.llm import LLMRuntime
+from pulsara_agent.llm.control import RunModelCallControlOwner
 from tests.support import run_agent_task, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.primitives.model_call import (
+    ModelCallControlDisposition,
+    sha256_fingerprint,
+)
+from tests.support.model_call import model_call_end_fields, model_call_start_fields
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultState
 from pulsara_agent.runtime import (
@@ -80,13 +101,30 @@ from pulsara_agent.primitives.permission import preset_permission_policy_fact
 from pulsara_agent.primitives.capability import build_capability_resolve_basis
 from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.primitives.run_entry import CapabilityExposureOwnerFact
-from pulsara_agent.host.run_boundary import CapabilityResolveBasis, derive_continuation_basis
+from pulsara_agent.primitives.tool_result import (
+    TerminalCommandDomainSubmissionFact,
+    TerminalProcessInventoryDomainSubmissionFact,
+    ToolResultRenderVariantCode,
+)
+from pulsara_agent.host.run_boundary import (
+    CapabilityResolveBasis,
+    derive_continuation_basis,
+)
 from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
+from pulsara_agent.runtime.tool_action import (
+    builtin_tool_action_policy,
+    terminal_process_tool_action_policy,
+)
 from pulsara_agent.runtime.run_entry import RunWorkingSet
+from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.tool_artifacts import (
     InMemoryToolResultArtifactIndex,
     ToolResultArtifactOptions,
     ToolResultArtifactService,
+)
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    empty_projection_state_fingerprint,
+    prepare_root_long_horizon_run,
 )
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.registry import ToolRegistry, build_tool_binding_contract
@@ -105,11 +143,56 @@ class DummyTool:
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         self.calls.append(call.id)
+        timing = build_terminal_payload_timing(
+            observed_at_utc="2026-01-01T00:00:00Z",
+            duration_seconds=0,
+            freshness="current_tool_observation",
+            clock_source="tool_runtime_metadata",
+        )
+        semantics_input = None
+        terminal_timing = None
+        if self.name == "terminal":
+            semantics_input = FrozenToolResultSemanticsRuntimeInput(
+                semantics_input_kind=ToolResultRenderVariantCode.TERMINAL_COMMAND_EXECUTED,
+                domain_submission=TerminalCommandDomainSubmissionFact(
+                    command=str(call.arguments.get("command") or "test command"),
+                    status="success",
+                    exit_code=0,
+                    cwd="/test",
+                    timed_out=False,
+                    output_truncated=False,
+                    error=None,
+                    process_id=None,
+                    yielded_to_background=False,
+                    terminal_session_id="test",
+                    backend_type="test",
+                    io_mode=None,
+                    stdin_closed=None,
+                    policy_code=None,
+                    duration_seconds=0,
+                ),
+            )
+            terminal_timing = timing
+        elif self.name == "terminal_process":
+            semantics_input = FrozenToolResultSemanticsRuntimeInput(
+                semantics_input_kind=ToolResultRenderVariantCode.TERMINAL_PROCESS_INVENTORY,
+                domain_submission=TerminalProcessInventoryDomainSubmissionFact(
+                    status="success",
+                    live_process_count=0,
+                    finished_process_count=0,
+                    process_summaries=(),
+                    omitted_process_count=0,
+                    summaries_truncated=False,
+                ),
+            )
+            terminal_timing = timing
         return ToolExecutionResult(
             call_id=call.id,
             tool_name=call.name,
             status=ToolResultState.SUCCESS,
             output=f"ran:{call.id}",
+            semantics_input=semantics_input,
+            terminal_payload_timing=terminal_timing,
         )
 
 
@@ -182,6 +265,8 @@ def _descriptor(
         is_model_callable=True,
         is_read_only=True,
         is_concurrency_safe=True,
+        result_render_contract=result_render_contract_for_tool(name),
+        long_horizon_policy=builtin_tool_action_policy(name),
         permission_category=permission_category,
         advertise_policy=advertise_policy,
         availability=availability,
@@ -399,9 +484,7 @@ def test_projection_semantic_fingerprint_ignores_exposure_scoped_artifact_ids(
     )
     runtime = _runtime_for_provider(provider)
     registry = ToolRegistry()
-    registry.register(
-        DummyTool("alpha", is_read_only=True, is_concurrency_safe=True)
-    )
+    registry.register(DummyTool("alpha", is_read_only=True, is_concurrency_safe=True))
     registry.bind_contract(
         build_tool_binding_contract(
             tool_name="alpha",
@@ -623,6 +706,8 @@ def test_capability_gate_preserves_terminal_process_observe_contract_and_termina
         is_model_callable=True,
         is_read_only=False,
         is_concurrency_safe=False,
+        result_render_contract=terminal_process_result_render_contract(),
+        long_horizon_policy=terminal_process_tool_action_policy(),
         is_open_world=True,
         permission_category="terminal",
     )
@@ -962,7 +1047,6 @@ def test_artifact_policy_uses_descriptor_mode() -> None:
         options=ToolResultArtifactOptions(
             archive_threshold_bytes=10,
             large_preview_chars=10,
-            tool_result_message_context_chars=20,
         ),
     )
     context = EventContext(
@@ -1090,8 +1174,14 @@ def test_agent_runtime_records_capability_exposure_and_gate_diagnostics(
     ]
     assert len(exposure_events) == 1
     authorization = exposure_events[0].exposure.authorization_entries
-    assert [entry.capability_name for entry in authorization if entry.disposition == "direct"] == ["noop"]
-    assert [entry.capability_name for entry in authorization if entry.callable] == ["noop"]
+    assert [
+        entry.capability_name
+        for entry in authorization
+        if entry.disposition == "direct"
+    ] == ["noop"]
+    assert [entry.capability_name for entry in authorization if entry.callable] == [
+        "noop"
+    ]
     gate_decision = _gate_decisions(agent)[0]
     assert gate_decision.tool_call_id == "call:noop"
     assert gate_decision.descriptor_id == "builtin:noop"
@@ -1113,7 +1203,11 @@ def test_terminal_gate_decision_records_active_skill_capability_context(
         [
             {
                 "tool_calls": [
-                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                    {
+                        "id": "call:terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "echo denied"}),
+                    }
                 ]
             },
             {"text": "done"},
@@ -1192,7 +1286,11 @@ def test_denied_terminal_gate_decision_keeps_active_skill_capability_context(
         [
             {
                 "tool_calls": [
-                    {"id": "call:terminal", "name": "terminal", "arguments": "{}"}
+                    {
+                        "id": "call:terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "echo denied"}),
+                    }
                 ]
             },
             {"text": "done"},
@@ -1418,8 +1516,24 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
         user_input="original request",
         turn_id=state.turn_id,
         reply_id=state.reply_id,
+        mcp_installation_owner_runtime_session_id=(
+            agent.runtime_session.runtime_session_id
+        ),
         model_target=state.run_model_target.fact,
     )
+    run_start_event_id = "run_start:test:approval-missing-descriptor"
+    prepared_long_horizon = prepare_root_long_horizon_run(
+        runtime_session_id=agent.runtime_session.runtime_session_id,
+        run_id=state.run_id,
+        run_start_event_id=run_start_event_id,
+        primary_target=state.run_model_target.fact,
+        summarizer_target=state.run_model_target.fact,
+        graph_reducer_contract=run_start_fields["subagent_graph_reducer_contract"],
+        source_through_sequence_at_open=0,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    run_start_fields["long_horizon"] = prepared_long_horizon.contract
     state.scratchpad["terminal_run_end_event_id"] = run_start_fields[
         "terminal_run_end_event_id"
     ]
@@ -1430,24 +1544,136 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
     )
 
     async def resume():
-        stored_start = await agent.runtime_session.emit(
-            RunStartEvent(
-                run_id=state.run_id,
-                turn_id=state.turn_id,
-                reply_id=state.reply_id,
-                **run_start_fields,
-                user_input_chars=len("original request"),
+        opening_context = EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        )
+        root_account = prepared_long_horizon.root_account
+        assert root_account is not None
+        opening_events = await agent.runtime_session.emit_many(
+            (
+                RunStartEvent(
+                    id=run_start_event_id,
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    **run_start_fields,
+                    user_input_chars=len("original request"),
+                ),
+                ContextWindowOpenedEvent(
+                    id=prepared_long_horizon.contract.initial_window_open_event_id,
+                    **opening_context.event_fields(),
+                    window=prepared_long_horizon.initial_window,
+                    opening_batch_id=prepared_long_horizon.opening_batch_id,
+                ),
+                RolloutBudgetAccountOpenedEvent(
+                    id=f"rollout_budget_account_opened:{root_account.account_id}",
+                    **opening_context.event_fields(),
+                    account=root_account,
+                ),
             ),
             state=state,
         )
+        stored_start = opening_events[0]
         assert isinstance(stored_start, RunStartEvent)
         assert stored_start.sequence is not None
         boundary = stored_start.new_run_boundary
         assert boundary is not None
+        event_context = EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        )
+        model_start = ModelCallStartEvent(
+            **event_context.event_fields(),
+            **model_call_start_fields(),
+        )
+        model_end = ModelCallEndEvent(
+            id=model_start.recovery_plan.stable_model_call_end_event_id,
+            **event_context.event_fields(),
+            **model_call_end_fields(resolved_call=model_start.resolved_call),
+        )
+        disposition_fields = {
+            "id": (
+                "model_call_control_disposition:"
+                f"{state.run_id}:{model_start.resolved_call.resolved_model_call_id}:1"
+            ),
+            **event_context.event_fields(),
+            "resolved_model_call_id": model_start.resolved_call.resolved_model_call_id,
+            "model_call_start_event_id": model_start.id,
+            "model_call_end_event_id": model_end.id,
+            "model_call_index": 1,
+            "source_result_fingerprint": "sha256:" + "e" * 64,
+            "run_execution_activation": (
+                model_start.recovery_plan.run_execution_activation
+            ),
+            "disposition": ModelCallControlDisposition.ACCEPTED,
+            "termination_intent": None,
+            "recovery_reason_code": None,
+        }
+        provisional_disposition = (
+            ModelCallControlDispositionResolvedEvent.model_construct(
+                **disposition_fields,
+                event_fingerprint="pending",
+            )
+        )
+        disposition_payload = provisional_disposition.model_dump(
+            mode="json", exclude={"event_fingerprint", "sequence"}
+        )
+        disposition = ModelCallControlDispositionResolvedEvent(
+            **disposition_payload,
+            event_fingerprint=sha256_fingerprint(
+                "model-call-control-disposition-event:v1", disposition_payload
+            ),
+        )
+        await agent.runtime_session.emit_many(
+            (
+                ReplyStartEvent(
+                    id=model_start.recovery_plan.reply_start_event_id,
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    name="assistant",
+                ),
+                model_start,
+                ToolCallStartEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:write",
+                    tool_call_name="write_file",
+                ),
+                ToolCallDeltaEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:write",
+                    delta=state.pending_tool_calls[0].input,
+                ),
+                ToolCallEndEvent(
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    tool_call_id="call:write",
+                ),
+                model_end,
+                ReplyEndEvent(
+                    id=model_start.recovery_plan.stable_reply_end_event_id,
+                    run_id=state.run_id,
+                    turn_id=state.turn_id,
+                    reply_id=state.reply_id,
+                    model_terminal_outcome="completed",
+                ),
+                disposition,
+            ),
+            state=state,
+        )
         state.run_working_set = RunWorkingSet(
             run_start_event_id=stored_start.id,
             run_start_sequence=stored_start.sequence,
             run_model_target=state.run_model_target,
+            long_horizon_contract=stored_start.long_horizon,
             permission_snapshot=state.permission_snapshot,
             plan_snapshot=PlanWorkflowStateFact(
                 workflow_id=None,
@@ -1478,19 +1704,72 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             ),
             original_exposure_plan=exposure,
             original_exposure_fact=None,
+            original_exposure_event_ref=None,
             effective_exposure_plan=exposure,
             effective_exposure_fact=None,
+            effective_exposure_event_ref=None,
             latest_committed_resume_boundary=None,
+            latest_committed_resume_boundary_ref=None,
         )
-        return await agent.resume_after_approval(
-            state,
-            ApprovalResolution(
-                approval_id="approval:test",
-                decisions=(
-                    ToolApprovalDecision(tool_call_id="call:write", confirmed=True),
-                ),
+        activation = model_start.recovery_plan.run_execution_activation
+        assert activation is not None
+        state.run_working_set.run_execution_activation = activation
+        state.run_working_set.process_segment_id = "run_segment:test:approval-resume"
+        state.run_working_set.model_call_control_owner = RunModelCallControlOwner(
+            run_id=state.run_id,
+            activation=activation,
+            segment_id=state.run_working_set.process_segment_id,
+            segment_generation=activation.segment_generation,
+        )
+        resolved_exposure = agent.capability_runtime.resolve_exposure_projection(
+            CapabilityProjectionResolveContext(
+                workspace_root=tmp_path,
+                workspace_kind="project",
+                memory_domain=None,
+                user_input="original request",
+                active_skill_names=frozenset(),
+            ),
+            frozen_surface=state.run_working_set.frozen_execution_surface,
+            archive=agent.runtime_session.archive,
+            runtime_session_id=agent.runtime_session.runtime_session_id,
+            owner=boundary.capability_basis.owner,
+            resolve_basis=boundary.capability_basis,
+            exposure_id="capability-exposure:test-missing-descriptor",
+        )
+        stored_exposure = await agent.runtime_session.emit(
+            CapabilityExposureResolvedEvent(
+                run_id=state.run_id,
+                turn_id=state.turn_id,
+                reply_id=state.reply_id,
+                exposure=resolved_exposure.fact,
+                exposure_revision=1,
+            ),
+            state=state,
+        )
+        assert isinstance(stored_exposure, CapabilityExposureResolvedEvent)
+        state.run_working_set.install_initial_exposure(
+            plan=resolved_exposure.plan,
+            fact=resolved_exposure.fact,
+            event_ref=event_reference_from_stored(
+                stored_exposure,
+                runtime_session_id=agent.runtime_session.runtime_session_id,
             ),
         )
+        try:
+            return await agent.resume_after_approval(
+                state,
+                ApprovalResolution(
+                    approval_id="approval:test",
+                    decisions=(
+                        ToolApprovalDecision(
+                            tool_call_id="call:write", confirmed=True
+                        ),
+                    ),
+                ),
+            )
+        finally:
+            await state.run_working_set.model_call_control_owner.retire()
+            state.run_working_set.model_call_control_owner = None
 
     result = asyncio.run(resume())
 
