@@ -220,3 +220,48 @@ Context compaction、memory reflection、governance 等支线同样使用 `LLMRu
 - retry exhausted metadata 包含 trace。
 - owned SDK client stream 后关闭一次。
 - compaction / side LLM 遇 `RUN_ERROR` fail closed。
+
+---
+
+## 14. Model stream ownership 与 rollout settlement hard cut
+
+production registry 只能暴露 `SanitizingLLMTransport`。raw adapter execution 不得直接交给 `LLMRuntime`；provider/SDK/HTTP/network
+exception 必须在 wrapper task 内转换为 versioned `ProviderErrorDraft`，完成 physical drain 后再给出 terminal draft。sanitizer failure 只能
+使用预构造 constant fallback，raw exception、traceback、URL credentials、headers/cookies 与 response body不得进入日志、event、artifact、
+Future exception或exception chain。
+
+`LLMRuntime` 通过 service-owned `ModelStreamExecutionHandle/Registry` 独占完整 stream：`commit_start()`、按 contiguous semantic index 的
+`commit_semantic()`、以及原子 `commit_terminal()`。public subscription 只观察 committed notifications；subscriber break/cancel/lag 只 detach，
+不能停止 transport、截断 canonical result或接管确认。Agent/direct/window summarizer 只从 EventLog materialize完整结果。
+
+terminal candidate一旦由provider terminal draft确定就不可改写。confirmed `NONE`必须使用同一组stable event IDs与相同payload重试；
+不得把`completed/provider_error`改写成`runtime_error`。`PARTIAL/UNKNOWN`保留owner并latch。Materialization按
+`resolved_model_call_id`做bounded canonical query，由RuntimeSession-owned I/O service执行；不得在event loop中同步
+`tuple(event_log.iter())`。worker task遭裸cancel时也必须先请求transport cancel、等待exact read/physical completion，再决定terminal；
+physical operation退出前不得移除tracking或退休handle。
+
+main model start 与 rollout reservation 同批提交；terminal batch必须包含 ModelEnd、精确 reservation settlement，以及 main reply 的 ReplyEnd。
+missing usage 按 frozen physical quote结算；reported input高于 estimate 但不超过 physical bound属于合法 measurement。request cancellation必须
+打断 blocked read并等待 exact transport physical completion；physical state为 `BLOCKED_UNTRUSTED` 时禁止伪造 terminal、释放 owner或越过
+Host teardown。
+
+`ProviderModelStreamErrorEvent` 使用独立 canonical EventType 和 historical decoder。每个 semantic event 保存 call/start/index/draft
+attribution。transport不得产生 stored event、Reply/Model lifecycle event、任意 JSON semantic draft或第二套 writer。
+
+---
+
+## 15. Runtime observation carrier
+
+`runtime_observation` 是 Pulsara-owned inert observation，不是 user、assistant 或 tool-result 消息。Target resolution 必须把完整
+`RuntimeDerivedObservationCarrierContractFact` 写入 resolved target；validator 与 adapter 只消费该 run-frozen contract，不从当前 provider
+配置补造 wire role。
+
+V1 production binding 固定为：
+
+- `openai_responses`：`developer` message；
+- `openai_chat_completions`：`system` message；
+- 无可验证 carrier 的 provider：resolved target 保存 `None`，需要 runtime observation 的调用在发送前 fail closed。
+
+carrier ID、version、provider API、wire-shape fingerprint 与 contract fingerprint 均进入 target identity。Chat/Responses adapter 必须校验
+binding 后再 lowering；不得把 runtime observation 伪装成带 tool-call identity 的消息。最低回归必须覆盖两个 production API 的 wire role、
+target fingerprint/rebind，以及 finalization status observation 可进入下一次真实 model call。

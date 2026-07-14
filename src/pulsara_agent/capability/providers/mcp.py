@@ -34,6 +34,7 @@ from pulsara_agent.runtime.mcp.types import (
     McpServerStatus,
     mangle_mcp_tool_name,
 )
+from pulsara_agent.runtime.tool_action import mcp_tool_action_policy
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
 
 
@@ -333,6 +334,7 @@ def _descriptor_from_tool(
         requires_user_interaction=False,
         permission_category="mcp",
         result_render_contract=generic_result_render_contract(),
+        long_horizon_policy=mcp_tool_action_policy(),
         approval_policy_hint=config.default_approval_mode,
         advertise_policy=CapabilityAdvertisePolicy.DIRECT,
         availability=CapabilityAvailability.AVAILABLE,

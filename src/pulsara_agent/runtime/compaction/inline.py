@@ -195,14 +195,6 @@ class RuntimeContextCompactor:
         )
         rewritten = tuple(message.model_copy(deep=True) for message in [*prefix, *tail])
         state.compacted = True
-        state.scratchpad["mid_turn_compaction"] = {
-            "compaction_id": completed.compaction_id,
-            "phase": "mid_turn",
-            "safe_point": "before_followup_model_call",
-            "current_run_id": state.run_id,
-            "current_run_start_sequence": current_run_start_sequence,
-            "tail_message_count": len(tail),
-        }
         return MidTurnCompactionResult(
             compacted=True,
             events=tuple(compaction_events),

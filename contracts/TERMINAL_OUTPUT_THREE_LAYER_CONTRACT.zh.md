@@ -120,7 +120,10 @@ Layer 2 是完整输出的唯一权威来源。
 - `huge_output_chars = 200_000`
 - `huge_preview_chars = 4_000`
 - `streaming_live_head_cap_chars ≈ 2_466`（默认 huge tier 在扣除 truncation notice 后的可见 head 上限）
-- `tool_result_message_context_chars = 36_000`
+
+这些值属于artifact归档与durable preview policy，不是模型上下文预算。模型可见terminal/tool-result envelope的aggregate target必须由
+当前`ResolvedModelCall`、context-window projection policy和finalization reserve动态派生；不得重新引入固定36K
+`tool_result_message_context_chars`。
 
 归档阈值按 UTF-8 bytes 计算；preview、`artifact_read.offset_chars` 和 head/tail 边界按 Python 字符数计算。terminal 不应单独定义 1KB、2KB、12KB 这类特殊阈值。若未来要调整阈值，应作为全局 artifact policy 调整，而不是 terminal-only 特例。
 

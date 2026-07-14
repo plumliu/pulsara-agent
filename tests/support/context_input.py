@@ -6,17 +6,24 @@ from dataclasses import dataclass
 
 from pulsara_agent.event import RunStartEvent
 from pulsara_agent.event_log.protocol import EventLog
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.primitives.context import ContextRunEntryReferenceFact
-from pulsara_agent.runtime.context_input import (
-    ContextEventSlice,
+from pulsara_agent.runtime.context_input.compiler import (
     LoweredTranscriptMessages,
-    finalize_context_authority_slice_plan,
     lower_transcript_for_context,
+)
+from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
+from pulsara_agent.runtime.context_input.policy import resolve_context_compile_policy
+from pulsara_agent.runtime.context_input.render import (
     prepare_tool_result_render_input,
-    project_context_transcript,
     render_prepared_tool_result_units,
-    resolve_context_compile_policy,
+)
+from pulsara_agent.runtime.context_input.snapshot import (
+    finalize_context_authority_slice_plan,
+)
+from pulsara_agent.runtime.context_input.transcript import (
+    project_context_transcript,
 )
 from pulsara_agent.runtime.context_input.render import PreparedToolResultRenderOutput
 from pulsara_agent.runtime.context_input.transcript import (
@@ -42,14 +49,14 @@ def render_event_log_transcript(
     runtime_session_id: str = "runtime:test",
     budget: LoopBudget | None = None,
 ) -> RenderedEventTranscript:
-    read = event_log.read_range_snapshot(minimum_sequence=1)
+    read = event_log.read_raw_range_snapshot(minimum_sequence=1)
     full = ContextEventSlice.from_read_snapshot(
         runtime_session_id=runtime_session_id,
         minimum_sequence=1,
         snapshot=read,
     )
     start_stored = full.event_by_id(run_start_event_id)
-    start = start_stored.decode_owned()
+    start = start_stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
     if not isinstance(start, RunStartEvent):
         raise TypeError("typed context fixture requires a RunStart event")
     entry = start.new_run_boundary or start.subagent_run_entry
@@ -94,6 +101,7 @@ def render_event_log_transcript(
     lowered = lower_transcript_for_context(
         transcript=normalized.transcript,
         rendered_tool_results=rendered,
+        prepared_rollups=(),
     )
     return RenderedEventTranscript(
         event_slice=authority_slice,

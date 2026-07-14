@@ -22,6 +22,7 @@ from pulsara_agent.event import (
     TextBlockDeltaEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog, dump_agent_event
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.runtime import RuntimeSession
@@ -395,6 +396,11 @@ def test_postgres_subagent_three_way_projection_equality(tmp_path: Path) -> None
                 summary="three-way complete",
                 event_context=context,
             )
+            await parent.subagent_graph_checkpoint_service.restore_for_selection(
+                requested_through_sequence=(
+                    parent.long_horizon_state_store.through_sequence
+                )
+            )
 
         asyncio.run(seed())
         events = parent.event_log.iter()
@@ -487,14 +493,21 @@ def test_postgres_old_subagent_started_payload_without_budget_is_rejected(
         invalid_payload.pop("budget_snapshot")
         invalid_payload["id"] = f"event:invalid-old-subagent:{uuid4().hex}"
         invalid_payload["sequence"] = parent.event_log.next_sequence()
+        schema = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(valid).schema_contract
         with psycopg.connect(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    insert into agent_events (
-                        id, session_id, run_id, turn_id, reply_id,
-                        sequence, event_type, created_at, payload
-                    ) values (%s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)
+                        insert into agent_events (
+                            id, session_id, run_id, turn_id, reply_id,
+                            sequence, event_type, event_schema_version,
+                            event_schema_fingerprint,
+                            event_domain_contract_fingerprint,
+                            created_at, payload
+                        ) values (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s::timestamptz, %s
+                        )
                     """,
                     (
                         invalid_payload["id"],
@@ -504,6 +517,9 @@ def test_postgres_old_subagent_started_payload_without_budget_is_rejected(
                         valid.reply_id,
                         invalid_payload["sequence"],
                         str(valid.type),
+                        schema.event_schema_version,
+                        schema.event_schema_fingerprint,
+                        schema.domain_contract_fingerprint,
                         valid.created_at,
                         Jsonb(invalid_payload),
                     ),

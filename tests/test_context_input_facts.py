@@ -48,11 +48,11 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultStateFact,
     validate_tool_result_profile_contract,
 )
-from pulsara_agent.runtime.context_input import resolve_context_compile_policy
-from pulsara_agent.runtime.context_input import (
+from pulsara_agent.runtime.context_input.external import (
     ExternalToolResultIngressBuilder,
     freeze_external_tool_result_submission,
 )
+from pulsara_agent.runtime.context_input.policy import resolve_context_compile_policy
 from pulsara_agent.runtime.state import LoopBudget
 from pulsara_agent.event import EventContext, RequireExternalExecutionEvent
 from pulsara_agent.event_log import InMemoryEventLog
@@ -144,6 +144,9 @@ def _render_contract() -> CapabilityResultRenderContractFact:
         "semantics_builder_version": builder.builder_version,
         "semantics_builder_contract": builder,
         "semantics_builder_contract_fingerprint": builder.contract_fingerprint,
+        "rollup_renderer_id": "test.rollup",
+        "rollup_renderer_version": "v1",
+        "rollup_renderer_contract_fingerprint": "sha256:" + "a" * 64,
         "pre_execution_denial_variant_code": denial.variant_code,
     }
     return CapabilityResultRenderContractFact(
@@ -463,6 +466,7 @@ def test_pre_execution_terminal_error_needs_no_execution_identity_or_timing() ->
         essential_capture_policy=None,
         essential_result=None,
         terminal_payload_timing=None,
+        rollup_semantics=None,
     )
     assert essential.execution_started is False
     assert semantics.terminal_payload_timing is None
@@ -478,6 +482,7 @@ def test_result_state_cannot_select_incompatible_variant() -> None:
             essential_capture_policy=None,
             essential_result=None,
             terminal_payload_timing=None,
+            rollup_semantics=None,
         )
 
 
@@ -662,43 +667,29 @@ def test_typed_terminal_semantics_wins_over_conflicting_display_json() -> None:
     assert semantics.essential_result.status == "success"
 
 
-def test_context_compile_policy_resolves_default_allocator_values() -> None:
+def test_context_compile_policy_resolves_per_unit_safety_values() -> None:
     policy = resolve_context_compile_policy(LoopBudget())
     basis = policy.tool_result_basis
-    assert basis.total_context_chars == 36_000
-    assert basis.body_context_chars == 24_000
-    assert basis.envelope_context_chars == 12_000
-    assert basis.prior_history_context_chars == 8_000
-    assert basis.current_run_tail_context_chars == 16_000
-    assert basis.current_user_context_chars == 16_000
-    assert basis.legacy_history_context_chars == 24_000
-    assert basis.per_tool_cap_chars == 12_000
-    assert basis.per_message_cap_chars == 20_000
+    assert basis.policy_version == "tool-result-render-policy:v2"
+    assert basis.per_tool_cap_chars == 32_000
+    assert basis.per_message_cap_chars == 64_000
     assert basis.per_envelope_cap_chars == 1_200
+    assert basis.minimum_essential_envelope_chars == 256
     assert policy.candidate_collection.projection_token_budget == 2_000
     assert policy.candidate_collection.max_subagent_results_per_parent_compile == 8
 
 
-def test_context_compile_policy_resolves_every_optional_budget_source() -> None:
+def test_context_compile_policy_freezes_explicit_per_unit_safety_caps() -> None:
     policy = resolve_context_compile_policy(
         LoopBudget(
-            tool_result_context_chars=1_000,
-            tool_result_body_context_chars=700,
-            tool_result_envelope_context_chars=900,
-            prior_tool_result_context_chars=100,
-            current_tail_tool_result_context_chars=200,
-            legacy_tool_result_context_chars=300,
             tool_result_per_tool_cap_chars=111,
             tool_result_per_message_cap_chars=222,
-            tool_result_per_envelope_cap_chars=1,
+            tool_result_per_envelope_cap_chars=300,
+            minimum_essential_envelope_chars=128,
         )
     )
     basis = policy.tool_result_basis
-    assert basis.body_context_chars == 700
-    assert basis.envelope_context_chars == 300
-    assert basis.prior_history_context_chars == 100
-    assert basis.current_run_tail_context_chars == 200
-    assert basis.legacy_history_context_chars == 300
     assert basis.per_tool_cap_chars == 111
     assert basis.per_message_cap_chars == 222
-    assert basis.per_envelope_cap_chars == 256
+    assert basis.per_envelope_cap_chars == 300
+    assert basis.minimum_essential_envelope_chars == 128

@@ -23,6 +23,7 @@ from pulsara_agent.capability.provider import (
 from pulsara_agent.capability.types import (
     CapabilityExecutionSurfaceSnapshotContext,
 )
+from pulsara_agent.runtime.tool_action import builtin_tool_action_policy
 
 
 DEFAULT_ARTIFACT_READ_CHARS = 20_000
@@ -107,6 +108,7 @@ def _descriptor(
         is_open_world=is_open_world,
         permission_category=permission_category,
         result_render_contract=result_render_contract_for_tool(name),
+        long_horizon_policy=builtin_tool_action_policy(name),
         advertise_policy=CapabilityAdvertisePolicy.DIRECT,
         artifact_mode=artifact_mode,
         metadata={"source": "explicit_builtin_descriptor"},

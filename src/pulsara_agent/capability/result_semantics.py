@@ -41,6 +41,7 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultSemanticsBuilderContractFact,
     ToolResultRenderProfileFact,
     ToolResultRenderVariantCode,
+    ToolResultRollupSemanticsFact,
     ToolResultStateFact,
     validate_tool_result_profile_contract,
 )
@@ -168,7 +169,7 @@ class DeclarativeToolResultSemanticsBuilder:
         essential_capture_policy: ToolResultEssentialCapturePolicyFact | None,
         result_state: ToolResultStateFact,
     ) -> ToolResultExecutionSemanticsFact:
-        del normalized_arguments, observation_timing
+        del observation_timing
         if typed_result is not None and domain_submission is not None:
             raise ValueError(
                 "live and external semantics inputs are mutually exclusive"
@@ -197,6 +198,14 @@ class DeclarativeToolResultSemanticsBuilder:
             domain_submission=frozen_submission,
             capture_policy=essential_capture_policy,
         )
+        rollup_semantics = _rollup_semantics(
+            descriptor=descriptor,
+            contract=contract,
+            selected_variant=selected_variant,
+            normalized_arguments=normalized_arguments,
+            result_state=result_state,
+            essential=essential,
+        )
         return ToolResultExecutionSemanticsFact(
             render_profile=profile,
             result_state=result_state,
@@ -205,6 +214,7 @@ class DeclarativeToolResultSemanticsBuilder:
             ),
             essential_result=essential,
             terminal_payload_timing=terminal_payload_timing,
+            rollup_semantics=rollup_semantics,
         )
 
 
@@ -480,6 +490,84 @@ def build_unknown_result_semantics(
         essential_capture_policy=None,
         essential_result=None,
         terminal_payload_timing=None,
+        rollup_semantics=None,
+    )
+
+
+def _rollup_semantics(
+    *,
+    descriptor: object,
+    contract: CapabilityResultRenderContractFact,
+    selected_variant: CapabilityResultRenderVariantFact,
+    normalized_arguments: FrozenJsonObjectFact | None,
+    result_state: ToolResultStateFact,
+    essential: object | None,
+) -> ToolResultRollupSemanticsFact | None:
+    """Classify only frozen arguments and typed essential facts."""
+
+    tool_name = str(getattr(descriptor, "name", "") or "")
+    arguments = (
+        thaw_json(normalized_arguments) if normalized_arguments is not None else {}
+    )
+    if not isinstance(arguments, dict):
+        raise ValueError("normalized tool arguments must thaw to an object")
+    evidence = tuple(
+        sorted(
+            {
+                f"{key}={value[:192]}"
+                for key in ("path", "query", "process_id", "action")
+                if isinstance((value := arguments.get(key)), str) and value
+            }
+        )
+    )
+    rollup_kind: str | None = None
+    family_basis: object | None = None
+    if result_state in {ToolResultStateFact.ERROR, ToolResultStateFact.DENIED}:
+        rollup_kind = "repeated_error_family"
+        family_basis = {
+            "tool_name": tool_name,
+            "result_state": result_state.value,
+            "variant": selected_variant.variant_code.value,
+        }
+    elif tool_name == "read_file" and result_state is ToolResultStateFact.SUCCESS:
+        rollup_kind = "repeated_file_reads"
+        family_basis = {"tool_name": tool_name, "path": arguments.get("path")}
+    elif tool_name == "search_files" and result_state is ToolResultStateFact.SUCCESS:
+        rollup_kind = "repeated_search_results"
+        family_basis = {
+            "tool_name": tool_name,
+            "path": arguments.get("path"),
+            "query": arguments.get("query"),
+        }
+    elif isinstance(essential, TerminalProcessInventoryEssentialFact):
+        rollup_kind = "terminal_inventory"
+        family_basis = {"tool_name": tool_name, "action": "list"}
+    elif (
+        tool_name in {"wait_agent", "wait_agent_tasks", "list_agents"}
+        and result_state is ToolResultStateFact.SUCCESS
+    ):
+        rollup_kind = "subagent_result_index"
+        family_basis = {"tool_name": tool_name}
+    if rollup_kind is None or family_basis is None:
+        return None
+    payload = {
+        "schema_version": "tool-result-rollup-semantics.v1",
+        "rollup_kind": rollup_kind,
+        "family_key": context_fingerprint(
+            "tool-result-rollup-family:v1", family_basis
+        ),
+        "evidence_keys": evidence,
+        "renderer_id": contract.rollup_renderer_id,
+        "renderer_version": contract.rollup_renderer_version,
+        "renderer_contract_fingerprint": (
+            contract.rollup_renderer_contract_fingerprint
+        ),
+    }
+    return ToolResultRollupSemanticsFact(
+        **payload,
+        semantics_fingerprint=context_fingerprint(
+            "tool-result-rollup-semantics:v1", payload
+        ),
     )
 
 

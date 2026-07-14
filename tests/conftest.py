@@ -53,6 +53,16 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.message import ToolResultBlock, ToolResultState
 from tests.support import test_resolved_target_fact
+from pulsara_agent.primitives.long_horizon import (
+    ChildRolloutSubaccountFact,
+    ResolvedChildRolloutBudgetFact,
+    RolloutReservationReferenceFact,
+)
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    empty_projection_state_fingerprint,
+    prepare_child_long_horizon_run,
+    prepare_root_long_horizon_run,
+)
 
 
 def tool_result_end_contract_fields(
@@ -84,6 +94,7 @@ def tool_result_end_contract_fields(
         "essential_capture_policy": semantics.essential_capture_policy,
         "essential_result": semantics.essential_result,
         "terminal_payload_timing": semantics.terminal_payload_timing,
+        "rollup_semantics": semantics.rollup_semantics,
     }
 
 
@@ -189,6 +200,7 @@ def external_tool_result_ingress_fact(
         essential_capture_policy=None,
         essential_result=None,
         terminal_payload_timing=None,
+        rollup_semantics=None,
     )
     reference = ExternalExecutionRequirementReferenceFact(
         owner_runtime_session_id="runtime:test",
@@ -229,6 +241,10 @@ def run_start_permission_fields(
     parsed = parse_permission_mode(mode)
     permission_snapshot_id = f"permission_snapshot:{run_id}"
     target = model_target or test_resolved_target_fact()
+    from pulsara_agent.runtime.long_horizon.reducer_contract import (
+        build_default_subagent_graph_reducer_contract,
+    )
+
     runtime_session_id = mcp_installation_owner_runtime_session_id
     observed_at = "1970-01-01T00:00:00Z"
     resolved_turn_id = turn_id or run_id.replace("run:", "turn:", 1)
@@ -245,20 +261,94 @@ def run_start_permission_fields(
             f"artifact:task:{run_id}" if source == "child_profile" else None
         ),
     )
+    graph_contract = build_default_subagent_graph_reducer_contract()
+    root_long_horizon = prepare_root_long_horizon_run(
+        runtime_session_id=runtime_session_id,
+        run_id=run_id,
+        run_start_event_id=f"run_start:test:{run_id}",
+        primary_target=target,
+        summarizer_target=target,
+        graph_reducer_contract=graph_contract,
+        source_through_sequence_at_open=transcript_source_through_sequence,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
     common = {
         "permission_snapshot_id": permission_snapshot_id,
         "permission_mode": parsed.value,
         "permission_policy": preset_to_policy(parsed).to_dict(),
         "permission_snapshot_source": source,
         "model_target": target,
+        "subagent_graph_reducer_contract": graph_contract,
         "mcp_installation_id": mcp_installation_id,
         "mcp_installation_owner_runtime_session_id": runtime_session_id,
         "current_user_message": current_user,
         "terminal_run_end_event_id": test_run_end_event_id(run_id),
     }
     if source == "child_profile":
+        reservation_ref = RolloutReservationReferenceFact(
+            owner_runtime_session_id=runtime_session_id,
+            reservation_id=f"reservation:test:{run_id}",
+            reservation_event_id=f"reservation_event:test:{run_id}",
+            reservation_sequence=1,
+            reservation_fingerprint=f"sha256:test-reservation:{run_id}",
+        )
+        budget_payload = {
+            "child_profile": "test",
+            "child_primary_target_fingerprint": target.target_fingerprint,
+            "child_summarizer_target_fingerprint": target.target_fingerprint,
+            "child_window_policy_fingerprint": (
+                root_long_horizon.contract.window_policy.policy_fingerprint
+            ),
+            "child_policy_fingerprint": (
+                root_long_horizon.contract.child_rollout_policy.policy_fingerprint
+            ),
+            "child_primary_reservation_quote_semantic_fingerprint": "sha256:test-primary-quote",
+            "child_compaction_reservation_quote_semantic_fingerprint": "sha256:test-compaction-quote",
+            "one_agent_call_reserve_milliunits": 1,
+            "one_compaction_call_reserve_milliunits": 1,
+            "tool_reserve_milliunits": 1,
+            "profile_limit_milliunits": 3,
+            "parent_share_limit_milliunits": 3,
+            "max_rollout_milliunits_per_child": 3,
+            "parent_account_state_fingerprint": "sha256:test-parent-account",
+        }
+        resolved_budget = ResolvedChildRolloutBudgetFact(
+            **budget_payload,
+            resolution_fingerprint=context_fingerprint(
+                "resolved-child-rollout-budget:v1", budget_payload
+            ),
+        )
+        child_long_horizon = prepare_child_long_horizon_run(
+            child_runtime_session_id=runtime_session_id,
+            child_run_id=run_id,
+            run_start_event_id=f"run_start:test:{run_id}",
+            primary_target=target,
+            summarizer_target=target,
+            graph_reducer_contract=graph_contract,
+            account_id=f"rollout_account:test:parent:{run_id}",
+            account_owner_runtime_session_id=runtime_session_id,
+            account_owner_run_id=f"parent:{run_id}",
+            inherited_rollout_reservation=reservation_ref,
+        )
+        subaccount_payload = {
+            "root_account_id": child_long_horizon.contract.rollout_account_id,
+            "parent_reservation": reservation_ref,
+            "child_runtime_session_id": runtime_session_id,
+            "child_run_id": run_id,
+            "resolved_budget": resolved_budget,
+            "reserved_milliunits": 3,
+        }
+        child_subaccount = ChildRolloutSubaccountFact(
+            **subaccount_payload,
+            subaccount_fingerprint=context_fingerprint(
+                "child-rollout-subaccount:v1", subaccount_payload
+            ),
+        )
         return {
             **common,
+            "long_horizon": child_long_horizon.contract,
+            "child_rollout_subaccount": child_subaccount,
             "run_entry_kind": "subagent_child",
             "new_run_boundary": None,
             "subagent_run_entry": SubagentRunEntryFact(
@@ -321,6 +411,8 @@ def run_start_permission_fields(
     )
     return {
         **common,
+        "long_horizon": root_long_horizon.contract,
+        "child_rollout_subaccount": None,
         "run_entry_kind": "host",
         "new_run_boundary": NewRunBoundaryFact(
             identity=identity,
@@ -328,6 +420,10 @@ def run_start_permission_fields(
                 source_through_sequence=transcript_source_through_sequence,
                 source_event_count=transcript_source_event_count,
                 compacted_window_id=None,
+                checkpoint_compaction_id=None,
+                checkpoint_terminal_event_id=None,
+                checkpoint_terminal_sequence=None,
+                checkpoint_keep_after_sequence=None,
                 preflight_compaction_id=None,
                 preflight_compaction_terminal_event_id=None,
                 preflight_compaction_terminal_sequence=None,
@@ -340,6 +436,83 @@ def run_start_permission_fields(
         ),
         "subagent_run_entry": None,
     }
+
+
+def open_test_root_rollout_run(
+    runtime_session,
+    *,
+    event_context,
+    model_target,
+) -> None:
+    """Commit the production-shaped root run facts used by main-call tests."""
+
+    from pulsara_agent.event import (
+        ContextWindowOpenedEvent,
+        RolloutBudgetAccountOpenedEvent,
+        RunStartEvent,
+    )
+    from pulsara_agent.runtime.long_horizon.reducer_contract import (
+        build_default_subagent_graph_reducer_contract,
+    )
+    from pulsara_agent.runtime.long_horizon.run_contract import (
+        empty_projection_state_fingerprint,
+        prepare_root_long_horizon_run,
+    )
+
+    if any(
+        isinstance(event, RunStartEvent)
+        for event in runtime_session.event_log.iter(run_id=event_context.run_id)
+    ):
+        return
+    run_start_event_id = f"run_start:test:{event_context.run_id}"
+    prepared = prepare_root_long_horizon_run(
+        runtime_session_id=runtime_session.runtime_session_id,
+        run_id=event_context.run_id,
+        run_start_event_id=run_start_event_id,
+        primary_target=model_target,
+        summarizer_target=model_target,
+        graph_reducer_contract=build_default_subagent_graph_reducer_contract(),
+        source_through_sequence_at_open=0,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    fields = run_start_permission_fields(
+        event_context.run_id,
+        user_input="",
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
+        mcp_installation_owner_runtime_session_id=(
+            runtime_session.runtime_session_id
+        ),
+        model_target=model_target,
+    )
+    fields["long_horizon"] = prepared.contract
+    run_start = RunStartEvent(
+        id=run_start_event_id,
+        **event_context.event_fields(),
+        **fields,
+        user_input_chars=0,
+    )
+    window_open = ContextWindowOpenedEvent(
+        id=prepared.contract.initial_window_open_event_id,
+        **event_context.event_fields(),
+        window=prepared.initial_window,
+        opening_batch_id=prepared.opening_batch_id,
+    )
+    account = prepared.root_account
+    assert account is not None
+    account_open = RolloutBudgetAccountOpenedEvent(
+        id=f"rollout_budget_account_opened:{account.account_id}",
+        **event_context.event_fields(),
+        account=account,
+    )
+    runtime_session.publisher.bind_running_loop()
+    result = runtime_session.write_events_from_thread(
+        (run_start, window_open, account_open)
+    )
+    result.require_reduced(
+        f"long_horizon:{runtime_session.runtime_session_id}"
+    )
 
 
 def test_run_end_event_id(run_id: str) -> str:

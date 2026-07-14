@@ -346,3 +346,20 @@ borrow tracker。detached child使用`ChildExecutionRegistry`持有的child-owne
 
 child handle进入closing时，borrow归零callback必须校验exact child ID、handle identity/generation、release_requested与
 coroutine done，随后才能释放child session/capacity/MCP reverse index；active child的普通borrow变化不得触发release。
+
+---
+
+## 17. Long-horizon action contract
+
+每个 model-visible callable descriptor 必须冻结 `long_horizon_action_contract`：classifier ID、version、contract fingerprint、默认 action
+class、tool cost units，以及允许按 invocation 细分的 action classes。descriptor fingerprint 必须覆盖这份 contract；同 ID/version 不得注册
+不同 contract fingerprint。
+
+具体调用进入 tool execution gate 前，runtime 必须使用 frozen descriptor contract 与 typed arguments 生成
+`ToolActionClassificationFact`。terminal/terminal_process 使用共享 invocation classifier 区分 evidence acquisition、artifact hydration、
+synthesis mutation、bounded verification、process control 与 external action；unknown action 在 finalization fail closed。
+
+phase narrowing 发生在 exposure/permission 之后、真实执行之前，并与 tool reservation 在同一 durable batch 中提交。deny 仍写 canonical
+typed gate/tool-result facts，但不得创建实际执行 owner。`finalization_only` 仅允许 evidence hydration、synthesis mutation、bounded
+verification、user interaction 与 process control；`exhausted`/`emergency_hard_stop` 不允许新 tool execution。descriptor 的普通
+read-only/permission category 不能覆盖这条 rollout contract。

@@ -122,7 +122,7 @@ def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
                     "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
                 },
             ),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]:
             await runtime.emit(event)
 
@@ -166,7 +166,7 @@ def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -
                 delta='{"command":"rm -rf build"}',
             ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:danger"),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
             RequireUserConfirmEvent(
                 **CTX.event_fields(),
                 tool_calls=[
@@ -217,7 +217,7 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
                 **CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input
             ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
             RequireUserConfirmEvent(**CTX.event_fields(), tool_calls=[tool_call]),
             UserConfirmResultEvent(
                 **CTX.event_fields(),
@@ -352,7 +352,7 @@ def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(
         await runtime.emit(
             TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="done")
         )
-        await runtime.emit(ReplyEndEvent(**CTX.event_fields()))
+        await runtime.emit(ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"))
         await runtime.emit(
             RunEndEvent(
                 **run_end_contract_fields(CTX.run_id, status="finished"),
@@ -396,7 +396,7 @@ def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(
     async def run() -> None:
         await runtime.emit(_run_start())
         await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
-        await runtime.emit(ReplyEndEvent(**CTX.event_fields()))
+        await runtime.emit(ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"))
         first = graph.find_by_type(rt.RUN_TIMELINE)[0]
         await runtime.emit(
             RunEndEvent(
@@ -461,7 +461,7 @@ def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
                     "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
                 },
             ),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
             RunEndEvent(
                 **run_end_contract_fields(CTX.run_id, status="finished"),
                 **CTX.event_fields(),

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import math
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import AsyncIterator
 
 import pytest
@@ -12,13 +13,15 @@ from pydantic import ValidationError
 from tests.support import (
     bind_test_context,
     context_compiled_contract_fields,
+    make_test_run_execution_activation,
     resolve_test_call,
     test_llm_config,
     test_llm_context,
     test_model_limits,
     test_model_slot,
 )
-from tests.conftest import run_start_permission_fields
+from tests.support.runtime_session import in_memory_runtime_session
+from tests.conftest import open_test_root_rollout_run, run_start_permission_fields
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -27,11 +30,12 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallStartEvent,
     ModelCallRejectedEvent,
+    ProviderModelStreamErrorEvent,
     ReplyEndEvent,
     ReplyStartEvent,
+    RolloutBudgetReservationSettledEvent,
     RunErrorEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
 )
 from pulsara_agent.event_log import dump_agent_event, load_agent_event
 from pulsara_agent.llm.adapters.openai.chat_completions import (
@@ -43,12 +47,7 @@ from pulsara_agent.llm.adapters.openai.responses import (
     build_responses_payload,
 )
 from pulsara_agent.llm.config import LLMConfig
-from pulsara_agent.llm.direct import (
-    DirectModelCallCollectionError,
-    collect_direct_model_call,
-)
 from pulsara_agent.llm.errors import (
-    LLMTransportContractError,
     ModelInputBudgetExceeded,
     ModelInputEstimateMismatch,
     ModelOptionUnsupported,
@@ -70,6 +69,9 @@ from pulsara_agent.llm.resolution import (
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.runtime import LLMRuntime
+from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
+from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelContextLimits,
@@ -87,6 +89,47 @@ EVENT_CONTEXT = EventContext(
     turn_id="turn:resolved-contract",
     reply_id="reply:resolved-contract",
 )
+
+
+def _start_test_stream(
+    runtime: LLMRuntime,
+    *,
+    call,
+    context: LLMContext,
+    event_context: EventContext,
+    runtime_session,
+    run_execution_activation=None,
+):
+    lifecycle_kind = (
+        "main_assistant_reply"
+        if context.model_call_index is not None
+        else "direct_internal_call"
+    )
+    if lifecycle_kind == "main_assistant_reply":
+        open_test_root_rollout_run(
+            runtime_session,
+            event_context=event_context,
+            model_target=call.target.fact,
+        )
+    bundle = prepare_model_lifecycle_start_bundle(
+        call=call,
+        context=context,
+        event_context=event_context,
+        runtime_session=runtime_session,
+        lifecycle_kind=lifecycle_kind,
+        run_execution_activation=run_execution_activation,
+    )
+    return runtime.start_stream(
+        call=call,
+        context=context,
+        event_context=event_context,
+        start_bundle=bundle,
+        commit_port=RuntimeSessionModelStreamEventCommitPort(
+            runtime_session=runtime_session,
+            state=None,
+        ),
+        execution_registry=runtime_session.model_stream_execution_registry,
+    )
 
 
 @dataclass(slots=True)
@@ -756,7 +799,8 @@ def test_fingerprint_rejects_nan_and_infinity() -> None:
 
 def test_resolve_target_binds_transport_once() -> None:
     target, _, transport = _target()
-    assert target.transport is transport
+    assert isinstance(target.transport, SanitizingLLMTransport)
+    assert target.transport._raw_transport is transport
     assert target.fact.transport_binding_id == transport.binding_id
 
 
@@ -843,10 +887,19 @@ def test_rebind_target_rejects_estimator_change() -> None:
 
 
 def test_stream_role_options_signature_is_removed() -> None:
-    parameters = inspect.signature(LLMRuntime.stream).parameters
+    assert not hasattr(LLMRuntime, "stream")
+    parameters = inspect.signature(LLMRuntime.start_stream).parameters
     assert "role" not in parameters
     assert "options" not in parameters
-    assert {"call", "context", "event_context"}.issubset(parameters)
+    assert {
+        "call",
+        "context",
+        "event_context",
+        "start_bundle",
+        "commit_port",
+        "execution_registry",
+    }.issubset(parameters)
+    assert "runtime_session" not in parameters
 
 
 def test_llm_context_identity_is_required_at_construction() -> None:
@@ -858,18 +911,8 @@ def test_compiled_call_requires_compiler_final_estimate() -> None:
     runtime, transport, call, context = _call_and_context()
     context = replace(context, compiler_estimated_input_tokens=None)
 
-    async def collect() -> list[AgentEvent]:
-        return [
-            event
-            async for event in runtime.stream(
-                call=call,
-                context=context,
-                event_context=EVENT_CONTEXT,
-            )
-        ]
-
     with pytest.raises(ModelInputEstimateMismatch):
-        asyncio.run(collect())
+        asyncio.run(_collect_runtime(runtime, call=call, context=context))
     assert transport.calls == 0
 
 
@@ -897,18 +940,8 @@ def test_pr1_standalone_validation_rejects_oversized_direct_call_before_reply_st
         config=config,
     )
 
-    async def collect() -> list[AgentEvent]:
-        return [
-            event
-            async for event in runtime.stream(
-                call=call,
-                context=context,
-                event_context=EVENT_CONTEXT,
-            )
-        ]
-
     with pytest.raises(ModelInputBudgetExceeded):
-        asyncio.run(collect())
+        asyncio.run(_collect_runtime(runtime, call=call, context=context))
     assert transport.calls == 0
 
 
@@ -933,19 +966,8 @@ def test_estimate_only_failure_writes_no_start_or_fake_end() -> None:
         messages=(LLMMessage.user("x" * 1_000),),
         config=config,
     )
-    observed: list[AgentEvent] = []
-
-    async def collect() -> None:
-        async for event in runtime.stream(
-            call=call,
-            context=context,
-            event_context=EVENT_CONTEXT,
-        ):
-            observed.append(event)
-
     with pytest.raises(ModelInputBudgetExceeded):
-        asyncio.run(collect())
-    assert observed == []
+        asyncio.run(_collect_runtime(runtime, call=call, context=context))
     assert transport.calls == 0
 
 
@@ -955,14 +977,22 @@ async def _collect_runtime(
     call,
     context: LLMContext,
 ) -> list[AgentEvent]:
-    return [
-        event
-        async for event in runtime.stream(
-            call=call,
-            context=context,
-            event_context=EVENT_CONTEXT,
-        )
-    ]
+    session = in_memory_runtime_session(Path.cwd())
+    handle = _start_test_stream(runtime,
+        call=call,
+        context=context,
+        event_context=EVENT_CONTEXT,
+        runtime_session=session,
+        run_execution_activation=(
+            make_test_run_execution_activation()
+            if context.model_call_index is not None
+            else None
+        ),
+    )
+    completion = await handle.wait_completed()
+    if completion.terminal_outcome == "rejected_before_start":
+        await handle.wait_result()
+    return list(completion.committed_events)
 
 
 def _end_event(call, *, outcome: str = "completed") -> ModelCallEndEvent:
@@ -972,6 +1002,7 @@ def _end_event(call, *, outcome: str = "completed") -> ModelCallEndEvent:
         target_fingerprint=call.target.fact.target_fingerprint,
         reported_model_id=None,
         outcome=outcome,
+        provider_dispatch_status="dispatched",
         usage_status="missing",
         usage=None,
         estimated_input_tokens=1,
@@ -1004,70 +1035,34 @@ def test_model_call_end_records_reported_model_identity() -> None:
     assert end.reported_model_id == "provider-snapshot"
 
 
-def test_transport_no_longer_emits_model_start() -> None:
-    runtime, transport, call, context = _call_and_context()
-    transport.items = (
-        ModelCallStartEvent(
-            **EVENT_CONTEXT.event_fields(),
-            resolved_call=call.fact,
-            context_id=context.context_id,
-            model_call_index=context.model_call_index,
-        ),
-    )
-    with pytest.raises(LLMTransportContractError) as error:
-        asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert error.value.reason_code == "transport_emitted_model_call_start"
-
-
-def test_transport_no_longer_emits_model_end() -> None:
-    runtime, transport, call, context = _call_and_context()
-    transport.items = (_end_event(call),)
-    with pytest.raises(LLMTransportContractError) as error:
-        asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert error.value.reason_code == "transport_emitted_model_call_end"
-
-
-def test_transport_no_longer_emits_reply_start() -> None:
-    runtime, transport, call, context = _call_and_context()
-    transport.items = (
+@pytest.mark.parametrize(
+    "raw_item",
+    (
+        ModelCallStartEvent.model_construct(),
         ReplyStartEvent(**EVENT_CONTEXT.event_fields(), name="assistant"),
-    )
-    with pytest.raises(LLMTransportContractError) as error:
-        asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert error.value.reason_code == "transport_emitted_reply_start"
-
-
-def test_transport_no_longer_emits_reply_end() -> None:
+        ReplyEndEvent(
+            **EVENT_CONTEXT.event_fields(), model_terminal_outcome="completed"
+        ),
+    ),
+)
+def test_raw_transport_lifecycle_event_fails_closed(raw_item: AgentEvent) -> None:
     runtime, transport, call, context = _call_and_context()
-    transport.items = (ReplyEndEvent(**EVENT_CONTEXT.event_fields()),)
-    with pytest.raises(LLMTransportContractError) as error:
-        asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert error.value.reason_code == "transport_emitted_reply_end"
+    transport.items = (raw_item,)
+    events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
+    assert any(isinstance(event, ProviderModelStreamErrorEvent) for event in events)
+    end = next(event for event in events if isinstance(event, ModelCallEndEvent))
+    assert end.outcome == "provider_error"
 
 
-def test_transport_emitted_model_start_is_contract_error() -> None:
-    test_transport_no_longer_emits_model_start()
-
-
-def test_transport_emitted_model_end_is_contract_error() -> None:
-    test_transport_no_longer_emits_model_end()
-
-
-def test_transport_emitted_reply_start_is_contract_error() -> None:
-    test_transport_no_longer_emits_reply_start()
-
-
-def test_transport_emitted_reply_end_is_contract_error() -> None:
-    test_transport_no_longer_emits_reply_end()
-
-
-def test_duplicate_transport_usage_report_is_contract_error() -> None:
+def test_duplicate_transport_usage_report_fails_closed() -> None:
     report = TransportUsageReport(usage_status="missing", usage=None)
     runtime, transport, call, context = _call_and_context()
     transport.items = (report, report)
-    with pytest.raises(LLMTransportContractError) as error:
-        asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert error.value.reason_code == "transport_usage_report_duplicate"
+    events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
+    assert any(isinstance(event, ProviderModelStreamErrorEvent) for event in events)
+    assert next(
+        event for event in events if isinstance(event, ModelCallEndEvent)
+    ).outcome == "provider_error"
 
 
 def test_missing_provider_usage_is_missing_not_zero() -> None:
@@ -1170,66 +1165,6 @@ def test_v1_estimator_text_json_and_framing_golden_values() -> None:
     assert estimate.tool_tokens > 8
 
 
-def test_direct_collector_drains_run_error_until_model_end() -> None:
-    _, _, call, _ = _call_and_context(purpose=ModelCallPurpose.MEMORY_REFLECTION)
-
-    async def events() -> AsyncIterator[AgentEvent]:
-        yield RunErrorEvent(
-            **EVENT_CONTEXT.event_fields(),
-            message="provider failed",
-            code="provider_error",
-        )
-        yield _end_event(call, outcome="provider_error")
-        yield ReplyEndEvent(**EVENT_CONTEXT.event_fields())
-
-    result = asyncio.run(collect_direct_model_call(events(), expected_call=call))
-    assert result.outcome == "provider_error"
-    assert result.error is not None
-
-
-def test_direct_collector_preserves_provider_error_usage() -> None:
-    _, _, call, _ = _call_and_context(purpose=ModelCallPurpose.MEMORY_REFLECTION)
-    usage = ModelTokenUsageFact(input_tokens=3, output_tokens=2, total_tokens=5)
-
-    async def events() -> AsyncIterator[AgentEvent]:
-        yield RunErrorEvent(
-            **EVENT_CONTEXT.event_fields(),
-            message="provider failed",
-            code="provider_error",
-        )
-        yield ModelCallEndEvent(
-            **EVENT_CONTEXT.event_fields(),
-            resolved_model_call_id=call.fact.resolved_model_call_id,
-            target_fingerprint=call.target.fact.target_fingerprint,
-            reported_model_id=call.target.fact.model_id,
-            outcome="provider_error",
-            usage_status="reported",
-            usage=usage,
-            estimated_input_tokens=4,
-        )
-        yield ReplyEndEvent(**EVENT_CONTEXT.event_fields())
-
-    result = asyncio.run(collect_direct_model_call(events(), expected_call=call))
-    assert result.usage == usage
-    assert result.reported_model_id == call.target.fact.model_id
-
-
-def test_direct_collector_transport_exception_has_no_fake_end() -> None:
-    _, _, call, _ = _call_and_context(purpose=ModelCallPurpose.MEMORY_REFLECTION)
-
-    async def events() -> AsyncIterator[AgentEvent]:
-        yield TextBlockDeltaEvent(
-            **EVENT_CONTEXT.event_fields(),
-            block_id="text:partial",
-            delta="partial",
-        )
-        raise RuntimeError("wire failed")
-
-    with pytest.raises(DirectModelCallCollectionError) as error:
-        asyncio.run(collect_direct_model_call(events(), expected_call=call))
-    assert error.value.partial_text == "partial"
-
-
 def test_provider_run_error_precedes_model_end_and_reply_end() -> None:
     run_error = RunErrorEvent(
         **EVENT_CONTEXT.event_fields(),
@@ -1239,12 +1174,13 @@ def test_provider_run_error_precedes_model_end_and_reply_end() -> None:
     runtime, transport, call, context = _call_and_context()
     transport.items = (run_error,)
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert [type(event) for event in events[-3:]] == [
-        RunErrorEvent,
+    assert [type(event) for event in events[-4:]] == [
+        ProviderModelStreamErrorEvent,
         ModelCallEndEvent,
+        RolloutBudgetReservationSettledEvent,
         ReplyEndEvent,
     ]
-    assert events[-2].outcome == "provider_error"
+    assert events[-3].outcome == "provider_error"
 
 
 def test_final_context_call_id_mismatch_rejected() -> None:
@@ -1336,6 +1272,7 @@ def test_model_call_end_identity_is_required() -> None:
             target_fingerprint="sha256:test",
             reported_model_id=None,
             outcome="completed",
+            provider_dispatch_status="dispatched",
             usage_status="missing",
             usage=None,
             estimated_input_tokens=1,
@@ -1350,6 +1287,7 @@ def test_model_call_end_reported_model_identity_is_required() -> None:
             resolved_model_call_id=call.fact.resolved_model_call_id,
             target_fingerprint=call.target.fact.target_fingerprint,
             outcome="completed",
+            provider_dispatch_status="dispatched",
             usage_status="missing",
             usage=None,
             estimated_input_tokens=1,
@@ -1365,6 +1303,7 @@ def test_model_call_end_reported_usage_requires_fact() -> None:
             target_fingerprint=call.target.fact.target_fingerprint,
             reported_model_id=None,
             outcome="completed",
+            provider_dispatch_status="dispatched",
             usage_status="reported",
             usage=None,
             estimated_input_tokens=1,
@@ -1380,6 +1319,7 @@ def test_model_call_end_missing_usage_requires_null() -> None:
             target_fingerprint=call.target.fact.target_fingerprint,
             reported_model_id=None,
             outcome="completed",
+            provider_dispatch_status="dispatched",
             usage_status="missing",
             usage=ModelTokenUsageFact(input_tokens=1, output_tokens=1, total_tokens=2),
             estimated_input_tokens=1,

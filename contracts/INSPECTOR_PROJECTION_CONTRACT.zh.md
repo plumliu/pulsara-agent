@@ -271,3 +271,41 @@ provider或当前时间重算。cross-event source/effective exposure、compacti
 
 Host live summary 可额外显示 process observation（preparing/committed、active segment generation、handle retirement、
 pending compaction terminalization），但这些字段不得冒充 durable historical projection。
+
+---
+
+## 13. Subagent graph checkpoint projection
+
+Session/run Inspector 必须从 typed `SubagentGraphCheckpointCommittedEvent` 投影 bounded checkpoint catalog，至少展示：
+
+- confirmed checkpoint count 与 truncation；
+- checkpoint/materialization event/artifact identity；
+- through sequence、reducer ID/version/contract fingerprint；
+- graph event count 与 graph-state semantic fingerprint。
+
+Context input exact replay projection 必须分开：
+
+- manifest 冻结的 `SubagentGraphSemanticSourceFact`；
+- preferred checkpoint ID；
+- 本次 replay 实际使用的 checkpoint ID；
+- `rebased`、checkpoint through sequence、delta range/count/bytes 与 ledger high-water。
+
+Replay status 仍只有 `exact_replay | fact_replay_only | artifact_missing | contract_mismatch | ledger_untrusted`。原 artifact 缺失但
+compatible rebase 恢复出同一 semantic source/payload 时仍是 `exact_replay`，只在 acceleration 中标记 `rebased=true`。Inspector 不得
+从 current runtime graph/cache 猜测历史 source。
+
+---
+
+## 14. Same-run context window projection
+
+Session/run Inspector 必须从 durable `ContextWindowOpenedEvent`、`ContextWindowClosedEvent` 与
+`ContextWindowCompactionStartedEvent|CompletedEvent|FailedEvent` 投影：
+
+- `context_windows[]`：window/generation/previous/open reason、open/close event identity与sequence、semantic/fact fingerprint、source
+  compaction/summary、active或closed状态及next window；
+- `context_window_compactions[]`：compaction/attempt、Started/terminal identity与sequence、source/target window generation、plan/call/
+  settlement identity、summary artifact existence、actual/target token measurement与failure stage/reason；
+- `diagnostics[]`：Started无terminal、同一compaction多个terminal、completed summary artifact缺失。
+
+Inspector只检查durable artifact存在性，不重新运行summarizer、不重新估算summary或post-compaction token，也不从当前window cache推断历史状态。
+Completed窗口切换必须表现为旧window closed、新window active；Failed或recovered-interrupted只终结attempt，不能伪造旧window已关闭。

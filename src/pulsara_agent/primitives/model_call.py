@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class ModelCallPurpose(StrEnum):
     AGENT_MODEL_LOOP = "agent_model_loop"
     CONTEXT_COMPACTION_SUMMARY = "context_compaction_summary"
+    CONTEXT_WINDOW_COMPACTION_SUMMARY = "context_window_compaction_summary"
     MEMORY_GOVERNANCE = "memory_governance"
     MEMORY_REFLECTION = "memory_reflection"
 
@@ -174,10 +175,38 @@ class ModelTokenUsageFact(BaseModel):
         return self
 
 
+class RuntimeDerivedObservationCarrierContractFact(BaseModel):
+    """Run-frozen provider wire contract for inert runtime observations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["runtime_derived_observation_carrier.v1"] = (
+        "runtime_derived_observation_carrier.v1"
+    )
+    carrier_id: str = Field(min_length=1)
+    carrier_version: str = Field(min_length=1)
+    provider_api: str = Field(min_length=1)
+    provider_role_contract: Literal["runtime_inert_observation"] = (
+        "runtime_inert_observation"
+    )
+    wire_shape_fingerprint: str = Field(min_length=1)
+    contract_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_contract(self) -> "RuntimeDerivedObservationCarrierContractFact":
+        expected = sha256_fingerprint(
+            "runtime-derived-observation-carrier:v1",
+            self.model_dump(mode="json", exclude={"contract_fingerprint"}),
+        )
+        if self.contract_fingerprint != expected:
+            raise ValueError("runtime observation carrier fingerprint mismatch")
+        return self
+
+
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v2"] = "resolved-model-target:v2"
+    contract_version: Literal["resolved-model-target:v3"] = "resolved-model-target:v3"
     target_fingerprint: str
     model_id: str = Field(min_length=1)
     model_role: Literal["pro", "flash"]
@@ -196,9 +225,15 @@ class ResolvedModelTargetFact(BaseModel):
     effective_options: ResolvedModelOptionsFact
     context_budget: ResolvedModelContextBudgetFact
     token_estimator: TokenEstimatorFact
+    runtime_observation_carrier: RuntimeDerivedObservationCarrierContractFact | None
 
     @model_validator(mode="after")
     def _validate_target(self) -> "ResolvedModelTargetFact":
+        if (
+            self.runtime_observation_carrier is not None
+            and self.runtime_observation_carrier.provider_api != self.api
+        ):
+            raise ValueError("runtime observation carrier provider API mismatch")
         expected_pre_margin = min(
             self.limits.max_input_tokens,
             self.limits.total_context_tokens
@@ -232,7 +267,7 @@ class ResolvedModelTargetFact(BaseModel):
 def resolved_model_target_fingerprint(
     payload_without_fingerprint: dict[str, Any],
 ) -> str:
-    return sha256_fingerprint("resolved-model-target:v2", payload_without_fingerprint)
+    return sha256_fingerprint("resolved-model-target:v3", payload_without_fingerprint)
 
 
 class ResolvedModelCallFact(BaseModel):
@@ -464,4 +499,274 @@ class CompactionObservedAfterMeasurementFact(BaseModel):
             raise ValueError(
                 "observed transcript must equal summary + retained + protected"
             )
+        return self
+
+
+class ModelStreamSemanticAttributionFact(BaseModel):
+    """Exact durable identity of one provider semantic stream item."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["model_stream_semantic_attribution.v1"] = (
+        "model_stream_semantic_attribution.v1"
+    )
+    resolved_model_call_id: str = Field(min_length=1)
+    model_call_start_event_id: str = Field(min_length=1)
+    transport_sequence_index: int = Field(ge=0)
+    draft_schema_version: Literal["provider_transport_semantic_draft.v1"] = (
+        "provider_transport_semantic_draft.v1"
+    )
+    draft_kind: Literal[
+        "text_block_start",
+        "text_block_delta",
+        "text_block_end",
+        "thinking_block_start",
+        "thinking_block_delta",
+        "thinking_block_end",
+        "data_block_start",
+        "data_block_delta",
+        "data_block_end",
+        "tool_call_start",
+        "tool_call_delta",
+        "tool_call_end",
+        "provider_error",
+    ]
+    draft_fingerprint: str = Field(min_length=1)
+    attribution_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_fingerprint(self) -> "ModelStreamSemanticAttributionFact":
+        expected = sha256_fingerprint(
+            "model-stream-semantic-attribution:v1",
+            self.model_dump(mode="json", exclude={"attribution_fingerprint"}),
+        )
+        if self.attribution_fingerprint != expected:
+            raise ValueError("model stream semantic attribution fingerprint mismatch")
+        return self
+
+
+class ProviderModelStreamErrorCode(StrEnum):
+    AUTHENTICATION_FAILED = "authentication_failed"
+    PERMISSION_DENIED = "permission_denied"
+    INVALID_REQUEST = "invalid_request"
+    RATE_LIMITED = "rate_limited"
+    PROVIDER_OVERLOADED = "provider_overloaded"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    PROVIDER_TIMEOUT = "provider_timeout"
+    CONTENT_FILTERED = "content_filtered"
+    TRANSPORT_PROTOCOL_ERROR = "transport_protocol_error"
+    UNKNOWN_PROVIDER_ERROR = "unknown_provider_error"
+
+
+class ProviderErrorSanitizationContractFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["provider_error_sanitization_contract.v1"] = (
+        "provider_error_sanitization_contract.v1"
+    )
+    contract_id: str = Field(min_length=1)
+    contract_version: str = Field(min_length=1)
+    stable_code_mapping_fingerprint: str = Field(min_length=1)
+    sensitive_key_policy_fingerprint: str = Field(min_length=1)
+    secret_pattern_policy_fingerprint: str = Field(min_length=1)
+    url_redaction_policy_fingerprint: str = Field(min_length=1)
+    diagnostic_attribute_allowlist_fingerprint: str = Field(min_length=1)
+    max_message_chars: int = Field(ge=1)
+    max_diagnostic_count: int = Field(ge=0)
+    max_diagnostic_attribute_chars: int = Field(ge=1)
+    contract_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_fingerprint(self) -> "ProviderErrorSanitizationContractFact":
+        expected = sha256_fingerprint(
+            "provider-error-sanitization-contract:v1",
+            self.model_dump(mode="json", exclude={"contract_fingerprint"}),
+        )
+        if self.contract_fingerprint != expected:
+            raise ValueError("provider error sanitization contract fingerprint mismatch")
+        return self
+
+
+class ProviderSanitizedDiagnosticKind(StrEnum):
+    PROVIDER_STATUS = "provider_status"
+    PROVIDER_CODE = "provider_code"
+    PROVIDER_REQUEST_ID = "provider_request_id"
+    RETRY_AFTER = "retry_after"
+    TRANSPORT_ENDPOINT = "transport_endpoint"
+    ADAPTER_CONTEXT = "adapter_context"
+
+
+class ProviderSanitizedDiagnosticFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    diagnostic_kind: ProviderSanitizedDiagnosticKind
+    attributes: dict[str, str]
+    redaction_count: int = Field(ge=0)
+    truncated: bool
+    diagnostic_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_fingerprint(self) -> "ProviderSanitizedDiagnosticFact":
+        expected = sha256_fingerprint(
+            "provider-sanitized-diagnostic:v1",
+            self.model_dump(mode="json", exclude={"diagnostic_fingerprint"}),
+        )
+        if self.diagnostic_fingerprint != expected:
+            raise ValueError("provider sanitized diagnostic fingerprint mismatch")
+        return self
+
+
+class ProviderSanitizedErrorFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["provider_sanitized_error.v1"] = (
+        "provider_sanitized_error.v1"
+    )
+    code: ProviderModelStreamErrorCode
+    message: str
+    diagnostics: tuple[ProviderSanitizedDiagnosticFact, ...]
+    redaction_count: int = Field(ge=0)
+    truncated: bool
+    sanitization_contract: ProviderErrorSanitizationContractFact
+    error_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_error(self) -> "ProviderSanitizedErrorFact":
+        if len(self.message) > self.sanitization_contract.max_message_chars:
+            raise ValueError("provider sanitized error message exceeds contract cap")
+        if len(self.diagnostics) > self.sanitization_contract.max_diagnostic_count:
+            raise ValueError("provider sanitized diagnostics exceed contract cap")
+        if self.redaction_count != sum(
+            diagnostic.redaction_count for diagnostic in self.diagnostics
+        ):
+            raise ValueError("provider sanitized error redaction count mismatch")
+        expected = sha256_fingerprint(
+            "provider-sanitized-error:v1",
+            self.model_dump(mode="json", exclude={"error_fingerprint"}),
+        )
+        if self.error_fingerprint != expected:
+            raise ValueError("provider sanitized error fingerprint mismatch")
+        return self
+
+
+class ModelCallControlDisposition(StrEnum):
+    ACCEPTED = "accepted"
+    SUPPRESSED_BY_TERMINATION = "suppressed_by_termination"
+    SUPPRESSED_BY_RECOVERY = "suppressed_by_recovery"
+
+
+class RunTerminationIntentAttributionFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["run_termination_intent_attribution.v1"] = (
+        "run_termination_intent_attribution.v1"
+    )
+    intent_id: str = Field(min_length=1)
+    kind: Literal["user_stop", "host_teardown"]
+    requested_at_utc: str = Field(min_length=1)
+    requester_id: str = Field(min_length=1)
+    target_run_execution_activation_fingerprint: str = Field(min_length=1)
+    attribution_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_fingerprint(self) -> "RunTerminationIntentAttributionFact":
+        expected = sha256_fingerprint(
+            "run-termination-intent-attribution:v1",
+            self.model_dump(mode="json", exclude={"attribution_fingerprint"}),
+        )
+        if self.attribution_fingerprint != expected:
+            raise ValueError("run termination intent attribution fingerprint mismatch")
+        return self
+
+
+class CommittedModelTextBlockFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    block_id: str = Field(min_length=1)
+    text: str
+    start_sequence: int = Field(ge=1)
+    end_sequence: int | None = Field(default=None, ge=1)
+    completion_status: Literal["completed", "interrupted"]
+
+
+class CommittedModelThinkingBlockFact(CommittedModelTextBlockFact):
+    pass
+
+
+class CommittedModelDataBlockFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    block_id: str = Field(min_length=1)
+    media_type: str = Field(min_length=1)
+    data: str
+    start_sequence: int = Field(ge=1)
+    end_sequence: int | None = Field(default=None, ge=1)
+    completion_status: Literal["completed", "interrupted"]
+
+
+class CommittedModelToolCallFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool_call_id: str = Field(min_length=1)
+    tool_call_name: str = Field(min_length=1)
+    raw_arguments_json: str
+    start_sequence: int = Field(ge=1)
+    end_sequence: int | None = Field(default=None, ge=1)
+    completion_status: Literal["completed", "interrupted"]
+
+
+class ModelCallResultControlDisposition(StrEnum):
+    SUCCESS_ELIGIBLE = "success_eligible"
+    AUDIT_ONLY = "audit_only"
+
+
+class CommittedModelCallResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["committed_model_call_result.v1"] = (
+        "committed_model_call_result.v1"
+    )
+    resolved_model_call_id: str = Field(min_length=1)
+    model_call_start_event_id: str = Field(min_length=1)
+    model_call_start_sequence: int = Field(ge=1)
+    model_call_end_event_id: str = Field(min_length=1)
+    model_call_end_sequence: int = Field(ge=1)
+    terminal_outcome: Literal[
+        "completed", "provider_error", "cancelled", "runtime_error"
+    ]
+    control_disposition: ModelCallResultControlDisposition
+    text_blocks: tuple[CommittedModelTextBlockFact, ...]
+    combined_text: str
+    thinking_blocks: tuple[CommittedModelThinkingBlockFact, ...]
+    data_blocks: tuple[CommittedModelDataBlockFact, ...]
+    tool_calls: tuple[CommittedModelToolCallFact, ...]
+    provider_errors: tuple[ProviderSanitizedErrorFact, ...]
+    usage_status: Literal["reported", "missing"]
+    usage: ModelTokenUsageFact | None
+    reported_model_id: str | None
+    semantic_item_count: int = Field(ge=0)
+    source_through_sequence: int = Field(ge=1)
+    result_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "CommittedModelCallResult":
+        if (self.usage_status == "reported") != (self.usage is not None):
+            raise ValueError("committed model result usage mismatch")
+        expected_disposition = (
+            ModelCallResultControlDisposition.SUCCESS_ELIGIBLE
+            if self.terminal_outcome == "completed"
+            else ModelCallResultControlDisposition.AUDIT_ONLY
+        )
+        if self.control_disposition is not expected_disposition:
+            raise ValueError("committed model result terminal disposition mismatch")
+        if self.terminal_outcome == "provider_error" and not self.provider_errors:
+            raise ValueError("provider-error result requires a sanitized error")
+        if self.terminal_outcome != "provider_error" and self.provider_errors:
+            raise ValueError("non-provider-error result cannot carry provider errors")
+        expected = sha256_fingerprint(
+            "committed-model-call-result:v1",
+            self.model_dump(mode="json", exclude={"result_fingerprint"}),
+        )
+        if self.result_fingerprint != expected:
+            raise ValueError("committed model call result fingerprint mismatch")
         return self

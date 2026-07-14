@@ -13,16 +13,21 @@ from tests.conftest import (
     run_start_permission_fields,
     tool_result_end_contract_fields,
 )
+from tests.support import model_call_end_fields, model_call_start_fields
 from tests.support.context_input import render_event_log_transcript
 
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
+    ContextWindowOpenedEvent,
     EventContext,
+    ModelCallControlDispositionResolvedEvent,
     ModelCallEndEvent,
+    ModelCallStartEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RunEndEvent,
     RunStartEvent,
+    RolloutBudgetAccountOpenedEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
@@ -55,6 +60,14 @@ from pulsara_agent.runtime.compaction.service import (
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopTransition
 from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
+from pulsara_agent.primitives.model_call import (
+    ModelCallControlDisposition,
+    sha256_fingerprint,
+)
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    empty_projection_state_fingerprint,
+    prepare_root_long_horizon_run,
+)
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -68,14 +81,22 @@ class _CapturingLLMRuntime:
         self.raw_parts: list[str] = []
         self.model_ends: list[ModelCallEndEvent] = []
 
-    async def stream(self, **kwargs):
+        self.capture_tasks: list[asyncio.Task[None]] = []
+
+    def start_stream(self, **kwargs):
         self.contexts.append(kwargs.get("context"))
-        async for event in self.inner.stream(**kwargs):
-            if isinstance(event, TextBlockDeltaEvent):
-                self.raw_parts.append(event.delta)
-            elif isinstance(event, ModelCallEndEvent):
-                self.model_ends.append(event)
-            yield event
+        handle = self.inner.start_stream(**kwargs)
+
+        async def capture_committed() -> None:
+            completion = await handle.wait_completed()
+            for event in completion.committed_events:
+                if isinstance(event, TextBlockDeltaEvent):
+                    self.raw_parts.append(event.delta)
+                elif isinstance(event, ModelCallEndEvent):
+                    self.model_ends.append(event)
+
+        self.capture_tasks.append(asyncio.create_task(capture_committed()))
+        return handle
 
     def resolve_target(self, **kwargs):
         return self.inner.resolve_target(**kwargs)
@@ -129,11 +150,21 @@ def test_real_llm_context_compaction_summary_and_resume(tmp_path: Path) -> None:
                 "Implemented typed events, summary artifact metadata, transcript rehydration, and inspector diagnostics."
             ),
         )
+        runtime_session = RuntimeSession(
+            tmp_path,
+            runtime_session_id=runtime_session_id,
+            event_log=log,
+            archive=archive,
+            tool_result_artifacts=PostgresToolResultArtifactIndex(
+                settings.storage.postgres_dsn
+            ),
+        )
         service = ContextCompactionService(
             event_log=log,
             archive=archive,
             llm_runtime=build_llm_runtime(settings.llm),
             runtime_session_id=runtime_session_id,
+            runtime_session=runtime_session,
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 keep_recent_runs=1,
@@ -185,6 +216,8 @@ def test_real_llm_context_compaction_summary_and_resume(tmp_path: Path) -> None:
             for event in resumed_log.iter()
         )
     finally:
+        if "runtime_session" in locals():
+            runtime_session.close()
         _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
@@ -209,12 +242,22 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
         )
         archive = PostgresArtifactStore(settings.storage.postgres_dsn)
         _append_pr4_style_long_dogfood_transcript(log)
+        runtime_session = RuntimeSession(
+            tmp_path,
+            runtime_session_id=runtime_session_id,
+            event_log=log,
+            archive=archive,
+            tool_result_artifacts=PostgresToolResultArtifactIndex(
+                settings.storage.postgres_dsn
+            ),
+        )
         capture = _CapturingLLMRuntime(build_llm_runtime(settings.llm))
         service = ContextCompactionService(
             event_log=log,
             archive=archive,
             llm_runtime=capture,
             runtime_session_id=runtime_session_id,
+            runtime_session=runtime_session,
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 keep_recent_runs=2,
@@ -285,6 +328,8 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
             flush=True,
         )
     finally:
+        if "runtime_session" in locals():
+            runtime_session.close()
         _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
@@ -333,34 +378,29 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
             ),
         )
         state = _mid_turn_state(runtime_session_id)
-        current_start = asyncio.run(
-            runtime_session.emit(
-                RunStartEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    **run_start_permission_fields(
-                        state.run_id,
-                        user_input="Current request: inspect the just-finished tool output.",
-                        turn_id=state.turn_id,
-                        reply_id=state.reply_id,
-                    ),
-                    user_input_chars=len(
-                        "Current request: inspect the just-finished tool output."
-                    ),
-                    metadata={
-                        "user_input": "Current request: inspect the just-finished tool output."
-                    },
+        current_context = EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        )
+        current_opened = asyncio.run(
+            runtime_session.emit_many(
+                _root_run_open_events(
+                    log,
+                    ctx=current_context,
+                    user_input="Current request: inspect the just-finished tool output.",
                 ),
                 state=state,
             )
         )
+        current_start = current_opened[0]
         capture = _CapturingLLMRuntime(build_llm_runtime(settings.llm))
         service = ContextCompactionService(
             event_log=log,
             archive=archive,
             llm_runtime=capture,
             runtime_session_id=runtime_session_id,
+            runtime_session=runtime_session,
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 auto_trigger_ratio=0.006,
@@ -375,36 +415,30 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
         state.run_model_target = capture.resolve_target(role=ModelRole.PRO)
         log.extend(
             (
-                ReplyStartEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    name="assistant",
-                ),
-                ToolCallStartEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    tool_call_id="call:current",
-                    tool_call_name="terminal",
-                ),
-                ToolCallDeltaEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    tool_call_id="call:current",
-                    delta='{"command":"printf current"}',
-                ),
-                ToolCallEndEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    tool_call_id="call:current",
-                ),
-                ReplyEndEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
+                *_accepted_reply_events(
+                    current_context,
+                    (
+                        ToolCallStartEvent(
+                            run_id=state.run_id,
+                            turn_id=state.turn_id,
+                            reply_id=state.reply_id,
+                            tool_call_id="call:current",
+                            tool_call_name="terminal",
+                        ),
+                        ToolCallDeltaEvent(
+                            run_id=state.run_id,
+                            turn_id=state.turn_id,
+                            reply_id=state.reply_id,
+                            tool_call_id="call:current",
+                            delta='{"command":"printf current"}',
+                        ),
+                        ToolCallEndEvent(
+                            run_id=state.run_id,
+                            turn_id=state.turn_id,
+                            reply_id=state.reply_id,
+                            tool_call_id="call:current",
+                        ),
+                    ),
                 ),
                 ToolResultStartEvent(
                     run_id=state.run_id,
@@ -500,6 +534,119 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
         _cleanup_session(settings.storage.postgres_dsn, runtime_session_id)
 
 
+def _root_run_open_events(
+    log: PostgresEventLog,
+    *,
+    ctx: EventContext,
+    user_input: str,
+) -> tuple[RunStartEvent, ContextWindowOpenedEvent, RolloutBudgetAccountOpenedEvent]:
+    run_start = RunStartEvent(
+        id=f"run_start:{ctx.run_id}",
+        **ctx.event_fields(),
+        **run_start_permission_fields(
+            ctx.run_id,
+            user_input=user_input,
+            turn_id=ctx.turn_id,
+            reply_id=ctx.reply_id,
+            mcp_installation_owner_runtime_session_id=log.runtime_session_id,
+        ),
+        user_input_chars=len(user_input),
+    )
+    prepared = prepare_root_long_horizon_run(
+        runtime_session_id=log.runtime_session_id,
+        run_id=ctx.run_id,
+        run_start_event_id=run_start.id,
+        primary_target=run_start.model_target,
+        summarizer_target=run_start.model_target,
+        graph_reducer_contract=run_start.subagent_graph_reducer_contract,
+        source_through_sequence_at_open=log.next_sequence() - 1,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    run_start = run_start.model_copy(
+        update={"long_horizon": prepared.contract},
+        deep=True,
+    )
+    account = prepared.root_account
+    assert account is not None
+    return (
+        run_start,
+        ContextWindowOpenedEvent(
+            id=prepared.contract.initial_window_open_event_id,
+            **ctx.event_fields(),
+            window=prepared.initial_window,
+            opening_batch_id=prepared.opening_batch_id,
+        ),
+        RolloutBudgetAccountOpenedEvent(
+            id=f"rollout_budget_account_opened:{account.account_id}",
+            **ctx.event_fields(),
+            account=account,
+        ),
+    )
+
+
+def _accepted_reply_events(
+    ctx: EventContext,
+    semantic_events: tuple = (),
+) -> tuple:
+    start = ModelCallStartEvent(
+        **ctx.event_fields(),
+        **model_call_start_fields(),
+    )
+    end = ModelCallEndEvent(
+        id=start.recovery_plan.stable_model_call_end_event_id,
+        **ctx.event_fields(),
+        **model_call_end_fields(resolved_call=start.resolved_call),
+    )
+    disposition_fields = {
+        "id": (
+            f"model_call_control_disposition:{ctx.run_id}:"
+            f"{start.resolved_call.resolved_model_call_id}:1"
+        ),
+        **ctx.event_fields(),
+        "resolved_model_call_id": start.resolved_call.resolved_model_call_id,
+        "model_call_start_event_id": start.id,
+        "model_call_end_event_id": end.id,
+        "model_call_index": 1,
+        "source_result_fingerprint": "sha256:" + "e" * 64,
+        "run_execution_activation": start.recovery_plan.run_execution_activation,
+        "disposition": ModelCallControlDisposition.ACCEPTED,
+        "termination_intent": None,
+        "recovery_reason_code": None,
+    }
+    provisional = ModelCallControlDispositionResolvedEvent.model_construct(
+        **disposition_fields,
+        event_fingerprint="pending",
+    )
+    payload = provisional.model_dump(
+        mode="json",
+        exclude={"event_fingerprint", "sequence"},
+    )
+    disposition = ModelCallControlDispositionResolvedEvent(
+        **payload,
+        event_fingerprint=sha256_fingerprint(
+            "model-call-control-disposition-event:v1",
+            payload,
+        ),
+    )
+    return (
+        ReplyStartEvent(
+            id=start.recovery_plan.reply_start_event_id,
+            **ctx.event_fields(),
+            name="assistant",
+        ),
+        start,
+        *semantic_events,
+        end,
+        ReplyEndEvent(
+            id=start.recovery_plan.stable_reply_end_event_id,
+            **ctx.event_fields(),
+            model_terminal_outcome="completed",
+        ),
+        disposition,
+    )
+
+
 def _append_turn(
     log: PostgresEventLog, label: str, user_input: str, assistant_text: str
 ) -> None:
@@ -509,31 +656,27 @@ def _append_turn(
         reply_id=f"reply:real-compaction:{label}:{uuid4().hex}",
     )
     log.extend(
-        [
-            RunStartEvent(
-                **ctx.event_fields(),
-                **run_start_permission_fields(
-                    ctx.run_id,
-                    user_input=user_input,
-                    turn_id=ctx.turn_id,
-                    reply_id=ctx.reply_id,
+        (
+            *_root_run_open_events(log, ctx=ctx, user_input=user_input),
+            *_accepted_reply_events(
+                ctx,
+                (
+                    TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
+                    TextBlockDeltaEvent(
+                        **ctx.event_fields(),
+                        block_id=f"text:{label}",
+                        delta=assistant_text,
+                    ),
+                    TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{label}"),
                 ),
-                user_input_chars=len(user_input),
             ),
-            ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-            TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
-            TextBlockDeltaEvent(
-                **ctx.event_fields(), block_id=f"text:{label}", delta=assistant_text
-            ),
-            TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{label}"),
-            ReplyEndEvent(**ctx.event_fields()),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="finished"),
                 **ctx.event_fields(),
                 status="finished",
                 stop_reason="final",
             ),
-        ]
+        )
     )
 
 

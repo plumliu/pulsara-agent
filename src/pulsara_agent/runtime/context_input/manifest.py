@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
+from concurrent.futures import Executor, Future as ConcurrentFuture
 from dataclasses import dataclass
 import hashlib
 from enum import StrEnum
@@ -11,25 +11,44 @@ from time import monotonic
 from typing import TYPE_CHECKING, Callable, Literal
 from uuid import uuid4
 
+from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+
 from pulsara_agent.primitives.context import (
     ContextCompileInputAuditFact,
     ContextCompileInputManifestFact,
+    ContextEventReferenceFact,
     ContextFactSnapshotFact,
     FrozenJsonObjectFact,
     PreparedContextCandidateSet,
+    ProjectedToolResultCompileRefFact,
+    LongHorizonContextAttributionFact,
+    TranscriptCompileInput,
+    TranscriptToolResultRefFact,
     canonical_json_bytes,
     context_fingerprint,
     freeze_json,
     thaw_json,
 )
+from pulsara_agent.primitives.long_horizon import (
+    ContextWindowFact,
+    ContextWindowProjectionState,
+    LongHorizonContextAllocationPolicyFact,
+    LongHorizonContextBudgetDecisionFact,
+    LongHorizonProjectionPressureShadowFact,
+    PreparedObservationRollupUnit,
+    ProjectionTargetUnreachableAuditFact,
+    RolloutBudgetStateFact,
+    SubagentGraphSemanticSourceFact,
+)
 from pulsara_agent.primitives.tool_result import PreparedToolResultRenderInput
+from pulsara_agent.runtime.context_input.render import PreparedToolResultRenderOutput
 
 if TYPE_CHECKING:
     from pulsara_agent.memory.foundation.protocols import ArtifactStore
 
 
 CONTEXT_INPUT_MANIFEST_MEDIA_TYPE = (
-    "application/vnd.pulsara.context-input-manifest+json; version=1"
+    "application/vnd.pulsara.context-input-manifest+json; version=2"
 )
 
 
@@ -150,16 +169,13 @@ class ContextInputManifestWriteService:
         archive: ArtifactStore,
         max_pending: int = 8,
         max_physical_operations: int = 16,
-        max_workers: int = 2,
+        executor: Executor | None = None,
         on_consistency_failure: Callable[[], None] | None = None,
     ) -> None:
         self._archive = archive
         self._max_pending = max_pending
         self._max_physical_operations = max_physical_operations
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="pulsara-context-manifest",
-        )
+        self._executor = executor or auxiliary_io_executor()
         self._lock = asyncio.Lock()
         self._entries: dict[str, PendingContextInputManifestWrite] = {}
         self._operations: dict[str, ContextInputManifestPhysicalOperation] = {}
@@ -356,7 +372,6 @@ class ContextInputManifestWriteService:
         await self.drain_pending(deadline_monotonic=deadline_monotonic)
         async with self._lock:
             self._closed = True
-        self._executor.shutdown(wait=True, cancel_futures=False)
 
     def close_if_idle(self) -> None:
         if self._entries or self._operations:
@@ -364,7 +379,6 @@ class ContextInputManifestWriteService:
                 "context input manifest service still owns pending operations"
             )
         self._closed = True
-        self._executor.shutdown(wait=True, cancel_futures=False)
 
     def _start_operation_locked(
         self,
@@ -689,8 +703,18 @@ def _operation_result_status(result: object, error: BaseException | None) -> str
 def build_context_input_manifest(
     *,
     snapshot: ContextFactSnapshotFact,
-    transcript_fingerprint: str,
+    transcript: TranscriptCompileInput,
     prepared_tool_results: PreparedToolResultRenderInput,
+    rendered_tool_results: PreparedToolResultRenderOutput,
+    active_window: ContextWindowFact,
+    window_policy: LongHorizonContextAllocationPolicyFact,
+    projection_state: ContextWindowProjectionState,
+    prepared_rollups: tuple[PreparedObservationRollupUnit, ...],
+    rollout_state: RolloutBudgetStateFact,
+    context_budget_decision: LongHorizonContextBudgetDecisionFact,
+    projection_pressure_shadow: LongHorizonProjectionPressureShadowFact,
+    projection_target_unreachable: ProjectionTargetUnreachableAuditFact | None,
+    safe_point_revision: int,
     prepared_candidates: PreparedContextCandidateSet,
 ) -> ContextCompileInputManifestFact:
     """Build the exact event-safe input aggregate consumed by one compile."""
@@ -705,35 +729,155 @@ def build_context_input_manifest(
         "tool-result-units:v1",
         tuple(unit.unit_fingerprint for unit in prepared_tool_results.units),
     )
+    projected_refs = build_projected_tool_result_compile_refs(
+        transcript=transcript,
+        rendered_tool_results=rendered_tool_results,
+        projection_state=projection_state,
+    )
     aggregate = context_fingerprint(
-        "context-compile-input-aggregate:v1",
+        "context-compile-input-aggregate:v2",
         [
-            snapshot.snapshot_fact_fingerprint,
-            transcript_fingerprint,
+            snapshot.snapshot_semantic_fingerprint,
+            transcript.transcript_fingerprint,
             prepared_tool_results.render_input_fingerprint,
             prepared_candidates.candidate_set_fingerprint,
+            active_window.window_semantic_fingerprint,
+            window_policy.policy_fingerprint,
+            projection_state.state_semantic_fingerprint,
+            tuple(item.prepared_fingerprint for item in prepared_rollups),
+            rollout_state.state_fingerprint,
+            context_budget_decision.decision_fingerprint,
+            (
+                projection_target_unreachable.audit_fingerprint
+                if projection_target_unreachable is not None
+                else None
+            ),
             snapshot.identity.compiler_contract_version,
         ],
     )
     payload = {
-        "schema_version": "context-input-manifest:v1",
+        "schema_version": "context-input-manifest:v2",
         "input_aggregate_fingerprint": aggregate,
         "snapshot": snapshot,
+        "subagent_graph_semantic_source": (
+            snapshot.subagent_graph_semantic_source
+        ),
+        "subagent_graph_acceleration": snapshot.subagent_graph_acceleration,
         "prepared_candidate_set": prepared_candidates,
-        "transcript_fingerprint": transcript_fingerprint,
+        "transcript_fingerprint": transcript.transcript_fingerprint,
         "tool_result_units_fingerprint": units_fingerprint,
         "tool_result_render_policy": prepared_tool_results.resolved_policy,
         "tool_result_render_input_fingerprint": (
             prepared_tool_results.render_input_fingerprint
         ),
+        "active_window": active_window,
+        "window_policy": window_policy,
+        "projection_state": projection_state,
+        "projected_tool_result_refs": projected_refs,
+        "prepared_rollup_units": prepared_rollups,
+        "rollout_state": rollout_state,
+        "context_budget_decision": context_budget_decision,
+        "projection_pressure_shadow": projection_pressure_shadow,
+        "projection_target_unreachable": projection_target_unreachable,
+        "safe_point_revision": safe_point_revision,
         "compiler_contract_version": snapshot.identity.compiler_contract_version,
     }
-    return ContextCompileInputManifestFact(
+    return ContextCompileInputManifestFact.from_trusted_factory_payload(
+        payload
+    )
+
+
+def build_long_horizon_context_attribution(
+    *,
+    run_contract_fingerprint: str,
+    active_window: ContextWindowFact,
+    projection_state: ContextWindowProjectionState,
+    projection_rewrite_event_refs: tuple[ContextEventReferenceFact, ...],
+    rollout_account_owner_runtime_session_id: str,
+    rollout_state: RolloutBudgetStateFact,
+    subagent_graph_semantic_source: SubagentGraphSemanticSourceFact,
+    context_budget_decision: LongHorizonContextBudgetDecisionFact,
+) -> LongHorizonContextAttributionFact:
+    payload = {
+        "schema_version": "long-horizon-context-attribution:v1",
+        "run_contract_fingerprint": run_contract_fingerprint,
+        "window_id": active_window.window_id,
+        "window_generation": active_window.generation,
+        "window_semantic_fingerprint": active_window.window_semantic_fingerprint,
+        "projection_generation": projection_state.projection_generation,
+        "projection_state_fingerprint": (
+            projection_state.state_semantic_fingerprint
+        ),
+        "projection_rewrite_event_refs": projection_rewrite_event_refs,
+        "rollout_account_id": rollout_state.account_id,
+        "rollout_account_owner_runtime_session_id": (
+            rollout_account_owner_runtime_session_id
+        ),
+        "rollout_state_through_sequence": rollout_state.through_sequence,
+        "rollout_phase": rollout_state.phase,
+        "rollout_state_fingerprint": rollout_state.state_fingerprint,
+        "subagent_graph_semantic_source": subagent_graph_semantic_source,
+        "budget_decision": context_budget_decision,
+        "summary_artifact_id": active_window.source_summary_artifact_id,
+        "summary_content_sha256": active_window.source_summary_fingerprint,
+    }
+    return LongHorizonContextAttributionFact(
         **payload,
-        manifest_fingerprint=context_fingerprint(
-            "context-compile-input-manifest:v1", payload
+        attribution_fingerprint=context_fingerprint(
+            "long-horizon-context-attribution:v1", payload
         ),
     )
+
+
+def build_projected_tool_result_compile_refs(
+    *,
+    transcript: TranscriptCompileInput,
+    rendered_tool_results: PreparedToolResultRenderOutput,
+    projection_state: ContextWindowProjectionState,
+) -> tuple[ProjectedToolResultCompileRefFact, ...]:
+    projections = {item.unit_id: item for item in projection_state.unit_projections}
+    fragments = {item.unit_id: item for item in rendered_tool_results.fragments}
+    if len(projections) != len(projection_state.unit_projections):
+        raise ValueError("projection state contains duplicate unit IDs")
+    if len(fragments) != len(rendered_tool_results.fragments):
+        raise ValueError("rendered output contains duplicate unit IDs")
+    refs: list[ProjectedToolResultCompileRefFact] = []
+    for message in transcript.messages:
+        for block_index, block in enumerate(message.blocks):
+            if not isinstance(block, TranscriptToolResultRefFact):
+                continue
+            projection = projections.get(block.tool_result_unit_id)
+            fragment = fragments.get(block.tool_result_unit_id)
+            if projection is None or fragment is None:
+                raise ValueError("projected tool-result ref lacks projection or fragment")
+            if (
+                projection.tool_call_id != block.tool_call_id
+                or fragment.tool_call_id != block.tool_call_id
+                or fragment.source_message_id != message.message_id
+                or fragment.content_block_index != block_index
+                or fragment.rendered_text_fingerprint
+                != projection.rendered_fragment_fingerprint
+            ):
+                raise ValueError("projected tool-result ref identity mismatch")
+            refs.append(
+                ProjectedToolResultCompileRefFact(
+                    transcript_message_id=message.message_id,
+                    block_index=block_index,
+                    tool_call_id=block.tool_call_id,
+                    tool_result_unit_id=block.tool_result_unit_id,
+                    window_id=projection.window_id,
+                    projection_generation=projection.projection_generation,
+                    projected_fragment_fingerprint=(
+                        fragment.rendered_text_fingerprint
+                    ),
+                    representation=projection.representation,
+                    rollup_id=projection.source_rollup_id,
+                )
+            )
+    ref_ids = tuple(item.tool_result_unit_id for item in refs)
+    if len(ref_ids) != len(set(ref_ids)) or set(ref_ids) != set(projections):
+        raise ValueError("projection state differs from transcript result units")
+    return tuple(refs)
 
 
 def build_context_input_manifest_candidate(
@@ -785,7 +929,7 @@ def build_context_input_manifest_candidate(
         semantic_metadata=metadata,
         content_fingerprint=content_fingerprint,
         metadata_fingerprint=context_fingerprint(
-            "context-input-manifest-metadata:v1", metadata
+            "context-input-manifest-metadata:v2", metadata
         ),
     )
 
@@ -811,7 +955,7 @@ def build_context_compile_input_audit(
         snapshot_id=snapshot.identity.snapshot_id,
         snapshot_semantic_fingerprint=snapshot.snapshot_semantic_fingerprint,
         snapshot_fact_fingerprint=snapshot.snapshot_fact_fingerprint,
-        snapshot_schema_version="context-snapshot:v1",
+        snapshot_schema_version="context-snapshot:v2",
         compiler_contract_version=manifest.compiler_contract_version,
         source_runtime_session_id=snapshot.identity.runtime_session_id,
         authority_from_sequence=(snapshot.authority_slice_plan.authority_from_sequence),
@@ -853,6 +997,9 @@ def build_context_compile_input_audit(
         input_aggregate_fingerprint=manifest.input_aggregate_fingerprint,
         input_manifest_artifact_id=candidate.artifact_id,
         input_manifest_fingerprint=manifest.manifest_fingerprint,
+        long_horizon_attribution_fingerprint=(
+            snapshot.long_horizon_attribution.attribution_fingerprint
+        ),
         input_manifest_write_outcome=write_result.outcome,
     )
 

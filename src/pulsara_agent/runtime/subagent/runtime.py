@@ -19,10 +19,13 @@ from uuid import uuid4
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
+    EventType,
     ModelCallStartEvent,
     ModelCallEndEvent,
     RunEndEvent,
     RunStartEvent,
+    RolloutBudgetReservationCreatedEvent,
+    SubagentRolloutBudgetResolvedEvent,
     SubagentEdgeRecordedEvent,
     SubagentMessageSentEvent,
     SubagentPhaseReportedEvent,
@@ -45,6 +48,7 @@ from pulsara_agent.event import (
     ToolResultEndEvent,
 )
 from pulsara_agent.event_log import EventLog
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.model_call import ModelTokenUsageFact
 from pulsara_agent.primitives.subagent import (
@@ -87,6 +91,7 @@ from pulsara_agent.runtime.subagent.execution import ChildExecutionRegistry
 from pulsara_agent.runtime.subagent.commands import (
     PlannedChildReservation,
     PlannedSubagentWrite,
+    SubagentCommandPlanError,
     SubagentCommandPlanner,
 )
 from pulsara_agent.runtime.subagent.store import SubagentGraphStateStore
@@ -144,6 +149,12 @@ ChildEventLogFactory = Callable[[str], EventLog]
 SubagentChildRunner = Callable[
     ["SubagentRuntime", HydratedSubagentRunView], Awaitable[None]
 ]
+SubagentRolloutAdmission = Callable[
+    [tuple[SubagentRunStartedEvent, ...]], tuple[AgentEvent, ...]
+]
+SubagentRolloutTerminalAugmenter = Callable[
+    [tuple[AgentEvent, ...]], tuple[AgentEvent, ...]
+]
 
 
 class SubagentRuntime:
@@ -155,6 +166,8 @@ class SubagentRuntime:
         event_log_locator: EventLogLocator | None = None,
         default_budget: SubagentBudget | None = None,
         child_runner: SubagentChildRunner | None = None,
+        rollout_admission: SubagentRolloutAdmission | None = None,
+        rollout_terminal_augmenter: SubagentRolloutTerminalAugmenter | None = None,
     ) -> None:
         self.parent_runtime_session = parent_runtime_session
         self._child_event_log_factory = child_event_log_factory
@@ -166,11 +179,19 @@ class SubagentRuntime:
             )
         self.default_budget = default_budget or SubagentBudget()
         self._child_runner = child_runner
+        self._rollout_admission = rollout_admission
+        self._rollout_terminal_augmenter = rollout_terminal_augmenter
         self._execution_registry = ChildExecutionRegistry()
         self._command_planner = SubagentCommandPlanner()
         self._parent_capability_snapshot: SubagentCapabilityProfile | None = None
-        initial_events = self.parent_runtime_session.event_log.iter()
-        self._graph_store = SubagentGraphStateStore(initial_events)
+        graph_state = (
+            self.parent_runtime_session.subagent_graph_checkpoint_service.restore_for_live_store(
+                requested_through_sequence=(
+                    self.parent_runtime_session.long_horizon_state_store.through_sequence
+                )
+            )
+        )
+        self._graph_store = SubagentGraphStateStore.from_state(graph_state)
         self._graph_reducer_id = (
             f"subagent_graph:{self.parent_runtime_session.runtime_session_id}"
         )
@@ -197,6 +218,47 @@ class SubagentRuntime:
         """
 
         self._child_runner = child_runner
+
+    def bind_rollout_admission(
+        self,
+        rollout_admission: SubagentRolloutAdmission | None,
+    ) -> None:
+        """Bind the parent-owned child budget admission service."""
+
+        self._rollout_admission = rollout_admission
+
+    def bind_rollout_terminal_augmenter(
+        self,
+        augmenter: SubagentRolloutTerminalAugmenter | None,
+    ) -> None:
+        """Bind the parent-ledger child terminal settlement planner."""
+
+        self._rollout_terminal_augmenter = augmenter
+
+    def _rollout_admission_events(
+        self,
+        started_events: tuple[SubagentRunStartedEvent, ...],
+    ) -> tuple[AgentEvent, ...]:
+        if not started_events or self._rollout_admission is None:
+            return ()
+        events = self._rollout_admission(started_events)
+        resolved_ids = {
+            event.subagent_run_id
+            for event in events
+            if isinstance(event, SubagentRolloutBudgetResolvedEvent)
+        }
+        reservation_ids = {
+            event.reservation.owner_id
+            for event in events
+            if isinstance(event, RolloutBudgetReservationCreatedEvent)
+            and event.reservation.owner_kind == "subagent_run"
+        }
+        expected_ids = {event.subagent_run_id for event in started_events}
+        if resolved_ids != expected_ids or reservation_ids != expected_ids:
+            raise SubagentRuntimeError(
+                "child rollout admission did not cover every started child"
+            )
+        return events
 
     def detach_from_parent_session(self) -> None:
         """Detach the live reducer registration during parent session teardown."""
@@ -264,24 +326,160 @@ class SubagentRuntime:
         )
 
     async def _commit_plan(self, plan: PlannedSubagentWrite) -> tuple[AgentEvent, ...]:
-        plan = self._command_planner.validate(plan, state=self._graph_store.state)
-        result = await self.parent_runtime_session.write_events(
-            plan.events,
+        if self._rollout_terminal_augmenter is not None:
+            augmented = self._rollout_terminal_augmenter(plan.events)
+            if augmented != plan.events:
+                plan = replace(plan, events=augmented)
+        for _attempt in range(4):
+            state_before = self._graph_store.state
+            if plan.expected_through_sequence != state_before.through_sequence:
+                stale_sequence = plan.expected_through_sequence
+                rebased = replace(
+                    plan,
+                    expected_through_sequence=state_before.through_sequence,
+                )
+                try:
+                    plan = self._command_planner.validate(
+                        rebased,
+                        state=state_before,
+                    )
+                except SubagentCommandPlanError as exc:
+                    raise EventWriteConflict(
+                        runtime_session_id=(
+                            self.parent_runtime_session.runtime_session_id
+                        ),
+                        expected_last_sequence=stale_sequence,
+                        actual_last_sequence=state_before.through_sequence,
+                    ) from exc
+            plan_was_current = (
+                plan.expected_through_sequence == state_before.through_sequence
+            )
+            plan = self._command_planner.validate(plan, state=state_before)
+            try:
+                result = await self.parent_runtime_session.write_events(
+                    plan.events,
+                    expected_last_sequence=plan.expected_through_sequence,
+                )
+            except EventWriteConflict:
+                state_after = self._graph_store.state
+                if not plan_was_current or not _same_graph_semantics(
+                    state_before,
+                    state_after,
+                ):
+                    raise
+                plan = replace(
+                    plan,
+                    expected_through_sequence=state_after.through_sequence,
+                )
+                continue
+            result.require_reduced(self._graph_reducer_id)
+            return result.committed_events
+        raise EventWriteConflict(
+            runtime_session_id=self.parent_runtime_session.runtime_session_id,
             expected_last_sequence=plan.expected_through_sequence,
+            actual_last_sequence=self._graph_store.state.through_sequence,
         )
-        result.require_reduced(self._graph_reducer_id)
-        return result.committed_events
+
+    def _terminal_commit_is_fully_applied(self, subagent_run_id: str) -> bool:
+        """Return whether durable graph and rollout reducers released the child.
+
+        Await cancellation can race after the atomic batch is committed and both
+        reducers have applied it.  Process-owner cleanup follows those durable
+        facts, not whether the awaiting caller received a normal acknowledgement.
+        """
+
+        if self.parent_runtime_session.reconciliation_required:
+            return False
+        run = self._graph_store.state.runs.get(subagent_run_id)
+        if run is None or run.status not in _TERMINAL_STATUSES:
+            return False
+        parent_start = self.parent_runtime_session.long_horizon_state_store.run_start(
+            run.parent_run_id
+        )
+        admission = self.parent_runtime_session.event_log.get_by_id(
+            f"subagent_rollout_budget_resolved:{subagent_run_id}"
+        )
+        if not isinstance(admission, SubagentRolloutBudgetResolvedEvent):
+            return True
+        if parent_start is None:
+            return False
+        account_state = self.parent_runtime_session.long_horizon_state_store.rollout_state(
+            parent_start.long_horizon.rollout_account_id
+        )
+        if account_state is None:
+            return False
+        return not any(
+            reservation.owner_kind == "subagent_run"
+            and reservation.owner_id == subagent_run_id
+            for reservation in account_state.active_reservations
+        )
 
     def _commit_plan_from_thread(
         self, plan: PlannedSubagentWrite
     ) -> tuple[AgentEvent, ...]:
-        plan = self._command_planner.validate(plan, state=self._graph_store.state)
-        result = self.parent_runtime_session.write_events_from_thread(
-            plan.events,
+        if self._rollout_terminal_augmenter is not None and any(
+            isinstance(
+                event,
+                (
+                    SubagentRunCompletedEvent,
+                    SubagentRunFailedEvent,
+                    SubagentRunCancelledEvent,
+                ),
+            )
+            for event in plan.events
+        ):
+            raise SubagentRuntimeError(
+                "rollout-admitted child terminalization requires the async native-terminal path"
+            )
+        for _attempt in range(4):
+            state_before = self._graph_store.state
+            if plan.expected_through_sequence != state_before.through_sequence:
+                stale_sequence = plan.expected_through_sequence
+                rebased = replace(
+                    plan,
+                    expected_through_sequence=state_before.through_sequence,
+                )
+                try:
+                    plan = self._command_planner.validate(
+                        rebased,
+                        state=state_before,
+                    )
+                except SubagentCommandPlanError as exc:
+                    raise EventWriteConflict(
+                        runtime_session_id=(
+                            self.parent_runtime_session.runtime_session_id
+                        ),
+                        expected_last_sequence=stale_sequence,
+                        actual_last_sequence=state_before.through_sequence,
+                    ) from exc
+            plan_was_current = (
+                plan.expected_through_sequence == state_before.through_sequence
+            )
+            plan = self._command_planner.validate(plan, state=state_before)
+            try:
+                result = self.parent_runtime_session.write_events_from_thread(
+                    plan.events,
+                    expected_last_sequence=plan.expected_through_sequence,
+                )
+            except EventWriteConflict:
+                state_after = self._graph_store.state
+                if not plan_was_current or not _same_graph_semantics(
+                    state_before,
+                    state_after,
+                ):
+                    raise
+                plan = replace(
+                    plan,
+                    expected_through_sequence=state_after.through_sequence,
+                )
+                continue
+            result.require_reduced(self._graph_reducer_id)
+            return result.committed_events
+        raise EventWriteConflict(
+            runtime_session_id=self.parent_runtime_session.runtime_session_id,
             expected_last_sequence=plan.expected_through_sequence,
+            actual_last_sequence=self._graph_store.state.through_sequence,
         )
-        result.require_reduced(self._graph_reducer_id)
-        return result.committed_events
 
     def refresh_parent_capability_snapshot(
         self,
@@ -689,6 +887,11 @@ class SubagentRuntime:
                 )
             )
 
+        started_events = tuple(
+            event for event in events if isinstance(event, SubagentRunStartedEvent)
+        )
+        events.extend(self._rollout_admission_events(started_events))
+
         reservation = None
         if run_infos:
             self.validate_can_start_batch(event_context.run_id, count=len(run_infos))
@@ -881,6 +1084,10 @@ class SubagentRuntime:
                 spawn_initiator_id=initiator_id,
             ),
         )
+        started_event = next(
+            event for event in events if isinstance(event, SubagentRunStartedEvent)
+        )
+        events = (*events, *self._rollout_admission_events((started_event,)))
         try:
             await self._commit_plan(
                 PlannedSubagentWrite(
@@ -1062,12 +1269,13 @@ class SubagentRuntime:
             message_preview=task_preview,
             delivery_kind="spawn_task",
         )
+        rollout_events = self._rollout_admission_events((started,))
         try:
             await self._commit_plan(
                 PlannedSubagentWrite(
                     operation="spawn_agent",
                     expected_through_sequence=state.through_sequence,
-                    events=(started, message),
+                    events=(started, message, *rollout_events),
                     batch_id=batch_id,
                     create_tool_call_id=create_tool_call_id,
                     required_reservations=(
@@ -1436,10 +1644,12 @@ class SubagentRuntime:
         run: SubagentRunFact,
         child_run_id: str,
     ) -> tuple[tuple[AgentEvent, ...], RunStartEvent, RunEndEvent]:
-        child_events = tuple(
-            self.event_log_locator.event_log_for_runtime_session(
-                run.child_runtime_session_id
-            ).iter(run_id=child_run_id)
+        child_log = self.event_log_locator.event_log_for_runtime_session(
+            run.child_runtime_session_id
+        )
+        child_events = _read_child_run_events(
+            child_log,
+            run_id=child_run_id,
         )
         starts = [event for event in child_events if isinstance(event, RunStartEvent)]
         terminals = [event for event in child_events if isinstance(event, RunEndEvent)]
@@ -1732,17 +1942,15 @@ class SubagentRuntime:
                 return _legacy_result_from_fact(completed)
             raise SubagentNotReady(subagent_run_id)
         ctx = event_context or _spawn_event_context(run)
-        submitted_events = [
-            event
-            for event in self.parent_runtime_session.event_log.iter()
-            if isinstance(event, SubagentResultSubmittedEvent)
-            and event.result_id == result_fact.result_id
-        ]
-        if len(submitted_events) != 1:
+        submitted_event = self.parent_runtime_session.event_log.get_by_id(
+            result_fact.provenance.created_event_id
+        )
+        if not isinstance(submitted_event, SubagentResultSubmittedEvent) or (
+            submitted_event.result_id != result_fact.result_id
+        ):
             raise SubagentRuntimeError(
                 "explicit child completion requires one durable result submission"
             )
-        submitted_event = submitted_events[0]
         resolved_child_run_id = (
             child_run_id
             or run.child_run_id
@@ -1767,16 +1975,13 @@ class SubagentRuntime:
             else None
         )
         child_terminal_event_id = handoff.child_terminal_reference.terminal_event_id
-        child_terminal_created_at = next(
-            (
-                event.created_at
-                for event in self.event_log_locator.event_log_for_runtime_session(
-                    run.child_runtime_session_id
-                ).iter(run_id=resolved_child_run_id)
-                if isinstance(event, RunEndEvent)
-                and event.id == child_terminal_event_id
-            ),
-            submitted_event.created_at,
+        child_terminal = self.event_log_locator.event_log_for_runtime_session(
+            run.child_runtime_session_id
+        ).get_by_id(child_terminal_event_id)
+        child_terminal_created_at = (
+            child_terminal.created_at
+            if isinstance(child_terminal, RunEndEvent)
+            else submitted_event.created_at
         )
         events: list[AgentEvent] = [
             SubagentRunCompletedEvent(
@@ -1985,7 +2190,6 @@ class SubagentRuntime:
         cancelled_by: str = "parent_agent",
         repair_id: str | None = None,
         drain_timeout_seconds: float | None = 5.0,
-        _request_only: bool = False,
         child_terminal_reference: ChildNativeTerminalReferenceFact | None = None,
         terminal_event_id: str | None = None,
         terminal_created_at: str | None = None,
@@ -1994,25 +2198,78 @@ class SubagentRuntime:
         run = self._require_run(subagent_run_id)
         if run.status in _TERMINAL_STATUSES:
             return run
-        ctx = event_context or _spawn_event_context(run)
-        await self._commit_plan(
-            _plan_run_cancellation(
-                state,
-                run=run,
-                event_context=ctx,
-                reason_code=reason_code,
-                reason_message=reason_message,
-                cancelled_by=cancelled_by,
-                repair_id=repair_id,
-                operation="cancel_run",
-                child_terminal_reference=child_terminal_reference,
-                terminal_event_id=terminal_event_id,
-                terminal_created_at=terminal_created_at,
-            )
+        handle = self._execution_registry.get(subagent_run_id)
+        admission = self.parent_runtime_session.event_log.get_by_id(
+            f"subagent_rollout_budget_resolved:{subagent_run_id}"
         )
-        if _request_only:
-            self._execution_registry.request_cancel(subagent_run_id)
-        else:
+        has_rollout_admission = self._rollout_terminal_augmenter is not None and (
+            isinstance(admission, SubagentRolloutBudgetResolvedEvent)
+        )
+        native_child_owner = (
+            has_rollout_admission
+            and
+            handle is not None
+            and handle.child_session is not None
+            and handle.coroutine is not None
+        )
+        if native_child_owner and child_terminal_reference is None:
+            await self._execution_registry.cancel_for_terminal_handoff(
+                subagent_run_id,
+                timeout_seconds=drain_timeout_seconds,
+            )
+            child_log = self.event_log_locator.event_log_for_runtime_session(
+                run.child_runtime_session_id
+            )
+            lifecycle = child_log.read_raw_events_by_types(
+                (EventType.RUN_END.value,),
+                run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                max_events=1,
+                max_payload_bytes=512 * 1024,
+            )
+            terminals = tuple(
+                raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                for raw in lifecycle.events
+            )
+            if len(terminals) != 1:
+                raise SubagentRuntimeError(
+                    "cancelled child requires one confirmed native terminal"
+                )
+            native_terminal = terminals[0]
+            child_terminal_reference = _child_terminal_reference(
+                run=run,
+                child_run_id=native_terminal.run_id,
+                terminal=native_terminal,
+            )
+            terminal_event_id = deterministic_parent_subagent_terminal_event_id(
+                parent_runtime_session_id=run.parent_runtime_session_id,
+                subagent_run_id=subagent_run_id,
+                child_terminal_event_id=native_terminal.id,
+                parent_terminal_event_type="subagent_run_cancelled",
+            )
+            terminal_created_at = native_terminal.created_at
+        ctx = event_context or _spawn_event_context(run)
+        try:
+            await self._commit_plan(
+                _plan_run_cancellation(
+                    state,
+                    run=run,
+                    event_context=ctx,
+                    reason_code=reason_code,
+                    reason_message=reason_message,
+                    cancelled_by=cancelled_by,
+                    repair_id=repair_id,
+                    operation="cancel_run",
+                    child_terminal_reference=child_terminal_reference,
+                    terminal_event_id=terminal_event_id,
+                    terminal_created_at=terminal_created_at,
+                )
+            )
+        finally:
+            if native_child_owner and self._terminal_commit_is_fully_applied(
+                subagent_run_id
+            ):
+                self._execution_registry.release_handle(subagent_run_id)
+        if not native_child_owner:
             await self._execution_registry.cancel(
                 subagent_run_id,
                 timeout_seconds=drain_timeout_seconds,
@@ -2029,9 +2286,9 @@ class SubagentRuntime:
     ) -> tuple[SubagentRunFact, ...]:
         """Cancel all live child tasks owned by this runtime.
 
-        This is the HostSession/HostCore close hook.  It is deliberately
-        parent-graph-first: every child that was active gets a durable
-        cancellation fact before we wait for cooperative task teardown.
+        This is the HostSession/HostCore close hook.  Native child terminal
+        facts are confirmed before the parent graph terminal and rollout
+        settlement are committed atomically.
         """
 
         active_runs = [run for run in self.runs if run.status in _ACTIVE_STATUSES]
@@ -2043,14 +2300,29 @@ class SubagentRuntime:
                     reason_code=reason_code,
                     reason_message=reason_message,
                     cancelled_by=cancelled_by,
-                    _request_only=True,
+                    drain_timeout_seconds=timeout_seconds,
                 )
             )
-        # Also drain handles whose durable graph was terminalized earlier by a
-        # synchronous safety callback. Graph status alone is not proof that the
-        # child coroutine and its finally blocks have exited.
-        await self._execution_registry.drain(timeout_seconds=timeout_seconds)
         return tuple(cancelled)
+
+    async def drain_children_for_parent_run(
+        self,
+        parent_run_id: str,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        """Wait for child owners charged to one parent rollout account."""
+
+        run_ids = tuple(
+            sorted(
+                self._execution_registry.occupied_run_ids(parent_run_id=parent_run_id)
+            )
+        )
+        if run_ids:
+            await self._execution_registry.wait_run_ids(
+                run_ids,
+                timeout_seconds=timeout_seconds,
+            )
 
     async def repair_dangling_children(
         self,
@@ -2149,17 +2421,12 @@ class SubagentRuntime:
                 )
 
             if terminal.terminalization_kind == "normal":
-                submitted = [
-                    event
-                    for event in self.parent_runtime_session.event_log.iter()
-                    if isinstance(event, SubagentResultSubmittedEvent)
-                    and event.subagent_run_id == run.subagent_run_id
-                ]
-                if len(submitted) > 1:
-                    raise SubagentRuntimeError(
-                        "child repair found multiple explicit result submissions"
-                    )
-                if submitted:
+                submitted = _result_for_run(
+                    self._graph_store.state,
+                    run.subagent_run_id,
+                    status="submitted",
+                )
+                if submitted is not None:
                     await self.complete_submitted_result(
                         run.subagent_run_id,
                         child_run_id=start.run_id,
@@ -2636,13 +2903,90 @@ class SubagentRuntime:
                 f"Materialized batch has conflicting creation attribution: {batch_id}"
             )
         create_tool_call_id = next(iter(create_tool_call_ids), None)
+        native_terminal_by_run_id: dict[
+            str, ChildNativeTerminalReferenceFact
+        ] = {}
+        native_terminal_created_at_by_run_id: dict[str, str] = {}
+        if self._rollout_terminal_augmenter is not None:
+            for run in run_facts:
+                if run.status in _TERMINAL_STATUSES:
+                    continue
+                handle = self._execution_registry.get(run.subagent_run_id)
+                if handle is not None and handle.coroutine is not None:
+                    await self._execution_registry.cancel_for_terminal_handoff(
+                        run.subagent_run_id,
+                        timeout_seconds=5.0,
+                    )
+                child_log = self.event_log_locator.event_log_for_runtime_session(
+                    run.child_runtime_session_id
+                )
+                lifecycle = child_log.read_raw_events_by_types(
+                    (EventType.RUN_START.value, EventType.RUN_END.value),
+                    run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                    max_events=2,
+                    max_payload_bytes=1024 * 1024,
+                )
+                decoded_lifecycle = tuple(
+                    raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    for raw in lifecycle.events
+                )
+                starts = tuple(
+                    event
+                    for event in decoded_lifecycle
+                    if isinstance(event, RunStartEvent)
+                )
+                terminals = tuple(
+                    event
+                    for event in decoded_lifecycle
+                    if isinstance(event, RunEndEvent)
+                )
+                if starts and len(terminals) != 1:
+                    raise SubagentRuntimeError(
+                        "materialized batch repair lost a native child terminal"
+                    )
+                if terminals:
+                    terminal = terminals[0]
+                    native_terminal_by_run_id[run.subagent_run_id] = (
+                        _child_terminal_reference(
+                            run=run,
+                            child_run_id=terminal.run_id,
+                            terminal=terminal,
+                        )
+                    )
+                    native_terminal_created_at_by_run_id[run.subagent_run_id] = (
+                        terminal.created_at
+                    )
         events: list[AgentEvent] = []
         active_run_ids: list[str] = []
         for run in run_facts:
             if run.status in _TERMINAL_STATUSES:
                 continue
+            child_terminal_reference = native_terminal_by_run_id.get(
+                run.subagent_run_id
+            )
             events.append(
                 SubagentRunCancelledEvent(
+                    id=(
+                        deterministic_parent_subagent_terminal_event_id(
+                            parent_runtime_session_id=run.parent_runtime_session_id,
+                            subagent_run_id=run.subagent_run_id,
+                            child_terminal_event_id=(
+                                child_terminal_reference.terminal_event_id
+                            ),
+                            parent_terminal_event_type="subagent_run_cancelled",
+                        )
+                        if child_terminal_reference is not None
+                        else uuid4().hex
+                    ),
+                    **(
+                        {
+                            "created_at": native_terminal_created_at_by_run_id[
+                                run.subagent_run_id
+                            ]
+                        }
+                        if child_terminal_reference is not None
+                        else {}
+                    ),
                     **event_context.event_fields(),
                     subagent_run_id=run.subagent_run_id,
                     parent_runtime_session_id=run.parent_runtime_session_id,
@@ -2653,6 +2997,7 @@ class SubagentRuntime:
                     reason_code=reason_code,
                     reason_message=reason_message,
                     cancelled_by="runtime",
+                    child_terminal_reference=child_terminal_reference,
                 )
             )
             active_run_ids.append(run.subagent_run_id)
@@ -2684,21 +3029,28 @@ class SubagentRuntime:
                 excluded_task_ids=batch_task_ids,
             )
         )
-        if events:
-            await self._commit_plan(
-                PlannedSubagentWrite(
-                    operation="repair_materialized_batch",
-                    expected_through_sequence=state.through_sequence,
-                    events=tuple(events),
-                    batch_id=batch_id,
-                    create_tool_call_id=create_tool_call_id,
-                    repair_id=repair_id,
+        try:
+            if events:
+                await self._commit_plan(
+                    PlannedSubagentWrite(
+                        operation="repair_materialized_batch",
+                        expected_through_sequence=state.through_sequence,
+                        events=tuple(events),
+                        batch_id=batch_id,
+                        create_tool_call_id=create_tool_call_id,
+                        repair_id=repair_id,
+                    )
                 )
+        finally:
+            if self._rollout_terminal_augmenter is not None:
+                for run_id in active_run_ids:
+                    if self._terminal_commit_is_fully_applied(run_id):
+                        self._execution_registry.release_handle(run_id)
+        if self._rollout_terminal_augmenter is None:
+            await self._execution_registry.drain_run_ids(
+                tuple(active_run_ids),
+                timeout_seconds=5.0,
             )
-        await self._execution_registry.drain_run_ids(
-            tuple(active_run_ids),
-            timeout_seconds=5.0,
-        )
         return (
             tuple(self._require_task(task.task_id) for task in task_facts),
             tuple(self._require_run(run.subagent_run_id) for run in run_facts),
@@ -3002,9 +3354,7 @@ class SubagentRuntime:
                 "frozen subagent result selection is unavailable in graph state"
             )
         return tuple(
-            _legacy_result_from_fact(fact)
-            for fact in facts
-            if fact is not None
+            _legacy_result_from_fact(fact) for fact in facts if fact is not None
         )
 
     def render_pending_results_section(
@@ -3048,15 +3398,22 @@ class SubagentRuntime:
         model_call_index: int,
         section_id: str,
     ) -> list[SubagentResultDeliveredEvent]:
+        starts = self.parent_runtime_session.event_log.read_raw_events_by_types(
+            (EventType.MODEL_CALL_START.value,),
+            run_ids=(event_context.run_id,),
+            max_events=256,
+            max_payload_bytes=4 * 1024 * 1024,
+        )
         matching_model_start = any(
             isinstance(event, ModelCallStartEvent)
-            and event.run_id == event_context.run_id
             and event.turn_id == event_context.turn_id
             and event.reply_id == event_context.reply_id
             and event.context_id == context_id
             and event.model_call_index == model_call_index
-            for event in self.parent_runtime_session.event_log.iter(
-                run_id=event_context.run_id
+            for raw in starts.events
+            if isinstance(
+                event := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                ModelCallStartEvent,
             )
         )
         if not matching_model_start:
@@ -3136,6 +3493,9 @@ class SubagentRuntime:
                 }
             },
             context_event_log_locator=self.event_log_locator,
+            rollout_account_owner_state_store=(
+                self.parent_runtime_session.long_horizon_state_store
+            ),
         )
         child.mcp_supervisor = self.parent_runtime_session.mcp_supervisor
         child.set_mcp_installation_contract(
@@ -3166,9 +3526,12 @@ class SubagentRuntime:
                     diagnostics=[{"timeout_seconds": run.budget.child_timeout_seconds}],
                 )
         except asyncio.CancelledError:
-            # Explicit stop_agent/cancel already writes the canonical parent
-            # graph event. Do not convert cooperative cancellation into an
-            # additional failure.
+            # The child ledger terminalizes first.  Keep the execution owner
+            # until cancel() atomically commits the parent graph terminal and
+            # root rollout settlement.
+            retain_handle_for_reconciliation = (
+                not self._terminal_commit_is_fully_applied(run.subagent_run_id)
+            )
             raise
         except SubagentRunEntryCommitUntrusted as exc:
             retain_handle_for_reconciliation = True
@@ -3203,10 +3566,15 @@ class SubagentRuntime:
                 child_log = self.event_log_locator.event_log_for_runtime_session(
                     run.child_runtime_session_id
                 )
+                terminal_snapshot = child_log.read_raw_events_by_types(
+                    (EventType.RUN_END.value,),
+                    run_ids=((run.child_run_id,) if run.child_run_id is not None else None),
+                    max_events=1,
+                    max_payload_bytes=512 * 1024,
+                )
                 child_terminals = [
-                    event
-                    for event in child_log.iter()
-                    if isinstance(event, RunEndEvent)
+                    raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    for raw in terminal_snapshot.events
                 ]
                 if child_terminals:
                     child_terminal = child_terminals[-1]
@@ -3773,6 +4141,33 @@ def _mcp_tool_names_from_profile(profile: SubagentCapabilityProfile) -> set[str]
         if isinstance(tool_names, list):
             names.update(str(item) for item in tool_names if isinstance(item, str))
     return names
+
+
+def _same_graph_semantics(
+    before: SubagentGraphState,
+    after: SubagentGraphState,
+) -> bool:
+    """Allow a CAS rebase only when non-graph events advanced the ledger."""
+
+    return replace(before, through_sequence=0) == replace(
+        after,
+        through_sequence=0,
+    )
+
+
+def _read_child_run_events(
+    event_log: EventLog,
+    *,
+    run_id: str,
+) -> tuple[AgentEvent, ...]:
+    raw = event_log.read_raw_run_events(
+        run_id,
+        max_events=16_384,
+        max_payload_bytes=16 * 1024 * 1024,
+    )
+    return tuple(
+        item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in raw
+    )
 
 
 def _mcp_binding_identities(

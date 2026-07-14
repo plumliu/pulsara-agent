@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable
@@ -9,7 +10,6 @@ from typing import TYPE_CHECKING, Callable
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
-    ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
     utc_now,
@@ -31,6 +31,7 @@ from pulsara_agent.primitives.tool_result import (
 )
 from pulsara_agent.runtime.tool_artifacts import ToolResultArtifactService
 from pulsara_agent.tools.base import (
+    PreparedToolTerminalResult,
     ToolCall,
     ToolExecutionResult,
     ToolExecutionSuspended,
@@ -40,6 +41,38 @@ from pulsara_agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from pulsara_agent.capability.descriptor import CapabilityDescriptor
+
+
+def _cancelled_execution_result(
+    call: ToolCall,
+    *,
+    descriptor: CapabilityDescriptor | None,
+) -> ToolExecutionResult:
+    result = ToolExecutionResult(
+        call_id=call.id,
+        tool_name=call.name,
+        status=ToolResultState.INTERRUPTED,
+        output="[TOOL_INTERRUPTED] tool execution cancelled",
+    )
+    if (
+        descriptor is not None
+        and descriptor.result_render_contract.semantics_builder_id
+        != "tool-result-semantics:generic"
+    ):
+        # Terminal-family builders require a typed error carrier when
+        # cancellation happens before the adapter can return its ordinary
+        # executed-domain payload.
+        return replace(
+            result,
+            status=ToolResultState.ERROR,
+            semantics_input=build_adapter_failure_runtime_input(
+                contract=descriptor.result_render_contract,
+                call=call,
+                error_text=result.output,
+                state=ToolResultStateFact.ERROR,
+            ),
+        )
+    return result
 
 
 @dataclass(slots=True)
@@ -118,6 +151,8 @@ class ToolExecutor:
                 )
             else:
                 result = tool.execute(call)
+        except asyncio.CancelledError:
+            result = _cancelled_execution_result(call, descriptor=descriptor)
         except Exception as exc:
             result = ToolExecutionResult(
                 call_id=call.id,
@@ -199,6 +234,8 @@ class ToolExecutor:
                     context_id=context_id,
                     model_call_index=model_call_index,
                 )
+        except asyncio.CancelledError:
+            result = _cancelled_execution_result(call, descriptor=descriptor)
         except Exception as exc:
             result = ToolExecutionResult(
                 call_id=call.id,
@@ -288,20 +325,15 @@ class ToolExecutor:
             },
             semantics=semantics,
         )
-        end_event = ToolResultEndEvent(
-            **event_context.event_fields(),
-            created_at=end_created_at,
+        prepared_terminal = PreparedToolTerminalResult(
             tool_call_id=call.id,
             state=result.status,
-            artifacts=list(artifact_refs),
+            created_at=end_created_at,
+            artifacts=tuple(artifact_refs),
             observation_timing=timing,
-            render_profile=semantics.render_profile,
-            essential_capture_policy=semantics.essential_capture_policy,
-            essential_result=semantics.essential_result,
-            terminal_payload_timing=semantics.terminal_payload_timing,
+            semantics=semantics,
         )
-        self._append(end_event)
-        return result
+        return replace(result, prepared_terminal_result=prepared_terminal)
 
     def _append(self, event):
         if self.record_event is not None:

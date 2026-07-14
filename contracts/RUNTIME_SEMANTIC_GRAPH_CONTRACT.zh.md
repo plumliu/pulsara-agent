@@ -302,3 +302,20 @@ Read side 不得把缺失 runtime semantic projection 当成 run 不存在。权
 - working_context 低信号 run 不更新。
 - working_context summary upsert 按 domain latest 覆盖。
 - working_context projection 带 `do_not_write_back` 且不生成 memory ids。
+
+---
+
+## 10. Subagent graph checkpoint memoization
+
+Subagent graph 的唯一 authority 仍是 canonical EventLog 和 RunStart 冻结的 versioned reducer contract。Checkpoint 只是
+`fold(events[1:k])` 的可丢弃 memoization，不是第二真源。Durable contract 必须精确绑定 reducer ID、version、contract fingerprint、
+supported graph event schema/domain entries 和 canonical state codec。Graph-domain event 不在 RunStart contract 中时 fail closed；明确声明的
+non-graph/checkpoint event 只推进 ledger continuity。
+
+Production selection/replay 只能从 compatible checkpoint 加 bounded contiguous delta 恢复；新 session 只允许 bounded bootstrap。已有
+session 没有 bounded path 时 fail closed，不得隐式回退 sequence-1 full fold。无界 full fold 只属于 closed/quiescent session 上的
+privileged offline doctor。
+
+`SubagentGraphSemanticSourceFact` 只表达 graph semantic source；`SubagentGraphAccelerationFact` 只表达 checkpoint、delta、
+ledger high-water 与 rebase 归因。Checkpoint ID、materialization event、delta range/count、physical sequence 不得进入 selection、snapshot、
+candidate 或 provider payload 的 semantic fingerprint。不同 checkpoint schedule 恢复出相同 graph 时 semantic source 必须相同。

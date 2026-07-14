@@ -2591,7 +2591,10 @@ V1 required保存`subagent:results` selection fact：无pending时为`no_eligibl
 Subagent selection不得由Agent先后读取live graph state再绑定较晚EventLog high-water。唯一允许算法为：先冻结canonical parent
 event slice，再在该slice上运行pure subagent reducer，一次性得到ordered eligible IDs，随后按frozen policy切分selected/omitted。
 `source_from/source_through`必须等于实际reducer slice range。V1在没有durable graph checkpoint时从sequence 1读取；未来若缩窄，
-必须新增可验证checkpoint/range contract，不能只改性能实现。
+必须执行Long-Horizon L0A schema hard cut：selection改为引用`SubagentGraphSemanticSourceFact`，checkpoint ID/high-water与delta range只进入
+独立`SubagentGraphAccelerationFact` operational audit。Semantic source只覆盖graph-domain event count/accumulator、versioned reducer contract与
+最终graph state；物理sequence/high-water、全ledger continuity、checkpoint event/schedule不得进入candidate/snapshot/input semantic fingerprint；
+EventLog + versioned reducer contract仍是唯一authority，不能只改性能实现或读取process-local graph。
 
 authority producer按source冻结：memory必须先找到当前run最新`ProjectionRequestedEvent`，再以
 `projection_id + role + scope`匹配该request之后唯一terminal；terminal为`ProjectionReadyEvent`时才从
@@ -3296,7 +3299,8 @@ ownership规则：
 confirmation state machine外，RuntimeSession必须拥有统一bounded `ContextInputIoService`，负责event-slice range read、
 static-instruction artifact put/confirm、candidate artifact materialization及compaction/subagent context所需的ledger reads：
 
-- service使用RuntimeSession-owned bounded `ThreadPoolExecutor`，不使用无界default executor；每个physical operation以稳定
+- physical worker来自process-owned `auxiliary_io` bounded executor；durable event writer使用独立`critical_ledger` lane，辅助I/O不得占用
+  ledger保留容量。RuntimeSession只拥有operation registry、deadline、cancel/detach与close drain；每个physical operation以稳定
   operation ID登记，caller cancellation/timeout不移除ownership；
 - connect timeout、PostgreSQL `statement_timeout`与transaction deadline必须不超过attempt剩余绝对deadline；
 - `PostgresEventLog.read_range_snapshot(..., deadline_monotonic=...)`在同一repeatable-read transaction中设置local
@@ -3309,6 +3313,8 @@ static-instruction artifact put/confirm、candidate artifact materialization及c
   不得继续破坏性teardown；
 - 每个write/read/confirm都接收剩余deadline，connection必须在worker `finally`中关闭；
 - executor排队也计入deadline，不得让资源耗尽把bounded close变成无界等待。
+- EventLog production bounded readers必须使用带critical-write reserve的process PostgreSQL pool；不得从reader hot path直接
+  `psycopg.connect()`。Context authority使用单个repeatable-read bundle冻结high-water并返回delta/sparse/exact channels；
 - `drain_pending()`同时等待logical resolution、所有physical executor futures真实EXIT与post-terminal verification
   收口；它不会因logical
   stored/absent/conflict就忽略旧write thread。deadline到达时及时抛close blocker，但service/Host resources必须保留；
@@ -4309,6 +4315,13 @@ ToolResultRenderUnit[]
   -> deterministic micro-compaction
   -> re-resolve PreparedToolResultRenderInput for the selected window
 
+PreparedObservationRollupUnit[]
+  -> materialize artifact before pure compiler
+  -> preserve ordered member-set identity and placement anchor
+  -> insert an independent runtime-owned derived observation only after a complete pair group
+  -> never attach cross-call rollup text to a tool-result role or tool_call_id
+  -> bind its carrier fingerprint to the full carrier fact frozen in ResolvedModelTarget v3
+
 ContextCompilePolicyFact
   -> derive dynamic targets from ResolvedModelContextBudgetFact
 ```
@@ -4322,6 +4335,10 @@ ContextCompilePolicyFact
 - current-user naming guess。
 
 这正是本阶段必须先于 Long-Horizon 的原因。
+
+阶段四L0A还会把本章`FrozenStoredEvent`升级为per-event schema-aware raw envelope：schema version/fingerprint/domain identity在当前
+`AgentEvent` union decode之前读取。该升级不改变本章“canonical bytes + owned decode copy”的immutability原则，但会删除以全局schema version和
+current union作为historical read前置条件的实现。
 
 ---
 

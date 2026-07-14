@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+from pulsara_agent.primitives.long_horizon import LongHorizonToolPolicyFact
 from pulsara_agent.primitives.tool_result import CapabilityResultRenderContractFact
 
 
@@ -60,6 +61,7 @@ class CapabilityDescriptor:
     is_read_only: bool
     is_concurrency_safe: bool
     result_render_contract: CapabilityResultRenderContractFact
+    long_horizon_policy: LongHorizonToolPolicyFact
     is_destructive: bool = False
     is_open_world: bool = False
     requires_user_interaction: bool = False
@@ -89,6 +91,7 @@ class CapabilityDescriptor:
             "result_render_contract": self.result_render_contract.model_dump(
                 mode="json"
             ),
+            "long_horizon_policy": self.long_horizon_policy.model_dump(mode="json"),
             "advertise_policy": self.advertise_policy.value,
             "artifact_mode": self.artifact_mode.value,
             "availability": self.availability.value,
@@ -115,6 +118,7 @@ class CapabilityDescriptor:
             "result_render_contract": self.result_render_contract.model_dump(
                 mode="json"
             ),
+            "long_horizon_policy": self.long_horizon_policy.model_dump(mode="json"),
             "approval_policy_hint": self.approval_policy_hint,
             "advertise_policy": self.advertise_policy.value,
             "artifact_mode": self.artifact_mode.value,

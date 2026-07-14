@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.event import (
+    ContextWindowOpenedEvent,
     EventContext,
+    ModelCallControlDispositionResolvedEvent,
+    ModelCallEndEvent,
+    ModelCallStartEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RunStartEvent,
@@ -29,6 +33,10 @@ from pulsara_agent.primitives.context import (
     ToolArgumentsParseErrorCode,
     context_fingerprint,
 )
+from pulsara_agent.primitives.model_call import (
+    ModelCallControlDisposition,
+    sha256_fingerprint,
+)
 from pulsara_agent.primitives.tool_result import (
     ToolResultBodyPolicy,
     ToolResultEnvelopePolicy,
@@ -38,21 +46,26 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultStateFact,
 )
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
-from pulsara_agent.runtime.context_input import (
-    ContextEventSlice,
+from pulsara_agent.runtime.context_input.compiler import lower_transcript_for_context
+from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
+from pulsara_agent.runtime.context_input.policy import resolve_context_compile_policy
+from pulsara_agent.runtime.context_input.render import (
     InMemoryToolResultRenderCache,
-    finalize_context_authority_slice_plan,
-    lower_transcript_for_context,
     prepare_tool_result_render_input,
     render_prepared_tool_result_units,
+)
+from pulsara_agent.runtime.context_input.snapshot import (
+    finalize_context_authority_slice_plan,
+)
+from pulsara_agent.runtime.context_input.transcript import (
     project_context_transcript,
-    resolve_context_compile_policy,
 )
 from pulsara_agent.runtime.state import LoopBudget
 from tests.conftest import (
     run_start_permission_fields,
     tool_result_end_contract_fields,
 )
+from tests.support.model_call import model_call_end_fields, model_call_start_fields
 
 
 def _projection_fixture(
@@ -62,6 +75,11 @@ def _projection_fixture(
     tool_name: str = "lookup",
     result_state: ToolResultState = ToolResultState.ERROR,
     artifacts: tuple[ToolResultArtifactRef, ...] = (),
+    model_outcome: str = "completed",
+    control_disposition: ModelCallControlDisposition | None = (
+        ModelCallControlDisposition.ACCEPTED
+    ),
+    include_tool_result: bool = True,
 ):
     ctx = EventContext(
         run_id="run:transcript-projection",
@@ -69,7 +87,7 @@ def _projection_fixture(
         reply_id="reply:transcript-projection",
     )
     run_start = RunStartEvent(
-        id="run-start:transcript-projection",
+        id="run_start:test:run:transcript-projection",
         **ctx.event_fields(),
         **run_start_permission_fields(
             ctx.run_id,
@@ -79,34 +97,129 @@ def _projection_fixture(
         ),
         user_input_chars=len("inspect the result"),
     )
+    from pulsara_agent.runtime.long_horizon.run_contract import (
+        empty_projection_state_fingerprint,
+        prepare_root_long_horizon_run,
+    )
+
+    prepared_long_horizon = prepare_root_long_horizon_run(
+        runtime_session_id="runtime:test",
+        run_id=ctx.run_id,
+        run_start_event_id=run_start.id,
+        primary_target=run_start.model_target,
+        summarizer_target=run_start.model_target,
+        graph_reducer_contract=run_start.subagent_graph_reducer_contract,
+        source_through_sequence_at_open=0,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    run_start = run_start.model_copy(
+        update={"long_horizon": prepared_long_horizon.contract},
+        deep=True,
+    )
+    window_open = ContextWindowOpenedEvent(
+        id=prepared_long_horizon.contract.initial_window_open_event_id,
+        **ctx.event_fields(),
+        window=prepared_long_horizon.initial_window,
+        opening_batch_id=prepared_long_horizon.opening_batch_id,
+    )
+    model_start = ModelCallStartEvent(
+        **ctx.event_fields(),
+        **model_call_start_fields(),
+    )
+    model_end_payload = model_call_end_fields(resolved_call=model_start.resolved_call)
+    model_end_payload["outcome"] = model_outcome
+    model_end = ModelCallEndEvent(
+        id=model_start.recovery_plan.stable_model_call_end_event_id,
+        **ctx.event_fields(),
+        **model_end_payload,
+    )
+    disposition_fields = {
+        "id": (
+            "model_call_control_disposition:run:transcript-projection:"
+            f"{model_start.resolved_call.resolved_model_call_id}:1"
+        ),
+        **ctx.event_fields(),
+        "resolved_model_call_id": (
+            model_start.resolved_call.resolved_model_call_id
+        ),
+        "model_call_start_event_id": model_start.id,
+        "model_call_end_event_id": model_end.id,
+        "model_call_index": 1,
+        "source_result_fingerprint": "sha256:" + "e" * 64,
+        "run_execution_activation": (
+            model_start.recovery_plan.run_execution_activation
+        ),
+        "disposition": control_disposition,
+        "termination_intent": None,
+        "recovery_reason_code": (
+            "process_restarted_before_control_resolution"
+            if control_disposition
+            is ModelCallControlDisposition.SUPPRESSED_BY_RECOVERY
+            else None
+        ),
+    }
+    disposition = None
+    if control_disposition is not None:
+        disposition_candidate = (
+            ModelCallControlDispositionResolvedEvent.model_construct(
+                **disposition_fields,
+                event_fingerprint="pending",
+            )
+        )
+        disposition_payload = disposition_candidate.model_dump(
+            mode="json", exclude={"event_fingerprint", "sequence"}
+        )
+        disposition = ModelCallControlDispositionResolvedEvent(
+            **disposition_payload,
+            event_fingerprint=sha256_fingerprint(
+                "model-call-control-disposition-event:v1", disposition_payload
+            ),
+        )
     log = InMemoryEventLog()
-    stored = log.extend(
-        (
-            run_start,
-            ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-            ToolCallStartEvent(
+    events = [
+        run_start,
+        window_open,
+        ReplyStartEvent(
+                id=model_start.recovery_plan.reply_start_event_id,
+                **ctx.event_fields(),
+                name="assistant",
+            ),
+        model_start,
+        ToolCallStartEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 tool_call_name=tool_name,
             ),
-            ToolCallDeltaEvent(
+        ToolCallDeltaEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 delta=raw_arguments_json,
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:projection"),
-            ReplyEndEvent(**ctx.event_fields()),
-            ToolResultStartEvent(
+        ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:projection"),
+        model_end,
+        ReplyEndEvent(
+                id=model_start.recovery_plan.stable_reply_end_event_id,
+                **ctx.event_fields(),
+                model_terminal_outcome=model_outcome,
+            ),
+    ]
+    if disposition is not None:
+        events.append(disposition)
+    if include_tool_result:
+        events.extend(
+            (
+                ToolResultStartEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 tool_call_name=tool_name,
             ),
-            ToolResultTextDeltaEvent(
+                ToolResultTextDeltaEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 delta=result_text,
             ),
-            ToolResultEndEvent(
+                ToolResultEndEvent(
                 **ctx.event_fields(),
                 **tool_result_end_contract_fields(
                     "call:projection",
@@ -117,9 +230,10 @@ def _projection_fixture(
                 state=result_state,
                 artifacts=list(artifacts),
             ),
+            )
         )
-    )
-    read = log.read_range_snapshot(minimum_sequence=1)
+    stored = log.extend(tuple(events))
+    read = log.read_raw_range_snapshot(minimum_sequence=1)
     event_slice = ContextEventSlice.from_read_snapshot(
         runtime_session_id="runtime:test",
         minimum_sequence=1,
@@ -146,6 +260,7 @@ def _lowered_messages(normalized, rendered):
     return lower_transcript_for_context(
         transcript=normalized.transcript,
         rendered_tool_results=rendered,
+        prepared_rollups=(),
     )
 
 
@@ -179,6 +294,34 @@ def test_transcript_projector_preserves_malformed_arguments_and_pairing() -> Non
     assert unit.call_position < unit.result_position
 
 
+@pytest.mark.parametrize(
+    ("model_outcome", "control_disposition"),
+    (
+        ("provider_error", None),
+        ("completed", ModelCallControlDisposition.SUPPRESSED_BY_RECOVERY),
+    ),
+)
+def test_non_accepted_closed_tool_call_is_audit_only(
+    model_outcome: str,
+    control_disposition: ModelCallControlDisposition | None,
+) -> None:
+    snapshot, event_slice = _projection_fixture(
+        raw_arguments_json='{"query":"never execute"}',
+        model_outcome=model_outcome,
+        control_disposition=control_disposition,
+        include_tool_result=False,
+    )
+
+    normalized = project_context_transcript(
+        snapshot=snapshot,
+        event_slice=event_slice,
+    )
+
+    assert [message.role for message in normalized.transcript.messages] == ["user"]
+    assert normalized.transcript.tool_pairs == ()
+    assert normalized.tool_result_units == ()
+
+
 def test_transcript_projector_is_deterministic_and_returns_immutable_facts() -> None:
     snapshot, event_slice = _projection_fixture(raw_arguments_json='{"query":"x"}')
 
@@ -194,12 +337,10 @@ def test_transcript_projector_is_deterministic_and_returns_immutable_facts() -> 
     )
 
 
-def test_tool_result_render_preparation_freezes_order_and_latest_reserve() -> None:
+def test_tool_result_render_preparation_freezes_order_and_protection() -> None:
     snapshot, event_slice = _projection_fixture(raw_arguments_json='{"query":"x"}')
     normalized = project_context_transcript(snapshot=snapshot, event_slice=event_slice)
-    policy = resolve_context_compile_policy(
-        LoopBudget(latest_tool_result_reserved_chars=128)
-    )
+    policy = resolve_context_compile_policy(LoopBudget())
 
     prepared = prepare_tool_result_render_input(
         units=normalized.tool_result_units,
@@ -209,8 +350,7 @@ def test_tool_result_render_preparation_freezes_order_and_latest_reserve() -> No
 
     unit_id = normalized.tool_result_units[0].unit_id
     assert prepared.resolved_policy.ordered_unit_ids == (unit_id,)
-    assert prepared.resolved_policy.latest_tail_unit_ids == (unit_id,)
-    assert prepared.resolved_policy.latest_reserved_unit_ids == (unit_id,)
+    assert prepared.resolved_policy.protected_unit_ids == (unit_id,)
     assert prepared.cache_hints == ()
 
 
@@ -275,7 +415,7 @@ def test_generic_terminal_looking_json_never_creates_terminal_semantics() -> Non
     assert body in _lowered_messages(normalized, rendered).full_messages[-1].content[0]
 
 
-def test_typed_renderer_applies_resolved_aggregate_and_per_tool_budgets() -> None:
+def test_typed_renderer_applies_per_tool_and_per_message_safety_caps() -> None:
     body = "x" * 5_000
     snapshot, event_slice = _projection_fixture(
         raw_arguments_json='{"query":"large"}',
@@ -284,15 +424,9 @@ def test_typed_renderer_applies_resolved_aggregate_and_per_tool_budgets() -> Non
     normalized = project_context_transcript(snapshot=snapshot, event_slice=event_slice)
     policy = resolve_context_compile_policy(
         LoopBudget(
-            tool_result_context_chars=400,
-            tool_result_body_context_chars=80,
-            tool_result_envelope_context_chars=320,
-            prior_tool_result_context_chars=80,
-            current_tail_tool_result_context_chars=80,
-            legacy_tool_result_context_chars=80,
             tool_result_per_tool_cap_chars=80,
             tool_result_per_message_cap_chars=80,
-            latest_tool_result_reserved_chars=0,
+            tool_result_per_envelope_cap_chars=320,
         )
     )
     prepared = prepare_tool_result_render_input(
@@ -309,7 +443,7 @@ def test_typed_renderer_applies_resolved_aggregate_and_per_tool_budgets() -> Non
     decision = rendered.canonical_decisions[0]
     assert decision.visible_body_chars <= 80
     assert decision.body_policy is ToolResultBodyPolicy.CLIPPED
-    assert decision.rendered_total_chars <= 400
+    assert decision.rendered_envelope_chars <= 320
     assert decision.observation_timing_policy == "full"
     assert decision.rendered_tool_observation is not None
     assert (
@@ -330,16 +464,10 @@ def test_low_fidelity_omitted_result_is_never_admitted_to_render_cache() -> None
     normalized = project_context_transcript(snapshot=snapshot, event_slice=event_slice)
     policy = resolve_context_compile_policy(
         LoopBudget(
-            tool_result_context_chars=240,
-            tool_result_body_context_chars=0,
-            tool_result_envelope_context_chars=240,
-            prior_tool_result_context_chars=0,
-            current_tail_tool_result_context_chars=0,
-            legacy_tool_result_context_chars=0,
-            tool_result_per_tool_cap_chars=0,
-            tool_result_per_message_cap_chars=0,
-            tool_result_per_envelope_cap_chars=120,
-            latest_tool_result_reserved_chars=0,
+            tool_result_per_tool_cap_chars=1,
+            tool_result_per_message_cap_chars=1,
+            tool_result_per_envelope_cap_chars=240,
+            minimum_essential_envelope_chars=64,
         )
     )
     prepared = prepare_tool_result_render_input(
@@ -636,16 +764,10 @@ def test_compact_artifact_envelope_preserves_primary_text_artifact_identity(
     normalized = project_context_transcript(snapshot=snapshot, event_slice=event_slice)
     policy = resolve_context_compile_policy(
         LoopBudget(
-            tool_result_context_chars=2_000,
-            tool_result_body_context_chars=0,
-            tool_result_envelope_context_chars=2_000,
-            prior_tool_result_context_chars=0,
-            current_tail_tool_result_context_chars=0,
-            legacy_tool_result_context_chars=0,
-            tool_result_per_tool_cap_chars=0,
-            tool_result_per_message_cap_chars=0,
+            tool_result_per_tool_cap_chars=1,
+            tool_result_per_message_cap_chars=1,
             tool_result_per_envelope_cap_chars=envelope_cap,
-            latest_tool_result_reserved_chars=0,
+            minimum_essential_envelope_chars=64,
         )
     )
     prepared = prepare_tool_result_render_input(
@@ -686,16 +808,10 @@ def test_binary_only_artifact_is_not_promoted_to_primary_artifact() -> None:
     normalized = project_context_transcript(snapshot=snapshot, event_slice=event_slice)
     policy = resolve_context_compile_policy(
         LoopBudget(
-            tool_result_context_chars=300,
-            tool_result_body_context_chars=0,
-            tool_result_envelope_context_chars=300,
-            prior_tool_result_context_chars=0,
-            current_tail_tool_result_context_chars=0,
-            legacy_tool_result_context_chars=0,
-            tool_result_per_tool_cap_chars=0,
-            tool_result_per_message_cap_chars=0,
-            tool_result_per_envelope_cap_chars=120,
-            latest_tool_result_reserved_chars=0,
+            tool_result_per_tool_cap_chars=1,
+            tool_result_per_message_cap_chars=1,
+            tool_result_per_envelope_cap_chars=160,
+            minimum_essential_envelope_chars=64,
         )
     )
     prepared = prepare_tool_result_render_input(
@@ -742,16 +858,10 @@ def test_artifact_preview_dropped_by_envelope_budget_is_not_counted_visible() ->
     normalized = project_context_transcript(snapshot=snapshot, event_slice=event_slice)
     policy = resolve_context_compile_policy(
         LoopBudget(
-            tool_result_context_chars=8_200,
-            tool_result_body_context_chars=8_000,
-            tool_result_envelope_context_chars=200,
-            prior_tool_result_context_chars=8_000,
-            current_tail_tool_result_context_chars=8_000,
-            legacy_tool_result_context_chars=8_000,
             tool_result_per_tool_cap_chars=8_000,
             tool_result_per_message_cap_chars=8_000,
-            tool_result_per_envelope_cap_chars=80,
-            latest_tool_result_reserved_chars=0,
+            tool_result_per_envelope_cap_chars=256,
+            minimum_essential_envelope_chars=64,
         )
     )
     prepared = prepare_tool_result_render_input(

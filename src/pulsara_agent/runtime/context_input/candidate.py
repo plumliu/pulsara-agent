@@ -6,7 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import RLock
-from typing import Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from pulsara_agent.event import (
     EventType,
@@ -35,7 +35,25 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
 from pulsara_agent.primitives.model_call import sha256_fingerprint
-from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
+from pulsara_agent.primitives.long_horizon import (
+    LongHorizonRolloutStatusCandidateFact,
+    RolloutStatusHintPolicyFact,
+    SubagentGraphSemanticSourceFact,
+)
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
+from pulsara_agent.runtime.context_input.event_slice import (
+    ContextEventAuthorityView,
+    ContextEventSlice,
+    FrozenStoredEvent,
+)
+from pulsara_agent.runtime.long_horizon.status import (
+    derive_rollout_status_candidate,
+    render_rollout_status_candidate,
+    rollout_status_candidate_is_required,
+)
+
+if TYPE_CHECKING:
+    from pulsara_agent.runtime.subagent.facts import SubagentGraphState
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,11 +207,17 @@ def build_context_candidate_authorities(
     projections: tuple,
     capability_snapshot: CapabilityExposureSnapshotFact,
     plan_snapshot,
-    event_slice: ContextEventSlice,
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
+    rollout_event_slice: ContextEventSlice | ContextEventAuthorityView,
+    rollout_account_id: str,
+    rollout_status_policy: RolloutStatusHintPolicyFact,
+    rollout_status_override: LongHorizonRolloutStatusCandidateFact | None = None,
+    derive_rollout_status_from_events: bool = True,
     run_id: str,
     runtime_environment: ContextRuntimeEnvironmentFact,
     compile_timing: ContextCompileTimingFact,
     source_selections: tuple[ContextCandidateSourceSelectionFact, ...],
+    external_authority_events: Mapping[str, FrozenStoredEvent] | None = None,
 ) -> tuple[ContextCandidateAuthorityFact, ...]:
     """Freeze the only candidate bytes/attribution accepted by the compiler."""
 
@@ -202,6 +226,7 @@ def build_context_candidate_authorities(
     selections_by_source = {
         item.source_instance_id: item for item in source_selections
     }
+    authority_events = external_authority_events or {}
     source_items = list(sources.candidate_texts())
     source_items.append(_ContextCandidateSourceText("runtime_context", ""))
     plan_revision_ref = _latest_pending_plan_revision_ref(
@@ -220,24 +245,48 @@ def build_context_candidate_authorities(
                 "",
             )
         )
+    rollout_status = (
+        derive_rollout_status_candidate(
+            event_slice=rollout_event_slice,
+            account_id=rollout_account_id,
+            policy=rollout_status_policy,
+        )
+        if derive_rollout_status_from_events
+        else rollout_status_override
+    )
+    if rollout_status is not None:
+        source_items.append(
+            _ContextCandidateSourceText(
+                "rollout:status",
+                render_rollout_status_candidate(rollout_status),
+            )
+        )
     authorities: list[ContextCandidateAuthorityFact] = []
     for source in source_items:
         spec = _source_spec(source.component_id)
         source_kind = spec[0]
-        source_refs, artifact_ids, dependency = _source_attribution_parts(
-            component_id=source.component_id,
-            projection_kind=spec[6],
-            projections=projections_by_kind,
-            static_by_source=static_by_source,
-            plan_snapshot=plan_snapshot,
-            plan_revision_ref=plan_revision_ref,
-            runtime_environment=runtime_environment,
-        )
+        if source.component_id == "rollout:status":
+            if rollout_status is None:  # pragma: no cover - source is derived above
+                raise ValueError("rollout status source lacks its derived fact")
+            source_refs = rollout_status.source_event_refs
+            artifact_ids = ()
+            dependency = rollout_status.semantic_fingerprint
+        else:
+            source_refs, artifact_ids, dependency = _source_attribution_parts(
+                component_id=source.component_id,
+                projection_kind=spec[6],
+                projections=projections_by_kind,
+                static_by_source=static_by_source,
+                plan_snapshot=plan_snapshot,
+                plan_revision_ref=plan_revision_ref,
+                runtime_environment=runtime_environment,
+            )
         text = _canonical_authority_text(
             source=source,
             source_kind=source_kind,
             source_refs=source_refs,
             event_slice=event_slice,
+            external_authority_events=authority_events,
             runtime_environment=runtime_environment,
             compile_timing=compile_timing,
             source_selection=selections_by_source.get(source.component_id),
@@ -279,6 +328,7 @@ def build_context_candidate_authorities(
         stability = spec[4] if dependency is not None else "ephemeral"
         timing = _source_timing_from_authority(
             event_slice=event_slice,
+            external_authority_events=authority_events,
             runtime_environment=runtime_environment,
             source_refs=source_refs,
             component_id=source.component_id,
@@ -290,7 +340,12 @@ def build_context_candidate_authorities(
             "source_artifact_ids": artifact_ids,
             "channel": spec[1],
             "priority": spec[2],
-            "required": spec[3],
+            "required": (
+                rollout_status_candidate_is_required(rollout_status)
+                if source.component_id == "rollout:status"
+                and rollout_status is not None
+                else spec[3]
+            ),
             "stability": stability,
             "lowering_kind": spec[5],
             "lifecycle_dependency_fingerprint": dependency,
@@ -314,23 +369,25 @@ def build_context_candidate_authorities(
 
 def build_context_candidate_source_selections(
     *,
-    event_slice: ContextEventSlice,
+    subagent_graph: "SubagentGraphState",
+    semantic_source: SubagentGraphSemanticSourceFact,
     policy: ContextCandidateCollectionPolicyFact,
 ) -> tuple[ContextCandidateSourceSelectionFact, ...]:
-    # Local import keeps RuntimeSession -> context_input initialization acyclic.
-    from pulsara_agent.runtime.subagent.reducer import (
-        fold_subagent_graph,
-        pending_subagent_result_ids,
+    from pulsara_agent.runtime.long_horizon.reducer_contract import (
+        graph_state_semantic_fingerprint,
     )
+    from pulsara_agent.runtime.subagent.reducer import pending_subagent_result_ids
 
-    graph = fold_subagent_graph(
-        frozen.decode_owned() for frozen in event_slice.events
-    )
-    if not graph.consistent or graph.through_sequence != event_slice.through_sequence:
+    if not subagent_graph.consistent:
         raise ValueError(
-            "candidate source selection requires a consistent canonical graph slice"
+            "candidate source selection requires a consistent restored graph"
         )
-    eligible_ids = pending_subagent_result_ids(graph)
+    if (
+        semantic_source.graph_state_semantic_fingerprint
+        != graph_state_semantic_fingerprint(subagent_graph)
+    ):
+        raise ValueError("candidate source selection semantic graph mismatch")
+    eligible_ids = pending_subagent_result_ids(subagent_graph)
     max_results = policy.max_subagent_results_per_parent_compile
     selected = eligible_ids[:max_results] if max_results > 0 else ()
     omitted = len(eligible_ids) - len(selected)
@@ -347,8 +404,7 @@ def build_context_candidate_source_selections(
         "omitted_source_count": omitted,
         "reason_code": reason_code,
         "policy_fingerprint": policy.policy_fingerprint,
-        "source_from_sequence": event_slice.from_sequence,
-        "source_through_sequence": event_slice.through_sequence,
+        "subagent_graph_semantic_source": semantic_source,
     }
     return (
         ContextCandidateSourceSelectionFact(
@@ -696,6 +752,16 @@ def _validate_candidate_source_authority(
             raise ValueError("plan candidate differs from plan snapshot authority")
         return
 
+    if authority.source_kind == "rollout_status":
+        if (
+            authority.source_instance_id != "rollout:status"
+            or not authority.source_fact_refs
+            or authority.source_artifact_ids
+            or authority.lifecycle_dependency_fingerprint is None
+        ):
+            raise ValueError("rollout status candidate authority mismatch")
+        return
+
     if authority.source_instance_id == "memory:hook_prompt":
         static = next(
             (
@@ -928,6 +994,16 @@ def _source_spec(component_id: str):
             "leading_user_context",
             None,
         )
+    if component_id == "rollout:status":
+        return (
+            "rollout_status",
+            ContextChannelFact.TRAILING_STATUS,
+            90,
+            False,
+            "step",
+            "trailing_status",
+            None,
+        )
     return (
         "runtime_context",
         ContextChannelFact.LEADING_USER,
@@ -1002,6 +1078,7 @@ def _canonical_authority_text(
     source_kind: str,
     source_refs,
     event_slice: ContextEventSlice,
+    external_authority_events: Mapping[str, FrozenStoredEvent],
     runtime_environment: ContextRuntimeEnvironmentFact,
     compile_timing: ContextCompileTimingFact,
     source_selection: ContextCandidateSourceSelectionFact | None,
@@ -1009,13 +1086,20 @@ def _canonical_authority_text(
     if source_kind == "memory_projection":
         if len(source_refs) != 1:
             raise ValueError("memory candidate requires one canonical projection event")
-        event = event_slice.event_by_id(source_refs[0].event_id).decode_owned()
+        event = event_slice.event_by_id(source_refs[0].event_id).decode_owned(
+            DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if not isinstance(event, ProjectionReadyEvent):
             raise ValueError("memory candidate authority is not ProjectionReadyEvent")
         return _memory_projection_text_from_event(event)
     if source_kind == "subagent_results":
         events = tuple(
-            event_slice.event_by_id(ref.event_id).decode_owned() for ref in source_refs
+            _authority_event_by_id(
+                event_slice=event_slice,
+                external_authority_events=external_authority_events,
+                event_id=ref.event_id,
+            ).decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for ref in source_refs
         )
         if not events or not all(
             isinstance(event, SubagentRunCompletedEvent) for event in events
@@ -1037,7 +1121,9 @@ def _canonical_authority_text(
     if source.component_id == "plan:revision":
         if len(source_refs) != 1:
             raise ValueError("plan revision candidate requires one decision event")
-        event = event_slice.event_by_id(source_refs[0].event_id).decode_owned()
+        event = event_slice.event_by_id(source_refs[0].event_id).decode_owned(
+            DEFAULT_EVENT_SCHEMA_REGISTRY
+        )
         if not isinstance(event, PlanExitResolvedEvent) or event.decision != "revise":
             raise ValueError("plan revision authority is not a revise decision")
         return render_plan_revision_instruction(event.user_feedback)
@@ -1105,7 +1191,10 @@ def _latest_pending_plan_revision_ref(
         (frozen, event)
         for frozen in event_slice.events
         if frozen.event_type == EventType.PLAN_EXIT_RESOLVED
-        if isinstance((event := frozen.decode_owned()), PlanExitResolvedEvent)
+        if isinstance(
+            (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            PlanExitResolvedEvent,
+        )
         and event.run_id == run_id
     ]
     if not resolutions or resolutions[-1][1].decision != "revise":
@@ -1150,6 +1239,7 @@ def _subagent_results_text_from_events(events) -> str:
 def _source_timing_from_authority(
     *,
     event_slice: ContextEventSlice,
+    external_authority_events: Mapping[str, FrozenStoredEvent],
     runtime_environment: ContextRuntimeEnvironmentFact,
     source_refs,
     component_id: str,
@@ -1162,12 +1252,23 @@ def _source_timing_from_authority(
         "memory:hook_prompt"
     ):
         freshness = "cached_snapshot"
-    elif component_id.startswith("runtime_context") or component_id.startswith("plan:"):
+    elif (
+        component_id.startswith("runtime_context")
+        or component_id.startswith("plan:")
+        or component_id == "rollout:status"
+    ):
         freshness = "current_turn"
     else:
         freshness = "unknown"
     if source_refs:
-        frozen = tuple(event_slice.event_by_id(ref.event_id) for ref in source_refs)
+        frozen = tuple(
+            _authority_event_by_id(
+                event_slice=event_slice,
+                external_authority_events=external_authority_events,
+                event_id=ref.event_id,
+            )
+            for ref in source_refs
+        )
         if any(
             ref.runtime_session_id != event_slice.runtime_session_id
             or ref.sequence != event.sequence
@@ -1202,6 +1303,20 @@ def _source_timing_from_authority(
         **payload,
         timing_fingerprint=context_fingerprint("context-source-timing:v1", payload),
     )
+
+
+def _authority_event_by_id(
+    *,
+    event_slice: ContextEventSlice,
+    external_authority_events: Mapping[str, FrozenStoredEvent],
+    event_id: str,
+) -> FrozenStoredEvent:
+    external = external_authority_events.get(event_id)
+    if external is not None:
+        if external.runtime_session_id != event_slice.runtime_session_id:
+            raise ValueError("external candidate authority owner mismatch")
+        return external
+    return event_slice.event_by_id(event_id)
 
 
 def _collection_decision(

@@ -560,7 +560,7 @@ async def _emit_timeline_events(runtime_session, ctx: EventContext, text: str) -
     await runtime_session.emit(
         TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta=text)
     )
-    await runtime_session.emit(ReplyEndEvent(**ctx.event_fields()))
+    await runtime_session.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
 
 def _event_context(label: str) -> EventContext:

@@ -20,6 +20,7 @@ from pulsara_agent.primitives.run_boundary import (
     InteractionResumeBoundaryFact,
     NewRunBoundaryFact,
     PlanWorkflowStateFact,
+    RunExecutionActivationFact,
 )
 from pulsara_agent.primitives.run_entry import (
     CurrentUserMessageFact,
@@ -27,11 +28,19 @@ from pulsara_agent.primitives.run_entry import (
     SubagentRunEntryFact,
 )
 from pulsara_agent.primitives.context import ContextEventReferenceFact
+from pulsara_agent.primitives.long_horizon import (
+    ChildRolloutSubaccountFact,
+    RunLongHorizonContractFact,
+)
 from pulsara_agent.primitives.mcp import McpInstallationReferenceFact
 from pulsara_agent.runtime.state import LoopState
 from pulsara_agent.runtime.permission_snapshot import RunPermissionSnapshot
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    PreparedLongHorizonRunFacts,
+)
 
 if TYPE_CHECKING:
+    from pulsara_agent.llm.control import RunModelCallControlOwner
     from pulsara_agent.runtime.agent import AgentRuntime
 
 
@@ -52,6 +61,7 @@ class RunWorkingSet:
     run_start_event_id: str
     run_start_sequence: int
     run_model_target: ResolvedModelTarget
+    long_horizon_contract: RunLongHorizonContractFact
     permission_snapshot: RunPermissionSnapshot
     plan_snapshot: PlanWorkflowStateFact
     capability_resolve_basis: CapabilityResolveBasis
@@ -65,6 +75,9 @@ class RunWorkingSet:
     latest_committed_resume_boundary: InteractionResumeBoundaryFact | None
     latest_committed_resume_boundary_ref: ContextEventReferenceFact | None
     latest_validated_suspended_state_token_fingerprint: str | None = None
+    run_execution_activation: RunExecutionActivationFact | None = None
+    process_segment_id: str | None = None
+    model_call_control_owner: RunModelCallControlOwner | None = None
 
     def install_initial_exposure(
         self,
@@ -129,6 +142,7 @@ class AgentRunDraft:
     capability_basis: CapabilityResolveBasisFact
     frozen_execution_surface: FrozenCapabilityExecutionSurface
     prior_messages: tuple[Msg, ...]
+    long_horizon: PreparedLongHorizonRunFacts
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +175,8 @@ class PreparedSubagentRunEntry:
     frozen_execution_surface: FrozenCapabilityExecutionSurface
     run_start_event_id: str
     terminal_run_end_event_id: str
+    long_horizon: PreparedLongHorizonRunFacts
+    child_rollout_subaccount: ChildRolloutSubaccountFact
 
 
 CommittedRunEntry: TypeAlias = CommittedHostRunEntry | CommittedSubagentRunEntry
@@ -182,6 +198,7 @@ def install_run_working_set(
         run_start_event_id=committed.run_start_event.id,
         run_start_sequence=committed.run_start_sequence,
         run_model_target=state.run_model_target,
+        long_horizon_contract=committed.run_start_event.long_horizon,
         permission_snapshot=state.permission_snapshot,
         plan_snapshot=plan_snapshot,
         capability_resolve_basis=capability_resolve_basis,
@@ -212,6 +229,8 @@ async def prepare_agent_run_draft(
     frozen_execution_surface: FrozenCapabilityExecutionSurface,
     new_run_boundary: NewRunBoundaryFact | None,
     subagent_run_entry: SubagentRunEntryFact | None,
+    long_horizon: PreparedLongHorizonRunFacts,
+    child_rollout_subaccount: ChildRolloutSubaccountFact | None,
     prior_messages: list[Msg] | None = None,
 ) -> AgentRunDraft:
     """Freeze one RunStart candidate without granting AgentRuntime commit ownership."""
@@ -257,6 +276,11 @@ async def prepare_agent_run_draft(
         user_input_chars=len(current_user_message.text),
         **permission_snapshot.to_event_fields(),
         model_target=run_model_target.fact,
+        subagent_graph_reducer_contract=(
+            agent.runtime_session.subagent_graph_checkpoint_service.reducer_binding.contract
+        ),
+        long_horizon=long_horizon.contract,
+        child_rollout_subaccount=child_rollout_subaccount,
         mcp_installation_id=agent.runtime_session.mcp_installation_id,
         mcp_installation_owner_runtime_session_id=(
             agent.runtime_session.mcp_installation_owner_runtime_session_id
@@ -284,6 +308,7 @@ async def prepare_agent_run_draft(
         prior_messages=tuple(
             message.model_copy(deep=True) for message in (prior_messages or ())
         ),
+        long_horizon=long_horizon,
     )
 
 

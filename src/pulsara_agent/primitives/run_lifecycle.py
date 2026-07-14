@@ -7,7 +7,6 @@ from enum import StrEnum
 
 class RunStopReason(StrEnum):
     FINAL = "final"
-    MAX_TURNS = "max_turns"
     MODEL_ERROR = "model_error"
     TOOL_ERROR_BUDGET = "tool_error_budget"
     PLAN_INTERACTION_BUDGET = "plan_interaction_budget"
@@ -19,6 +18,8 @@ class RunStopReason(StrEnum):
     INTERACTION_ROUTER_ERROR = "interaction_router_error"
     SUBAGENT_PENDING_UNSUPPORTED = "subagent_pending_unsupported"
     RUNTIME_EXECUTION_ERROR = "runtime_execution_error"
+    ROLLOUT_EXHAUSTED = "rollout_exhausted"
+    EMERGENCY_HARD_STOP = "emergency_hard_stop"
 
 
 class RunTerminalizationKind(StrEnum):
@@ -31,7 +32,6 @@ class RunTerminalizationKind(StrEnum):
 
 FAILURE_STOP_REASONS = frozenset(
     {
-        RunStopReason.MAX_TURNS,
         RunStopReason.MODEL_ERROR,
         RunStopReason.TOOL_ERROR_BUDGET,
         RunStopReason.PLAN_INTERACTION_BUDGET,
@@ -41,6 +41,8 @@ FAILURE_STOP_REASONS = frozenset(
         RunStopReason.INTERACTION_ROUTER_ERROR,
         RunStopReason.SUBAGENT_PENDING_UNSUPPORTED,
         RunStopReason.RUNTIME_EXECUTION_ERROR,
+        RunStopReason.ROLLOUT_EXHAUSTED,
+        RunStopReason.EMERGENCY_HARD_STOP,
     }
 )
 

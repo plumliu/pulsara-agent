@@ -244,6 +244,34 @@ class InMemoryArchiveStore:
             raise ValueError(f"Artifact {blob_id!r} is not a binary artifact")
         return blob.binary_content
 
+    def delete_if_identity(
+        self,
+        blob_id: str,
+        *,
+        session_id: str,
+        digest: str,
+        media_type: str,
+        semantic_metadata_fingerprint: str,
+    ) -> bool:
+        """Privileged maintenance deletion guarded by immutable identity."""
+
+        with self._lock:
+            existing = self.blobs.get(blob_id)
+            if existing is None:
+                return False
+            if (
+                existing.session_id != session_id
+                or existing.digest != digest
+                or existing.media_type != media_type
+                or existing.metadata.get("semantic_metadata_fingerprint")
+                != semantic_metadata_fingerprint
+            ):
+                raise ArtifactContentConflict(
+                    f"artifact {blob_id!r} maintenance identity mismatch"
+                )
+            del self.blobs[blob_id]
+            return True
+
     def _blob(self, blob_id: str, *, session_id: str | None) -> ArchiveBlob:
         blob = self.blobs[blob_id]
         if session_id is not None and blob.session_id != session_id:

@@ -445,3 +445,18 @@ Plan workflow 工具：
 - model-facing schema；
 - 本文件或对应专门契约；
 - 相关 tests。
+
+---
+
+## 15. Long-horizon tool classification
+
+所有 built-in descriptor 必须声明 versioned long-horizon action contract 和整数 tool cost units。固定工具可直接使用 descriptor 默认
+classification；terminal 与 terminal_process 必须按真实 action/arguments 通过共享 classifier 解析，不能仅凭工具名把 search、write、
+verification、process control 混成一类。
+
+finalization 阶段必须继续允许 `artifact_read` 等 evidence hydration、用户明确要求的 bounded synthesis mutation，以及验证已产出结果所需的
+bounded verification；新的开放式搜索、未知 terminal action 与 external action 必须返回 typed deny。deny 不得消耗 execution-side tool
+reservation，且至少一份 final agent-call reserve 不得因 deny 被误扣。
+
+旧 `max_turns=50`、`max_tool_calls=64` 不是正常预算权威。紧急 model/tool counters 只作为 circuit breaker，并在 Inspector 中与正常
+`exhausted` 明确区分。

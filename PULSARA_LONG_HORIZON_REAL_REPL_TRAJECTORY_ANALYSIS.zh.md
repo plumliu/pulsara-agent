@@ -4,6 +4,7 @@
 > 记录日期：2026-07-12
 > 关联路线：`PULSARA_NEXT_FIVE_HARD_CUT_STAGES_PLAN.zh.md`
 > 关联研究：`PULSARA_LONG_HORIZON_BUDGET_PRIOR_ART_RESEARCH.zh.md`
+> 生产规格：`PULSARA_LONG_HORIZON_CONTEXT_WINDOWS_HARD_CUT_IMPLEMENTATION.zh.md`
 
 ## 1. 结论摘要
 
@@ -26,7 +27,7 @@ tool_result_total_context_chars = 36,000
 
 因此，本轨迹应作为阶段四 **Long-Horizon Context Windows** 的核心 real dogfood。正确目标不是简单
 提高 36K 常量，而是让同一 user run 能在 bounded model-visible windows 之间持续推进，并在预算压力
-出现前完成 evidence rollup、current-run thinning、progress restriction 和 finalization。
+出现前完成 evidence rollup、current-run thinning、rollout phase收窄和 finalization。
 
 ## 2. 用户可见轨迹
 
@@ -149,7 +150,7 @@ Runtime 能观测到压力逐步增长，但目前没有把这些信号转换成
 这说明轨迹同时包含两类问题：
 
 1. **Runtime premature hard stop**：固定 36K tool-result cap 与 resolved model budget 脱节。
-2. **Low-value exploration drift**：缺少 evidence progress guard、rollout phase 与 finalization reserve。
+2. **Exploration drift**：缺少累计rollout phase、静态可行的finalization reserve与中性运行状态反馈。
 
 不应将问题单独归因为模型能力。模型确实探索过度，但 Runtime 既没有提供逐步收窄机制，又在真实
 context window 尚有充足空间时强制终止了任务。
@@ -261,31 +262,28 @@ sequence/window 的 summary，并在同一 run 内打开下一 window。
 ### 7.5 L5：Rollout budget and finalization reserve
 
 Runtime 应在探索接近预算边界前保留至少一次完整 synthesis/write/final-answer call。进入
-`finalization_only` 后应禁止新的低价值搜索，但允许：
+`finalization_only` 后应按action class禁止新的evidence acquisition/external action，但允许：
 
 - 读取已经获得的 artifact；
 - 写入目标文件；
 - 验证文件存在与关键内容；
 - 返回 bounded final answer。
 
-### 7.6 L6：Evidence progress guard
+### 7.6 最终设计决定：不实施通用progress guard
 
-需要区分：
+本轨迹能说明模型发生了重复探索，但不能证明通用runtime能够可靠判断“新证据”“低增益”或“是否改变结论”。阶段四因此不实现
+novelty ontology、progress reducer、3/5/7阈值或基于无新增证据的自动deny。
 
-- tool call 是否不同；
-- query 是否不同；
-- 返回 evidence 是否真正新增；
-- 新 evidence 是否改变任务结论或下一步。
-
-连续多次调用只产生重复或低增益 evidence 时，应依次进入 warning、restricted exploration 和
-finalization，而不是继续消耗 tool/model rounds。
+V1只从typed tool name/arguments/terminal outcome派生bounded exact recurrence，并在中性status hint中报告phase、settled
+calls、remaining allowance和recurrence次数。该hint不命令模型停止、继续或选择下一步，也不改变phase/gate。最终收口由L5累计
+rollout budget与finalization reserve保证。
 
 ## 8. 阶段四核心 dogfood 规格
 
 建议将本轨迹冻结为 Long-Horizon 的 required real dogfood：
 
 > 在 resolved model input budget 仍有充足空间时，连续 20 次以上 MCP 文档读取不得因固定 36K
-> tool-result cap 终止。Runtime 必须在同一个 user run 内完成 projection thinning、evidence progress
+> tool-result cap 终止。Runtime 必须在同一个 user run 内完成 projection thinning、rollout phase
 > restriction、final synthesis 和文件写入，不需要用户额外发送 `hello？`。
 
 最低验收条件：
@@ -296,7 +294,7 @@ finalization，而不是继续消耗 tool/model rounds。
 4. Tool-call/tool-result pairing 在所有 window 中保持合法。
 5. Latest/actionable result 与 artifact locator 不得被 rollup 丢失。
 6. 至少保留一次完整 finalization model call 的预算。
-7. 重复 evidence 达到阈值后停止新的低价值 docs search。
+7. 达到确定性的rollout phase阈值后，新的evidence-acquisition调用被phase gate收窄；exact recurrence仅作为中性事实展示。
 8. Agent 在原 run 内调用 `write_file` 并产生 final text。
 9. Inspector 能解释每条 observation 当前为何是 full/preview/locator/rollup/cleared。
 10. Live 与 replay 对相同 projection generation 生成相同 provider-neutral payload。

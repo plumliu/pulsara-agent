@@ -240,3 +240,16 @@ cross-ledger repair等需要预生成artifact ID的生产路径必须调用
 才视为幂等成功；metadata-only差异也是`ArtifactContentConflict`。PostgreSQL并发writer必须在同一事务/锁边界确认，不能
 先查后写产生TOCTOU。child inferred result的normal与repair路径必须共享同一policy fingerprint、artifact ID、正文和
 semantic metadata builder。
+
+---
+
+## 13. Subagent graph checkpoint artifacts
+
+Checkpoint artifact 使用稳定 ID、canonical bytes、media type
+`application/vnd.pulsara.subagent-graph-checkpoint+json` 和完整 semantic metadata identity。同 ID/同 bytes/同 metadata 幂等；
+body、media type、owner 或 metadata-only 差异均是 `ArtifactContentConflict`。
+
+Checkpoint artifact 是可丢弃 cache。Historical context manifest 不永久 pin 其原 checkpoint；只要其他 compatible checkpoint + bounded
+delta 能恢复相同 semantic source，exact replay 可以 rebase。Physical GC 不删 checkpoint events，且只能在 session
+closed/quiescent、持有 checkpoint maintenance exclusive advisory lock 时，使用 artifact ID/digest/media type/semantic metadata fingerprint
+条件删除。Exact replay/Inspector 读 checkpoint event + artifact 时必须持有同锁域 shared lease。

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from pulsara_agent.event import EventContext
 from pulsara_agent.message.blocks import ToolResultState
 from pulsara_agent.primitives.context import FrozenJsonObjectFact
+from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 from pulsara_agent.primitives.tool_result import (
     TerminalPayloadTimingFact,
     ToolResultExecutionSemanticsFact,
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from pulsara_agent.capability.result_semantics import (
         ToolResultSemanticsRuntimeInput,
     )
+    from pulsara_agent.event import ToolResultArtifactRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +40,19 @@ class ToolExecutionResult:
     semantics_input: "ToolResultSemanticsRuntimeInput | None" = None
     terminal_payload_timing: TerminalPayloadTimingFact | None = None
     semantics: ToolResultExecutionSemanticsFact | None = None
+    prepared_terminal_result: "PreparedToolTerminalResult | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedToolTerminalResult:
+    """Event-free terminal facts produced by the physical tool executor."""
+
+    tool_call_id: str
+    state: ToolResultState
+    created_at: str
+    artifacts: tuple["ToolResultArtifactRef", ...]
+    observation_timing: ToolObservationTimingFact
+    semantics: ToolResultExecutionSemanticsFact
 
 
 @dataclass(frozen=True, slots=True)

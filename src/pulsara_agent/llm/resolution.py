@@ -19,6 +19,7 @@ from pulsara_agent.llm.errors import (
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1, TokenEstimator
 from pulsara_agent.llm.models import ModelProfile, ModelRole
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.llm.runtime_observation import runtime_observation_carrier_for_api
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelContextLimits,
@@ -263,6 +264,10 @@ def resolve_model_target(
     if not binding_id or not contract_version:
         raise ModelTransportUnavailable("transport binding identity is incomplete")
     endpoint_origin, endpoint_fingerprint = canonicalize_endpoint(config.base_url)
+    runtime_observation_carrier = runtime_observation_carrier_for_api(
+        model.api,
+        allow_nonproduction_api=not registry.production_mode,
+    )
     provider_shape = redact_provider_request_shape(
         {
             "request_defaults": profile.request_defaults,
@@ -274,6 +279,11 @@ def resolve_model_target(
                 "message_field": profile.thinking.message_field,
                 "replay_policy": profile.thinking.replay_policy.value,
             },
+            "runtime_observation_carrier": (
+                runtime_observation_carrier.model_dump(mode="json")
+                if runtime_observation_carrier is not None
+                else None
+            ),
             "merge_policy": "validated_extensions_then_pulsara_fields:v2",
         },
         context="provider_profile",
@@ -283,7 +293,7 @@ def resolve_model_target(
     )
     estimator = PulsaraHeuristicTokenEstimatorV1()
     payload: dict[str, Any] = {
-        "contract_version": "resolved-model-target:v2",
+        "contract_version": "resolved-model-target:v3",
         "model_id": model.id,
         "model_role": role.value,
         "provider": model.provider,
@@ -301,6 +311,11 @@ def resolve_model_target(
         "effective_options": options_fact.model_dump(mode="json"),
         "context_budget": budget.model_dump(mode="json"),
         "token_estimator": estimator.fact.model_dump(mode="json"),
+        "runtime_observation_carrier": (
+            runtime_observation_carrier.model_dump(mode="json")
+            if runtime_observation_carrier is not None
+            else None
+        ),
     }
     fact = ResolvedModelTargetFact(
         target_fingerprint=resolved_model_target_fingerprint(payload),

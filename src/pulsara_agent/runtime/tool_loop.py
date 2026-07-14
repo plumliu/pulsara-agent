@@ -120,6 +120,7 @@ def build_tool_result_error_events(
         essential_capture_policy=actual_semantics.essential_capture_policy,
         essential_result=actual_semantics.essential_result,
         terminal_payload_timing=actual_semantics.terminal_payload_timing,
+        rollup_semantics=actual_semantics.rollup_semantics,
     )
     return [*(() if existing_start is not None else (start,)), text, end]
 

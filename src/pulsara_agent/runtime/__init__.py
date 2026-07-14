@@ -104,6 +104,10 @@ _LAZY_EXPORTS = {
     "RuntimeSession": ("pulsara_agent.runtime.session", "RuntimeSession"),
     "RuntimeEventSnapshot": ("pulsara_agent.runtime.session", "RuntimeEventSnapshot"),
     "CommittedReducerError": ("pulsara_agent.runtime.session", "CommittedReducerError"),
+    "EventBatchCommitOutcome": (
+        "pulsara_agent.runtime.session",
+        "EventBatchCommitOutcome",
+    ),
     "EventCommitError": ("pulsara_agent.runtime.session", "EventCommitError"),
     "EventPublicationAfterCommitError": (
         "pulsara_agent.runtime.session",
@@ -115,7 +119,12 @@ _LAZY_EXPORTS = {
         "EventReconciliationRequired",
     ),
     "EventWriteConflict": ("pulsara_agent.runtime.session", "EventWriteConflict"),
+    "EventWriteCancelled": ("pulsara_agent.runtime.session", "EventWriteCancelled"),
     "EventWriteResult": ("pulsara_agent.runtime.session", "EventWriteResult"),
+    "event_batch_commit_outcome_from_error": (
+        "pulsara_agent.runtime.session",
+        "event_batch_commit_outcome_from_error",
+    ),
     "SessionWriteCoordinator": (
         "pulsara_agent.runtime.session",
         "SessionWriteCoordinator",

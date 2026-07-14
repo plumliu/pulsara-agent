@@ -27,6 +27,7 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
 from pulsara_agent.message import (
+    AssistantMsg,
     Base64Source,
     TextBlock,
     ToolCallBlock,
@@ -35,6 +36,7 @@ from pulsara_agent.message import (
     ToolResultBlock,
     ToolResultState,
 )
+from pulsara_agent.message.reducer import MessageReducer
 from tests.support import model_call_end_fields
 from tests.conftest import (
     external_tool_call_requirement_fact,
@@ -45,6 +47,24 @@ from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+
+
+def _reduce_message_events(event_log: InMemoryEventLog):
+    events = event_log.iter(reply_id=CTX.reply_id)
+    start = next(
+        (event for event in events if isinstance(event, ReplyStartEvent)), None
+    )
+    reducer = MessageReducer(
+        AssistantMsg(
+            id=CTX.reply_id,
+            name=start.name if start is not None else "assistant",
+            content=[],
+            created_at=start.created_at if start is not None else None,
+        )
+    )
+    for event in events:
+        reducer.append(event)
+    return reducer.message
 
 
 def test_message_reducer_replays_text_thinking_tool_events() -> None:
@@ -123,11 +143,11 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
                 **CTX.event_fields(),
                 **model_call_end_fields(input_tokens=1, output_tokens=2),
             ),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
 
     assert msg.id == "reply:test"
     assert msg.content[0].type == "text"
@@ -189,7 +209,7 @@ def test_tool_result_end_event_artifacts_round_trip_into_block() -> None:
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
     assert isinstance(msg.content[0], ToolResultBlock)
     assert msg.content[0].artifacts == [artifact]
 
@@ -271,11 +291,11 @@ def test_message_reducer_preserves_block_start_order_for_interleaved_events() ->
             ),
             ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:later"),
             TextBlockEndEvent(**CTX.event_fields(), block_id="text:first"),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
 
     assert [block.type for block in msg.content] == ["text", "tool_call"]
     assert msg.content[0].text == "before tool"
@@ -323,11 +343,11 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
                     ),
                 ),
             ),
-            ReplyEndEvent(**CTX.event_fields()),
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
 
-    msg = event_log.replay("reply:test")
+    msg = _reduce_message_events(event_log)
 
     call = msg.content[0]
     result = msg.content[1]

@@ -10,6 +10,7 @@ from pulsara_agent.event.candidates import InvalidAttemptPayload, PreferenceCand
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.message.assembler import BlockAssembler
+from pulsara_agent.message.reducer import MessageReplayControlError
 from pulsara_agent.memory import (
     InMemoryArchiveStore,
     InMemoryCandidatePool,
@@ -106,8 +107,8 @@ def test_governance_synthetic_reply_does_not_replay_as_assistant_content() -> No
         assert update.completed == []
     assert assembler.active_count() == 0
 
-    replayed = log.replay("reply:governance/governance:test:replay")
-    assert replayed.content == []
+    with pytest.raises(MessageReplayControlError):
+        log.replay("reply:governance/governance:test:replay")
     assert log.iter(run_id=candidate.source_run_id) == []
 
 

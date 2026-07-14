@@ -320,6 +320,7 @@ def test_reflection_budget_validation_failure_requires_input_estimate() -> None:
         llm_runtime=runtime,
         candidate_pool=pool,
         graph=graph,
+        runtime_session=in_memory_runtime_session(Path.cwd()),
         options=MemoryReflectionOptions(llm_options=LLMOptions()),
     )
 
@@ -684,6 +685,7 @@ def _reflection(
         llm_runtime=_make_llm_runtime(transport),
         candidate_pool=pool,
         graph=graph,
+        runtime_session=in_memory_runtime_session(Path.cwd()),
     )
 
 
@@ -700,6 +702,7 @@ def _agent_with_reflection(
         llm_runtime=llm_runtime,
         candidate_pool=pool,
         graph=graph,
+        runtime_session=runtime_session,
     )
     hooks = ReflectiveMemoryHooks(
         candidate_pool=pool,

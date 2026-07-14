@@ -170,3 +170,21 @@ terminal 后台进程完成(`TerminalProcessCompletedEvent` → transcript 的 c
 - in-run producer:`recovery_mode` → `run_status=None` + `IN_RUN_STEP_FAILED`，Stage-3 recovery candidate producer把typed projection写入`PreparedContextCandidateSet`。
 - `AbortKind` / `RunEndEvent.abort_kind` round-trip。
 - 回归:transcript failed/aborted note 仍注入、completion note 仍独立、`_strip_unfinished_tool_calls` 行为不变、plan workflow tool 不出现在 unfinished 摘要。
+
+---
+
+## 11. Long-horizon model/window recovery
+
+`ModelCallStartEvent` 必须冻结 lifecycle-specific `ModelStreamRecoveryPlanFact`、run activation、downstream predicate contract、terminal IDs 与
+rollout reservation quote。reopen 对 main/direct/window 三类 Start-without-End 使用各自 terminal batch修复：semantic prefix末尾恰有一个合法
+provider error时保持 `provider_error`；没有 provider error时使用 `runtime_error`；多个、顺序错误、attribution漂移或未知 schema一律 structural
+latch。generic reservation repair不得与 model stream owner双重结算。
+
+completed main call缺 control disposition时，recovery只使用 Start-frozen activation、reopen high-water与versioned downstream predicate；不得
+伪造 live segment ID、调用 live coordinator或生成 permit。没有 downstream facts时先写 `SUPPRESSED_BY_RECOVERY`，再写
+recovered-interrupted RunEnd。已有 RunEnd、late conflicting winner、suppressed 后出现 accepted-only downstream、或 predicate contract漂移均
+fail closed。
+
+active context window、projection、rollout state与status hint必须从 confirmed checkpoint + bounded contiguous delta exact replay；checkpoint只是
+versioned reducer memoization，不是第二权威。window compaction Started-without-terminal由service-owned recovery补稳定 failed terminal，成功的
+close-old/open-new batch不得被拆开。PARTIAL/UNKNOWN ledger state、unsupported historical event domain或无法证明 continuity时禁止恢复执行。

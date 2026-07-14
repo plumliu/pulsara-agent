@@ -26,6 +26,7 @@ from pulsara_agent.primitives.context import (
     context_fingerprint,
     thaw_json,
 )
+from pulsara_agent.primitives.long_horizon import PreparedObservationRollupUnit
 from pulsara_agent.primitives.tool_result import ToolResultRenderDecisionFact
 from pulsara_agent.runtime.context_engine.types import (
     CompiledContext,
@@ -45,6 +46,7 @@ from pulsara_agent.runtime.context_input.candidate import (
     validate_candidate_against_snapshot,
 )
 from pulsara_agent.runtime.context_input.snapshot import ContextFactSnapshot
+from pulsara_agent.runtime.context_input.snapshot import ContextFactSnapshotDraft
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,9 +59,10 @@ class LoweredTranscriptMessages:
 
 def compile_context_from_facts(
     *,
-    facts: ContextFactSnapshot,
+    facts: ContextFactSnapshot | ContextFactSnapshotDraft,
     transcript: TranscriptCompileInput,
     rendered_tool_results: PreparedToolResultRenderOutput,
+    prepared_rollups: tuple[PreparedObservationRollupUnit, ...],
     section_candidates: PreparedContextCandidateSet,
 ) -> CompiledContext:
     """Lower one already-prepared immutable aggregate into ``LLMContext``."""
@@ -71,7 +74,19 @@ def compile_context_from_facts(
     lowered_transcript = lower_transcript_for_context(
         transcript=transcript,
         rendered_tool_results=rendered_tool_results,
+        prepared_rollups=prepared_rollups,
     )
+    carrier = call.target.fact.runtime_observation_carrier
+    if prepared_rollups and carrier is None:
+        raise ValueError(
+            "prepared observation rollups require a resolved runtime carrier"
+        )
+    if carrier is not None and any(
+        item.compile_unit.carrier_contract_fingerprint
+        != carrier.contract_fingerprint
+        for item in prepared_rollups
+    ):
+        raise ValueError("prepared rollup carrier differs from resolved model target")
     if transcript.transcript_fingerprint == "":
         raise ValueError("compiler transcript fingerprint is required")
     if section_candidates.policy != snapshot.compile_policy.candidate_collection:
@@ -316,6 +331,7 @@ def lower_transcript_for_context(
     *,
     transcript: TranscriptCompileInput,
     rendered_tool_results: PreparedToolResultRenderOutput,
+    prepared_rollups: tuple[PreparedObservationRollupUnit, ...],
 ) -> LoweredTranscriptMessages:
     """The sole normalized-transcript -> provider-message lowering seam."""
 
@@ -333,6 +349,26 @@ def lower_transcript_for_context(
     if tuple(fragments) != expected_refs:
         raise ValueError("rendered fragments do not match transcript result refs")
     pairs_by_call = {pair.tool_call_id: pair for pair in transcript.tool_pairs}
+    messages_by_id = {message.message_id: message for message in transcript.messages}
+    anchored_rollups: dict[str, list[PreparedObservationRollupUnit]] = {}
+    seen_rollup_ids: set[str] = set()
+    for prepared in prepared_rollups:
+        rollup = prepared.rollup
+        if rollup.rollup_id in seen_rollup_ids:
+            raise ValueError("prepared rollup IDs are not unique")
+        seen_rollup_ids.add(rollup.rollup_id)
+        anchor = prepared.compile_unit.placement_anchor
+        message = messages_by_id.get(anchor.insert_after_transcript_message_id)
+        if message is None:
+            raise ValueError("prepared rollup anchor message is absent")
+        if message.source_sequence_end != anchor.insert_after_source_sequence:
+            raise ValueError("prepared rollup anchor sequence differs from transcript")
+        member_ids = tuple(member.unit_id for member in rollup.member_facts)
+        if member_ids != prepared.ordered_member_unit_ids or any(
+            member_id not in fragments for member_id in member_ids
+        ):
+            raise ValueError("prepared rollup members differ from rendered results")
+        anchored_rollups.setdefault(message.message_id, []).append(prepared)
 
     full: list[LLMMessage] = []
     prior: list[LLMMessage] = []
@@ -347,6 +383,17 @@ def lower_transcript_for_context(
             fragments=fragments,
             pairs_by_call=pairs_by_call,
         )
+        rollup_messages = tuple(
+            LLMMessage.runtime_observation(item.compile_unit.inline_text)
+            for item in sorted(
+                anchored_rollups.get(message.message_id, ()),
+                key=lambda item: (
+                    item.rollup.member_facts[-1].result_sequence,
+                    item.rollup.rollup_id,
+                ),
+            )
+        )
+        lowered = (*lowered, *rollup_messages)
         full.extend(lowered)
         if segment == "current_user":
             current.extend(lowered)
@@ -593,6 +640,7 @@ def _section_renders_timing_header(section: AllocatedContextSection) -> bool:
         "system_instruction",
         "leading_user_context",
         "handoff_hint",
+        "trailing_status",
     }
 
 
@@ -955,7 +1003,7 @@ def _transcript_sections(
 
 
 def _compile_tools(
-    facts: ContextFactSnapshot,
+    facts: ContextFactSnapshot | ContextFactSnapshotDraft,
 ) -> tuple[tuple[ToolSpec, ...], tuple[CompiledToolSpecUnit, ...]]:
     estimator = facts.resolved_call.target.token_estimator
     tools = []
@@ -1037,12 +1085,31 @@ def _lower_messages(segmented, *, sections: tuple[AllocatedContextSection, ...])
         if section is not None and section.included and values is not None:
             messages.extend(values)
             scopes.extend("transcript" for _ in values)
+    trailing = tuple(
+        sorted(
+            (
+                section
+                for section in sections
+                if section.metadata.get("lowering_kind") == "trailing_status"
+                and section.included
+                and section.text
+            ),
+            key=lambda item: (item.priority, item.id),
+        )
+    )
+    for section in trailing:
+        messages.append(
+            LLMMessage.runtime_observation(
+                _render_section_text_with_timing(section)
+            )
+        )
+        scopes.append("non_transcript")
     return tuple(messages), tuple(scopes)
 
 
 def _budget_error(
     *,
-    facts: ContextFactSnapshot,
+    facts: ContextFactSnapshot | ContextFactSnapshotDraft,
     sections: tuple[AllocatedContextSection, ...],
     tool_units: tuple[CompiledToolSpecUnit, ...],
     code: str,

@@ -33,6 +33,7 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.model_call import ModelTokenUsageFact
+from pulsara_agent.primitives.long_horizon import default_child_rollout_policy
 from pulsara_agent.runtime.permission import preset_to_policy
 from pulsara_agent.runtime.subagent.facts import (
     SubagentGraphDiagnostic,
@@ -96,6 +97,9 @@ def _budget() -> dict[str, object]:
         "max_result_summary_chars_per_child": 4_000,
         "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
+        "child_rollout_policy": default_child_rollout_policy().model_dump(
+            mode="json"
+        ),
     }
 
 

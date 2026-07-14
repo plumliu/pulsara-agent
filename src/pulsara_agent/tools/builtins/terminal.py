@@ -622,7 +622,6 @@ class _StreamingTerminalJsonBuilder:
             huge_output_chars=default_options.huge_output_chars,
             huge_preview_chars=huge_preview,
             streaming_live_head_cap_chars=1,
-            tool_result_message_context_chars=default_options.effective_tool_result_message_context_chars,
         )
         huge_head_cap = build_adaptive_preview(
             "x" * (default_options.huge_output_chars + 1), options_seed
@@ -640,7 +639,6 @@ class _StreamingTerminalJsonBuilder:
             streaming_live_head_cap_chars=max(
                 1, min(default_options.streaming_live_head_cap_chars, huge_head_cap)
             ),
-            tool_result_message_context_chars=default_options.effective_tool_result_message_context_chars,
         )
         self._live_head_cap_chars = min(
             self._max_output_chars, self._options.streaming_live_head_cap_chars

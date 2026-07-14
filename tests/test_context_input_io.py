@@ -8,10 +8,12 @@ import pytest
 
 from pulsara_agent.event import EventContext, RunStartEvent
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.runtime.context_input import (
+from pulsara_agent.runtime.context_input.event_slice import (
+    EventLogContextEventSliceReader,
+)
+from pulsara_agent.runtime.context_input.io_service import (
     ContextInputIoDeadlineExceeded,
     ContextInputIoService,
-    EventLogContextEventSliceReader,
 )
 from tests.conftest import run_start_permission_fields
 
@@ -50,7 +52,7 @@ def test_event_slice_reader_uses_session_owned_deadline_aware_io() -> None:
     class RecordingLog(InMemoryEventLog):
         observed_deadline: float | None = None
 
-        def read_range_snapshot(
+        def read_raw_range_snapshot(
             self,
             *,
             minimum_sequence: int,
@@ -58,7 +60,7 @@ def test_event_slice_reader_uses_session_owned_deadline_aware_io() -> None:
             deadline_monotonic: float | None = None,
         ):
             self.observed_deadline = deadline_monotonic
-            return super().read_range_snapshot(
+            return super().read_raw_range_snapshot(
                 minimum_sequence=minimum_sequence,
                 through_sequence=through_sequence,
                 deadline_monotonic=deadline_monotonic,

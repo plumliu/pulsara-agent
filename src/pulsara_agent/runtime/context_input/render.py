@@ -23,6 +23,10 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
+from pulsara_agent.primitives.long_horizon import (
+    ContextWindowProjectionState,
+    ToolObservationRepresentation,
+)
 from pulsara_agent.primitives.tool_result import (
     ContextToolResultArtifactRefFact,
     PreparedToolResultRenderInput,
@@ -176,54 +180,28 @@ def prepare_tool_result_render_input(
         for block in message.blocks
         if isinstance(block, TranscriptToolResultRefFact)
     }
-    current_tail = tuple(
-        unit for unit in units if segment_by_unit[unit.unit_id] == "current_run_tail"
-    )
-    if current_tail:
-        latest_call_message_id = current_tail[-1].call_message_id
-        latest_tail = tuple(
-            unit
-            for unit in current_tail
-            if unit.call_message_id == latest_call_message_id
-        )
-    else:
-        latest_tail = ()
-    latest_reserved = tuple(
-        unit
-        for unit in latest_tail
-        if _body_candidate(unit)[0]
-        <= policy_basis.latest_result_reserved_chars_per_unit
-        and _body_candidate(unit)[1]
-        is not ToolResultBodyCandidateSource.ARTIFACT_PREVIEW
-    )
-    latest_reserved_total = policy_basis.latest_result_reserved_chars_per_unit * len(
-        latest_reserved
-    )
-    current_normal = max(
-        0,
-        policy_basis.current_run_tail_context_chars - latest_reserved_total,
+    protected_unit_ids = tuple(
+        unit.unit_id
+        for unit in units
+        if segment_by_unit[unit.unit_id] in {"current_user", "current_run_tail"}
     )
     resolved_payload = {
         "basis": policy_basis,
         "ordered_unit_ids": unit_ids,
-        "latest_tail_unit_ids": tuple(unit.unit_id for unit in latest_tail),
-        "latest_reserved_unit_ids": tuple(unit.unit_id for unit in latest_reserved),
-        "latest_reserved_total_chars": latest_reserved_total,
-        "current_tail_normal_context_chars": current_normal,
-        "protected_current_tail_total_chars": (current_normal + latest_reserved_total),
-        "initial_prior_remaining_chars": policy_basis.prior_history_context_chars,
-        "initial_current_tail_remaining_chars": current_normal,
-        "initial_current_user_remaining_chars": policy_basis.current_user_context_chars,
-        "initial_legacy_remaining_chars": policy_basis.legacy_history_context_chars,
+        "protected_unit_ids": protected_unit_ids,
         "unit_order_fingerprint": context_fingerprint(
-            "tool-result-unit-order:v1",
+            "tool-result-unit-order:v2",
             unit_ids,
+        ),
+        "protection_fingerprint": context_fingerprint(
+            "tool-result-unit-protection:v2",
+            protected_unit_ids,
         ),
     }
     resolved = ResolvedToolResultRenderPolicyFact(
         **resolved_payload,
         policy_fingerprint=context_fingerprint(
-            "resolved-tool-result-render-policy:v1",
+            "resolved-tool-result-render-policy:v2",
             resolved_payload,
         ),
     )
@@ -274,6 +252,7 @@ def render_prepared_tool_result_units(
     prepared: PreparedToolResultRenderInput,
     transcript: TranscriptCompileInput,
     token_estimator: TokenEstimator,
+    projection_state: ContextWindowProjectionState | None = None,
 ) -> PreparedToolResultRenderOutput:
     refs = tuple(
         block.tool_result_unit_id
@@ -349,7 +328,7 @@ def render_prepared_tool_result_units(
         if operational.cache_status in {"miss", "invalidated"}
         and _cache_admission_allowed(decision)
     )
-    return PreparedToolResultRenderOutput(
+    output = PreparedToolResultRenderOutput(
         fragments=tuple(fragments),
         canonical_decisions=tuple(allocator.decisions),
         operational_facts=tuple(allocator.operational),
@@ -358,6 +337,254 @@ def render_prepared_tool_result_units(
         ),
         tool_result_budget_report=allocator.report(),
         cache_write_candidates=cache_writes,
+    )
+    if projection_state is None:
+        return output
+    return apply_tool_observation_projection(
+        units=prepared.units,
+        rendered=output,
+        projection_state=projection_state,
+        policy=prepared.resolved_policy,
+        token_estimator=token_estimator,
+    )
+
+
+def apply_tool_observation_projection(
+    *,
+    units: tuple[ToolResultRenderUnit, ...],
+    rendered: PreparedToolResultRenderOutput,
+    projection_state: ContextWindowProjectionState,
+    policy: ResolvedToolResultRenderPolicyFact,
+    token_estimator: TokenEstimator,
+) -> PreparedToolResultRenderOutput:
+    """Render the exact representation selected by the durable projection."""
+
+    if not (
+        len(units)
+        == len(rendered.fragments)
+        == len(rendered.canonical_decisions)
+    ):
+        raise ValueError("projection render input cardinality mismatch")
+    projections = {item.unit_id: item for item in projection_state.unit_projections}
+    projected_fragments: list[RenderedToolResultFragment] = []
+    projected_decisions: list[ToolResultRenderDecisionFact] = []
+    for unit, fragment, decision in zip(
+        units,
+        rendered.fragments,
+        rendered.canonical_decisions,
+        strict=True,
+    ):
+        projection = projections.get(unit.unit_id)
+        if projection is None:
+            raise ValueError("durable projection is missing a transcript result unit")
+        if (
+            projection.tool_call_id != unit.tool_call_id
+            or projection.tool_result_event_id != unit.source_event_ids[-1]
+            or projection.tool_result_sequence != unit.source_sequence_end
+        ):
+            raise ValueError("durable projection source identity mismatch")
+        if (
+            projection.source_rollup_id is None
+            and projection.rendered_fragment_fingerprint
+            == fragment.rendered_text_fingerprint
+            and projection.estimated_tokens == token_estimator.estimate_text(fragment.text)
+        ):
+            projected_fragment, projected_decision = fragment, decision
+        else:
+            projected_fragment, projected_decision = (
+                render_tool_result_projection_variant(
+                    unit=unit,
+                    base_fragment=fragment,
+                    base_decision=decision,
+                    representation=projection.representation,
+                    source_rollup_id=projection.source_rollup_id,
+                    policy=policy,
+                )
+            )
+        if (
+            projected_fragment.rendered_text_fingerprint
+            != projection.rendered_fragment_fingerprint
+            or token_estimator.estimate_text(projected_fragment.text)
+            != projection.estimated_tokens
+        ):
+            raise ValueError(
+                "durable projection differs from deterministic rendered variant"
+            )
+        projected_fragments.append(projected_fragment)
+        projected_decisions.append(projected_decision)
+    report = _projection_render_report(
+        decisions=tuple(projected_decisions),
+        policy=policy,
+        token_estimator=token_estimator,
+        projection_state=projection_state,
+    )
+    return PreparedToolResultRenderOutput(
+        fragments=tuple(projected_fragments),
+        canonical_decisions=tuple(projected_decisions),
+        operational_facts=rendered.operational_facts,
+        tool_result_render_decisions=tuple(
+            _decision_event_value(item) for item in projected_decisions
+        ),
+        tool_result_budget_report=report,
+        # A downgraded projection is not a canonical high-fidelity render-cache
+        # candidate.  The original render candidates remain semantically valid
+        # only when every selected representation is unchanged.
+        cache_write_candidates=(
+            rendered.cache_write_candidates
+            if all(
+                projected.text == original.text
+                for projected, original in zip(
+                    projected_fragments, rendered.fragments, strict=True
+                )
+            )
+            else ()
+        ),
+    )
+
+
+def render_tool_result_projection_variant(
+    *,
+    unit: ToolResultRenderUnit,
+    base_fragment: RenderedToolResultFragment,
+    base_decision: ToolResultRenderDecisionFact,
+    representation: ToolObservationRepresentation,
+    source_rollup_id: str | None,
+    policy: ResolvedToolResultRenderPolicyFact,
+) -> tuple[RenderedToolResultFragment, ToolResultRenderDecisionFact]:
+    """Render one monotonic, pairing-safe long-horizon representation."""
+
+    if base_fragment.unit_id != unit.unit_id or base_decision.unit_id != unit.unit_id:
+        raise ValueError("projection variant base render identity mismatch")
+    if representation is ToolObservationRepresentation.FULL:
+        if source_rollup_id is not None:
+            raise ValueError("full projection cannot reference a rollup")
+        return base_fragment, base_decision
+    if (
+        representation is ToolObservationRepresentation.ROLLUP_MEMBER
+    ) != (source_rollup_id is not None):
+        raise ValueError("rollup-member projection requires exact rollup identity")
+
+    observation = _observation_payload(unit)
+    header = _tool_result_header(
+        unit.model_tool_name,
+        unit.result_state.value,
+        observation,
+    )
+    primary = _primary_text_artifact(unit.artifacts)
+    body = _unit_body(unit)
+    visible_body = 0
+    body_policy = ToolResultBodyPolicy.OMITTED_NON_ARTIFACT
+    envelope_policy = ToolResultEnvelopePolicy.COMPACT
+    reason = ToolResultRenderReasonCode.BUDGET_EXHAUSTED
+
+    if representation is ToolObservationRepresentation.PREVIEW:
+        preview_cap = min(
+            len(body),
+            max(512, min(4_096, policy.basis.per_tool_cap_chars // 4)),
+        )
+        preview = (
+            _clip_artifact_body(unit, body, preview_cap)
+            if unit.artifacts
+            else _clip_text(body, preview_cap)
+        )
+        if not preview or len(preview) >= len(body):
+            raise ValueError("preview projection does not reduce the source body")
+        payload: dict[str, object] = {
+            "projection": "preview",
+            "output_preview": preview,
+            "output_truncated": True,
+        }
+        if unit.essential is not None:
+            payload["essential_kind"] = unit.essential.kind
+        if primary is not None:
+            payload["primary_text_artifact"] = _artifact_payload(primary)
+        if unit.terminal_payload_timing is not None:
+            payload["timing"] = _terminal_timing_payload(unit)
+        text = header + _json(payload)
+        visible_body = len(preview)
+        body_policy = (
+            ToolResultBodyPolicy.ARTIFACT_PREVIEW
+            if primary is not None
+            else ToolResultBodyPolicy.CLIPPED
+        )
+        envelope_policy = ToolResultEnvelopePolicy.COMPACT
+        reason = ToolResultRenderReasonCode.ARTIFACT_PREVIEW
+    else:
+        payload = _projection_envelope_payload(
+            unit=unit,
+            representation=representation,
+            source_rollup_id=source_rollup_id,
+            primary=primary,
+        )
+        available = policy.basis.per_envelope_cap_chars - len(header)
+        if available < 1:
+            raise ValueError("projection envelope cap cannot hold observation header")
+        rendered_payload, envelope_policy, _, terminal_timing_included = _fit_envelope(
+            payload,
+            cap=available,
+            state=unit.result_state.value,
+            primary_artifact_id=primary.artifact_id if primary else None,
+        )
+        if unit.terminal_payload_timing is not None and not terminal_timing_included:
+            # Terminal timing is part of the typed essential carrier.  A
+            # projection that cannot preserve even its minimal form is invalid.
+            minimal_timing = _terminal_timing_payload(unit)
+            minimal_timing = {
+                key: minimal_timing[key]
+                for key in ("observed_at", "duration_seconds", "freshness")
+                if key in minimal_timing
+            }
+            fallback_payload = {
+                "projection": representation.value,
+                "status": unit.result_state.value,
+                "tool_call_id": unit.tool_call_id,
+                "timing": minimal_timing,
+            }
+            if primary is not None:
+                fallback_payload["primary_artifact_id"] = primary.artifact_id
+            rendered_payload = _json(fallback_payload)
+            if len(rendered_payload) > available:
+                raise ValueError(
+                    "projection envelope cap cannot preserve terminal timing"
+                )
+            envelope_policy = ToolResultEnvelopePolicy.MINIMAL
+        text = header + rendered_payload
+        body_policy = (
+            ToolResultBodyPolicy.OMITTED_ARTIFACT
+            if primary is not None
+            else ToolResultBodyPolicy.OMITTED_NON_ARTIFACT
+        )
+        reason = (
+            ToolResultRenderReasonCode.ESSENTIAL_PRESERVED
+            if representation is ToolObservationRepresentation.ESSENTIAL
+            else ToolResultRenderReasonCode.BUDGET_EXHAUSTED
+        )
+
+    rendered_envelope = len(text) - visible_body
+    if rendered_envelope > policy.basis.per_envelope_cap_chars:
+        raise ValueError("projection variant exceeds per-unit envelope safety cap")
+    projected_decision = _projected_render_decision(
+        base=base_decision,
+        unit=unit,
+        text=text,
+        visible_body=visible_body,
+        body_policy=body_policy,
+        envelope_policy=envelope_policy,
+        reason=reason,
+        primary=primary,
+    )
+    return (
+        RenderedToolResultFragment(
+            unit_id=base_fragment.unit_id,
+            tool_call_id=base_fragment.tool_call_id,
+            source_message_id=base_fragment.source_message_id,
+            source_message_index=base_fragment.source_message_index,
+            content_block_index=base_fragment.content_block_index,
+            segment=base_fragment.segment,
+            text=text,
+            rendered_text_fingerprint=rendered_text_fingerprint(text),
+        ),
+        projected_decision,
     )
 
 
@@ -381,8 +608,6 @@ def validate_prepared_tool_result_render_output(
         if isinstance(item, dict)
         and item.get("code")
         in {
-            "tool_result_total_budget_unsatisfied",
-            "max_tool_results_per_context_exceeded",
             "tool_observation_timing_missing",
         }
     )
@@ -445,16 +670,6 @@ class _TypedToolResultAllocator:
         self.cache_configured = cache_configured
         self.cache_read_failed_unit_ids = cache_read_failed_unit_ids
         self.cache_keys = cache_keys
-        self.segment_remaining = {
-            "prior_history": policy.initial_prior_remaining_chars,
-            "current_run_tail": policy.initial_current_tail_remaining_chars,
-            "current_user": policy.initial_current_user_remaining_chars,
-            "legacy_history": policy.initial_legacy_remaining_chars,
-        }
-        self.total_remaining = self.basis.total_context_chars
-        self.body_remaining = self.basis.body_context_chars
-        self.envelope_remaining = self.basis.envelope_context_chars
-        self.latest_reserved_remaining = policy.latest_reserved_total_chars
         self.batch_remaining: dict[str, int] = {}
         self.decisions: list[ToolResultRenderDecisionFact] = []
         self.operational: list[ToolResultRenderOperationalFact] = []
@@ -482,37 +697,20 @@ class _TypedToolResultAllocator:
             unit.result_state.value,
             observation,
         )
-        latest_candidate = unit.unit_id in self.policy.latest_tail_unit_ids
-        latest_reserved_candidate = unit.unit_id in self.policy.latest_reserved_unit_ids
         batch_before = self.batch_remaining.setdefault(
             unit.call_message_id,
             self.basis.per_message_cap_chars,
         )
-        segment_before = self.segment_remaining.get(segment, 0)
-        use_reserved = (
-            latest_reserved_candidate
-            and self.latest_reserved_remaining > 0
-            and batch_before
-            >= min(
-                original_chars,
-                self.basis.latest_result_reserved_chars_per_unit,
-            )
-        )
-        body_allowed = (
-            self.basis.latest_result_reserved_chars_per_unit
-            if use_reserved
-            else segment_before
-        )
         body_allowed = min(
-            body_allowed,
             batch_before,
             self.basis.per_tool_cap_chars,
-            self.body_remaining,
-            max(0, self._total_allowed(segment) - len(timed_header)),
         )
-        envelope_allowed = min(
-            self.basis.per_envelope_cap_chars,
-            max(0, self._total_allowed(segment) - len(basic_header)),
+        # Reserve the stable identity header. The payload may carry the complete
+        # observation itself; otherwise the timing header is used only when the
+        # same per-unit envelope cap can still hold it.
+        envelope_allowed = max(
+            0,
+            self.basis.per_envelope_cap_chars - len(basic_header),
         )
         (
             rendered_payload,
@@ -536,46 +734,34 @@ class _TypedToolResultAllocator:
             and envelope_policy is ToolResultEnvelopePolicy.FULL
             and rendered_payload == body
         )
-        # Raw/full or clipped bodies do not carry a structured observation
-        # envelope, so the universal timing header must remain visible.  The
-        # basic header is only valid when the rendered payload itself contains
-        # the typed observation fact.
-        header = basic_header if payload_contains_observation else timed_header
+        payload_envelope_chars = len(rendered_payload) - visible_body
+        observation_in_header = (
+            not payload_contains_observation
+            and len(timed_header) + payload_envelope_chars
+            <= self.basis.per_envelope_cap_chars
+        )
+        header = (
+            basic_header
+            if payload_contains_observation or not observation_in_header
+            else timed_header
+        )
         text = header + rendered_payload
         rendered_total = len(text)
         rendered_envelope = rendered_total - visible_body
-        if use_reserved and visible_body >= original_chars:
-            self.latest_reserved_remaining = max(
-                0,
-                self.latest_reserved_remaining - visible_body,
-            )
-            latest_applied = True
-            latest_reason = ToolResultLatestReserveReasonCode.APPLIED
-        else:
-            self.segment_remaining[segment] = max(
-                0,
-                segment_before - visible_body,
-            )
-            latest_applied = False
-            latest_reason = (
-                ToolResultLatestReserveReasonCode.NOT_LATEST
-                if not latest_candidate
-                else ToolResultLatestReserveReasonCode.BUDGET_UNSATISFIED
-                if latest_reserved_candidate
-                else ToolResultLatestReserveReasonCode.NOT_ELIGIBLE
-            )
+        if rendered_envelope > self.basis.per_envelope_cap_chars:
+            raise ValueError("tool-result per-unit envelope safety cap was exceeded")
+        if visible_body > self.basis.per_tool_cap_chars:
+            raise ValueError("tool-result per-unit body safety cap was exceeded")
         self.batch_remaining[unit.call_message_id] = max(
             0,
             batch_before - visible_body,
         )
-        self.total_remaining = max(0, self.total_remaining - rendered_total)
-        self.body_remaining = max(0, self.body_remaining - visible_body)
-        self.envelope_remaining = max(
-            0,
-            self.envelope_remaining - rendered_envelope,
-        )
 
-        rendered_observation = unit.observation_timing
+        rendered_observation = (
+            unit.observation_timing
+            if payload_contains_observation or observation_in_header
+            else None
+        )
         rendered_terminal_timing = (
             unit.terminal_payload_timing if payload_contains_terminal_timing else None
         )
@@ -622,12 +808,12 @@ class _TypedToolResultAllocator:
                 if unit.artifacts
                 else ToolResultMinimumEnvelopeKind.NONE
             ),
-            "latest_reserved_candidate": latest_candidate,
-            "latest_reserved_applied": latest_applied,
-            "latest_reserved_reason": latest_reason,
+            "latest_reserved_candidate": False,
+            "latest_reserved_applied": False,
+            "latest_reserved_reason": ToolResultLatestReserveReasonCode.NOT_LATEST,
             "visible_body_chars": visible_body,
             "rendered_tool_observation": (
-                unit.observation_timing if rendered_observation is not None else None
+                rendered_observation
             ),
             "observation_timing_policy": (
                 "full" if rendered_observation is not None else "omitted"
@@ -650,13 +836,13 @@ class _TypedToolResultAllocator:
             ),
             "payload_preserved": payload_preserved,
             "payload_format": _classify_display_payload_format(body),
-            "body_budget_remaining": (
-                self.latest_reserved_remaining
-                if latest_applied
-                else self.segment_remaining[segment]
+            "body_budget_remaining": max(
+                0, self.basis.per_tool_cap_chars - visible_body
             ),
             "message_body_budget_remaining": self.batch_remaining[unit.call_message_id],
-            "envelope_budget_remaining": self.envelope_remaining,
+            "envelope_budget_remaining": max(
+                0, self.basis.per_envelope_cap_chars - rendered_envelope
+            ),
             "primary_artifact_id": primary.artifact_id if primary else None,
             "artifact_ids": artifact_ids,
             "body_policy": body_policy,
@@ -732,74 +918,18 @@ class _TypedToolResultAllocator:
         self.operational.append(operational)
         return text
 
-    def _total_allowed(self, segment: str) -> int:
-        if segment != "prior_history":
-            return self.total_remaining
-        protected = min(
-            self.total_remaining,
-            self.policy.protected_current_tail_total_chars,
-        )
-        return max(0, self.total_remaining - protected)
-
     def report(self) -> dict[str, object]:
         total = sum(item.rendered_total_chars for item in self.decisions)
         body = sum(item.visible_body_chars for item in self.decisions)
         envelope = sum(item.rendered_envelope_chars for item in self.decisions)
-        diagnostics: list[dict[str, object]] = []
-        if total > self.basis.total_context_chars:
-            diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "tool_result_total_budget_unsatisfied",
-                    "rendered_total_chars": total,
-                    "cap": self.basis.total_context_chars,
-                }
-            )
-        if body > self.basis.body_context_chars:
-            diagnostics.append(
-                {
-                    "severity": "warning",
-                    "code": "tool_result_body_budget_unsatisfied",
-                    "rendered_body_chars": body,
-                    "cap": self.basis.body_context_chars,
-                    "soft_target": True,
-                }
-            )
-        if envelope > self.basis.envelope_context_chars:
-            diagnostics.append(
-                {
-                    "severity": "warning",
-                    "code": "essential_envelope_budget_unsatisfied",
-                    "rendered_envelope_chars": envelope,
-                    "cap": self.basis.envelope_context_chars,
-                    "soft_target": True,
-                }
-            )
-        if len(self.decisions) > self.basis.max_tool_results_per_context:
-            diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "max_tool_results_per_context_exceeded",
-                    "tool_result_count": len(self.decisions),
-                    "cap": self.basis.max_tool_results_per_context,
-                }
-            )
         return {
-            "caps": self.basis.model_dump(mode="json"),
+            "policy_version": self.basis.policy_version,
+            "per_unit_safety_caps": self.basis.model_dump(mode="json"),
             "used": {"total": total, "body": body, "envelope": envelope},
             "estimated_tokens": {
                 "total": self.token_estimator.estimate_text("x" * total),
                 "body": self.token_estimator.estimate_text("x" * body),
                 "envelope": self.token_estimator.estimate_text("x" * envelope),
-            },
-            "remaining": {
-                "total": self.total_remaining,
-                "body": self.body_remaining,
-                "envelope": self.envelope_remaining,
-            },
-            "used_by_scope": {
-                key: {"remaining": value}
-                for key, value in self.segment_remaining.items()
             },
             "used_by_batch": {
                 key: {"remaining": value} for key, value in self.batch_remaining.items()
@@ -811,7 +941,7 @@ class _TypedToolResultAllocator:
                     item.cache_status == "invalidated" for item in self.operational
                 ),
             },
-            "diagnostics": diagnostics,
+            "diagnostics": [],
         }
 
 
@@ -882,6 +1012,20 @@ def _render_unit_payload(
                 primary_artifact_id=primary_artifact_id,
             )
         )
+        if policy in {
+            ToolResultEnvelopePolicy.MINIMAL,
+            ToolResultEnvelopePolicy.OMITTED,
+        } and len(rendered) > envelope_allowed:
+            # Once the preview body has been dropped its former body allowance
+            # cannot be reclassified as envelope budget.
+            rendered, policy, observation_included, terminal_timing_included = (
+                _fit_envelope(
+                    payload,
+                    cap=envelope_allowed,
+                    state=unit.result_state.value,
+                    primary_artifact_id=primary_artifact_id,
+                )
+            )
         visible_chars = (
             len(visible)
             if policy
@@ -980,6 +1124,175 @@ def _essential_envelope(
     if unit.artifacts:
         payload["artifacts"] = [_artifact_payload(item) for item in unit.artifacts]
     return payload
+
+
+def _projection_envelope_payload(
+    *,
+    unit: ToolResultRenderUnit,
+    representation: ToolObservationRepresentation,
+    source_rollup_id: str | None,
+    primary: ContextToolResultArtifactRefFact | None,
+) -> dict[str, object]:
+    payload: dict[str, object]
+    if representation is ToolObservationRepresentation.ESSENTIAL:
+        if unit.essential is None:
+            raise ValueError("essential projection requires typed essential facts")
+        payload = _essential_envelope(
+            unit,
+            observation=_observation_payload(unit),
+        )
+        payload.pop("pulsara_tool_observation", None)
+        payload["projection"] = "essential"
+    elif representation is ToolObservationRepresentation.ARTIFACT_LOCATOR:
+        if primary is None:
+            raise ValueError("artifact-locator projection requires primary text artifact")
+        payload = {
+            "projection": "artifact_locator",
+            "status": unit.result_state.value,
+            "tool_call_id": unit.tool_call_id,
+            "primary_text_artifact": _artifact_payload(primary),
+        }
+    elif representation is ToolObservationRepresentation.ROLLUP_MEMBER:
+        if source_rollup_id is None:
+            raise ValueError("rollup-member projection lacks rollup identity")
+        payload = {
+            "projection": "rollup_member",
+            "status": unit.result_state.value,
+            "tool_call_id": unit.tool_call_id,
+            "source_rollup_id": source_rollup_id,
+            "result_sequence": unit.source_sequence_end,
+        }
+        if primary is not None:
+            payload["primary_text_artifact"] = _artifact_payload(primary)
+        if unit.essential is not None:
+            payload["essential_kind"] = unit.essential.kind
+    elif representation is ToolObservationRepresentation.PAIR_STUB:
+        payload = {
+            "projection": "pair_stub",
+            "status": unit.result_state.value,
+            "tool_call_id": unit.tool_call_id,
+            "result_sequence": unit.source_sequence_end,
+        }
+        if primary is not None:
+            payload["primary_text_artifact"] = _artifact_payload(primary)
+        if unit.essential is not None:
+            payload["essential_kind"] = unit.essential.kind
+    else:
+        raise ValueError(f"unsupported projected representation: {representation}")
+    if unit.terminal_payload_timing is not None:
+        payload["timing"] = _terminal_timing_payload(unit)
+    return payload
+
+
+def _projected_render_decision(
+    *,
+    base: ToolResultRenderDecisionFact,
+    unit: ToolResultRenderUnit,
+    text: str,
+    visible_body: int,
+    body_policy: ToolResultBodyPolicy,
+    envelope_policy: ToolResultEnvelopePolicy,
+    reason: ToolResultRenderReasonCode,
+    primary: ContextToolResultArtifactRefFact | None,
+) -> ToolResultRenderDecisionFact:
+    payload = base.model_dump(mode="json", exclude={"decision_fingerprint"})
+    rendered_envelope = len(text) - visible_body
+    payload.update(
+        {
+            "visible_body_chars": visible_body,
+            "rendered_tool_observation": unit.observation_timing,
+            "observation_timing_policy": "full",
+            "rendered_terminal_payload_timing": unit.terminal_payload_timing,
+            "terminal_payload_timing_policy": (
+                "not_applicable"
+                if unit.terminal_payload_timing is None
+                else "full"
+            ),
+            "rendered_header_chars": len(
+                _tool_result_header(
+                    unit.model_tool_name,
+                    unit.result_state.value,
+                    _observation_payload(unit),
+                )
+            ),
+            "rendered_envelope_chars": rendered_envelope,
+            "rendered_total_chars": len(text),
+            "framing": "pulsara_tool_result_envelope",
+            "payload_preserved": False,
+            "payload_format": ToolResultPayloadFormat.JSON,
+            "body_budget_remaining": max(0, base.original_chars - visible_body),
+            "message_body_budget_remaining": max(
+                0, base.message_body_budget_remaining
+            ),
+            "envelope_budget_remaining": max(
+                0, base.rendered_envelope_chars + base.envelope_budget_remaining
+                - rendered_envelope,
+            ),
+            "primary_artifact_id": primary.artifact_id if primary else None,
+            "body_policy": body_policy,
+            "envelope_policy": envelope_policy,
+            "reason_code": reason,
+            "read_more": (
+                primary.preview.read_more
+                if primary is not None and primary.preview is not None
+                else freeze_json(
+                    {"tool": "artifact_read", "artifact_id": primary.artifact_id}
+                )
+                if primary is not None
+                else None
+            ),
+            "diagnostics": (
+                *base.diagnostics,
+                _diagnostic(
+                    ToolResultRenderDiagnosticCode.BUDGET_DEGRADED,
+                    {"reason": "long_horizon_projection"},
+                ),
+            ),
+        }
+    )
+    return ToolResultRenderDecisionFact(
+        **payload,
+        decision_fingerprint=context_fingerprint(
+            "tool-result-render-decision:v1", payload
+        ),
+    )
+
+
+def _projection_render_report(
+    *,
+    decisions: tuple[ToolResultRenderDecisionFact, ...],
+    policy: ResolvedToolResultRenderPolicyFact,
+    token_estimator: TokenEstimator,
+    projection_state: ContextWindowProjectionState,
+) -> dict[str, object]:
+    total = sum(item.rendered_total_chars for item in decisions)
+    body = sum(item.visible_body_chars for item in decisions)
+    envelope = sum(item.rendered_envelope_chars for item in decisions)
+    return {
+        "policy_version": policy.basis.policy_version,
+        "per_unit_safety_caps": policy.basis.model_dump(mode="json"),
+        "used": {"total": total, "body": body, "envelope": envelope},
+        "estimated_tokens": {
+            "total": token_estimator.estimate_text("x" * total),
+            "body": token_estimator.estimate_text("x" * body),
+            "envelope": token_estimator.estimate_text("x" * envelope),
+        },
+        "projection": {
+            "window_id": projection_state.window_id,
+            "generation": projection_state.projection_generation,
+            "state_semantic_fingerprint": (
+                projection_state.state_semantic_fingerprint
+            ),
+            "representations": {
+                representation.value: sum(
+                    item.representation is representation
+                    for item in projection_state.unit_projections
+                )
+                for representation in ToolObservationRepresentation
+            },
+        },
+        "diagnostics": [],
+    }
 
 
 def _fit_envelope(
@@ -1084,6 +1397,10 @@ def _fit_envelope(
     if primary_artifact_id is not None:
         fallback_payload["primary_artifact_id"] = primary_artifact_id
     fallback = _json(fallback_payload)
+    if len(fallback) > cap:
+        fallback = _json({"status": state})
+    if len(fallback) > cap:
+        raise ValueError("per-unit envelope cap cannot hold parseable identity")
     return fallback, ToolResultEnvelopePolicy.OMITTED, False, False
 
 
@@ -1406,6 +1723,7 @@ def _cache_admission_allowed(decision: ToolResultRenderDecisionFact) -> bool:
 
 
 __all__ = [
+    "apply_tool_observation_projection",
     "PreparedToolResultRenderOutput",
     "RenderedToolResultFragment",
     "ToolResultRenderCacheWriteCandidate",
@@ -1413,6 +1731,7 @@ __all__ = [
     "ToolResultRenderDecisionCachePort",
     "prepare_tool_result_render_input",
     "render_prepared_tool_result_units",
+    "render_tool_result_projection_variant",
     "rendered_text_fingerprint",
     "validate_prepared_tool_result_render_output",
 ]

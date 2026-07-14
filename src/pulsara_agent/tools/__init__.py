@@ -12,6 +12,10 @@ _LAZY_EXPORTS = {
     "AsyncTool": ("pulsara_agent.tools.base", "AsyncTool"),
     "Tool": ("pulsara_agent.tools.base", "Tool"),
     "ToolCall": ("pulsara_agent.tools.base", "ToolCall"),
+    "PreparedToolTerminalResult": (
+        "pulsara_agent.tools.base",
+        "PreparedToolTerminalResult",
+    ),
     "ToolExecutionResult": ("pulsara_agent.tools.base", "ToolExecutionResult"),
     "ToolExecutionSuspended": ("pulsara_agent.tools.base", "ToolExecutionSuspended"),
     "ToolResultArtifactCandidate": ("pulsara_agent.tools.base", "ToolResultArtifactCandidate"),

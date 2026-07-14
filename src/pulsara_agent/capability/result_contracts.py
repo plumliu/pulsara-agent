@@ -5,6 +5,9 @@ from __future__ import annotations
 from functools import lru_cache
 
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.long_horizon import (
+    default_observation_rollup_renderer_contract,
+)
 from pulsara_agent.primitives.tool_result import (
     CapabilityResultRenderContractFact,
     CapabilityResultRenderVariantFact,
@@ -48,6 +51,7 @@ def _contract(
     variants: tuple[CapabilityResultRenderVariantFact, ...],
     denial: ToolResultRenderVariantCode,
 ) -> CapabilityResultRenderContractFact:
+    rollup_renderer = default_observation_rollup_renderer_contract()
     builder_payload = {
         "schema_version": "tool-result-semantics-builder-contract:v1",
         "builder_id": builder_id,
@@ -60,7 +64,7 @@ def _contract(
             "schema:terminal-payload-timing:v1",
             "schema:tool-result-essential-capture-policy:v1",
         ),
-        "output_schema_fingerprint": "schema:tool-result-execution-semantics:v1",
+        "output_schema_fingerprint": "schema:tool-result-execution-semantics:v2",
         "variant_table_fingerprint": context_fingerprint(
             "tool-result-variant-table:v1",
             [item.model_dump(mode="json") for item in variants],
@@ -78,6 +82,7 @@ def _contract(
             "terminal-domain:v1",
             "capture:v1",
             "profile:v1",
+            "rollup-semantics:v1",
         ),
     }
     builder = ToolResultSemanticsBuilderContractFact(
@@ -98,6 +103,11 @@ def _contract(
         "semantics_builder_version": builder_version,
         "semantics_builder_contract": builder,
         "semantics_builder_contract_fingerprint": builder.contract_fingerprint,
+        "rollup_renderer_id": rollup_renderer.renderer_id,
+        "rollup_renderer_version": rollup_renderer.renderer_version,
+        "rollup_renderer_contract_fingerprint": (
+            rollup_renderer.renderer_contract_fingerprint
+        ),
         "pre_execution_denial_variant_code": denial,
     }
     return CapabilityResultRenderContractFact(
@@ -146,7 +156,7 @@ def generic_result_render_contract() -> CapabilityResultRenderContractFact:
     )
     return _contract(
         builder_id="tool-result-semantics:generic",
-        builder_version="1",
+        builder_version="2",
         variants=variants,
         denial=ToolResultRenderVariantCode.GENERIC_DENIED,
     )
@@ -206,7 +216,7 @@ def terminal_result_render_contract() -> CapabilityResultRenderContractFact:
     )
     return _contract(
         builder_id="tool-result-semantics:terminal-command",
-        builder_version="1",
+        builder_version="2",
         variants=variants,
         denial=ToolResultRenderVariantCode.TERMINAL_COMMAND_DENIED,
     )
@@ -262,7 +272,7 @@ def terminal_process_result_render_contract() -> CapabilityResultRenderContractF
     )
     return _contract(
         builder_id="tool-result-semantics:terminal-process",
-        builder_version="1",
+        builder_version="2",
         variants=variants,
         denial=ToolResultRenderVariantCode.TERMINAL_PROCESS_ERROR,
     )

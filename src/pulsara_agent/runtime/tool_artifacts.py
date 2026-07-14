@@ -40,7 +40,6 @@ DEFAULT_LARGE_PREVIEW_CHARS = 8_000
 DEFAULT_HUGE_OUTPUT_CHARS = 200_000
 DEFAULT_HUGE_PREVIEW_CHARS = 4_000
 DEFAULT_STREAMING_LIVE_HEAD_CAP_CHARS = 2_600
-DEFAULT_TOOL_RESULT_MESSAGE_CONTEXT_CHARS = 36_000
 _HEAD_RATIO = 0.65
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
@@ -53,12 +52,10 @@ class ToolResultArtifactOptions:
     huge_output_chars: int = DEFAULT_HUGE_OUTPUT_CHARS
     huge_preview_chars: int = DEFAULT_HUGE_PREVIEW_CHARS
     streaming_live_head_cap_chars: int = DEFAULT_STREAMING_LIVE_HEAD_CAP_CHARS
-    tool_result_message_context_chars: int = DEFAULT_TOOL_RESULT_MESSAGE_CONTEXT_CHARS
 
     def __post_init__(self) -> None:
         effective_archive_threshold = self.effective_archive_threshold_bytes
         effective_large_preview = self.effective_large_preview_chars
-        effective_message_context = self.effective_tool_result_message_context_chars
         if effective_archive_threshold < 1:
             raise ValueError("archive_threshold_bytes must be >= 1")
         if self.complete_preview_body_chars < 1:
@@ -71,12 +68,6 @@ class ToolResultArtifactOptions:
             raise ValueError("huge_preview_chars must be >= 1")
         if self.streaming_live_head_cap_chars < 1:
             raise ValueError("streaming_live_head_cap_chars must be >= 1")
-        if effective_message_context < 1:
-            raise ValueError("tool_result_message_context_chars must be >= 1")
-        if effective_archive_threshold > effective_message_context:
-            raise ValueError(
-                "archive_threshold_bytes must be <= tool_result_message_context_chars"
-            )
 
     @property
     def effective_archive_threshold_bytes(self) -> int:
@@ -85,11 +76,6 @@ class ToolResultArtifactOptions:
     @property
     def effective_large_preview_chars(self) -> int:
         return self.large_preview_chars
-
-    @property
-    def effective_tool_result_message_context_chars(self) -> int:
-        return self.tool_result_message_context_chars
-
 
 @dataclass(frozen=True, slots=True)
 class AdaptivePreview:
@@ -537,7 +523,6 @@ def _options_for_tool_call(
         huge_output_chars=options.huge_output_chars,
         huge_preview_chars=huge_preview,
         streaming_live_head_cap_chars=1,
-        tool_result_message_context_chars=options.effective_tool_result_message_context_chars,
     )
     huge_head_cap = build_adaptive_preview(
         "x" * (options.huge_output_chars + 1), streaming_options_seed
@@ -551,7 +536,6 @@ def _options_for_tool_call(
         streaming_live_head_cap_chars=max(
             1, min(options.streaming_live_head_cap_chars, huge_head_cap)
         ),
-        tool_result_message_context_chars=options.effective_tool_result_message_context_chars,
     )
 
 

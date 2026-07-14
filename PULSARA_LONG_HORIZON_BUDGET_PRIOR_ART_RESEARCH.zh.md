@@ -1,10 +1,13 @@
 # Pulsara 长程任务预算控制调研：Codex、Claude Code 与 tool-result cap
 
-> 状态：调研结论与下一步设计输入，不是已实施规格  
-> 日期：2026-07-11  
-> Pulsara 基线：`6a6e62672fefe3e150b6d043b7ae4196d29eb972`（工作区含未提交的 ResolvedModelCall hard-cut）  
-> Codex 基线：`6138909d6ec58b2fbe635ef973e02caecad5a5aa`  
+> 状态：调研结论与下一步设计输入，不是已实施规格
+> 日期：2026-07-11
+> Pulsara 基线：`6a6e62672fefe3e150b6d043b7ae4196d29eb972`（工作区含未提交的 ResolvedModelCall hard-cut）
+> Codex 基线：`6138909d6ec58b2fbe635ef973e02caecad5a5aa`
 > Claude Code 快照基线：`5a774a2b62d7949c1d94e0b726281554d7893cfd`
+
+> 后续生产规格：`PULSARA_LONG_HORIZON_CONTEXT_WINDOWS_HARD_CUT_IMPLEMENTATION.zh.md`。本文保留prior-art与问题分析价值；若DTO、
+> identity、预算公式、commit/recovery或PR顺序与实施规格不同，以实施规格为准。
 
 ## 0. 结论先行
 
@@ -586,8 +589,11 @@ weighted_work
 
 - 已使用预算；
 - 剩余预算；
-- 当前证据覆盖；
-- 要求停止扩散搜索并综合当前证据。
+- 当前phase与允许的action classes；
+- bounded exact recurrence（若存在）。
+
+该提示只陈述runtime已经观察到的事实，不要求模型停止、继续、finalize或选择下一步。真正的探索收窄由确定性的rollout phase与
+capability gate执行，不能把自然语言hint当控制面。
 
 预算耗尽后，默认动作应是进入 finalization，而不是继续允许工具调用。
 
@@ -604,15 +610,15 @@ tool_calls
 例如在达到 exploration soft limit 或只剩 1–2 次 model call 时：
 
 - capability exposure 中暂时 gate deny search/scrape/terminal 等扩散工具；
-- 注入 `finalize_with_available_evidence` system/runtime fact；
+- 注入只包含当前phase、剩余reserve与allowed action classes的中性runtime fact；
 - 允许至少一次无工具的最终综合调用；
 - 如果模型仍请求工具，返回稳定 denial，并继续保留 finalization call，而不是消耗掉最后机会。
 
 硬 `max_turns` 仍可作为异常保险丝，但不应是正常长程工作完成协议。
 
-### 9.6 搜索类任务增加 evidence progress guard
+### 9.6 被否决的研究分叉：通用 evidence progress guard
 
-Codex 与 Claude Code 的通用预算机制并不能证明事实增益。Pulsara 可以利用 typed events 做得更好：
+Codex 与 Claude Code 的通用预算机制并不能证明事实增益。早期调研曾考虑让Pulsara利用typed events实现：
 
 - canonicalize query；
 - URL / document content fingerprint；
@@ -621,14 +627,20 @@ Codex 与 Claude Code 的通用预算机制并不能证明事实增益。Pulsara
 - 新增可引用事实数；
 - 最近 N 次工具调用的 evidence delta。
 
-若连续若干次搜索没有新 URL / 新事实：
+若连续若干次搜索没有新 URL / 新事实，早期方案拟执行：
 
 1. 先向模型给 no-progress diagnostic；
 2. 要求改变策略或直接回答；
 3. 再重复则 gate deny同类 search；
 4. 进入 finalization reserve。
 
-这比单纯 `max_tool_calls=64` 更符合“长程但不盲目”的目标。
+后续与Codex、Claude Code、MiMo-Code、DeepSeek-Reasonix对照后，本阶段明确不采纳该方案。原因是“新证据”“低增益”和
+“改变结论”需要产品域语义，通用runtime难以稳定判断；它还会把长程探索误收敛为搜索任务，并引入novelty ontology、builder
+registry、progress reducer与阈值联动。
+
+阶段四只保留更窄的机制：从typed tool name/arguments/terminal outcome派生bounded exact recurrence，并在中性status hint中陈述
+次数。它不形成progress状态、不改变phase、不deny调用，也不告诉模型下一步该做什么。若未来建设AutoResearch/Web Research，
+应在独立产品层重新设计证据质量策略。
 
 ### 9.7 为 search / scrape 提供直接 bounded 查询结果
 
@@ -703,14 +715,14 @@ Pulsara 应优先让 search/scrape adapter 直接返回：
 - soft reminder；
 - exploration gate；
 - reserved final answer call；
+- 对所有production primary target/summarizer pair运行静态可行性矩阵；
+- 配置加载与现有`pulsara config-check`报告total rollout、reserve components、exploration allowance与不可行组合；
+- 中性status hint只报告phase、settled calls、remaining allowance与bounded exact recurrence；
 - hard exhaustion 有明确 terminal reason，而不是模糊 `max_turns`。
 
-### PR6：evidence progress guard
+### 已取消的后续分叉：通用 evidence progress guard
 
-- 先覆盖 web search / scrape；
-- fingerprint query、URL 与 content；
-- 连续无新证据时 nudge → deny → finalize；
-- Inspector 展示为什么系统判定 low progress。
+通用evidence progress guard已从阶段四实施范围删除。阶段四在PR5结束；不存在后续progress PR，不保留隐式future flag或兼容schema。
 
 ## 11. 验收与 dogfood
 
@@ -752,14 +764,15 @@ soft target = 36,000 chars compatibility value
 - auto-compaction不会因为累计值误触发；
 - rollout reminder / finalization 会触发。
 
-### 11.4 搜索 no-progress
+### 11.4 中性 exact recurrence 观察
 
 连续返回相同 URL 与相同 content fingerprint：
 
-- 第一次重复只记 diagnostic；
-- 达阈值后拒绝继续同类 search；
-- 保留最终综合调用；
-- agent 能用已有证据给出带不确定性的答案。
+- Inspector能展示bounded recent window中的exact normalized action recurrence；
+- hydration/control调用夹在两次search之间不破坏recurrence统计；
+- 模型可见hint只报告phase、调用次数、remaining allowance与recurrence次数；
+- recurrence本身不改变phase、不拒绝search、不替runtime判断“是否有新证据”；
+- 最终综合调用由rollout finalization reserve保证。
 
 ### 11.5 真实 REPL dogfood
 
@@ -809,7 +822,8 @@ observe -> exceed 83 chars -> fail run
 1. **短期**：可以上调，但更重要的是立即把 aggregate total 从 run-ending hard cap 改为可继续降级的 soft target。
 2. **中期**：保留现有完整 artifact + head/tail preview，从固定 chars hard truth 迁移到 `ResolvedModelCall` 派生的 token budget；保留 tool-specific I/O/persistence caps。
 3. **长程主线**：让当前 run 跨多个 model-visible context window，先 microcompact old tool observations，再做 LLM summary。
-4. **独立治理**：增加累计 rollout budget、no-progress evidence guard 与 finalization reserve；不要指望 auto-compaction解决累计成本和搜索循环。
+4. **独立治理**：增加累计 rollout budget、配置期reserve可行性校验与 finalization reserve；运行期status hint只陈述事实，
+   不把通用no-progress判断做成runtime控制面。不要指望auto-compaction解决累计成本和搜索循环。
 
 Pulsara README 中的“长程任务”不应被定义为“允许无限轮工具调用”，而应定义为：
 

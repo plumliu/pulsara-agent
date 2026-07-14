@@ -14,45 +14,12 @@ from pulsara_agent.runtime.state import LoopBudget
 
 
 def resolve_context_compile_policy(budget: LoopBudget) -> ContextCompilePolicyFact:
-    """Resolve every optional LoopBudget source value exactly once.
+    """Freeze per-observation safety limits and context collection policy.
 
-    The derivation mirrors ``_ToolResultRenderAllocator.from_loop_budget``.
-    Compiler and renderer code consume only the returned non-null facts.
+    Aggregate tool-result allocation is intentionally absent.  The resolved
+    model input budget and long-horizon projection planner own every cross-unit
+    token decision.
     """
-
-    total = max(0, budget.tool_result_context_chars)
-    body_total = budget.tool_result_body_context_chars
-    configured_envelope = max(0, budget.tool_result_envelope_context_chars)
-    if body_total is None:
-        envelope_total = min(configured_envelope, max(0, total // 3))
-        body_total = max(0, total - envelope_total)
-    else:
-        body_total = max(0, min(body_total, total))
-        envelope_total = min(configured_envelope, max(0, total - body_total))
-
-    prior = budget.prior_tool_result_context_chars
-    current = budget.current_tail_tool_result_context_chars
-    legacy = budget.legacy_tool_result_context_chars
-    if prior is None or current is None:
-        derived_prior = min(12_000, body_total // 3)
-        derived_current = max(0, body_total - derived_prior)
-        prior = derived_prior if prior is None else prior
-        current = derived_current if current is None else current
-    prior = max(0, prior)
-    current = max(0, current)
-    legacy = max(0, body_total if legacy is None else legacy)
-
-    latest_reserved = max(0, budget.latest_tool_result_reserved_chars)
-    per_tool = budget.tool_result_per_tool_cap_chars
-    if per_tool is None:
-        per_tool = max(latest_reserved, min(12_000, max(current, legacy, prior)))
-    per_message = budget.tool_result_per_message_cap_chars
-    if per_message is None:
-        per_message = max(
-            latest_reserved,
-            min(20_000, max(current, legacy, prior)),
-        )
-    per_envelope = max(256, budget.tool_result_per_envelope_cap_chars)
 
     envelope_payload = {
         "envelope_renderer_version": "tool-result-envelope:v1",
@@ -75,22 +42,11 @@ def resolve_context_compile_policy(budget: LoopBudget) -> ContextCompilePolicyFa
     )
 
     basis_payload = {
-        "policy_version": "tool-result-render-policy:v1",
-        "total_context_chars": total,
-        "body_context_chars": body_total,
-        "envelope_context_chars": envelope_total,
-        "prior_history_context_chars": prior,
-        "current_run_tail_context_chars": current,
-        "current_user_context_chars": current,
-        "legacy_history_context_chars": legacy,
-        "per_tool_cap_chars": max(0, per_tool),
-        "per_message_cap_chars": max(0, per_message),
-        "per_envelope_cap_chars": per_envelope,
-        "latest_result_reserved_chars_per_unit": latest_reserved,
-        "max_tool_results_per_context": max(0, budget.max_tool_results_per_context),
-        "minimum_essential_envelope_chars": max(
-            1, budget.minimum_essential_envelope_chars
-        ),
+        "policy_version": "tool-result-render-policy:v2",
+        "per_tool_cap_chars": budget.tool_result_per_tool_cap_chars,
+        "per_message_cap_chars": budget.tool_result_per_message_cap_chars,
+        "per_envelope_cap_chars": budget.tool_result_per_envelope_cap_chars,
+        "minimum_essential_envelope_chars": budget.minimum_essential_envelope_chars,
         "max_artifact_refs_per_unit": 64,
         "max_data_placeholder_chars": 512,
         "envelope_render": envelope,
@@ -98,7 +54,7 @@ def resolve_context_compile_policy(budget: LoopBudget) -> ContextCompilePolicyFa
     basis = ToolResultRenderPolicyBasisFact(
         **basis_payload,
         basis_fingerprint=context_fingerprint(
-            "tool-result-render-policy-basis:v1", basis_payload
+            "tool-result-render-policy-basis:v2", basis_payload
         ),
     )
 

@@ -13,6 +13,7 @@ class MessageRole(StrEnum):
     ASSISTANT = "assistant"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    RUNTIME_OBSERVATION = "runtime_observation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,3 +89,7 @@ class LLMMessage:
     @classmethod
     def tool_result(cls, text: str, *, tool_call_id: str | None = None) -> "LLMMessage":
         return cls(role=MessageRole.TOOL_RESULT, content=(text,), tool_call_id=tool_call_id)
+
+    @classmethod
+    def runtime_observation(cls, text: str) -> "LLMMessage":
+        return cls(role=MessageRole.RUNTIME_OBSERVATION, content=(text,))

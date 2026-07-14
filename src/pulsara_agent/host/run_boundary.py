@@ -56,6 +56,9 @@ from pulsara_agent.runtime.run_entry import (
     PreparedSubagentRunEntry,
     RunWorkingSet,
 )
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    PreparedLongHorizonRunFacts,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,7 @@ class PreparedNewRunBoundary:
     new_run_boundary: NewRunBoundaryFact
     frozen_execution_surface: FrozenCapabilityExecutionSurface
     pending_mcp_audits: tuple[AgentEvent, ...]
+    long_horizon: PreparedLongHorizonRunFacts
     diagnostics: tuple[HostRunBoundaryDiagnostic, ...]
 
 
@@ -235,6 +239,7 @@ class HostRunBoundaryAttempt:
         "ledger_latched",
     ]
     completion: asyncio.Future[HostRunBoundaryAttemptOutcome]
+    commit_confirmation: BoundaryBatchConfirmation | None = None
 
 
 @dataclass(frozen=True, slots=True)

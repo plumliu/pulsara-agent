@@ -330,3 +330,29 @@ approval、plan、MCP input-required 的 live continuation 必须在执行前原
 continuation 始终重绑原 RunStart 的 model target 与 permission snapshot，只允许 capability exposure 语义完全复用或
 单调收窄。commit FULL 后才可安装新的 segment；commit NONE 保留原 pending/token/lease；partial/unknown 必须 latch，
 不得用 bool 压成“未提交”。stop/close 在取消 segment 前必须先 CAS 安装 typed termination intent。
+
+---
+
+## 16. Long-horizon rollout 与 finalization
+
+每个 production run 的 `RunStartEvent.long_horizon` 必须冻结 active context-window policy、rollout policy、primary/summarizer
+target、status-hint policy 与 graph reducer contract。root run 原子创建 rollout account 和 initial window；child run 只能通过
+parent account 中已经提交的 child reservation 创建自己的 bounded subaccount。
+
+模型调用、tool batch 与 child actual start 必须先取得精确 bucket reservation。settlement 只消费 committed terminal fact；缺失 usage
+按 `pre_margin_input_tokens + effective_output_tokens` 的 frozen physical quote 全额计费。phase 只能按
+`exploration -> warning -> restricted -> finalization_only -> exhausted -> emergency_hard_stop` 单调前进，exploration 不得借用任何
+finalization bucket。finalization 必须分别保留 agent call、window compaction 与 synthesis/verification tool budget。
+
+`LLMRuntime` 是 Reply/Model lifecycle、semantic stream、terminal batch与model reservation settlement的唯一持久化 owner。AgentRuntime
+只从 EventLog materialize `CommittedModelCallResult`。completed terminal 仍需在 run-control linearization lock 内 FULL commit
+`ModelCallControlDispositionResolvedEvent(ACCEPTED)`，才可交付 final reply、执行闭合 tool call 或进入 canonical transcript；termination
+抢先时写 suppression，绝不 speculative execute。
+
+Live model semantic commit使用`ModelStreamExecutionHandle`持有的confirmed cursor。连续delta按bounded event/char/time窗口批写；正常路径只比较前一
+confirmed semantic ID/count，writer直接返回canonical committed envelopes。逐chunk扫描call history、重复读取Start/End、成功写后按ID回读均禁止；
+ledger UNKNOWN/reopen才允许bounded per-call reconstruction。
+
+rollout status hint 只陈述 phase、调用计数、remaining allowance 与 exact recurrence。它不得给出继续、停止、finalize 或下一步建议，
+也不得改变 capability exposure、permission、phase、reservation 或 gate 结果。所有 production primary/summarizer 与可启动 child pair
+必须在配置期和 pre-run 使用同一整数公式通过 feasibility validation。

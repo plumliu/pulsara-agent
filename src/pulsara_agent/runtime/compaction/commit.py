@@ -68,14 +68,16 @@ class PendingCompactionEventCommit:
             return _runtime_write_result(self.candidate_event, exc.result)
         except BaseException as task_error:
             if self.runtime_session is not None:
-                confirmation = self.runtime_session.confirm_event_batch(
-                    (self.candidate_event,)
+                outcome = self.runtime_session.resolved_event_write_outcome(
+                    task_error
                 )
-                if confirmation.missing_event_ids:
+                if outcome.status == "none":
                     raise CompactionPendingCommitNotDurable(
                         "cancelled compaction candidate was not committed"
                     ) from task_error
-                committed = confirmation.committed_events[0]
+                if outcome.status == "unknown":
+                    raise
+                committed = outcome.committed_events[0]
                 return _committed_event_result(
                     self.candidate_event,
                     committed,
@@ -136,39 +138,16 @@ class RuntimeSessionCompactionEventCommitPort:
         try:
             result = await asyncio.shield(task)
         except asyncio.CancelledError as cancelled:
-            try:
-                confirmation = self.runtime_session.confirm_event_batch((event,))
-            except BaseException:
-                # UNKNOWN is not NONE.  The write can still commit after the
-                # confirmation read failed, so transfer the live task to the
-                # service-owned pending commit just like an explicit miss.
-                raise CompactionCommitPendingAfterCancellation(
-                    PendingCompactionEventCommit(
-                        candidate_event=event,
-                        task=task,
-                        runtime_session=self.runtime_session,
-                    )
-                ) from cancelled
-            if confirmation.missing_event_ids:
-                raise CompactionCommitPendingAfterCancellation(
-                    PendingCompactionEventCommit(
-                        candidate_event=event,
-                        task=task,
-                        runtime_session=self.runtime_session,
-                    )
-                ) from cancelled
-            committed = confirmation.committed_events[0]
-            if committed.sequence is None:
-                raise RuntimeError("compaction commit returned an unsequenced event")
-            normalized = CompactionEventCommitResult(
-                candidate_event_id=event.id,
-                committed_event=committed,
-                committed_through_sequence=committed.sequence,
-                publication_status="enqueued",
-                publication_errors=(),
-            )
-            _consume_background_task(task)
-            raise CompactionCommitCancelledAfterCommit(normalized) from cancelled
+            # The shielded writer task remains the sole owner. It will resolve
+            # the original deadline and typed commit outcome without a second
+            # event-loop confirmation query.
+            raise CompactionCommitPendingAfterCancellation(
+                PendingCompactionEventCommit(
+                    candidate_event=event,
+                    task=task,
+                    runtime_session=self.runtime_session,
+                )
+            ) from cancelled
         committed = result.committed_events[0]
         if committed.sequence is None:
             raise RuntimeError("compaction commit returned an unsequenced event")

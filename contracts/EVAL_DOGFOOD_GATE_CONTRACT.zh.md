@@ -310,3 +310,15 @@ uv run pytest tests/test_real_llm_governance_relatedness.py::test_real_embedding
 ```
 
 Real dogfood 命令不得被写成默认 CI 必跑项，除非 CI 环境明确提供 provider、Postgres、Oxigraph、keys 与成本预算。
+
+---
+
+## Long-horizon trajectory gate
+
+阶段四的真实 dogfood 必须覆盖：repeated research、artifact write before finalization、超过旧 36K 字符的 tool observations、current-run
+pairing、same-run window compaction、finalization deny 后保留 final call、parent-bounded subagent usage，以及 live/exact-replay manifest
+一致性。
+
+真实轨迹不能只断言最终文本出现。每条轨迹必须保存或打印 phase、model/tool counts、bucket charged/reserved/remaining、projection
+generation、window transition、neutral status hint、exact recurrence、artifact facts 与 child settlement aggregate。recurrence 只能作为事实展示，
+不能被测试解释成“无进展”或自动停止理由。real provider gate 继续由显式环境开关控制；deterministic fake/postgres parity tests 必须默认运行。

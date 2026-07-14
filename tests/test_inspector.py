@@ -21,6 +21,7 @@ from tests.support import (
     model_call_start_fields,
     test_resolved_call_fact,
 )
+from pulsara_agent.primitives.long_horizon import default_child_rollout_policy
 
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
@@ -38,6 +39,7 @@ from pulsara_agent.event import (
     ProjectionReadyEvent,
     ReplyEndEvent,
     ReplyStartEvent,
+    RolloutBudgetAccountOpenedEvent,
     RunEndEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
@@ -64,7 +66,9 @@ from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.inspector.service import (
     _context_compilation_projection,
+    _long_horizon_run_projection,
     _model_contract_projection,
+    _rollout_status_shadow_projection,
 )
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.primitives.model_call import (
@@ -88,10 +92,20 @@ from pulsara_agent.primitives.mcp import (
     McpReconcileAttemptSummaryFact,
     McpServerLifecycleTimingFact,
 )
+from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.long_horizon import (
+    RolloutBudgetAccountFact,
+    calculate_model_call_reservation,
+)
 from pulsara_agent.memory.candidates.pool import CANDIDATE_POOL_SCHEMA_SQL
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
+from pulsara_agent.runtime.tool_action import (
+    builtin_tool_action_policy,
+    default_tool_action_classifier_registry,
+)
+from pulsara_agent.tools import ToolCall
 from pulsara_agent.runtime.subagent.facts import subagent_dependency_generation
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
@@ -99,6 +113,20 @@ from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
 def _stored(event, sequence: int):
     return event.model_copy(update={"sequence": sequence})
+
+
+def _action_classification(
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    descriptor_id: str,
+):
+    return default_tool_action_classifier_registry().classify(
+        call=ToolCall(id=tool_call_id, name=tool_name, arguments={}),
+        descriptor_id=descriptor_id,
+        descriptor_fingerprint=f"descriptor-fingerprint:{descriptor_id}",
+        policy=builtin_tool_action_policy(tool_name),
+    )
 
 
 def _compiled_call_events(*, reported_usage: bool = True):
@@ -377,9 +405,12 @@ def test_inspector_allows_direct_call_without_compiled_context() -> None:
     start = _stored(
         ModelCallStartEvent(
             **ctx.event_fields(),
-            resolved_call=call,
-            context_id="context:direct",
-            model_call_index=None,
+            **model_call_start_fields(
+                resolved_call=call,
+                context_id="context:direct",
+                model_call_index=None,
+                lifecycle_kind="direct_internal_call",
+            ),
         ),
         1,
     )
@@ -389,6 +420,93 @@ def test_inspector_allows_direct_call_without_compiled_context() -> None:
         == "direct_context_not_applicable"
     )
     assert projection["diagnostics"] == []
+
+
+def test_inspector_can_show_counts_when_model_hint_is_not_injected() -> None:
+    ctx = _ctx("rollout-status-shadow")
+    permission = run_start_permission_fields(ctx.run_id, user_input="status")
+    start = _stored(
+        RunStartEvent(
+            **ctx.event_fields(),
+            **permission,
+            user_input_chars=6,
+        ),
+        1,
+    )
+    contract = start.long_horizon
+    target = start.model_target
+    policy = contract.rollout_policy
+    primary = calculate_model_call_reservation(
+        target=target,
+        resolved_model_call_id=None,
+        policy=policy,
+    )
+    final_agent = primary.reserved_milliunits * policy.finalization_reserved_model_calls
+    final_compaction = (
+        primary.reserved_milliunits
+        * policy.finalization_reserved_window_compactions
+    )
+    final_tool = (
+        policy.finalization_reserved_tool_cost_units
+        * policy.tool_cost_unit_weight_milli
+    )
+    reserve = final_agent + final_compaction + final_tool
+    total = (
+        target.context_budget.input_budget_tokens
+        * policy.total_input_budget_multiplier_milli
+    )
+    account_payload = {
+        "account_id": contract.rollout_account_id,
+        "owner_runtime_session_id": contract.rollout_account_owner_runtime_session_id,
+        "root_run_id": ctx.run_id,
+        "policy": policy,
+        "total_budget_milliunits": total,
+        "finalization_reserve_milliunits": reserve,
+        "finalization_agent_reserve_milliunits": final_agent,
+        "finalization_compaction_reserve_milliunits": final_compaction,
+        "finalization_tool_reserve_milliunits": final_tool,
+        "exploration_allowance_milliunits": total - reserve,
+    }
+    opened = _stored(
+        RolloutBudgetAccountOpenedEvent(
+            **ctx.event_fields(),
+            account=RolloutBudgetAccountFact(
+                **account_payload,
+                semantic_fingerprint=context_fingerprint(
+                    "rollout-budget-account:v1", account_payload
+                ),
+            ),
+        ),
+        2,
+    )
+
+    projection = _rollout_status_shadow_projection(
+        (start, opened),
+        runtime_session_id=contract.rollout_account_owner_runtime_session_id,
+    )
+
+    assert projection["diagnostics"] == []
+    assert len(projection["shadows"]) == 1
+    shadow = projection["shadows"][0]
+    assert shadow["settled_model_call_count"] == 0
+    assert shadow["settled_tool_call_count"] == 0
+    assert shadow["recurrence"] == []
+    assert shadow["model_visible"] is False
+
+    long_horizon = _long_horizon_run_projection(
+        (start, opened),
+        runtime_session_id=contract.rollout_account_owner_runtime_session_id,
+    )
+    assert long_horizon["diagnostics"] == []
+    assert len(long_horizon["runs"]) == 1
+    run = long_horizon["runs"][0]
+    assert run["run_id"] == ctx.run_id
+    assert run["rollout_phase"] == "exploration"
+    assert run["rollout_charged_milliunits"] == 0
+    assert run["rollout_total_milliunits"] == total
+    assert run["latest_rollout_status_hint"] is None
+    assert run["rollout_status_shadow"]["model_visible"] is False
+    assert run["pending_owner_counts"]["total"] == 0
 
 
 def _connect_or_skip(dsn: str):
@@ -467,6 +585,9 @@ def _subagent_budget_snapshot() -> dict[str, object]:
         "max_result_summary_chars_per_child": 4_000,
         "max_result_artifact_refs_per_child": 32,
         "max_subagent_results_per_parent_compile": 8,
+        "child_rollout_policy": default_child_rollout_policy().model_dump(
+            mode="json"
+        ),
     }
 
 
@@ -520,7 +641,7 @@ def _simple_run_events(
             **ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta=text
         ),
         TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
-        ReplyEndEvent(**ctx.event_fields()),
+        ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
         RunEndEvent(
             **run_end_contract_fields(ctx.run_id, status="finished"),
             **ctx.event_fields(),
@@ -1159,7 +1280,7 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
                     **ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta="done"
                 ),
                 TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
-                ReplyEndEvent(**ctx.event_fields()),
+                ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
                 RunEndEvent(
                     **run_end_contract_fields(ctx.run_id, status="finished"),
                     **ctx.event_fields(),
@@ -1469,7 +1590,7 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                     **target.event_fields(), block_id="text:target", delta="target done"
                 ),
                 TextBlockEndEvent(**target.event_fields(), block_id="text:target"),
-                ReplyEndEvent(**target.event_fields()),
+                ReplyEndEvent(**target.event_fields(), model_terminal_outcome="completed"),
                 RunEndEvent(
                     **run_end_contract_fields(target.run_id, status="finished"),
                     **target.event_fields(),
@@ -1573,6 +1694,11 @@ def test_inspect_run_projects_capability_surface_events(tmp_path: Path) -> None:
                     permission_category="filesystem_read",
                     effective_permission_category="filesystem_read",
                     effective_read_only=True,
+                    action_classification=_action_classification(
+                        tool_call_id="call:read",
+                        tool_name="read_file",
+                        descriptor_id="builtin:read_file",
+                    ),
                 ),
                 CustomEvent(
                     **ctx.event_fields(),
@@ -1825,9 +1951,14 @@ def test_inspect_run_reports_gate_permission_snapshot_mismatch(tmp_path: Path) -
                     )["permission_policy"],
                     availability="available",
                     permission_category="terminal",
-                    effective_permission_category="terminal",
-                    effective_read_only=False,
-                ),
+                        effective_permission_category="terminal",
+                        effective_read_only=False,
+                        action_classification=_action_classification(
+                            tool_call_id="call:terminal",
+                            tool_name="terminal",
+                            descriptor_id="builtin:terminal",
+                        ),
+                    ),
                 *events[1:],
             ]
         )

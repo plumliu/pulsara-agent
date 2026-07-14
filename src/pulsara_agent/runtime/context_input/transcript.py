@@ -16,6 +16,8 @@ from pulsara_agent.event.events import (
     AgentEvent,
     CapabilityExposureResolvedEvent,
     ContextCompactionCompletedEvent,
+    ContextWindowCompactionCompletedEvent,
+    ContextWindowCompactionStartedEvent,
     DataBlockDeltaEvent,
     DataBlockEndEvent,
     DataBlockStartEvent,
@@ -41,6 +43,7 @@ from pulsara_agent.event.events import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.message.assembler import BlockAssembler, BlockCompletion
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.message.blocks import (
     Base64Source,
     DataBlock,
@@ -52,6 +55,10 @@ from pulsara_agent.message.blocks import (
     ToolResultBlock,
 )
 from pulsara_agent.primitives._context_base import FrozenJsonObjectFact
+from pulsara_agent.message.reducer import (
+    MessageReplayControlError,
+    accepted_main_reply_ids,
+)
 from pulsara_agent.primitives.context import (
     CompactedWindowReferenceFact,
     ContextEventReferenceFact,
@@ -69,6 +76,7 @@ from pulsara_agent.primitives.context import (
     TranscriptThinkingBlockFact,
     TranscriptToolCallFact,
     TranscriptToolResultRefFact,
+    WindowCompactionSourceDocumentFact,
     context_fingerprint,
     freeze_json,
     thaw_json,
@@ -87,9 +95,13 @@ from pulsara_agent.primitives.tool_result import (
 )
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 from pulsara_agent.runtime.context_input.event_slice import (
+    ContextEventAuthorityView,
     ContextEventSlice,
     ContextEventSliceError,
     FrozenStoredEvent,
+)
+from pulsara_agent.runtime.context_input.window_baseline import (
+    parse_window_compaction_transcript_baseline,
 )
 from pulsara_agent.runtime.recovery import (
     RECOVERY_NOTE_ID_PREFIX_BY_STATUS,
@@ -125,6 +137,7 @@ class ContextTranscriptProjectionAuthority:
     current_user_message: CurrentUserMessageFact
     authority_slice_plan: ContextAuthoritySlicePlan
     primary_event_range: ContextEventRangeFact
+    named_event_ranges: tuple[ContextEventRangeFact, ...] = ()
 
     @classmethod
     def from_snapshot(
@@ -139,6 +152,7 @@ class ContextTranscriptProjectionAuthority:
             current_user_message=snapshot.current_user_message,
             authority_slice_plan=snapshot.authority_slice_plan,
             primary_event_range=snapshot.primary_event_range,
+            named_event_ranges=snapshot.named_event_ranges,
         )
 
 
@@ -217,13 +231,20 @@ class _PendingUnit:
 def project_context_transcript(
     *,
     snapshot: ContextFactSnapshotFact | ContextTranscriptProjectionAuthority,
-    event_slice: ContextEventSlice,
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
     compaction_summary_text: str | None = None,
+    window_compaction_source_document: WindowCompactionSourceDocumentFact | None = None,
 ) -> NormalizedContextTranscript:
     """Project one canonical authority slice into immutable transcript inputs."""
 
     _validate_snapshot_slice(snapshot=snapshot, event_slice=event_slice)
-    decoded = tuple((stored, stored.decode_owned()) for stored in event_slice.events)
+    decoded = tuple(
+        (stored, stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
+        for stored in event_slice.events
+    )
+    decoded_by_sequence = {
+        stored.sequence: (stored, event) for stored, event in decoded
+    }
     by_id = {stored.event_id: (stored, event) for stored, event in decoded}
     selected = tuple(
         (stored, event)
@@ -232,6 +253,7 @@ def project_context_transcript(
             stored.sequence, snapshot.authority_slice_plan.transcript_window
         )
     )
+    accepted_reply_ids = _accepted_main_reply_ids(selected)
     current_start = _current_run_start(snapshot=snapshot, by_id=by_id)
     _validate_descriptor_attributions(
         snapshot=snapshot,
@@ -260,6 +282,10 @@ def project_context_transcript(
     tool_result_ends: dict[str, tuple[FrozenStoredEvent, ToolResultEndEvent]] = {}
 
     for stored, event in selected:
+        if _is_model_reply_stream_event(event) and (
+            event.reply_id not in accepted_reply_ids
+        ):
+            continue
         if isinstance(event, ReplyStartEvent):
             if event.reply_id in reply_starts:
                 raise TranscriptNormalizationError("duplicate ReplyStart identity")
@@ -274,7 +300,13 @@ def project_context_transcript(
             tool_call_ends[event.tool_call_id] = (stored, event)
         elif isinstance(event, ToolResultStartEvent):
             if event.tool_call_id in tool_result_starts:
-                raise ToolResultPairingError("duplicate tool result start")
+                prior_stored, _prior = tool_result_starts[event.tool_call_id]
+                raise ToolResultPairingError(
+                    "duplicate tool result start for "
+                    f"{event.tool_call_id!r}: "
+                    f"{prior_stored.event_id}@{prior_stored.sequence}, "
+                    f"{stored.event_id}@{stored.sequence}"
+                )
             tool_result_starts[event.tool_call_id] = (stored, event)
         elif isinstance(event, ToolResultEndEvent):
             if event.tool_call_id in tool_result_ends:
@@ -288,6 +320,7 @@ def project_context_transcript(
             refs = _completion_source_refs(
                 event_slice=event_slice,
                 completion=completion,
+                decoded_by_sequence=decoded_by_sequence,
             )
             if isinstance(completion.block, HintBlock):
                 continue
@@ -332,6 +365,7 @@ def project_context_transcript(
         snapshot=snapshot,
         event_slice=event_slice,
         compaction_summary_text=compaction_summary_text,
+        window_compaction_source_document=window_compaction_source_document,
     )
     if summary_message is not None:
         messages.append(summary_message)
@@ -459,6 +493,7 @@ def project_context_transcript(
                 essential_capture_policy=end_event.essential_capture_policy,
                 essential_result=end_event.essential_result,
                 terminal_payload_timing=end_event.terminal_payload_timing,
+                rollup_semantics=end_event.rollup_semantics,
             ),
             source_refs=refs,
             result_sequence=refs[-1].sequence,
@@ -493,6 +528,15 @@ def project_context_transcript(
             current_run_start_sequence=current_start.sequence,
         )
 
+    messages, calls, results, baseline_pairs, baseline_units = (
+        _apply_window_compaction_projection(
+        messages=messages,
+        calls=calls,
+        results=results,
+        snapshot=snapshot,
+        source_document=window_compaction_source_document,
+        )
+    )
     messages = _sort_messages(messages, results=results)
     positions = {
         (message.message_id, block_index): position
@@ -502,8 +546,8 @@ def project_context_transcript(
             for block_index, _ in enumerate(message.blocks)
         )
     }
-    pairs: list[ToolInteractionPairFact] = []
-    units: list[ToolResultRenderUnit] = []
+    pairs: list[ToolInteractionPairFact] = list(baseline_pairs)
+    units: list[ToolResultRenderUnit] = list(baseline_units)
     ordered_results = sorted(
         results.items(),
         key=lambda item: positions[(item[1].message_id, item[1].block_index)],
@@ -550,6 +594,18 @@ def project_context_transcript(
             )
         )
 
+    pairs.sort(
+        key=lambda pair: (
+            positions[(pair.call_message_id, pair.call_block_index)],
+            pair.tool_call_id,
+        )
+    )
+    units = _reposition_tool_result_units(
+        units=units,
+        pairs=tuple(pairs),
+        positions=positions,
+    )
+
     transcript_payload = {
         "schema_version": "transcript-input:v1",
         "runtime_session_id": event_slice.runtime_session_id,
@@ -574,13 +630,68 @@ def project_context_transcript(
     )
 
 
+def _accepted_main_reply_ids(
+    selected: tuple[tuple[FrozenStoredEvent, AgentEvent], ...],
+) -> frozenset[str]:
+    """Resolve the durable control disposition before projecting semantics.
+
+    Provider stream completion is not control-plane acceptance.  A completed
+    main call becomes model-visible only after its exact ACCEPTED disposition
+    has committed; all other terminal outcomes and suppressed calls remain
+    audit-only.  Missing or contradictory lifecycle facts are structural input
+    corruption rather than a reason to guess from ReplyEnd or downstream data.
+    """
+
+    try:
+        return accepted_main_reply_ids(tuple(event for _, event in selected))
+    except MessageReplayControlError as exc:
+        raise TranscriptNormalizationError(str(exc)) from exc
+
+
+def _is_model_reply_stream_event(event: AgentEvent) -> bool:
+    return isinstance(
+        event,
+        ReplyStartEvent
+        | ReplyEndEvent
+        | TextBlockStartEvent
+        | TextBlockDeltaEvent
+        | TextBlockEndEvent
+        | ThinkingBlockStartEvent
+        | ThinkingBlockDeltaEvent
+        | ThinkingBlockEndEvent
+        | DataBlockStartEvent
+        | DataBlockDeltaEvent
+        | DataBlockEndEvent
+        | ToolCallStartEvent
+        | ToolCallDeltaEvent
+        | ToolCallEndEvent
+        | HintBlockEvent,
+    )
+
+
 def _validate_snapshot_slice(
-    *, snapshot: ContextFactSnapshotFact, event_slice: ContextEventSlice
+    *,
+    snapshot: ContextFactSnapshotFact | ContextTranscriptProjectionAuthority,
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
 ) -> None:
     if event_slice.runtime_session_id != snapshot.identity.runtime_session_id:
         raise ContextEventSliceError("transcript event-slice owner mismatch")
     if event_slice.to_range_fact() != snapshot.primary_event_range:
         raise ContextEventSliceError("transcript event slice does not match snapshot")
+    expected_local = tuple(
+        item
+        for item in getattr(snapshot, "named_event_ranges", ())
+        if item.runtime_session_id == snapshot.identity.runtime_session_id
+    )
+    actual_local = (
+        event_slice.named_range_facts()
+        if isinstance(event_slice, ContextEventAuthorityView)
+        else ()
+    )
+    if actual_local != expected_local:
+        raise ContextEventSliceError(
+            "transcript named authority ranges do not match snapshot"
+        )
 
 
 def _prior_lifecycle_messages(
@@ -711,6 +822,11 @@ def _terminal_completion_note_line(event: TerminalProcessCompletedEvent) -> str:
 
 
 def _sequence_is_model_visible(sequence: int, window) -> bool:
+    if window.window_kind == "window_compaction":
+        # Exact message retention is applied after complete normalization. This
+        # keeps provider tool pairing reconstructible without making sequence
+        # ranges a second compaction authority.
+        return True
     retained = (
         window.retained_history_from_sequence,
         window.retained_history_through_sequence,
@@ -809,17 +925,23 @@ def _validate_descriptor_attributions(
 
 
 def _completion_source_refs(
-    *, event_slice: ContextEventSlice, completion: BlockCompletion
+    *,
+    event_slice: ContextEventSlice,
+    completion: BlockCompletion,
+    decoded_by_sequence: dict[int, tuple[FrozenStoredEvent, AgentEvent]],
 ) -> tuple[ContextEventReferenceFact, ...]:
     if completion.start_sequence is None or completion.end_sequence is None:
         raise TranscriptNormalizationError(
             "completed block lacks durable sequence span"
         )
     refs: list[ContextEventReferenceFact] = []
-    for stored in event_slice.events:
-        if not completion.start_sequence <= stored.sequence <= completion.end_sequence:
-            continue
-        event = stored.decode_owned()
+    for sequence in range(completion.start_sequence, completion.end_sequence + 1):
+        pair = decoded_by_sequence.get(sequence)
+        if pair is None:
+            raise TranscriptNormalizationError(
+                "completed block source sequence is absent"
+            )
+        stored, event = pair
         if event.reply_id != completion.reply_id:
             continue
         if _event_matches_block(event, completion):
@@ -946,13 +1068,17 @@ def _validate_stream_completeness(
 
 def _compaction_summary_message(
     *,
-    snapshot: ContextFactSnapshotFact,
+    snapshot: ContextFactSnapshotFact | ContextTranscriptProjectionAuthority,
     event_slice: ContextEventSlice,
     compaction_summary_text: str | None,
+    window_compaction_source_document: WindowCompactionSourceDocumentFact | None,
 ) -> tuple[TranscriptMessageFact | None, CompactedWindowReferenceFact | None]:
     window = snapshot.authority_slice_plan.transcript_window
     if window.compaction_terminal_ref is None:
-        if compaction_summary_text is not None:
+        if (
+            compaction_summary_text is not None
+            or window_compaction_source_document is not None
+        ):
             raise TranscriptNormalizationError(
                 "uncompacted transcript cannot receive compaction summary text"
             )
@@ -962,10 +1088,27 @@ def _compaction_summary_message(
             "compacted transcript requires prepared summary artifact text"
         )
     stored = event_slice.event_by_id(window.compaction_terminal_ref.event_id)
-    event = stored.decode_owned()
-    if not isinstance(event, ContextCompactionCompletedEvent):
+    event = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    prefix = isinstance(event, ContextCompactionCompletedEvent)
+    same_run = isinstance(event, ContextWindowCompactionCompletedEvent)
+    if not prefix and not same_run:
         raise TranscriptNormalizationError("compaction window terminal type mismatch")
-    summary_message_id = f"compaction-summary:{event.compaction_id}"
+    if prefix and window_compaction_source_document is not None:
+        raise TranscriptNormalizationError(
+            "prefix compaction cannot receive a window source document"
+        )
+    if same_run:
+        _validate_window_compaction_source_document(
+            snapshot=snapshot,
+            event_slice=event_slice,
+            completed=event,
+            source_document=window_compaction_source_document,
+        )
+    summary_message_id = (
+        f"compaction-summary:{event.compaction_id}"
+        if prefix
+        else f"window-compaction-summary:{event.compaction_id}"
+    )
     source_ref = stored.to_reference(event_slice.runtime_session_id)
     block = TranscriptTextBlockFact(
         block_id=f"text:{summary_message_id}",
@@ -978,7 +1121,7 @@ def _compaction_summary_message(
     message = _message_fact(
         message_id=summary_message_id,
         role="system",
-        name="pulsara_compaction",
+        name="pulsara_compaction" if prefix else "pulsara_window_compaction",
         run_id=None,
         turn_id=None,
         reply_id=None,
@@ -990,13 +1133,190 @@ def _compaction_summary_message(
         source_sequence_end=stored.sequence,
     )
     return message, CompactedWindowReferenceFact(
+        compaction_kind="prefix" if prefix else "window",
         compaction_id=event.compaction_id,
         summary_artifact_id=event.summary_artifact_id,
-        compacted_through_sequence=event.through_sequence,
-        keep_after_sequence=event.keep_after_sequence,
+        compacted_through_sequence=(
+            event.through_sequence
+            if prefix
+            else snapshot.authority_slice_plan.transcript_window.compacted_through_sequence
+        ),
+        keep_after_sequence=event.keep_after_sequence if prefix else None,
         summary_message_id=summary_message_id,
         source_event=source_ref,
+        source_started_event=(
+            snapshot.authority_slice_plan.transcript_window.window_compaction_started_ref
+            if same_run
+            else None
+        ),
     )
+
+
+def _validate_window_compaction_source_document(
+    *,
+    snapshot: ContextFactSnapshotFact | ContextTranscriptProjectionAuthority,
+    event_slice: ContextEventSlice,
+    completed: ContextWindowCompactionCompletedEvent,
+    source_document: WindowCompactionSourceDocumentFact | None,
+) -> None:
+    window = snapshot.authority_slice_plan.transcript_window
+    if window.window_kind != "window_compaction":
+        raise TranscriptNormalizationError("window terminal used by a prefix projection")
+    if source_document is None:
+        raise TranscriptNormalizationError(
+            "window compaction requires its source document artifact"
+        )
+    started_ref = window.window_compaction_started_ref
+    if started_ref is None:
+        raise TranscriptNormalizationError("window compaction lacks Started reference")
+    stored = event_slice.event_by_id(started_ref.event_id)
+    started = stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    if not isinstance(started, ContextWindowCompactionStartedEvent):
+        raise TranscriptNormalizationError("window compaction Started type mismatch")
+    plan = started.plan
+    if (
+        completed.started_event_id != started.id
+        or completed.plan_fingerprint != plan.plan_fingerprint
+        or source_document.compaction_id != plan.compaction_id
+        or source_document.run_id != plan.run_id
+        or source_document.source_window_id != plan.source_window_id
+        or source_document.source_projection_generation
+        != plan.source_projection_generation
+        or source_document.source_through_sequence != plan.source_through_sequence
+        or source_document.document_fingerprint != plan.source_document_fingerprint
+        or source_document.summarized_message_ids != plan.summarized_message_ids
+        or source_document.retained_message_ids != plan.retained_message_ids
+        or source_document.summarized_pair_group_ids
+        != plan.summarized_pair_group_ids
+        or source_document.retained_pair_group_ids != plan.retained_pair_group_ids
+    ):
+        raise TranscriptNormalizationError(
+            "window compaction source document differs from its durable plan"
+        )
+
+
+def _apply_window_compaction_projection(
+    *,
+    messages: list[TranscriptMessageFact],
+    calls: dict[str, _CallProjection],
+    results: dict[str, _ResultProjection],
+    snapshot: ContextFactSnapshotFact | ContextTranscriptProjectionAuthority,
+    source_document: WindowCompactionSourceDocumentFact | None,
+) -> tuple[
+    list[TranscriptMessageFact],
+    dict[str, _CallProjection],
+    dict[str, _ResultProjection],
+    tuple[ToolInteractionPairFact, ...],
+    tuple[ToolResultRenderUnit, ...],
+]:
+    window = snapshot.authority_slice_plan.transcript_window
+    if window.window_kind != "window_compaction":
+        if source_document is not None:
+            raise TranscriptNormalizationError(
+                "non-window projection received a window source document"
+            )
+        return messages, calls, results, (), ()
+    if source_document is None:
+        raise TranscriptNormalizationError("window compaction source document missing")
+    through = window.compacted_through_sequence
+    if through is None:
+        raise TranscriptNormalizationError("window compaction high-water missing")
+    baseline = parse_window_compaction_transcript_baseline(
+        source_document.retained_transcript_baseline
+    )
+    if (
+        baseline.compaction_id != source_document.compaction_id
+        or baseline.run_id != source_document.run_id
+        or baseline.source_window_id != source_document.source_window_id
+        or baseline.source_through_sequence != source_document.source_through_sequence
+        or tuple(item.message_id for item in baseline.retained_messages)
+        != source_document.retained_message_ids
+    ):
+        raise TranscriptNormalizationError(
+            "window compaction transcript baseline differs from source document"
+        )
+    retained = set(window.retained_message_ids)
+    summarized = set(window.summarized_message_ids)
+    reconstructed_retained = tuple(
+        message for message in messages if message.message_id in retained
+    )
+    if reconstructed_retained and reconstructed_retained != baseline.retained_messages:
+        raise TranscriptNormalizationError(
+            "window compaction retained message differs from durable baseline"
+        )
+    kept_messages = [
+        message
+        for message in messages
+        if message.segment == "compaction_summary"
+        or message.source_sequence_start > through
+    ]
+    summary_count = sum(
+        message.segment == "compaction_summary" for message in kept_messages
+    )
+    kept_messages[summary_count:summary_count] = list(baseline.retained_messages)
+    if any(message.message_id in summarized for message in kept_messages):
+        raise TranscriptNormalizationError("summarized message leaked into new window")
+    kept_ids = {
+        message.message_id
+        for message in kept_messages
+        if message.message_id not in retained
+    }
+    kept_calls = {
+        tool_call_id: call
+        for tool_call_id, call in calls.items()
+        if call.message_id in kept_ids
+    }
+    kept_results = {
+        tool_call_id: result
+        for tool_call_id, result in results.items()
+        if result.message_id in kept_ids
+    }
+    if set(kept_calls) != set(kept_results):
+        raise ToolResultPairingError(
+            "window compaction retained only one side of a tool interaction"
+        )
+    return (
+        kept_messages,
+        kept_calls,
+        kept_results,
+        baseline.retained_tool_pairs,
+        baseline.retained_tool_result_units,
+    )
+
+
+def _reposition_tool_result_units(
+    *,
+    units: list[ToolResultRenderUnit],
+    pairs: tuple[ToolInteractionPairFact, ...],
+    positions: dict[tuple[str, int], int],
+) -> list[ToolResultRenderUnit]:
+    pair_by_call = {pair.tool_call_id: pair for pair in pairs}
+    repositioned: list[ToolResultRenderUnit] = []
+    for unit in units:
+        pair = pair_by_call.get(unit.tool_call_id)
+        if pair is None:
+            raise TranscriptNormalizationError(
+                "tool result unit lacks its normalized interaction pair"
+            )
+        payload = unit.model_dump(mode="python", exclude={"unit_fingerprint"})
+        payload.update(
+            call_position=positions[
+                (pair.call_message_id, pair.call_block_index)
+            ],
+            result_position=positions[
+                (pair.result_message_id, pair.result_block_index)
+            ],
+        )
+        repositioned.append(
+            ToolResultRenderUnit(
+                **payload,
+                unit_fingerprint=context_fingerprint(
+                    "tool-result-render-unit:v1", payload
+                ),
+            )
+        )
+    repositioned.sort(key=lambda item: (item.result_position, item.unit_id))
+    return repositioned
 
 
 def _user_message(
@@ -1267,6 +1587,7 @@ def _tool_result_unit(*, pending: _PendingUnit) -> ToolResultRenderUnit:
         "render_profile": semantics.render_profile,
         "essential_capture_policy": semantics.essential_capture_policy,
         "essential": semantics.essential_result,
+        "rollup_semantics": semantics.rollup_semantics,
         "source_sequence_start": source_refs[0].sequence,
         "source_sequence_end": source_refs[-1].sequence,
         "source_event_ids": tuple(ref.event_id for ref in source_refs),

@@ -295,7 +295,7 @@ def test_runtime_hook_manager_cleans_only_finished_reply_on_reply_end() -> None:
             _ctx("reply:b"),
             TextBlockDeltaEvent(**ctx_b.event_fields(), block_id="text:1", delta="B"),
         ),
-        (_ctx("reply:a"), ReplyEndEvent(**ctx_a.event_fields())),
+        (_ctx("reply:a"), ReplyEndEvent(**ctx_a.event_fields(), model_terminal_outcome="completed")),
         (_ctx("reply:a"), TextBlockEndEvent(**ctx_a.event_fields(), block_id="text:1")),
         (_ctx("reply:b"), TextBlockEndEvent(**ctx_b.event_fields(), block_id="text:1")),
     ]:

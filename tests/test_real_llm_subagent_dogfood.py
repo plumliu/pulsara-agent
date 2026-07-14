@@ -9,6 +9,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from tests.conftest import open_test_root_rollout_run
 from tests.support import run_agent_task
 
 from pulsara_agent.event import (
@@ -16,6 +17,7 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     SubagentEdgeRecordedEvent,
     SubagentResultDeliveredEvent,
+    SubagentRolloutBudgetResolvedEvent,
     SubagentRunCompletedEvent,
     SubagentRunFailedEvent,
     SubagentRunStartedEvent,
@@ -149,6 +151,32 @@ def test_real_llm_subagent_background_result_delivery_dogfood(tmp_path: Path) ->
     assert result["child_raw_events_missing_subagent_metadata"] == 0, result
 
 
+def test_real_llm_long_horizon_subagent_budget_is_parent_bounded(
+    tmp_path: Path,
+) -> None:
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
+    if os.getenv("PULSARA_RUN_LONG_HORIZON_DOGFOOD") != "1":
+        pytest.skip(
+            "Set PULSARA_RUN_LONG_HORIZON_DOGFOOD=1 to run long-horizon dogfood."
+        )
+    settings = _settings()
+    result = asyncio.run(_run_subagent_spawn_wait_dogfood(settings, tmp_path))
+    print(
+        "\nREAL_LLM_LONG_HORIZON_SUBAGENT_BUDGET="
+        + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    )
+    assert result["status"] == "finished", result
+    assert result["subagent_budget_resolved_count"] == 1, result
+    assert result["child_max_rollout_milliunits"] > 0, result
+    assert (
+        result["child_max_rollout_milliunits"]
+        <= result["child_parent_share_limit_milliunits"]
+    ), result
+
+
 async def _run_subagent_spawn_wait_dogfood(
     settings: PulsaraSettings,
     tmp_path: Path,
@@ -164,8 +192,6 @@ async def _run_subagent_spawn_wait_dogfood(
         durable=durable,
     )
     wiring.agent_runtime.budget = LoopBudget(
-        max_turns=12,
-        max_tool_calls=12,
         max_consecutive_model_failures=2,
         max_consecutive_tool_failures=4,
         max_subagent_results_per_parent_compile=0,
@@ -202,6 +228,11 @@ async def _run_subagent_spawn_wait_dogfood(
             event
             for event in parent_events
             if isinstance(event, SubagentResultDeliveredEvent)
+        ]
+        budget_resolved = [
+            event
+            for event in parent_events
+            if isinstance(event, SubagentRolloutBudgetResolvedEvent)
         ]
         tool_names = [
             event.tool_call_name
@@ -248,6 +279,17 @@ async def _run_subagent_spawn_wait_dogfood(
             ],
             "subagent_started_count": len(started),
             "subagent_completed_count": len(completed),
+            "subagent_budget_resolved_count": len(budget_resolved),
+            "child_max_rollout_milliunits": (
+                budget_resolved[0].resolved_budget.max_rollout_milliunits_per_child
+                if budget_resolved
+                else 0
+            ),
+            "child_parent_share_limit_milliunits": (
+                budget_resolved[0].resolved_budget.parent_share_limit_milliunits
+                if budget_resolved
+                else 0
+            ),
             "subagent_failures": [
                 {
                     "subagent_run_id": event.subagent_run_id,
@@ -317,6 +359,13 @@ async def _run_subagent_background_delivery_dogfood(
     assert subagent_runtime is not None
     seed_context = EventContext(
         run_id="run:seed", turn_id="turn:seed", reply_id="reply:seed"
+    )
+    open_test_root_rollout_run(
+        wiring.runtime_wiring.runtime_session,
+        event_context=seed_context,
+        model_target=wiring.agent_runtime.llm_runtime.resolve_target(
+            role=ModelRole.PRO
+        ).fact,
     )
     seeded = await subagent_runtime.spawn_fake(
         task="seeded background child result",

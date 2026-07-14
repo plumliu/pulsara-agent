@@ -7,25 +7,39 @@ import pytest
 
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
+    ContextCompiledEvent,
+    ContextWindowOpenedEvent,
     EventContext,
     RunStartEvent,
     TextBlockDeltaEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.event_log.protocol import EventLogReadSnapshot
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.primitives.capability import (
     build_capability_execution_surface_identity,
 )
+from pulsara_agent.primitives.context import (
+    ContextCompileInputManifestFact,
+    context_fingerprint,
+)
 from pulsara_agent.runtime import AgentRuntime
-from pulsara_agent.runtime.context_input import collect_live_context_inputs
+from pulsara_agent.runtime.context_input.live import (
+    _advance_sparse_relevant_through_sequence,
+    collect_live_context_inputs,
+)
+from pulsara_agent.runtime.context_input.snapshot import (
+    build_context_snapshot,
+)
 from pulsara_agent.runtime.permission_snapshot import snapshot_from_mode
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.runtime.context_input import (
+from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventSlice,
     ContextEventSliceError,
     EventLogContextEventSliceReader,
     FrozenStoredEvent,
+)
+from pulsara_agent.runtime.context_input.snapshot import (
     finalize_context_authority_slice_plan,
 )
 from tests.support.model_call import compaction_completed_contract_fields
@@ -50,6 +64,10 @@ def _event(index: int) -> TextBlockDeltaEvent:
         delta=f"delta:{index}",
         metadata={"nested": {"items": [index]}},
     )
+
+
+def test_child_sparse_authority_cursor_accepts_an_empty_delta() -> None:
+    assert _advance_sparse_relevant_through_sequence(17, ()) == 17
 
 
 def test_in_memory_event_log_owns_appended_payload_and_returns_fresh_copies() -> None:
@@ -82,11 +100,52 @@ def test_context_event_slice_is_canonical_and_projectors_get_owned_events() -> N
     assert event_slice.through_sequence == 2
     assert tuple(item.sequence for item in event_slice.events) == (1, 2)
 
-    first_projection = event_slice.events[0].decode_owned()
-    second_projection = event_slice.events[0].decode_owned()
+    first_projection = event_slice.events[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    second_projection = event_slice.events[0].decode_owned(
+        DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     first_projection.metadata["nested"]["items"].append(99)
     assert second_projection.metadata["nested"]["items"] == [1]
-    assert event_slice.events[0].decode_owned().metadata["nested"]["items"] == [1]
+    assert event_slice.events[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY).metadata[
+        "nested"
+    ]["items"] == [1]
+
+
+def test_context_event_slice_delta_extension_preserves_canonical_fingerprints() -> None:
+    log = InMemoryEventLog()
+    log.extend((_event(1), _event(2)))
+    first = log.read_raw_range_snapshot(
+        minimum_sequence=1,
+        through_sequence=1,
+        max_events=2,
+        max_payload_bytes=100_000,
+    )
+    event_slice = ContextEventSlice.from_read_snapshot(
+        runtime_session_id="runtime:context-slice",
+        minimum_sequence=1,
+        snapshot=first,
+    )
+    delta = log.read_raw_range_snapshot(
+        minimum_sequence=2,
+        through_sequence=2,
+        max_events=2,
+        max_payload_bytes=100_000,
+    )
+    extended = event_slice.extend_snapshot(delta)
+
+    ids = tuple(event.event_id for event in extended.events)
+    payloads = tuple(event.payload_fingerprint for event in extended.events)
+    assert ids == ("event:1", "event:2")
+    assert extended.event_ids_fingerprint == context_fingerprint(
+        "context-event-slice-ids:v1", ids
+    )
+    assert extended.event_payloads_fingerprint == context_fingerprint(
+        "context-event-slice-payloads:v1", payloads
+    )
+    assert len(extended.events.chunks) == 2
+    assert extended.payload_byte_count == sum(
+        len(event.canonical_payload_bytes) for event in extended.events
+    )
 
 
 def test_explicit_context_high_water_excludes_later_append() -> None:
@@ -113,14 +172,14 @@ def test_context_event_slice_rejects_sequence_gap() -> None:
     third = FrozenStoredEvent.from_stored_event(
         _event(3).model_copy(update={"sequence": 3})
     )
-    snapshot = EventLogReadSnapshot(
-        through_sequence=3, events=(first.decode_owned(), third.decode_owned())
-    )
     with pytest.raises(ContextEventSliceError, match="contiguous"):
-        ContextEventSlice.from_read_snapshot(
+        ContextEventSlice(
             runtime_session_id="runtime:context-slice",
-            minimum_sequence=1,
-            snapshot=snapshot,
+            from_sequence=1,
+            through_sequence=3,
+            events=(first, third),
+            event_ids_fingerprint="invalid",
+            event_payloads_fingerprint="invalid",
         )
 
 
@@ -140,7 +199,7 @@ def test_frozen_stored_event_rejects_wrapper_payload_split_brain() -> None:
         object.__setattr__(corrupt, field_name, getattr(frozen, field_name))
     object.__setattr__(corrupt, "sequence", 2)
     with pytest.raises(ContextEventSliceError, match="wrapper identity"):
-        corrupt.decode_owned()
+        corrupt.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
 
 
 def test_context_slice_read_is_blocked_by_structural_latch() -> None:
@@ -160,8 +219,12 @@ def test_context_slice_read_is_blocked_by_structural_latch() -> None:
         )
 
 
-def _run_start(ctx: EventContext) -> RunStartEvent:
+def _run_start(ctx: EventContext) -> tuple[RunStartEvent, ContextWindowOpenedEvent]:
     from tests.conftest import run_start_permission_fields
+    from pulsara_agent.runtime.long_horizon.run_contract import (
+        empty_projection_state_fingerprint,
+        prepare_root_long_horizon_run,
+    )
 
     fields = run_start_permission_fields(
         ctx.run_id,
@@ -170,11 +233,32 @@ def _run_start(ctx: EventContext) -> RunStartEvent:
         reply_id=ctx.reply_id,
         mcp_installation_owner_runtime_session_id="runtime:context-slice",
     )
-    return RunStartEvent(
+    run_start_id = f"run_start:test:{ctx.run_id}"
+    prepared = prepare_root_long_horizon_run(
+        runtime_session_id="runtime:context-slice",
+        run_id=ctx.run_id,
+        run_start_event_id=run_start_id,
+        primary_target=fields["model_target"],
+        summarizer_target=fields["model_target"],
+        graph_reducer_contract=fields["subagent_graph_reducer_contract"],
+        source_through_sequence_at_open=0,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    fields["long_horizon"] = prepared.contract
+    run_start = RunStartEvent(
+        id=run_start_id,
         **ctx.event_fields(),
         **fields,
         user_input_chars=len("current request"),
     )
+    window_open = ContextWindowOpenedEvent(
+        id=prepared.contract.initial_window_open_event_id,
+        **ctx.event_fields(),
+        window=prepared.initial_window,
+        opening_batch_id=prepared.opening_batch_id,
+    )
+    return run_start, window_open
 
 
 def _compaction(ctx: EventContext, *, label: str) -> ContextCompactionCompletedEvent:
@@ -203,11 +287,12 @@ def test_preflight_compaction_window_is_independent_from_authority_slice() -> No
     log = InMemoryEventLog()
     history = log.append(_event(1))
     compacted = log.append(_compaction(ctx, label="preflight"))
-    started = log.append(_run_start(ctx))
+    run_start, window_open = _run_start(ctx)
+    started, _ = log.extend((run_start, window_open))
     event_slice = ContextEventSlice.from_read_snapshot(
         runtime_session_id="runtime:context-slice",
         minimum_sequence=1,
-        snapshot=log.read_range_snapshot(minimum_sequence=1),
+        snapshot=log.read_raw_range_snapshot(minimum_sequence=1),
     )
     plan = finalize_context_authority_slice_plan(
         event_slice=event_slice,
@@ -239,7 +324,8 @@ def test_mid_turn_compaction_keeps_current_run_in_protected_window() -> None:
     )
     log = InMemoryEventLog()
     history = log.append(_event(1))
-    started = log.append(_run_start(ctx))
+    run_start, window_open = _run_start(ctx)
+    started, _ = log.extend((run_start, window_open))
     current = log.append(
         TextBlockDeltaEvent(
             **ctx.event_fields(), block_id="current", delta="current run"
@@ -249,7 +335,7 @@ def test_mid_turn_compaction_keeps_current_run_in_protected_window() -> None:
     event_slice = ContextEventSlice.from_read_snapshot(
         runtime_session_id="runtime:context-slice",
         minimum_sequence=1,
-        snapshot=log.read_range_snapshot(minimum_sequence=1),
+        snapshot=log.read_raw_range_snapshot(minimum_sequence=1),
     )
     start_ref = FrozenStoredEvent.from_stored_event(started).to_reference(
         "runtime:context-slice"
@@ -288,11 +374,13 @@ async def _captured_live_collect_args(tmp_path, monkeypatch):
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
     )
     await run_agent_task(agent, "snapshot joins")
-    return captured[0]
+    return captured[0], agent.runtime_session
 
 
 def test_live_snapshot_permission_join_fails_closed(tmp_path, monkeypatch) -> None:
-    kwargs = asyncio.run(_captured_live_collect_args(tmp_path, monkeypatch))
+    kwargs, _runtime_session = asyncio.run(
+        _captured_live_collect_args(tmp_path, monkeypatch)
+    )
     working_set = kwargs["working_set"]
     wrong_permission = snapshot_from_mode(
         runtime_session_id=working_set.permission_snapshot.runtime_session_id,
@@ -312,7 +400,9 @@ def test_live_snapshot_permission_join_fails_closed(tmp_path, monkeypatch) -> No
 
 
 def test_live_snapshot_mcp_surface_join_fails_closed(tmp_path, monkeypatch) -> None:
-    kwargs = asyncio.run(_captured_live_collect_args(tmp_path, monkeypatch))
+    kwargs, _runtime_session = asyncio.run(
+        _captured_live_collect_args(tmp_path, monkeypatch)
+    )
     working_set = kwargs["working_set"]
     old_surface = working_set.frozen_execution_surface
     changed_identity = build_capability_execution_surface_identity(
@@ -333,7 +423,9 @@ def test_live_snapshot_mcp_surface_join_fails_closed(tmp_path, monkeypatch) -> N
 
 
 def test_live_snapshot_exposure_join_fails_closed(tmp_path, monkeypatch) -> None:
-    kwargs = asyncio.run(_captured_live_collect_args(tmp_path, monkeypatch))
+    kwargs, _runtime_session = asyncio.run(
+        _captured_live_collect_args(tmp_path, monkeypatch)
+    )
     working_set = kwargs["working_set"]
     assert working_set.effective_exposure_fact is not None
     drifted = working_set.effective_exposure_fact.model_copy(
@@ -355,3 +447,52 @@ def test_raw_suspended_token_is_not_a_snapshot_build_field() -> None:
         ContextSnapshotBuildInput.model_fields
     )
     assert "suspended_state_token" not in ContextSnapshotBuildInput.model_fields
+
+
+def test_manifest_semantic_fingerprint_excludes_checkpoint_acceleration(
+    tmp_path, monkeypatch
+) -> None:
+    kwargs, runtime_session = asyncio.run(
+        _captured_live_collect_args(tmp_path, monkeypatch)
+    )
+    original_input = collect_live_context_inputs(**kwargs)
+    acceleration_payload = original_input.subagent_graph_acceleration.model_dump(
+        mode="python", exclude={"acceleration_fingerprint"}
+    )
+    acceleration_payload["checkpoint_id"] = "subagent-checkpoint:alternate"
+    changed_acceleration = original_input.subagent_graph_acceleration.__class__(
+        **acceleration_payload,
+        acceleration_fingerprint=context_fingerprint(
+            "subagent-graph-acceleration:v1", acceleration_payload
+        ),
+    )
+    changed_input = original_input.model_copy(
+        update={"subagent_graph_acceleration": changed_acceleration}
+    )
+    compiled = next(
+        event
+        for event in reversed(runtime_session.event_log.iter())
+        if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
+    )
+    assert compiled.input_audit is not None
+    manifest = ContextCompileInputManifestFact.model_validate_json(
+        runtime_session.archive.get_text(
+            compiled.input_audit.input_manifest_artifact_id,
+            session_id=runtime_session.runtime_session_id,
+        )
+    )
+    attribution = manifest.snapshot.long_horizon_attribution
+
+    original = build_context_snapshot(
+        original_input,
+        long_horizon_attribution=attribution,
+    )
+    changed = build_context_snapshot(
+        changed_input,
+        long_horizon_attribution=attribution,
+    )
+
+    assert original.snapshot_semantic_fingerprint == (
+        changed.snapshot_semantic_fingerprint
+    )
+    assert original.snapshot_fact_fingerprint != changed.snapshot_fact_fingerprint

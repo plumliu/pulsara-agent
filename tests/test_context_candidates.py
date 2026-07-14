@@ -6,6 +6,7 @@ import pytest
 
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event import ContextCompiledEvent, EventContext
+from pulsara_agent.llm.config import ModelRole
 from pulsara_agent.primitives.context import (
     ContextCandidateSourceSelectionFact,
     ContextCandidateLifecycleKeyFact,
@@ -18,22 +19,24 @@ from pulsara_agent.primitives.context import (
     context_fingerprint,
 )
 from pulsara_agent.runtime import AgentRuntime, LoopBudget
-from pulsara_agent.runtime.context_input import (
-    ContextEventSlice,
+from pulsara_agent.runtime.context_input.candidate import (
     InMemoryContextLifecycleCache,
     ContextCandidateCollectionInput,
     build_context_candidate_source_selections,
     collect_context_candidates,
-    compile_context_from_facts,
     prepare_context_candidates,
+)
+from pulsara_agent.runtime.context_input.compiler import compile_context_from_facts
+from pulsara_agent.runtime.context_input.policy import resolve_context_compile_policy
+from pulsara_agent.runtime.context_input.render import (
     prepare_tool_result_render_input,
     render_prepared_tool_result_units,
-    resolve_context_compile_policy,
 )
 from pulsara_agent.runtime.context_input.compiler import _apply_section_budget
 from pulsara_agent.runtime.context_engine.types import AllocatedContextSection
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.conftest import open_test_root_rollout_run
 from tests.test_agent_runtime_loop import (
     ScriptedTransport,
     make_llm_runtime,
@@ -60,6 +63,27 @@ async def _prepared_snapshot(tmp_path, monkeypatch):
     )
     await run_agent_task(agent, "candidate facts")
     return captured[0]
+
+
+async def _compiled_snapshot(tmp_path, monkeypatch) -> ContextFactSnapshotFact:
+    import pulsara_agent.runtime.agent as agent_module
+
+    captured: list[ContextFactSnapshotFact] = []
+    original = agent_module.build_context_snapshot
+
+    def capture(*args, **kwargs):
+        snapshot = original(*args, **kwargs)
+        captured.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr(agent_module, "build_context_snapshot", capture)
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=in_memory_runtime_session(tmp_path),
+        llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
+    )
+    await run_agent_task(agent, "candidate facts")
+    return captured[-1]
 
 
 class _CandidateCache:
@@ -196,6 +220,7 @@ def test_compiler_rejects_forged_candidate_even_with_valid_candidate_fingerprint
             facts=prepared.invocation,
             transcript=prepared.normalized_transcript.transcript,
             rendered_tool_results=rendered,
+            prepared_rollups=(),
             section_candidates=forged_set,
         )
 
@@ -379,8 +404,7 @@ def test_candidate_collection_input_rejects_process_local_subagent_selection() -
 def test_snapshot_rejects_subagent_selection_above_frozen_policy(
     tmp_path, monkeypatch
 ) -> None:
-    prepared = asyncio.run(_prepared_snapshot(tmp_path, monkeypatch))
-    snapshot = prepared.invocation.fact
+    snapshot = asyncio.run(_compiled_snapshot(tmp_path, monkeypatch))
     selected_ids = tuple(f"result:{index}" for index in range(9))
     selection_payload = {
         "source_instance_id": "subagent:results",
@@ -391,8 +415,9 @@ def test_snapshot_rejects_subagent_selection_above_frozen_policy(
         "policy_fingerprint": (
             snapshot.compile_policy.candidate_collection.policy_fingerprint
         ),
-        "source_from_sequence": snapshot.primary_event_range.first_sequence,
-        "source_through_sequence": snapshot.identity.source_through_sequence,
+        "subagent_graph_semantic_source": (
+            snapshot.subagent_graph_semantic_source
+        ),
     }
     forged_selection = ContextCandidateSourceSelectionFact(
         **selection_payload,
@@ -414,7 +439,9 @@ def test_snapshot_rejects_subagent_selection_above_frozen_policy(
         )
 
 
-def test_subagent_selection_is_derived_from_one_frozen_event_slice(tmp_path) -> None:
+def test_new_child_completion_between_reads_cannot_drift_selection_high_water(
+    tmp_path,
+) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
@@ -429,50 +456,75 @@ def test_subagent_selection_is_derived_from_one_frozen_event_slice(tmp_path) -> 
     )
 
     async def scenario():
+        from pulsara_agent.runtime.long_horizon.checkpoint import (
+            restore_subagent_graph_from_checkpoint,
+        )
+
+        # This fixture exercises only canonical graph selection high-waters.
+        # Fake child completion has no child-native rollout ledger, so keep the
+        # production rollout settlement hooks outside this graph-only test.
+        agent.subagent_runtime.bind_rollout_admission(None)
+        agent.subagent_runtime.bind_rollout_terminal_augmenter(None)
+        open_test_root_rollout_run(
+            runtime_session,
+            event_context=event_context,
+            model_target=agent.llm_runtime.resolve_target(role=ModelRole.PRO).fact,
+        )
         run = await agent.subagent_runtime.spawn_fake(
             task="complete after slice",
             event_context=event_context,
         )
-        old_read = runtime_session.event_log.read_range_snapshot(minimum_sequence=1)
-        old_slice = ContextEventSlice.from_read_snapshot(
-            runtime_session_id=runtime_session.runtime_session_id,
-            minimum_sequence=1,
-            snapshot=old_read,
+        service = runtime_session.subagent_graph_checkpoint_service
+        old_high_water = runtime_session.event_log.next_sequence() - 1
+        old_read = await service.restore_for_selection(
+            requested_through_sequence=old_high_water
+        )
+        old_graph, old_semantic, _old_acceleration = (
+            restore_subagent_graph_from_checkpoint(
+                snapshot=old_read,
+                reducer_binding=service.reducer_binding,
+            )
         )
         await agent.subagent_runtime.complete_fake(
             run.subagent_run_id,
             summary="completed after frozen high-water",
             event_context=event_context,
         )
-        new_read = runtime_session.event_log.read_range_snapshot(minimum_sequence=1)
-        new_slice = ContextEventSlice.from_read_snapshot(
-            runtime_session_id=runtime_session.runtime_session_id,
-            minimum_sequence=1,
-            snapshot=new_read,
+        new_high_water = runtime_session.event_log.next_sequence() - 1
+        new_read = await service.restore_for_selection(
+            requested_through_sequence=new_high_water
         )
-        return old_slice, new_slice
+        new_graph, new_semantic, _new_acceleration = (
+            restore_subagent_graph_from_checkpoint(
+                snapshot=new_read,
+                reducer_binding=service.reducer_binding,
+            )
+        )
+        return old_graph, old_semantic, new_graph, new_semantic
 
-    old_slice, new_slice = asyncio.run(scenario())
+    old_graph, old_semantic, new_graph, new_semantic = asyncio.run(scenario())
     policy = resolve_context_compile_policy(
         LoopBudget(max_subagent_results_per_parent_compile=0)
     ).candidate_collection
     old_selection = build_context_candidate_source_selections(
-        event_slice=old_slice,
+        subagent_graph=old_graph,
+        semantic_source=old_semantic,
         policy=policy,
     )[0]
     new_selection = build_context_candidate_source_selections(
-        event_slice=new_slice,
+        subagent_graph=new_graph,
+        semantic_source=new_semantic,
         policy=policy,
     )[0]
 
-    assert old_selection.source_through_sequence == old_slice.through_sequence
     assert old_selection.eligible_source_count == 0
     assert old_selection.reason_code == "no_eligible_sources"
-    assert new_selection.source_through_sequence == new_slice.through_sequence
+    assert old_selection.subagent_graph_semantic_source == old_semantic
     assert new_selection.eligible_source_count == 1
     assert new_selection.selected_source_ids == ()
     assert new_selection.omitted_source_count == 1
     assert new_selection.reason_code == "policy_limit"
+    assert new_selection.subagent_graph_semantic_source == new_semantic
 
 
 def test_candidate_source_timing_must_match_snapshot_authority(

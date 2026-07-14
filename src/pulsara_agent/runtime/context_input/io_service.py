@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, TypeVar
 from uuid import uuid4
+
+from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
 
 
 T = TypeVar("T")
@@ -32,14 +34,17 @@ class _OwnedContextInputIoOperation:
 class ContextInputIoService:
     """Own physical blocking operations independently from cancelled waiters."""
 
-    def __init__(self, *, max_pending: int = 8, max_workers: int = 4) -> None:
-        if max_pending < 1 or max_workers < 1:
+    def __init__(
+        self,
+        *,
+        max_pending: int = 8,
+        executor: Executor | None = None,
+        max_workers: int | None = None,
+    ) -> None:
+        if max_pending < 1 or (max_workers is not None and max_workers < 1):
             raise ValueError("context-input I/O bounds must be positive")
         self._max_pending = max_pending
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="pulsara-context-input-io",
-        )
+        self._executor = executor or auxiliary_io_executor()
         self._lock = asyncio.Lock()
         self._operations: dict[str, _OwnedContextInputIoOperation] = {}
         self._closed = False
@@ -155,7 +160,6 @@ class ContextInputIoService:
                 "cannot close context-input I/O service with pending operations"
             )
         self._closed = True
-        self._executor.shutdown(wait=False, cancel_futures=False)
 
 
 __all__ = [

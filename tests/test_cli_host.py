@@ -48,6 +48,111 @@ class FakeFailedResult:
     state = SimpleNamespace(run_id="run:failed")
 
 
+class _CheckpointReport:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def model_dump(self, *, mode: str) -> dict[str, object]:
+        assert mode == "json"
+        return dict(self.payload)
+
+
+def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "checkpoint",
+            "doctor",
+            "runtime:checkpoint:cli",
+            "--mode",
+            "rebuild",
+            "--through-sequence",
+            "17",
+        ]
+    )
+    event_log = SimpleNamespace()
+    archive = SimpleNamespace()
+    authority = SimpleNamespace()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli,
+        "_settings_from_inspect_args",
+        lambda _args: SimpleNamespace(
+            storage=SimpleNamespace(postgres_dsn="postgresql://checkpoint-test")
+        ),
+    )
+    monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: event_log)
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: archive)
+    monkeypatch.setattr(
+        cli, "PostgresCheckpointMaintenanceAuthority", lambda _dsn: authority
+    )
+
+    def doctor(**kwargs):
+        captured.update(kwargs)
+        return _CheckpointReport({"outcome": "rebuilt"})
+
+    monkeypatch.setattr(
+        cli, "verify_or_rebuild_subagent_graph_checkpoint", doctor
+    )
+
+    assert cli._checkpoint_command(args) == {"outcome": "rebuilt"}  # noqa: SLF001
+    assert captured["runtime_session_id"] == "runtime:checkpoint:cli"
+    assert captured["through_sequence"] == 17
+    assert captured["mode"] == "rebuild"
+    assert captured["event_log"] is event_log
+    assert captured["archive"] is archive
+    assert captured["maintenance_authority"] is authority
+    assert "runtime_session" not in captured
+
+
+def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "checkpoint",
+            "gc",
+            "runtime:checkpoint:cli",
+            "--retain",
+            "3",
+            "--max-catalog-events",
+            "99",
+        ]
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli,
+        "_settings_from_inspect_args",
+        lambda _args: SimpleNamespace(
+            storage=SimpleNamespace(postgres_dsn="postgresql://checkpoint-test")
+        ),
+    )
+    monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: "event-log")
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: "archive")
+    monkeypatch.setattr(
+        cli,
+        "PostgresCheckpointMaintenanceAuthority",
+        lambda _dsn: "maintenance-authority",
+    )
+
+    def gc(**kwargs):
+        captured.update(kwargs)
+        return _CheckpointReport({"deleted_checkpoint_ids": []})
+
+    monkeypatch.setattr(
+        cli, "garbage_collect_subagent_graph_checkpoint_artifacts", gc
+    )
+
+    assert cli._checkpoint_command(args) == {  # noqa: SLF001
+        "deleted_checkpoint_ids": []
+    }
+    assert captured == {
+        "runtime_session_id": "runtime:checkpoint:cli",
+        "event_log": "event-log",
+        "archive": "archive",
+        "maintenance_authority": "maintenance-authority",
+        "retained_checkpoint_min_count": 3,
+        "max_catalog_events": 99,
+    }
+
+
 class FakeSession:
     host_session_id = "host:fake"
     runtime_session_id = "runtime:fake"
@@ -1775,6 +1880,13 @@ def test_repl_status_payload_distinguishes_default_and_effective_plan_mode() -> 
             PermissionMode.READ_ONLY
         ),
         plan_state=SimpleNamespace(active=True),
+        summary=lambda: {
+            "long_horizon": {
+                "rollout_phase": "restricted",
+                "model_call_count": 7,
+                "tool_call_count": 11,
+            }
+        },
     )
 
     payload = cli._host_session_status_payload(session)
@@ -1784,3 +1896,4 @@ def test_repl_status_payload_distinguishes_default_and_effective_plan_mode() -> 
     assert payload["default_policy"]["terminal_access"] == "allow"
     assert payload["effective_next_run_policy"]["terminal_access"] == "off"
     assert payload["plan_active"] is True
+    assert payload["long_horizon"]["rollout_phase"] == "restricted"

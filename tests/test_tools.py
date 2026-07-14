@@ -16,6 +16,7 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolResultBlock, ToolResultState
+from pulsara_agent.message.assembler import completed_tool_result_from_events
 from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
@@ -30,6 +31,7 @@ from pulsara_agent.runtime.tool_artifacts import (
     ToolResultArtifactRecord,
     ToolResultArtifactService,
 )
+from pulsara_agent.runtime.tool_execution import build_tool_result_terminal_event
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.tools import (
     ToolCall,
@@ -120,6 +122,30 @@ def execute_tool(tmp_path, name: str, arguments: dict) -> tuple[ToolExecutor, ob
         event_context=CTX,
     )
     return executor, result
+
+
+def _commit_prepared_terminal(
+    event_log: InMemoryEventLog,
+    result: ToolExecutionResult,
+) -> ToolResultEndEvent:
+    prepared = result.prepared_terminal_result
+    assert prepared is not None
+    return event_log.append(
+        build_tool_result_terminal_event(
+            event_context=CTX,
+            prepared=prepared,
+        )
+    )
+
+
+def _completed_tool_result(
+    event_log: InMemoryEventLog,
+    tool_call_id: str,
+) -> ToolResultBlock:
+    return completed_tool_result_from_events(
+        event_log.iter(reply_id=CTX.reply_id),
+        tool_call_id,
+    )
 
 
 def test_async_tool_runs_on_calling_loop_with_runtime_context() -> None:
@@ -1291,7 +1317,7 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
     assert json.loads(cleared.output)["items"] == []
 
 
-def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) -> None:
+def test_tool_executor_prepares_terminal_for_runtime_owned_commit(tmp_path) -> None:
     registry = make_registry(tmp_path)
     event_log = InMemoryEventLog()
     executor = ToolExecutor(registry=registry, record_event=event_log.append)
@@ -1302,7 +1328,8 @@ def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) 
         ),
         event_context=CTX,
     )
-    msg = event_log.replay("reply:tools")
+    end_event = _commit_prepared_terminal(event_log, result)
+    block = _completed_tool_result(event_log, "call:terminal")
 
     assert result.status is ToolResultState.SUCCESS
     assert [event.sequence for event in event_log.iter(reply_id="reply:tools")] == [
@@ -1312,21 +1339,11 @@ def test_tool_executor_appends_tool_result_events_and_replays_message(tmp_path) 
         4,
         5,
     ]
-    assert isinstance(msg.content[0], ToolResultBlock)
-    assert msg.content[0].name == "terminal"
-    assert msg.content[0].state is ToolResultState.SUCCESS
-    assert json.loads(msg.content[0].output[0].text)["output"] == "ok"
+    assert block.name == "terminal"
+    assert block.state is ToolResultState.SUCCESS
+    assert json.loads(block.output[0].text)["output"] == "ok"
     result_timing = result.metadata["tool_observation_timing"]
-    end_event = next(
-        event
-        for event in event_log.iter(reply_id="reply:tools")
-        if isinstance(event, ToolResultEndEvent)
-    )
     assert end_event.observation_timing.to_message_projection_payload() == result_timing
-    assert (
-        msg.metadata["tool_observation_timing_by_call_id"]["call:terminal"]
-        == result_timing
-    )
     assert result_timing["tool_call_id"] == "call:terminal"
     assert result_timing["tool_name"] == "terminal"
     assert result_timing["observed_at"] == end_event.created_at.replace("+00:00", "Z")
@@ -1362,8 +1379,8 @@ def test_tool_executor_archives_generic_large_output(tmp_path) -> None:
     result = executor.execute(
         ToolCall(id="call:large", name="large_output"), event_context=CTX
     )
-    msg = runtime_session.event_log.replay("reply:tools")
-    block = msg.content[0]
+    _commit_prepared_terminal(runtime_session.event_log, result)
+    block = _completed_tool_result(runtime_session.event_log, "call:large")
 
     assert result.status is ToolResultState.SUCCESS
     assert isinstance(block, ToolResultBlock)
@@ -1407,7 +1424,8 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
         event_context=CTX,
     )
     assert terminal_result.status is ToolResultState.SUCCESS
-    block = session_a.event_log.replay("reply:tools").content[0]
+    _commit_prepared_terminal(session_a.event_log, terminal_result)
+    block = _completed_tool_result(session_a.event_log, "call:terminal")
     assert isinstance(block, ToolResultBlock)
     artifact_id = block.artifacts[0].artifact_id
 
@@ -1526,21 +1544,14 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(
         ),
         event_context=CTX,
     )
-    msg = runtime_session.event_log.replay("reply:tools")
-    block = msg.content[0]
+    _commit_prepared_terminal(runtime_session.event_log, result)
+    block = _completed_tool_result(runtime_session.event_log, "call:artifact-read")
 
     assert result.status is ToolResultState.SUCCESS
     assert len(result.output) > 8_000
     assert isinstance(block, ToolResultBlock)
     assert [artifact.artifact_id for artifact in block.artifacts] == [artifact_id]
     assert len(runtime_session.archive.blobs) == 1
-
-
-def test_tool_result_artifact_options_reject_unrecoverable_threshold_band() -> None:
-    with pytest.raises(ValueError, match="archive_threshold_bytes"):
-        ToolResultArtifactOptions(
-            archive_threshold_bytes=20_000, tool_result_message_context_chars=8_000
-        )
 
 
 def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_preview() -> (
@@ -1640,26 +1651,26 @@ def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) ->
     executor = ToolExecutor(registry=registry, record_event=event_log.append)
     result_holder = {}
 
-    thread = threading.Thread(
-        target=lambda: result_holder.setdefault(
-            "result",
-            executor.execute(
-                ToolCall(
-                    id="call:terminal",
-                    name="terminal",
-                    arguments={
-                        "command": (
-                            "python -c 'import time; "
-                            'print("STREAM_FIRST", flush=True); '
-                            "time.sleep(1.0); "
-                            'print("STREAM_SECOND", end="", flush=True)\''
-                        )
-                    },
-                ),
-                event_context=CTX,
+    def execute_and_commit() -> None:
+        result = executor.execute(
+            ToolCall(
+                id="call:terminal",
+                name="terminal",
+                arguments={
+                    "command": (
+                        "python -c 'import time; "
+                        'print("STREAM_FIRST", flush=True); '
+                        "time.sleep(1.0); "
+                        'print("STREAM_SECOND", end="", flush=True)\''
+                    )
+                },
             ),
+            event_context=CTX,
         )
-    )
+        result_holder["result"] = result
+        _commit_prepared_terminal(event_log, result)
+
+    thread = threading.Thread(target=execute_and_commit)
     thread.start()
     deadline = time.monotonic() + 3.0
     saw_first_delta_before_end = False
@@ -1674,12 +1685,12 @@ def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) ->
             break
         time.sleep(0.02)
     thread.join(timeout=2)
-    msg = event_log.replay("reply:tools")
+    block = _completed_tool_result(event_log, "call:terminal")
 
     assert saw_first_delta_before_end is True
     assert thread.is_alive() is False
     assert result_holder["result"].status is ToolResultState.SUCCESS
-    payload = json.loads(msg.content[0].output[0].text)
+    payload = json.loads(block.output[0].text)
     assert payload["output"] == "STREAM_FIRST\nSTREAM_SECOND"
 
 
@@ -1696,6 +1707,7 @@ def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
         ),
         event_context=CTX,
     )
+    _commit_prepared_terminal(event_log, result)
     deltas = [
         event.delta
         for event in event_log.iter(reply_id="reply:tools")
@@ -1722,6 +1734,7 @@ def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(
         ),
         event_context=CTX,
     )
+    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
     deltas = [
         event.delta
         for event in runtime_session.event_log.iter(reply_id="reply:tools")
@@ -1729,13 +1742,6 @@ def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(
     ]
     streamed_json = "".join(deltas)
     streamed_payload = json.loads(streamed_json)
-    end_event = next(
-        event
-        for event in runtime_session.event_log.iter(reply_id="reply:tools")
-        if isinstance(event, ToolResultEndEvent)
-        and event.tool_call_id == "call:terminal"
-    )
-
     assert result.status is ToolResultState.SUCCESS
     assert len(streamed_json) < 15_000
     assert streamed_payload["preview_policy"] == "head_tail"
@@ -1767,16 +1773,11 @@ def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(
         ),
         event_context=CTX,
     )
+    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
 
     payload = json.loads(result.output)
     assert result.status is ToolResultState.SUCCESS
     assert payload["truncated"] is True
-    end_event = next(
-        event
-        for event in runtime_session.event_log.iter(reply_id="reply:tools")
-        if isinstance(event, ToolResultEndEvent)
-        and event.tool_call_id == "call:terminal"
-    )
     assert end_event.artifacts
     assert end_event.artifacts[0].preview is not None
 
@@ -1784,7 +1785,7 @@ def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(
 def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None:
     runtime_session, executor = make_runtime_executor(tmp_path)
 
-    executor.execute(
+    result = executor.execute(
         ToolCall(
             id="call:terminal",
             name="terminal",
@@ -1794,6 +1795,7 @@ def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None
         ),
         event_context=CTX,
     )
+    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
     streamed_json = "".join(
         event.delta
         for event in runtime_session.event_log.iter(reply_id="reply:tools")
@@ -1805,12 +1807,6 @@ def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None
     visible_head_chars = payload["preview"]["visible_head_chars"]
     assert payload["output"][visible_head_chars:].startswith(
         "\n\n[OUTPUT TRUNCATED / PREVIEW"
-    )
-    end_event = next(
-        event
-        for event in runtime_session.event_log.iter(reply_id="reply:tools")
-        if isinstance(event, ToolResultEndEvent)
-        and event.tool_call_id == "call:terminal"
     )
     assert end_event.artifacts[0].preview is not None
     assert end_event.artifacts[0].preview.visible_head_chars == visible_head_chars
@@ -1831,10 +1827,10 @@ def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -
         event_context=CTX,
     )
     payload = json.loads(result.output)
-    msg = runtime_session.event_log.replay("reply:tools")
-    block = msg.content[0]
+    _commit_prepared_terminal(runtime_session.event_log, result)
+    block = _completed_tool_result(runtime_session.event_log, "call:terminal")
     assert isinstance(block, ToolResultBlock)
-    replay_payload = json.loads(msg.content[0].output[0].text)
+    replay_payload = json.loads(block.output[0].text)
 
     assert result.status is ToolResultState.SUCCESS
     assert payload["truncated"] is True
@@ -1873,9 +1869,10 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
         ),
         event_context=CTX,
     )
+    _commit_prepared_terminal(runtime_session.event_log, start)
     process_id = json.loads(start.output)["process_id"]
     assert process_id
-    executor.execute(
+    waited = executor.execute(
         ToolCall(
             id="call:wait",
             name="terminal_process",
@@ -1888,7 +1885,8 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
         ),
         event_context=CTX,
     )
-    executor.execute(
+    _commit_prepared_terminal(runtime_session.event_log, waited)
+    logged = executor.execute(
         ToolCall(
             id="call:log",
             name="terminal_process",
@@ -1900,12 +1898,11 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
         ),
         event_context=CTX,
     )
+    _commit_prepared_terminal(runtime_session.event_log, logged)
 
-    msg = runtime_session.event_log.replay("reply:tools")
-    log_block = next(
-        block
-        for block in msg.content
-        if isinstance(block, ToolResultBlock) and block.id == "call:log"
+    log_block = _completed_tool_result(
+        runtime_session.event_log,
+        "call:log",
     )
     artifact_id = log_block.artifacts[0].artifact_id
     artifact_info = runtime_session.archive.get_info(

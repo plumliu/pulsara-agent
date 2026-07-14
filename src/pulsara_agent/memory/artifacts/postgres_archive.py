@@ -356,6 +356,47 @@ class PostgresArtifactStore:
                     raise ValueError(f"Artifact {blob_id!r} is not a binary artifact")
                 return bytes(binary_body)
 
+    def delete_if_identity(
+        self,
+        blob_id: str,
+        *,
+        session_id: str,
+        digest: str,
+        media_type: str,
+        semantic_metadata_fingerprint: str,
+    ) -> bool:
+        """Delete one cache artifact only when every durable identity matches."""
+
+        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+            with connection.cursor() as cursor:
+                self._lock_artifact(cursor, blob_id)
+                cursor.execute(
+                    """
+                    select id, session_id, media_type, digest, metadata
+                    from artifacts
+                    where id = %s
+                    for update
+                    """,
+                    (blob_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return False
+                if (
+                    row["session_id"] != session_id
+                    or row["digest"] != digest
+                    or row["media_type"] != media_type
+                    or (row["metadata"] or {}).get(
+                        "semantic_metadata_fingerprint"
+                    )
+                    != semantic_metadata_fingerprint
+                ):
+                    raise ArtifactContentConflict(
+                        f"artifact {blob_id!r} maintenance identity mismatch"
+                    )
+                cursor.execute("delete from artifacts where id = %s", (blob_id,))
+                return cursor.rowcount == 1
+
     def _lock_artifact(self, cursor, blob_id: str) -> None:
         cursor.execute(
             "select pg_advisory_xact_lock(hashtextextended(%s, 0))",

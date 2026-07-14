@@ -6,13 +6,17 @@ from pulsara_agent.event.events import (
     AgentEvent,
     EventType,
     ExternalExecutionResultEvent,
+    ModelCallControlDispositionResolvedEvent,
     ModelCallEndEvent,
+    ModelCallStartEvent,
     ReplyEndEvent,
+    ReplyStartEvent,
     RequireExternalExecutionEvent,
     RequireUserConfirmEvent,
     ToolResultEndEvent,
     UserConfirmResultEvent,
 )
+from pulsara_agent.primitives.model_call import ModelCallControlDisposition
 from pulsara_agent.message.assembler import BlockAssembler
 from pulsara_agent.message.blocks import (
     ToolCallBlock,
@@ -118,6 +122,133 @@ class MessageReducer:
             self.message.content.append(block)
 
 
+class MessageReplayControlError(RuntimeError):
+    """A reply lacks the durable control authority required for replay."""
+
+
+def accepted_main_reply_ids(events: tuple[AgentEvent, ...]) -> frozenset[str]:
+    """Project model-visible main replies from durable lifecycle control facts."""
+
+    main_starts: dict[str, ModelCallStartEvent] = {}
+    model_ends: dict[str, list[ModelCallEndEvent]] = {}
+    dispositions: dict[str, list[ModelCallControlDispositionResolvedEvent]] = {}
+    reply_starts = {
+        event.id: event for event in events if isinstance(event, ReplyStartEvent)
+    }
+    reply_ends = {
+        event.id: event for event in events if isinstance(event, ReplyEndEvent)
+    }
+    for event in events:
+        if (
+            isinstance(event, ModelCallStartEvent)
+            and event.recovery_plan.lifecycle_kind == "main_assistant_reply"
+        ):
+            call_id = event.resolved_call.resolved_model_call_id
+            if call_id in main_starts:
+                raise MessageReplayControlError(
+                    "duplicate main model-call start identity"
+                )
+            main_starts[call_id] = event
+        elif isinstance(event, ModelCallEndEvent):
+            model_ends.setdefault(event.resolved_model_call_id, []).append(event)
+        elif isinstance(event, ModelCallControlDispositionResolvedEvent):
+            dispositions.setdefault(event.resolved_model_call_id, []).append(event)
+
+    referenced_reply_event_ids: set[str] = set()
+    accepted: set[str] = set()
+    for call_id, start in main_starts.items():
+        plan = start.recovery_plan
+        reply_start_id = plan.reply_start_event_id
+        reply_end_id = plan.stable_reply_end_event_id
+        if reply_start_id is None or reply_end_id is None:
+            raise MessageReplayControlError(
+                "main model lifecycle lacks reply envelope identities"
+            )
+        reply_start = reply_starts.get(reply_start_id)
+        reply_end = reply_ends.get(reply_end_id)
+        if reply_start is None or reply_end is None:
+            raise MessageReplayControlError(
+                "main model lifecycle lacks its durable reply envelope"
+            )
+        referenced_reply_event_ids.update((reply_start_id, reply_end_id))
+        if (
+            reply_start.reply_id != start.reply_id
+            or reply_end.reply_id != start.reply_id
+            or reply_start.run_id != start.run_id
+            or reply_end.run_id != start.run_id
+        ):
+            raise MessageReplayControlError(
+                "main model lifecycle reply attribution mismatch"
+            )
+
+        ends = model_ends.get(call_id, [])
+        if len(ends) != 1:
+            raise MessageReplayControlError(
+                "main model lifecycle requires exactly one terminal event"
+            )
+        end = ends[0]
+        if (
+            end.id != plan.stable_model_call_end_event_id
+            or end.reply_id != start.reply_id
+            or end.run_id != start.run_id
+            or reply_end.model_terminal_outcome != end.outcome
+        ):
+            raise MessageReplayControlError(
+                "main model lifecycle terminal attribution mismatch"
+            )
+
+        winners = dispositions.get(call_id, [])
+        if end.outcome != "completed":
+            if winners:
+                raise MessageReplayControlError(
+                    "non-completed model lifecycle cannot carry a disposition"
+                )
+            continue
+        if len(winners) != 1:
+            raise MessageReplayControlError(
+                "completed model lifecycle requires exactly one disposition"
+            )
+        winner = winners[0]
+        if (
+            winner.model_call_start_event_id != start.id
+            or winner.model_call_end_event_id != end.id
+            or winner.model_call_index != start.model_call_index
+            or winner.run_execution_activation
+            != start.recovery_plan.run_execution_activation
+        ):
+            raise MessageReplayControlError(
+                "model-call disposition does not join its lifecycle"
+            )
+        if winner.disposition is ModelCallControlDisposition.ACCEPTED:
+            accepted.add(start.reply_id)
+
+    orphan_reply_ids = (set(reply_starts) | set(reply_ends)) - referenced_reply_event_ids
+    if orphan_reply_ids:
+        raise MessageReplayControlError(
+            "reply lifecycle is not owned by a main model-call start"
+        )
+    return frozenset(accepted)
+
+
+def require_canonical_reply_control(events: tuple[AgentEvent, ...]) -> None:
+    """Reject success replay unless every completed main call was accepted."""
+
+    main_reply_ids = {
+        event.reply_id
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+        and event.recovery_plan.lifecycle_kind == "main_assistant_reply"
+    }
+    if not main_reply_ids:
+        raise MessageReplayControlError(
+            "canonical assistant replay requires a main model lifecycle"
+        )
+    if accepted_main_reply_ids(events) != frozenset(main_reply_ids):
+        raise MessageReplayControlError(
+            "completed model lifecycle lacks one accepted disposition"
+        )
+
+
 def _remember_tool_observation_timing(
     message: Msg, *, tool_call_id: str, timing: object
 ) -> None:
@@ -136,3 +267,11 @@ def _remember_tool_observation_timing(
         and getattr(tool_result_blocks[0], "id", None) == tool_call_id
     ):
         message.metadata["tool_observation_timing"] = dict(timing)
+
+
+__all__ = [
+    "MessageReducer",
+    "MessageReplayControlError",
+    "accepted_main_reply_ids",
+    "require_canonical_reply_control",
+]

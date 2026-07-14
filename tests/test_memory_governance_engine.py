@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import AsyncIterator
 from uuid import uuid4
 
@@ -54,6 +55,7 @@ from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from tests.support.memory_uow import fake_memory_uow_factory
+from tests.support.runtime_session import in_memory_runtime_session
 
 
 class _ScriptedTransport:
@@ -116,7 +118,7 @@ def test_memory_governance_engine_submits_pending_candidate_with_synthetic_conte
             )
         ]
     )
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(transport),
         executor=_executor(pool=pool, graph=graph, log=log),
         options=MemoryGovernanceOptions(limit=5),
@@ -186,7 +188,7 @@ def test_memory_governance_engine_exposes_whole_batch_and_merges_before_apply() 
             )
         ]
     )
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(transport),
         executor=_executor(pool=pool, graph=graph, log=log),
     )
@@ -219,7 +221,7 @@ def test_memory_governance_engine_invalid_json_does_not_write_or_decide() -> Non
     log = InMemoryEventLog()
     pool.append_candidate(_pooled_preference())
     transport = _ScriptedTransport(["not json"])
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(transport),
         executor=_executor(pool=pool, graph=graph, log=log),
     )
@@ -282,7 +284,7 @@ def test_governance_compaction_candidate_uses_bounded_window_evidence_view() -> 
             }
         )
     )
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(_ScriptedTransport([])),
         executor=_executor(pool=pool, graph=graph, log=log),
     )
@@ -356,7 +358,7 @@ def test_memory_governance_engine_invalid_target_returns_error_without_write() -
             )
         ]
     )
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(transport),
         executor=_executor(pool=pool, graph=graph, log=log),
     )
@@ -477,7 +479,7 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
             )
         ]
     )
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(transport),
         executor=_executor(pool=pool, graph=graph, log=log),
     )
@@ -516,7 +518,7 @@ def test_memory_governance_engine_empty_pool_does_not_call_llm() -> None:
     pool = InMemoryCandidatePool()
     log = InMemoryEventLog()
     transport = _ScriptedTransport([])
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(transport),
         executor=_executor(pool=pool, graph=graph, log=log),
     )
@@ -560,7 +562,7 @@ def test_governance_result_carries_usage_without_durable_session_projection() ->
         [json.dumps({"reason": "skip", "decisions": []})],
         usage=usage,
     )
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=_llm_runtime(transport),
         executor=_executor(pool=pool, graph=graph, log=log),
     )
@@ -593,7 +595,7 @@ def test_governance_oversized_context_fails_before_provider() -> None:
             input_safety_margin_tokens=8,
         ),
     )
-    engine = MemoryGovernanceEngine(
+    engine = _governance_engine(
         llm_runtime=runtime,
         executor=_executor(pool=pool, graph=graph, log=log),
         options=MemoryGovernanceOptions(llm_options=LLMOptions()),
@@ -680,6 +682,20 @@ def _executor(
             candidate_pool=pool,
             memory_write_service=service,
         ),
+    )
+
+
+def _governance_engine(
+    *,
+    llm_runtime: LLMRuntime,
+    executor: MemoryGovernanceExecutor,
+    **kwargs,
+) -> MemoryGovernanceEngine:
+    return MemoryGovernanceEngine(
+        llm_runtime=llm_runtime,
+        executor=executor,
+        runtime_session=in_memory_runtime_session(Path.cwd()),
+        **kwargs,
     )
 
 

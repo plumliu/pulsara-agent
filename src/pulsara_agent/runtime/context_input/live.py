@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Iterable
 from dataclasses import dataclass
+import json
 from time import monotonic
 from typing import TYPE_CHECKING, Iterator
 
 from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
+    ContextCompactionCompletedEvent,
     EventType,
     ProjectionFailedEvent,
     ProjectionReadyEvent,
@@ -20,6 +23,13 @@ from pulsara_agent.event import (
     SubagentRunStartedEvent,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.event_log.protocol import (
+    RawContextAuthorityBundleRequest,
+    RawEventLogReadSnapshot,
+    RawEventSelectionBounds,
+    RawStoredEventEnvelope,
+)
+from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.context import (
     CapabilityDescriptorRenderAttributionFact,
     ContextCompilePolicyFact,
@@ -38,17 +48,28 @@ from pulsara_agent.primitives.context import (
     ContextStaticInstructionFact,
     ContextToolSpecFact,
     FrozenJsonObjectFact,
+    WindowCompactionSourceDocumentFact,
     canonical_json_bytes,
     context_fingerprint,
     freeze_json,
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+from pulsara_agent.primitives.long_horizon import (
+    ContextWindowFact,
+    ContextWindowProjectionState,
+    LongHorizonRolloutStatusCandidateFact,
+    RolloutBudgetStateFact,
+    SubagentGraphAccelerationFact,
+    SubagentGraphSemanticSourceFact,
+)
 from pulsara_agent.primitives.tool_result import PreparedToolResultRenderInput
 from pulsara_agent.primitives.run_boundary import InteractionResumeBoundaryFact
 from pulsara_agent.runtime.context_input.event_slice import (
+    ContextEventAuthorityView,
     ContextEventSlice,
     ContextEventSliceError,
-    EventLogContextEventSliceReader,
+    FrozenStoredEvent,
+    SparseAuthorityCursor,
 )
 from pulsara_agent.runtime.context_input.candidate import (
     ContextLifecycleCacheWriteCandidate,
@@ -59,10 +80,9 @@ from pulsara_agent.runtime.context_input.candidate import (
 )
 from pulsara_agent.runtime.context_input.policy import resolve_context_compile_policy
 from pulsara_agent.runtime.context_input.snapshot import (
-    ContextFactSnapshot,
+    ContextFactSnapshotDraft,
     ContextSnapshotBuildInput,
-    bind_context_invocation,
-    build_context_snapshot,
+    bind_context_draft,
     finalize_context_authority_slice_plan,
 )
 from pulsara_agent.runtime.context_input.transcript import (
@@ -75,30 +95,85 @@ from pulsara_agent.runtime.context_input.transcript import (
 from pulsara_agent.runtime.context_input.render import (
     prepare_tool_result_render_input,
 )
+from pulsara_agent.runtime.long_horizon.status import (
+    derive_rollout_status_candidate_from_state,
+)
 from pulsara_agent.runtime.run_entry import RunWorkingSet
 
 if TYPE_CHECKING:
     from pulsara_agent.memory.foundation.protocols import ArtifactStore
     from pulsara_agent.runtime.session import RuntimeSession
     from pulsara_agent.runtime.state import LoopBudget
+    from pulsara_agent.runtime.subagent.facts import SubagentGraphState
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedLiveContextSnapshot:
-    invocation: ContextFactSnapshot
-    authority_slice: ContextEventSlice
+    invocation: ContextFactSnapshotDraft
+    snapshot_build_input: ContextSnapshotBuildInput
+    authority_slice: ContextEventSlice | ContextEventAuthorityView
     named_slices: tuple[ContextEventSlice, ...]
     normalized_transcript: NormalizedContextTranscript
     prepared_tool_results: PreparedToolResultRenderInput
     prepared_candidates: PreparedContextCandidateSet
     candidate_cache_writes: tuple[ContextLifecycleCacheWriteCandidate, ...]
+    active_window: ContextWindowFact
+    projection_state: ContextWindowProjectionState
+    rollout_state: RolloutBudgetStateFact
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedLiveTranscriptProjection:
-    authority_slice: ContextEventSlice
+    authority_slice: ContextEventSlice | ContextEventAuthorityView
     normalized_transcript: NormalizedContextTranscript
     prepared_tool_results: PreparedToolResultRenderInput
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveAuthorityRead:
+    primary_slice: ContextEventSlice
+    local_named_slices: tuple[ContextEventSlice, ...]
+    run_start: RunStartEvent
+
+    @property
+    def view(self) -> ContextEventSlice | ContextEventAuthorityView:
+        if not self.local_named_slices:
+            return self.primary_slice
+        return ContextEventAuthorityView(
+            primary_slice=self.primary_slice,
+            named_slices=self.local_named_slices,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildAuthorityRead:
+    slices: tuple[ContextEventSlice, ...]
+    rollout_state: RolloutBudgetStateFact | None
+
+
+_MAX_LIVE_AUTHORITY_EVENTS = 16_384
+_MAX_LIVE_AUTHORITY_PAYLOAD_BYTES = 16 * 1024 * 1024
+_MAX_LIVE_SPARSE_AUTHORITY_EVENTS = 4_096
+_MAX_LIVE_SPARSE_AUTHORITY_PAYLOAD_BYTES = 4 * 1024 * 1024
+
+_COMPACTED_WINDOW_SPARSE_EVENT_TYPES = (
+    EventType.RUN_START.value,
+    EventType.RUN_INTERACTION_RESUME_BOUNDARY.value,
+    EventType.CAPABILITY_EXPOSURE_RESOLVED.value,
+    EventType.PROJECTION_REQUESTED.value,
+    EventType.PROJECTION_READY.value,
+    EventType.PROJECTION_FAILED.value,
+    EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED.value,
+    EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED.value,
+    EventType.ROLLOUT_BUDGET_RESERVATION_CREATED.value,
+    EventType.ROLLOUT_BUDGET_RESERVATION_SETTLED.value,
+    EventType.ROLLOUT_PHASE_TRANSITIONED.value,
+)
+
+_COMPACTED_WINDOW_SESSION_SPARSE_EVENT_TYPES = (
+    EventType.PLAN_MODE_ENTERED.value,
+    EventType.PLAN_EXIT_RESOLVED.value,
+)
 
 
 class ContextInputPreparationError(RuntimeError):
@@ -346,7 +421,9 @@ def build_runtime_environment(
 
 
 def _plan_snapshot(
-    *, working_set: RunWorkingSet, event_slice: ContextEventSlice
+    *,
+    working_set: RunWorkingSet,
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
 ) -> ContextPlanSnapshotFact:
     plan = working_set.plan_snapshot
     entered = None
@@ -377,14 +454,16 @@ def _plan_snapshot(
 
 
 def _run_and_continuation_refs(
-    *, working_set: RunWorkingSet, event_slice: ContextEventSlice
+    *,
+    working_set: RunWorkingSet,
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
 ) -> tuple[
     ContextRunEntryReferenceFact,
     tuple[ContextEventReferenceFact, ...],
     ContextContinuationReferenceFact | None,
 ]:
     start_stored = event_slice.event_by_id(working_set.run_start_event_id)
-    start = start_stored.decode_owned()
+    start = start_stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
     if not isinstance(start, RunStartEvent):
         raise ContextEventSliceError("working-set RunStart reference is not RunStart")
     if start.sequence != working_set.run_start_sequence:
@@ -402,7 +481,7 @@ def _run_and_continuation_refs(
     for frozen in event_slice.events:
         if frozen.event_type != EventType.RUN_INTERACTION_RESUME_BOUNDARY:
             continue
-        decoded = frozen.decode_owned()
+        decoded = frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
         if (
             isinstance(decoded, RunInteractionResumeBoundaryEvent)
             and decoded.run_id == start.run_id
@@ -444,23 +523,31 @@ def collect_live_context_inputs(
     *,
     working_set: RunWorkingSet,
     resolved_call: ResolvedModelCall,
-    event_slice: ContextEventSlice,
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
     identity: ContextInputIdentityFact,
     timing: ContextCompileTimingFact,
     compile_policy: ContextCompilePolicyFact,
     static_instructions: tuple[ContextStaticInstructionFact, ...],
     runtime_environment: ContextRuntimeEnvironmentFact,
     tool_specs: tuple[ContextToolSpecFact, ...],
+    subagent_graph: "SubagentGraphState",
+    subagent_graph_semantic_source: SubagentGraphSemanticSourceFact,
+    subagent_graph_acceleration: SubagentGraphAccelerationFact,
+    subagent_authority_events: tuple[FrozenStoredEvent, ...],
     projections: tuple[ContextProjectionReferenceFact, ...] = (),
     candidate_sources: ContextCandidateCollectionInput,
     named_slices: tuple[ContextEventSlice, ...] = (),
     raw_suspended_state_token_for_validation: str | None = None,
+    rollout_status_override: LongHorizonRolloutStatusCandidateFact | None = None,
+    derive_rollout_status_from_events: bool = True,
 ) -> ContextSnapshotBuildInput:
     run_entry, continuation_refs, continuation = _run_and_continuation_refs(
         working_set=working_set,
         event_slice=event_slice,
     )
-    start = event_slice.event_by_id(working_set.run_start_event_id).decode_owned()
+    start = event_slice.event_by_id(working_set.run_start_event_id).decode_owned(
+        DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     assert isinstance(start, RunStartEvent)
     permission = working_set.permission_snapshot.to_context_fact()
     if start.current_user_message.message_id != f"user-message:{start.run_id}":
@@ -505,7 +592,9 @@ def collect_live_context_inputs(
         raise ContextEventSliceError(
             "live context requires committed capability exposure"
         )
-    capability_event = event_slice.event_by_id(capability_ref.event_id).decode_owned()
+    capability_event = event_slice.event_by_id(capability_ref.event_id).decode_owned(
+        DEFAULT_EVENT_SCHEMA_REGISTRY
+    )
     if not isinstance(capability_event, CapabilityExposureResolvedEvent):
         raise ContextEventSliceError("capability reference is not an exposure event")
     if capability_event.exposure != capability:
@@ -531,7 +620,8 @@ def collect_live_context_inputs(
         event_slice=event_slice,
     )
     candidate_source_selections = build_context_candidate_source_selections(
-        event_slice=event_slice,
+        subagent_graph=subagent_graph,
+        semantic_source=subagent_graph_semantic_source,
         policy=compile_policy.candidate_collection,
     )
     subagent_result_ids = candidate_source_selections[0].selected_source_ids
@@ -545,7 +635,41 @@ def collect_live_context_inputs(
             compile_policy.candidate_collection.projection_token_budget
         ),
         subagent_result_ids=subagent_result_ids,
+        subagent_authority_events=subagent_authority_events,
     )
+    rollout_owner_runtime_session_id = (
+        start.long_horizon.rollout_account_owner_runtime_session_id
+    )
+    rollout_slices = tuple(
+        item
+        for item in (
+            *(
+                (event_slice.primary_slice, *event_slice.named_slices)
+                if isinstance(event_slice, ContextEventAuthorityView)
+                else (event_slice,)
+            ),
+            *named_slices,
+        )
+        if item.runtime_session_id == rollout_owner_runtime_session_id
+    )
+    if not rollout_slices:
+        raise ContextEventSliceError(
+            "context input requires frozen rollout-account authority"
+        )
+    rollout_event_slice: ContextEventSlice | ContextEventAuthorityView
+    if len(rollout_slices) == 1:
+        rollout_event_slice = rollout_slices[0]
+    else:
+        primary_rollout_slice = max(
+            rollout_slices,
+            key=lambda item: item.through_sequence,
+        )
+        rollout_event_slice = ContextEventAuthorityView(
+            primary_slice=primary_rollout_slice,
+            named_slices=tuple(
+                item for item in rollout_slices if item is not primary_rollout_slice
+            ),
+        )
     candidate_authorities = build_context_candidate_authorities(
         sources=candidate_sources,
         static_instructions=static_instructions,
@@ -553,11 +677,20 @@ def collect_live_context_inputs(
         capability_snapshot=capability,
         plan_snapshot=plan_snapshot,
         event_slice=event_slice,
+        rollout_event_slice=rollout_event_slice,
+        rollout_account_id=start.long_horizon.rollout_account_id,
+        rollout_status_policy=start.long_horizon.rollout_status_hint_policy,
+        rollout_status_override=rollout_status_override,
+        derive_rollout_status_from_events=derive_rollout_status_from_events,
         run_id=identity.run_id,
         runtime_environment=runtime_environment,
         compile_timing=timing,
         source_selections=candidate_source_selections,
+        external_authority_events={
+            event.event_id: event for event in subagent_authority_events
+        },
     )
+    external_authority_ids = {event.event_id for event in subagent_authority_events}
     required_refs = (
         run_entry.run_start,
         capability_ref,
@@ -567,12 +700,14 @@ def collect_live_context_inputs(
             ref
             for authority in candidate_authorities
             for ref in authority.source_fact_refs
+            if ref.event_id not in external_authority_ids
         ),
         *(
             ref
             for projection in projections
             for ref in projection.source_event_refs
             if ref.runtime_session_id == event_slice.runtime_session_id
+            and ref.event_id not in external_authority_ids
         ),
     )
     latest_compaction = next(
@@ -593,12 +728,11 @@ def collect_live_context_inputs(
             if hasattr(run_entry.run_entry, "transcript")
             else 0
         ),
-        required_source_from_sequence=(
-            candidate_source_selections[0].source_from_sequence
-        ),
     )
-    authority_slice = event_slice.subslice(
-        from_sequence=authority_plan.authority_from_sequence
+    authority_slice = (
+        event_slice.primary_slice
+        if isinstance(event_slice, ContextEventAuthorityView)
+        else event_slice.subslice(from_sequence=authority_plan.authority_from_sequence)
     )
     if identity.source_through_sequence != authority_slice.through_sequence:
         raise ContextEventSliceError("context identity high-water mismatch")
@@ -621,12 +755,21 @@ def collect_live_context_inputs(
         compile_policy=compile_policy,
         tool_specs=tool_specs,
         projections=projections,
+        subagent_graph_semantic_source=subagent_graph_semantic_source,
+        subagent_graph_acceleration=subagent_graph_acceleration,
         candidate_source_selections=candidate_source_selections,
         candidate_authorities=candidate_authorities,
         timing=timing,
         authority_slice_plan=authority_plan,
         primary_event_range=authority_slice.to_range_fact(),
-        named_event_ranges=tuple(item.to_range_fact() for item in named_slices),
+        named_event_ranges=(
+            *(
+                event_slice.named_range_facts()
+                if isinstance(event_slice, ContextEventAuthorityView)
+                else ()
+            ),
+            *(item.to_range_fact() for item in named_slices),
+        ),
     )
 
 
@@ -639,6 +782,7 @@ def collect_context_projection_references(
     run_id: str,
     projection_token_budget: int,
     subagent_result_ids: tuple[str, ...],
+    subagent_authority_events: tuple[FrozenStoredEvent, ...],
 ) -> tuple[ContextProjectionReferenceFact, ...]:
     by_kind = {item.projection_kind: item for item in explicit}
     for projection_kind, projection in (
@@ -670,7 +814,7 @@ def collect_context_projection_references(
             EventType.PROJECTION_FAILED,
         }
         if isinstance(
-            (event := frozen.decode_owned()),
+            (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
             ProjectionRequestedEvent | ProjectionReadyEvent | ProjectionFailedEvent,
         )
         and event.run_id == run_id
@@ -726,12 +870,8 @@ def collect_context_projection_references(
                     {
                         "projection_id": terminal.projection_id,
                         "projection_kind": terminal.projection_kind,
-                        "included_memory_ids": tuple(
-                            terminal.included_memory_ids
-                        ),
-                        "filtered_memory_ids": tuple(
-                            terminal.filtered_memory_ids
-                        ),
+                        "included_memory_ids": tuple(terminal.included_memory_ids),
+                        "filtered_memory_ids": tuple(terminal.filtered_memory_ids),
                         "token_budget": terminal.token_budget,
                         "summary": terminal.summary,
                     },
@@ -745,9 +885,11 @@ def collect_context_projection_references(
         selected = set(subagent_result_ids)
         result_events = [
             (frozen, event)
-            for frozen in event_slice.events
-            if frozen.event_type == EventType.SUBAGENT_RUN_COMPLETED
-            if isinstance((event := frozen.decode_owned()), SubagentRunCompletedEvent)
+            for frozen in subagent_authority_events
+            if isinstance(
+                (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+                SubagentRunCompletedEvent,
+            )
             and event.result_id in selected
         ]
         by_result = {
@@ -786,6 +928,37 @@ def collect_context_projection_references(
     return tuple(by_kind[key] for key in sorted(by_kind))
 
 
+def _rollout_status_from_store(
+    *,
+    runtime_session: RuntimeSession,
+    start: RunStartEvent,
+    event_slice: ContextEventSlice | ContextEventAuthorityView,
+    state: RolloutBudgetStateFact,
+) -> LongHorizonRolloutStatusCandidateFact | None:
+    contract = start.long_horizon
+    owner_runtime_session_id = contract.rollout_account_owner_runtime_session_id
+    owner_store = (
+        runtime_session.long_horizon_state_store
+        if owner_runtime_session_id == runtime_session.runtime_session_id
+        else runtime_session.rollout_account_owner_state_store
+    )
+    if owner_store is None:
+        raise ContextEventSliceError(
+            "live context lacks its rollout-account owner state store"
+        )
+    account = owner_store.rollout_account(contract.rollout_account_id)
+    if account is None:
+        raise ContextEventSliceError(
+            "session-owned rollout status is absent from the incremental store"
+        )
+    return derive_rollout_status_candidate_from_state(
+        event_slice=event_slice,
+        account=account,
+        state=state,
+        policy=contract.rollout_status_hint_policy,
+    )
+
+
 async def prepare_live_context_snapshot(
     *,
     runtime_session: RuntimeSession,
@@ -806,32 +979,130 @@ async def prepare_live_context_snapshot(
     raw_suspended_state_token_for_validation: str | None = None,
 ) -> PreparedLiveContextSnapshot:
     progress = _ContextInputPreparationProgress()
-    reader = EventLogContextEventSliceReader(
-        event_log=runtime_session.event_log,
-        runtime_session_id=runtime_session.runtime_session_id,
-        reconciliation_required=lambda: runtime_session.reconciliation_required,
-        io_service=runtime_session.context_input_io_service,
-    )
     with _preparation_stage(
         progress,
         "event_slice",
         ContextInputFailureReasonCode.EVENT_SLICE_INVALID,
     ):
-        full_slice = await reader.read_through_current_high_water(
-            runtime_session_id=runtime_session.runtime_session_id,
-            minimum_sequence=1,
+        authority_read = await _read_live_primary_event_slice(
+            runtime_session=runtime_session,
+            working_set=working_set,
         )
+        full_slice = authority_read.view
+        start = authority_read.run_start
         progress.source_through_sequence = full_slice.through_sequence
-        start = full_slice.event_by_id(working_set.run_start_event_id).decode_owned()
-        if not isinstance(start, RunStartEvent):
-            raise ContextEventSliceError("live snapshot RunStart is not durable")
-        named_slices = await _child_named_context_slices(
+        live_store = runtime_session.long_horizon_state_store
+        live_window_chain = live_store.window_state(start.run_id)
+        if (
+            live_window_chain is None
+            or not live_window_chain.consistent
+            or live_window_chain.active_window_id is None
+            or live_window_chain.through_sequence != full_slice.through_sequence
+        ):
+            raise ContextEventSliceError(
+                "live context window reducer differs from the frozen authority"
+            )
+        active_window = live_window_chain.windows[live_window_chain.active_window_id]
+        projection_state = live_store.projection_state(active_window.window_id)
+        if projection_state is None:
+            raise ContextEventSliceError(
+                "live context lacks its active projection reducer state"
+            )
+        reducer_binding = (
+            runtime_session.subagent_graph_checkpoint_service.reducer_binding
+        )
+        if start.subagent_graph_reducer_contract != reducer_binding.contract:
+            raise ContextEventSliceError(
+                "live snapshot reducer binding differs from RunStart contract"
+            )
+        child_authority = await _child_named_context_slices(
             runtime_session=runtime_session,
             run_start=start,
         )
+        child_named_slices = child_authority.slices
+        rollout_state = (
+            child_authority.rollout_state
+            if child_named_slices
+            else live_store.rollout_state_at(
+                start.long_horizon.rollout_account_id,
+                through_sequence=full_slice.through_sequence,
+            )
+        )
+        if rollout_state is None:
+            raise ContextEventSliceError(
+                "live context lacks its frozen rollout reducer state"
+            )
+        named_slices = (
+            *authority_read.local_named_slices,
+            *child_named_slices,
+        )
+        checkpoint_snapshot = await runtime_session.subagent_graph_checkpoint_service.restore_for_selection(
+            requested_through_sequence=full_slice.through_sequence
+        )
+        from pulsara_agent.runtime.long_horizon.checkpoint import (
+            restore_subagent_graph_from_checkpoint,
+        )
+
+        (
+            subagent_graph,
+            subagent_graph_semantic_source,
+            subagent_graph_acceleration,
+        ) = restore_subagent_graph_from_checkpoint(
+            snapshot=checkpoint_snapshot,
+            reducer_binding=reducer_binding,
+        )
+        compile_policy = resolve_context_compile_policy(budget)
+        source_selection = build_context_candidate_source_selections(
+            subagent_graph=subagent_graph,
+            semantic_source=subagent_graph_semantic_source,
+            policy=compile_policy.candidate_collection,
+        )[0]
+        selected_results = tuple(
+            subagent_graph.results[result_id]
+            for result_id in source_selection.selected_source_ids
+        )
+        terminal_event_ids = tuple(
+            result.provenance.terminal_event_id or "" for result in selected_results
+        )
+        if any(not event_id for event_id in terminal_event_ids):
+            raise ContextEventSliceError(
+                "selected subagent result lacks terminal event attribution"
+            )
+        result_deadline = monotonic() + 30.0
+        raw_result_events = await runtime_session.context_input_io_service.execute(
+            operation_name="subagent-result-authority-read",
+            operation=lambda: runtime_session.event_log.read_raw_events_by_id(
+                terminal_event_ids,
+                deadline_monotonic=result_deadline,
+            ),
+            deadline_monotonic=result_deadline,
+        )
+        if len(raw_result_events) != len(terminal_event_ids):
+            raise ContextEventSliceError(
+                "selected subagent result terminal event is unavailable"
+            )
+        subagent_authority_events = tuple(
+            FrozenStoredEvent.from_raw_envelope(raw) for raw in raw_result_events
+        )
+        for result, frozen in zip(
+            selected_results, subagent_authority_events, strict=True
+        ):
+            event = frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            if (
+                frozen.sequence > full_slice.through_sequence
+                or not isinstance(event, SubagentRunCompletedEvent)
+                or event.result_id != result.result_id
+                or event.subagent_run_id != result.subagent_run_id
+                or event.summary != result.summary
+                or event.result_artifact_id != result.final_message_artifact_id
+                or tuple(event.artifact_ids) != result.artifact_ids
+            ):
+                raise ContextEventSliceError(
+                    "selected subagent result differs from restored graph"
+                )
     identity = ContextInputIdentityFact(
         snapshot_id=f"context_snapshot:{context_id}:{compile_attempt_index}",
-        compiler_contract_version="context-compiler-input:v1",
+        compiler_contract_version="context-compiler-input:v2",
         runtime_session_id=runtime_session.runtime_session_id,
         run_id=start.run_id,
         turn_id=start.turn_id,
@@ -881,17 +1152,16 @@ async def prepare_live_context_snapshot(
                 static_deadline = monotonic() + 30.0
                 static = await runtime_session.context_input_io_service.execute(
                     operation_name="context-static-instruction-write",
-                    operation=lambda source_id=source_id,
-                    contract_version=contract_version,
-                    content=content,
-                    static_deadline=static_deadline: build_static_instruction(
-                        source_id=source_id,
-                        contract_version=contract_version,
-                        content=content,
-                        archive=runtime_session.archive,
-                        runtime_session_id=runtime_session.runtime_session_id,
-                        run_id=start.run_id,
-                        deadline_monotonic=static_deadline,
+                    operation=lambda source_id=source_id, contract_version=contract_version, content=content, static_deadline=static_deadline: (
+                        build_static_instruction(
+                            source_id=source_id,
+                            contract_version=contract_version,
+                            content=content,
+                            archive=runtime_session.archive,
+                            runtime_session_id=runtime_session.runtime_session_id,
+                            run_id=start.run_id,
+                            deadline_monotonic=static_deadline,
+                        )
                     ),
                     deadline_monotonic=static_deadline,
                 )
@@ -918,48 +1188,46 @@ async def prepare_live_context_snapshot(
             event_slice=full_slice,
             identity=identity,
             timing=timing,
-            compile_policy=resolve_context_compile_policy(budget),
+            compile_policy=compile_policy,
             static_instructions=tuple(static_instructions),
             runtime_environment=environment,
             tool_specs=tool_specs,
+            subagent_graph=subagent_graph,
+            subagent_graph_semantic_source=subagent_graph_semantic_source,
+            subagent_graph_acceleration=subagent_graph_acceleration,
+            subagent_authority_events=subagent_authority_events,
             candidate_sources=candidate_sources,
-            named_slices=named_slices,
+            named_slices=child_named_slices,
             raw_suspended_state_token_for_validation=(
                 raw_suspended_state_token_for_validation
             ),
+            rollout_status_override=_rollout_status_from_store(
+                runtime_session=runtime_session,
+                start=start,
+                event_slice=full_slice,
+                state=rollout_state,
+            ),
+            derive_rollout_status_from_events=False,
         )
-        fact = build_context_snapshot(build_input)
         assert progress.component_fingerprints is not None
-        progress.component_fingerprints["snapshot_fact"] = (
-            fact.snapshot_fact_fingerprint
+        progress.component_fingerprints["snapshot_draft"] = context_fingerprint(
+            "context-snapshot-draft:v1", build_input
         )
-    authority_slice = full_slice.subslice(
-        from_sequence=fact.authority_slice_plan.authority_from_sequence
-    )
-    summary_artifact_id = (
-        fact.authority_slice_plan.transcript_window.compaction_summary_artifact_id
-    )
+    authority_slice = full_slice
     with _preparation_stage(
         progress,
         "transcript_normalization",
         ContextInputFailureReasonCode.TRANSCRIPT_INVALID,
     ):
-        summary_text = None
-        if summary_artifact_id is not None:
-            summary_deadline = monotonic() + 30.0
-            summary_text = await runtime_session.context_input_io_service.execute(
-                operation_name="context-compaction-summary-read",
-                operation=lambda: runtime_session.archive.get_text(
-                    summary_artifact_id,
-                    session_id=runtime_session.runtime_session_id,
-                    deadline_monotonic=summary_deadline,
-                ),
-                deadline_monotonic=summary_deadline,
-            )
+        summary_text, window_source_document = await _read_compaction_inputs(
+            runtime_session=runtime_session,
+            transcript_window=build_input.authority_slice_plan.transcript_window,
+        )
         normalized = project_context_transcript(
-            snapshot=fact,
+            snapshot=build_input,
             event_slice=authority_slice,
             compaction_summary_text=summary_text,
+            window_compaction_source_document=window_source_document,
         )
         assert progress.component_fingerprints is not None
         progress.component_fingerprints["transcript"] = (
@@ -973,7 +1241,7 @@ async def prepare_live_context_snapshot(
         prepared_tool_results = prepare_tool_result_render_input(
             units=normalized.tool_result_units,
             transcript=normalized.transcript,
-            policy_basis=fact.compile_policy.tool_result_basis,
+            policy_basis=build_input.compile_policy.tool_result_basis,
             cache=runtime_session.tool_result_render_cache,
         )
         assert progress.component_fingerprints is not None
@@ -986,7 +1254,7 @@ async def prepare_live_context_snapshot(
         ContextInputFailureReasonCode.CANDIDATE_INVALID,
     ):
         prepared_candidates = collect_context_candidates(
-            snapshot=fact,
+            snapshot=build_input,
             cache=runtime_session.context_candidate_lifecycle_cache,
         )
         for diagnostic in prepared_candidates.operational_diagnostics:
@@ -1000,17 +1268,21 @@ async def prepare_live_context_snapshot(
             prepared_candidates.prepared.candidate_set_fingerprint
         )
     return PreparedLiveContextSnapshot(
-        invocation=bind_context_invocation(
-            fact=fact,
+        invocation=bind_context_draft(
+            build_input=build_input,
             resolved_call=resolved_call,
             materialized_tool_specs=materialized,
         ),
+        snapshot_build_input=build_input,
         authority_slice=authority_slice,
         named_slices=named_slices,
         normalized_transcript=normalized,
         prepared_tool_results=prepared_tool_results,
         prepared_candidates=prepared_candidates.prepared,
         candidate_cache_writes=prepared_candidates.cache_writes,
+        active_window=active_window,
+        projection_state=projection_state,
+        rollout_state=rollout_state,
     )
 
 
@@ -1027,19 +1299,12 @@ async def prepare_live_transcript_projection(
     deliberately has no resolved-call or context identity.
     """
 
-    reader = EventLogContextEventSliceReader(
-        event_log=runtime_session.event_log,
-        runtime_session_id=runtime_session.runtime_session_id,
-        reconciliation_required=lambda: runtime_session.reconciliation_required,
-        io_service=runtime_session.context_input_io_service,
+    authority_read = await _read_live_primary_event_slice(
+        runtime_session=runtime_session,
+        working_set=working_set,
     )
-    full_slice = await reader.read_through_current_high_water(
-        runtime_session_id=runtime_session.runtime_session_id,
-        minimum_sequence=1,
-    )
-    start = full_slice.event_by_id(working_set.run_start_event_id).decode_owned()
-    if not isinstance(start, RunStartEvent):
-        raise ContextEventSliceError("live transcript RunStart is not durable")
+    full_slice = authority_read.view
+    start = authority_read.run_start
     run_entry, continuation_refs, _continuation = _run_and_continuation_refs(
         working_set=working_set,
         event_slice=full_slice,
@@ -1072,9 +1337,7 @@ async def prepare_live_transcript_projection(
             else 0
         ),
     )
-    authority_slice = full_slice.subslice(
-        from_sequence=authority_plan.authority_from_sequence
-    )
+    authority_slice = full_slice
     authority = ContextTranscriptProjectionAuthority(
         identity=TranscriptProjectionIdentity(
             runtime_session_id=runtime_session.runtime_session_id
@@ -1082,27 +1345,22 @@ async def prepare_live_transcript_projection(
         run_entry=run_entry,
         current_user_message=start.current_user_message,
         authority_slice_plan=authority_plan,
-        primary_event_range=authority_slice.to_range_fact(),
+        primary_event_range=authority_read.primary_slice.to_range_fact(),
+        named_event_ranges=(
+            authority_read.view.named_range_facts()
+            if isinstance(authority_read.view, ContextEventAuthorityView)
+            else ()
+        ),
     )
-    summary_artifact_id = (
-        authority_plan.transcript_window.compaction_summary_artifact_id
+    summary_text, window_source_document = await _read_compaction_inputs(
+        runtime_session=runtime_session,
+        transcript_window=authority_plan.transcript_window,
     )
-    summary_text = None
-    if summary_artifact_id is not None:
-        summary_deadline = monotonic() + 30.0
-        summary_text = await runtime_session.context_input_io_service.execute(
-            operation_name="context-compaction-summary-read",
-            operation=lambda: runtime_session.archive.get_text(
-                summary_artifact_id,
-                session_id=runtime_session.runtime_session_id,
-                deadline_monotonic=summary_deadline,
-            ),
-            deadline_monotonic=summary_deadline,
-        )
     normalized = project_context_transcript(
         snapshot=authority,
         event_slice=authority_slice,
         compaction_summary_text=summary_text,
+        window_compaction_source_document=window_source_document,
     )
     prepared = prepare_tool_result_render_input(
         units=normalized.tool_result_units,
@@ -1117,38 +1375,491 @@ async def prepare_live_transcript_projection(
     )
 
 
+async def _read_compaction_inputs(
+    *,
+    runtime_session: RuntimeSession,
+    transcript_window,
+) -> tuple[str | None, WindowCompactionSourceDocumentFact | None]:
+    async def read_text(artifact_id: str, *, operation_name: str) -> str:
+        deadline = monotonic() + 30.0
+        return await runtime_session.context_input_io_service.execute(
+            operation_name=operation_name,
+            operation=lambda: runtime_session.archive.get_text(
+                artifact_id,
+                session_id=runtime_session.runtime_session_id,
+                deadline_monotonic=deadline,
+            ),
+            deadline_monotonic=deadline,
+        )
+
+    summary_text = None
+    if transcript_window.compaction_summary_artifact_id is not None:
+        summary_text = await read_text(
+            transcript_window.compaction_summary_artifact_id,
+            operation_name="context-compaction-summary-read",
+        )
+    source_document = None
+    source_id = transcript_window.window_compaction_source_document_artifact_id
+    if source_id is not None:
+        source_text = await read_text(
+            source_id,
+            operation_name="window-compaction-source-document-read",
+        )
+        source_document = WindowCompactionSourceDocumentFact.model_validate(
+            json.loads(source_text)
+        )
+        if (
+            source_document.document_fingerprint
+            != transcript_window.window_compaction_source_document_fingerprint
+        ):
+            raise ValueError("window compaction source artifact fingerprint mismatch")
+    return summary_text, source_document
+
+
+async def _read_live_primary_event_slice(
+    *,
+    runtime_session: RuntimeSession,
+    working_set: RunWorkingSet,
+) -> _LiveAuthorityRead:
+    """Read one bounded active-window delta plus exact historical authority."""
+
+    if runtime_session.reconciliation_required:
+        raise ContextEventSliceError(
+            "event ledger requires reconciliation before context read"
+        )
+    deadline = monotonic() + 30.0
+
+    def read() -> _LiveAuthorityRead:
+        start = runtime_session.long_horizon_state_store.run_start_by_event_id(
+            working_set.run_start_event_id
+        )
+        if start is None:
+            run_start_rows = runtime_session.event_log.read_raw_events_by_id(
+                (working_set.run_start_event_id,),
+                deadline_monotonic=deadline,
+            )
+            if len(run_start_rows) != 1:
+                raise ContextEventSliceError("live snapshot RunStart is not durable")
+            decoded_start = run_start_rows[0].decode_owned(
+                DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
+            start = decoded_start if isinstance(decoded_start, RunStartEvent) else None
+        if (
+            not isinstance(start, RunStartEvent)
+            or start.id != working_set.run_start_event_id
+            or start.sequence != working_set.run_start_sequence
+        ):
+            raise ContextEventSliceError("live snapshot RunStart identity drifted")
+        minimum_sequence = start.sequence
+        compacted_window = False
+        compacted_source_through: int | None = None
+        window_state = runtime_session.long_horizon_state_store.window_state(
+            start.run_id
+        )
+        if window_state is not None:
+            if not window_state.consistent:
+                raise ContextEventSliceError(
+                    "active context window state is inconsistent"
+                )
+            active_window = (
+                window_state.windows.get(window_state.active_window_id)
+                if window_state.active_window_id is not None
+                else None
+            )
+            if (
+                active_window is not None
+                and active_window.transcript_basis.basis_kind == "window_compaction"
+            ):
+                source_through = (
+                    active_window.transcript_basis.source_through_sequence_at_compaction
+                )
+                if source_through is None:
+                    raise ContextEventSliceError(
+                        "compacted window has no bounded post-compaction delta"
+                    )
+                minimum_sequence = source_through + 1
+                compacted_window = True
+                compacted_source_through = source_through
+        boundary = start.new_run_boundary
+        checkpoint_terminal_id: str | None = None
+        if (
+            not compacted_window
+            and boundary is not None
+            and boundary.transcript.source_through_sequence > 0
+        ):
+            terminal_id = boundary.transcript.checkpoint_terminal_event_id
+            if terminal_id is None:
+                minimum_sequence = 1
+            else:
+                checkpoint_terminal_id = terminal_id
+                keep_after = boundary.transcript.checkpoint_keep_after_sequence
+                terminal_sequence = boundary.transcript.checkpoint_terminal_sequence
+                if keep_after is None or terminal_sequence is None:
+                    raise ContextEventSliceError(
+                        "transcript checkpoint boundary is incomplete"
+                    )
+                retained_from = keep_after + 1
+                candidates = [start.sequence, terminal_sequence]
+                if retained_from <= boundary.transcript.source_through_sequence:
+                    candidates.append(retained_from)
+                minimum_sequence = min(item for item in candidates if item > 0)
+        entered_sequence = working_set.plan_snapshot.entered_event_sequence
+        if entered_sequence is not None and not compacted_window:
+            minimum_sequence = min(minimum_sequence, entered_sequence)
+        cache_key = (
+            runtime_session.runtime_session_id,
+            working_set.run_start_event_id,
+            minimum_sequence,
+        )
+        cached = runtime_session.context_authority_slice_cache.get(cache_key)
+        remaining_events = (
+            _MAX_LIVE_AUTHORITY_EVENTS - len(cached.events)
+            if cached is not None
+            else _MAX_LIVE_AUTHORITY_EVENTS
+        )
+        remaining_bytes = (
+            _MAX_LIVE_AUTHORITY_PAYLOAD_BYTES - cached.payload_byte_count
+            if cached is not None
+            else _MAX_LIVE_AUTHORITY_PAYLOAD_BYTES
+        )
+        exact_ids = {
+            working_set.run_start_event_id,
+            *((checkpoint_terminal_id,) if checkpoint_terminal_id is not None else ()),
+            *(
+                (working_set.effective_exposure_event_ref.event_id,)
+                if working_set.effective_exposure_event_ref is not None
+                else ()
+            ),
+            *(
+                (working_set.plan_snapshot.entered_event_id,)
+                if working_set.plan_snapshot.entered_event_id is not None
+                else ()
+            ),
+            *(
+                (working_set.latest_committed_resume_boundary_ref.event_id,)
+                if working_set.latest_committed_resume_boundary_ref is not None
+                else ()
+            ),
+        }
+        bundle_request = RawContextAuthorityBundleRequest(
+            primary_minimum_sequence=(
+                cached.through_sequence + 1 if cached is not None else minimum_sequence
+            ),
+            run_id=start.run_id,
+            run_sparse_event_types=(
+                _COMPACTED_WINDOW_SPARSE_EVENT_TYPES if compacted_window else ()
+            ),
+            session_sparse_event_types=(
+                _COMPACTED_WINDOW_SESSION_SPARSE_EVENT_TYPES if compacted_window else ()
+            ),
+            exact_event_ids=tuple(sorted(exact_ids)),
+            primary_bounds=RawEventSelectionBounds(
+                max_events=max(1, remaining_events),
+                max_payload_bytes=max(1, remaining_bytes),
+            ),
+            run_sparse_bounds=RawEventSelectionBounds(
+                max_events=_MAX_LIVE_SPARSE_AUTHORITY_EVENTS,
+                max_payload_bytes=_MAX_LIVE_SPARSE_AUTHORITY_PAYLOAD_BYTES,
+            ),
+            session_sparse_bounds=RawEventSelectionBounds(
+                max_events=_MAX_LIVE_SPARSE_AUTHORITY_EVENTS,
+                max_payload_bytes=_MAX_LIVE_SPARSE_AUTHORITY_PAYLOAD_BYTES,
+            ),
+            exact_bounds=RawEventSelectionBounds(
+                max_events=max(1, len(exact_ids)),
+                max_payload_bytes=_MAX_LIVE_SPARSE_AUTHORITY_PAYLOAD_BYTES,
+            ),
+        )
+        bundle = runtime_session.event_log.read_context_authority_bundle(
+            bundle_request,
+            deadline_monotonic=deadline,
+        )
+        high_water = bundle.through_sequence
+        if compacted_window and (
+            compacted_source_through is None or compacted_source_through >= high_water
+        ):
+            raise ContextEventSliceError(
+                "compacted window has no bounded post-compaction delta"
+            )
+        if cached is not None:
+            if cached.through_sequence > high_water:
+                raise ContextEventSliceError(
+                    "authority slice cache exceeds canonical ledger high-water"
+                )
+            if cached.through_sequence == high_water:
+                authority_slice = cached
+            else:
+                if remaining_events < 1 or remaining_bytes < 1:
+                    raise ContextEventSliceError(
+                        "authority slice cache reached its hard read bound"
+                    )
+                delta = _raw_event_snapshot(
+                    through_sequence=high_water,
+                    events=bundle.primary_events,
+                )
+                authority_slice = cached.extend_snapshot(delta)
+        else:
+            if not bundle.primary_events:
+                raise ContextEventSliceError("authority bundle primary range is empty")
+            snapshot = _raw_event_snapshot(
+                through_sequence=high_water,
+                events=bundle.primary_events,
+            )
+            authority_slice = ContextEventSlice.from_read_snapshot(
+                runtime_session_id=runtime_session.runtime_session_id,
+                minimum_sequence=minimum_sequence,
+                snapshot=snapshot,
+            )
+        runtime_session.context_authority_slice_cache.put(cache_key, authority_slice)
+        local_named_slices: tuple[ContextEventSlice, ...] = ()
+        bundle_by_id = {
+            item.event_id: item
+            for item in (
+                *bundle.run_sparse_events,
+                *bundle.session_sparse_events,
+                *bundle.exact_events,
+            )
+        }
+        if exact_ids - set(bundle_by_id):
+            raise ContextEventSliceError(
+                "compacted window exact authority is unavailable"
+                if compacted_window
+                else "live context exact authority is unavailable"
+            )
+        if checkpoint_terminal_id is not None:
+            terminal = bundle_by_id[checkpoint_terminal_id].decode_owned(
+                DEFAULT_EVENT_SCHEMA_REGISTRY
+            )
+            if not isinstance(terminal, ContextCompactionCompletedEvent):
+                raise ContextEventSliceError(
+                    "transcript checkpoint reference is not a completed fact"
+                )
+            if (
+                terminal.sequence != boundary.transcript.checkpoint_terminal_sequence
+                or terminal.compaction_id
+                != boundary.transcript.checkpoint_compaction_id
+                or terminal.keep_after_sequence
+                != boundary.transcript.checkpoint_keep_after_sequence
+                or terminal.window_id != boundary.transcript.compacted_window_id
+            ):
+                raise ContextEventSliceError(
+                    "transcript checkpoint basis drifted from RunStart"
+                )
+        if compacted_window:
+            sparse_by_id = {
+                item.event_id: item
+                for item in (
+                    *bundle.run_sparse_events,
+                    *bundle.session_sparse_events,
+                    *bundle.exact_events,
+                )
+            }
+            frozen = tuple(
+                FrozenStoredEvent.from_raw_envelope(item)
+                for item in sorted(
+                    sparse_by_id.values(), key=lambda item: item.sequence
+                )
+                if item.sequence < authority_slice.from_sequence
+            )
+            local_named_slices = _contiguous_exact_slices(
+                runtime_session_id=runtime_session.runtime_session_id,
+                events=frozen,
+            )
+        return _LiveAuthorityRead(
+            primary_slice=authority_slice,
+            local_named_slices=local_named_slices,
+            run_start=start,
+        )
+
+    authority = await runtime_session.context_input_io_service.execute(
+        operation_name="context-live-authority-read",
+        operation=read,
+        deadline_monotonic=deadline,
+    )
+    if runtime_session.reconciliation_required:
+        raise ContextEventSliceError(
+            "event ledger requires reconciliation after context read"
+        )
+    return authority
+
+
+def _contiguous_exact_slices(
+    *,
+    runtime_session_id: str,
+    events: tuple[FrozenStoredEvent, ...],
+) -> tuple[ContextEventSlice, ...]:
+    if not events:
+        return ()
+    groups: list[list[FrozenStoredEvent]] = []
+    for event in events:
+        if groups and event.sequence == groups[-1][-1].sequence + 1:
+            groups[-1].append(event)
+        else:
+            groups.append([event])
+    return tuple(
+        ContextEventSlice.from_frozen_events(
+            runtime_session_id=runtime_session_id,
+            events=group,
+        )
+        for group in groups
+    )
+
+
 async def _child_named_context_slices(
     *,
     runtime_session: RuntimeSession,
     run_start: RunStartEvent,
-) -> tuple[ContextEventSlice, ...]:
+) -> _ChildAuthorityRead:
     entry = run_start.subagent_run_entry
     if entry is None:
-        return ()
+        return _ChildAuthorityRead(
+            slices=(),
+            rollout_state=None,
+        )
     locator = runtime_session.context_event_log_locator
     if locator is None:
         raise ContextEventSliceError("child context requires a parent EventLogLocator")
     parent_log = locator.event_log_for_runtime_session(entry.parent_runtime_session_id)
     deadline = monotonic() + 30.0
+
+    def read_parent_authority() -> _ChildAuthorityRead:
+        sparse_key = (
+            entry.parent_runtime_session_id,
+            f"parent-run:{entry.parent_run_id}:child:{entry.subagent_run_id}",
+        )
+        cursor = runtime_session.context_authority_slice_cache.get_sparse_cursor(
+            sparse_key
+        )
+        relevant = parent_log.read_raw_events_by_types(
+            (
+                EventType.RUN_START.value,
+                EventType.SUBAGENT_RUN_STARTED.value,
+                EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED.value,
+                EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED.value,
+                EventType.ROLLOUT_BUDGET_RESERVATION_CREATED.value,
+                EventType.ROLLOUT_BUDGET_RESERVATION_SETTLED.value,
+                EventType.ROLLOUT_PHASE_TRANSITIONED.value,
+            ),
+            run_ids=(entry.parent_run_id,),
+            minimum_sequence=(
+                cursor.observed_ledger_high_water + 1 if cursor is not None else 1
+            ),
+            max_events=_MAX_LIVE_AUTHORITY_EVENTS,
+            max_payload_bytes=_MAX_LIVE_AUTHORITY_PAYLOAD_BYTES,
+            deadline_monotonic=deadline,
+        )
+        if cursor is None:
+            starts = tuple(
+                event
+                for event in relevant.events
+                if event.event_type == EventType.RUN_START
+            )
+            if len(starts) != 1:
+                raise ContextEventSliceError(
+                    "child parent ledger lacks its unique RunStart"
+                )
+            spawn = tuple(
+                event
+                for event in relevant.events
+                if event.event_type == EventType.SUBAGENT_RUN_STARTED
+                and event.event_id == f"subagent_run_started:{entry.subagent_run_id}"
+            )
+            if len(spawn) != 1:
+                # The fallback validates the complete typed spawn identity; it
+                # does not widen the sparse authority selection.
+                spawn = tuple(
+                    raw
+                    for raw in relevant.events
+                    if raw.event_type == EventType.SUBAGENT_RUN_STARTED
+                    and isinstance(
+                        decoded := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                        SubagentRunStartedEvent,
+                    )
+                    and decoded.subagent_run_id == entry.subagent_run_id
+                    and decoded.edge_id == entry.spawn_edge_id
+                )
+            if len(spawn) != 1:
+                raise ContextEventSliceError(
+                    "child parent ledger lacks its unique spawn fact"
+                )
+            run_start_event = FrozenStoredEvent.from_raw_envelope(starts[0])
+            spawn_event = FrozenStoredEvent.from_raw_envelope(spawn[0])
+            relevant_through_sequence = max(
+                starts[0].sequence,
+                spawn[0].sequence,
+                *(event.sequence for event in relevant.events),
+            )
+        else:
+            run_start_event = cursor.run_start_event
+            spawn_event = cursor.spawn_event
+            relevant_through_sequence = _advance_sparse_relevant_through_sequence(
+                cursor.relevant_through_sequence,
+                relevant.events,
+            )
+        relevant_events_by_id = (
+            {item.event_id: item for item in cursor.relevant_events}
+            if cursor is not None
+            else {}
+        )
+        relevant_events_by_id.update(
+            (
+                item.event_id,
+                FrozenStoredEvent.from_raw_envelope(item),
+            )
+            for item in relevant.events
+        )
+        relevant_events_by_id[run_start_event.event_id] = run_start_event
+        relevant_events_by_id[spawn_event.event_id] = spawn_event
+        frozen_relevant = tuple(
+            sorted(relevant_events_by_id.values(), key=lambda item: item.sequence)
+        )
+        runtime_session.context_authority_slice_cache.put_sparse_cursor(
+            sparse_key,
+            SparseAuthorityCursor(
+                observed_ledger_high_water=relevant.through_sequence,
+                relevant_through_sequence=relevant_through_sequence,
+                run_start_event=run_start_event,
+                spawn_event=spawn_event,
+                relevant_events=frozen_relevant,
+            ),
+        )
+        owner_store = runtime_session.rollout_account_owner_state_store
+        if owner_store is None:
+            raise ContextEventSliceError(
+                "child context lacks its parent rollout state store"
+            )
+        rollout_state = owner_store.rollout_state_at(
+            run_start.long_horizon.rollout_account_id,
+            through_sequence=relevant.through_sequence,
+        )
+        if rollout_state is None:
+            raise ContextEventSliceError(
+                "child context parent rollout account is unavailable"
+            )
+        return _ChildAuthorityRead(
+            slices=_contiguous_exact_slices(
+                runtime_session_id=entry.parent_runtime_session_id,
+                events=frozen_relevant,
+            ),
+            rollout_state=rollout_state,
+        )
+
     read = await runtime_session.context_input_io_service.execute(
         operation_name="context-child-parent-event-slice-read",
-        operation=lambda: parent_log.read_range_snapshot(
-            minimum_sequence=1,
-            deadline_monotonic=deadline,
-        ),
+        operation=read_parent_authority,
         deadline_monotonic=deadline,
     )
-    if read.through_sequence < 1:
+    if not read.slices:
         raise ContextEventSliceError("child parent ledger is empty")
-    parent_slice = ContextEventSlice.from_read_snapshot(
-        runtime_session_id=entry.parent_runtime_session_id,
-        minimum_sequence=1,
-        snapshot=read,
-    )
+    parent_slices = read.slices
     matching = tuple(
         event
+        for parent_slice in parent_slices
         for frozen in parent_slice.events
-        if isinstance((event := frozen.decode_owned()), SubagentRunStartedEvent)
+        if isinstance(
+            (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)),
+            SubagentRunStartedEvent,
+        )
         and event.subagent_run_id == entry.subagent_run_id
         and event.child_runtime_session_id == runtime_session.runtime_session_id
         and event.edge_id == entry.spawn_edge_id
@@ -1158,7 +1869,33 @@ async def _child_named_context_slices(
         raise ContextEventSliceError(
             "child context parent slice lacks its unique spawn fact"
         )
-    return (parent_slice,)
+    return read
+
+
+def _advance_sparse_relevant_through_sequence(
+    current: int,
+    events: Iterable[RawStoredEventEnvelope],
+) -> int:
+    return max((event.sequence for event in events), default=current)
+
+
+def _raw_event_snapshot(
+    *,
+    through_sequence: int,
+    events: tuple[RawStoredEventEnvelope, ...],
+) -> RawEventLogReadSnapshot:
+    frozen = tuple(events)
+    return RawEventLogReadSnapshot(
+        through_sequence=through_sequence,
+        events=frozen,
+        snapshot_fingerprint=context_fingerprint(
+            "raw-event-log-read-snapshot:v1",
+            {
+                "through_sequence": through_sequence,
+                "envelopes": tuple(item.envelope_fingerprint for item in frozen),
+            },
+        ),
+    )
 
 
 __all__ = [

@@ -35,31 +35,20 @@ class LoopTransition(StrEnum):
     CONTINUE_AFTER_RECOVERY = "continue_after_recovery"
     FINISH = "finish"
     FAIL = "fail"
-    EXCEED_MAX_ITERS = "exceed_max_iters"
     WAIT_FOR_USER = "wait_for_user"
 
 
 @dataclass(frozen=True, slots=True)
 class LoopBudget:
-    max_turns: int = 50
-    max_tool_calls: int = 64
     max_consecutive_model_failures: int = 2
     max_consecutive_tool_failures: int = 8
     max_plan_interactions_per_run: int = 16
     max_plan_exit_revisions_per_run: int = 8
     projection_token_budget: int = 2_000
     recall_hard_timeout_ms: int = 1_500
-    tool_result_context_chars: int = 36_000
-    tool_result_body_context_chars: int | None = None
-    tool_result_envelope_context_chars: int = 16_384
-    prior_tool_result_context_chars: int | None = None
-    current_tail_tool_result_context_chars: int | None = None
-    legacy_tool_result_context_chars: int | None = None
-    tool_result_per_tool_cap_chars: int | None = None
-    tool_result_per_message_cap_chars: int | None = None
+    tool_result_per_tool_cap_chars: int = 32_000
+    tool_result_per_message_cap_chars: int = 64_000
     tool_result_per_envelope_cap_chars: int = 1_200
-    latest_tool_result_reserved_chars: int = 2_048
-    max_tool_results_per_context: int = 256
     minimum_essential_envelope_chars: int = 256
     max_subagent_results_per_parent_compile: int = 8
 

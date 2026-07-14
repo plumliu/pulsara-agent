@@ -3,21 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 from pulsara_agent.event import (
     AgentEvent,
     ContextCompactionCompletedEvent,
+    EventType,
+    ReplyStartEvent,
     ReplyEndEvent,
     RunEndEvent,
     RunStartEvent,
     TerminalProcessCompletedEvent,
     ToolResultEndEvent,
 )
-from pulsara_agent.event_log import EventLog
+from pulsara_agent.event_log import DEFAULT_EVENT_SCHEMA_REGISTRY, EventLog
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.message import DataBlock, TextBlock, ToolCallBlock, ToolResultBlock
-from pulsara_agent.message import Msg, SystemMsg, UserMsg
+from pulsara_agent.message import AssistantMsg, Msg, SystemMsg, UserMsg
+from pulsara_agent.message.reducer import (
+    MessageReducer,
+    MessageReplayControlError,
+    require_canonical_reply_control,
+)
 from pulsara_agent.runtime.compaction.planner import (
     build_compaction_summary_message,
     latest_completed_boundary,
@@ -38,9 +45,139 @@ __all__ = [
     "INTERRUPTED_NOTE_TEXT",
     "rebuild_prior_messages",
     "rebuild_prior_messages_before_sequence",
+    "rebuild_prior_messages_bounded",
 ]
 
 _MAX_COMPLETION_NOTES = 3
+_MAX_TRANSCRIPT_CONTROL_EVENTS = 16_384
+_MAX_TRANSCRIPT_CONTROL_BYTES = 16 * 1024 * 1024
+_MAX_REPLY_EVENTS = 16_384
+_MAX_REPLY_BYTES = 16 * 1024 * 1024
+_MAX_COMPACTION_CHECKPOINT_CANDIDATES = 8
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedPriorTranscript:
+    messages: tuple[Msg, ...]
+    source_through_sequence: int
+    source_event_count: int
+    checkpoint_event: ContextCompactionCompletedEvent | None
+
+
+def rebuild_prior_messages_bounded(
+    event_log: EventLog,
+    *,
+    archive: ArtifactStore,
+    session_id: str,
+    deadline_monotonic: float,
+) -> BoundedPriorTranscript:
+    """Rebuild from the latest durable compaction checkpoint plus bounded facts."""
+
+    boundary = None
+    candidates = event_log.read_raw_events_by_type(
+        str(EventType.CONTEXT_COMPACTION_COMPLETED),
+        limit=_MAX_COMPACTION_CHECKPOINT_CANDIDATES,
+        deadline_monotonic=deadline_monotonic,
+    )
+    for raw in candidates:
+        event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        if not isinstance(event, ContextCompactionCompletedEvent):
+            raise ValueError("compaction checkpoint query returned another event type")
+        try:
+            summary = archive.get_text(
+                event.summary_artifact_id,
+                session_id=session_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except (KeyError, ValueError):
+            continue
+        from pulsara_agent.runtime.compaction.planner import CompactionBoundary
+
+        boundary = CompactionBoundary(event=event, summary_text=summary)
+        break
+    minimum_sequence = boundary.keep_after_sequence + 1 if boundary else 1
+    relevant_types = (
+        str(EventType.RUN_START),
+        str(EventType.RUN_END),
+        str(EventType.MODEL_CALL_START),
+        str(EventType.MODEL_CALL_END),
+        str(EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED),
+        str(EventType.REPLY_END),
+        str(EventType.TOOL_CALL_START),
+        str(EventType.TOOL_RESULT_START),
+        str(EventType.TOOL_RESULT_END),
+        str(EventType.REQUIRE_USER_CONFIRM),
+        str(EventType.TERMINAL_PROCESS_COMPLETED),
+        str(EventType.PLAN_MODE_ENTERED),
+        str(EventType.PLAN_MODE_EXITED),
+    )
+    sparse = event_log.read_raw_events_by_types(
+        relevant_types,
+        minimum_sequence=minimum_sequence,
+        max_events=_MAX_TRANSCRIPT_CONTROL_EVENTS,
+        max_payload_bytes=_MAX_TRANSCRIPT_CONTROL_BYTES,
+        deadline_monotonic=deadline_monotonic,
+    )
+    events = [
+        item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY) for item in sparse.events
+    ]
+    reply_ids = tuple(
+        dict.fromkeys(
+            event.reply_id for event in events if isinstance(event, ReplyEndEvent)
+        )
+    )
+    reply_events_by_id: dict[str, tuple[AgentEvent, ...]] = {}
+    if reply_ids:
+        reply_snapshot = event_log.read_raw_replies_snapshot(
+            reply_ids,
+            through_sequence=sparse.through_sequence,
+            max_total_events=_MAX_REPLY_EVENTS,
+            max_total_payload_bytes=_MAX_REPLY_BYTES,
+            deadline_monotonic=deadline_monotonic,
+        )
+        reply_events_by_id = {
+            group.reply_id: tuple(
+                item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                for item in group.events
+            )
+            for group in reply_snapshot.groups
+        }
+
+    def load_reply(reply_id: str) -> Msg:
+        decoded = reply_events_by_id.get(reply_id)
+        if decoded is None:
+            raise MessageReplayControlError(
+                "bounded transcript reply is absent from its frozen snapshot"
+            )
+        require_canonical_reply_control(decoded)
+        start = next(
+            (item for item in decoded if isinstance(item, ReplyStartEvent)), None
+        )
+        message = AssistantMsg(
+            id=reply_id,
+            name=start.name if start else "assistant",
+            content=[],
+            created_at=start.created_at if start else None,
+        )
+        reducer = MessageReducer(message)
+        for item in decoded:
+            reducer.append(item)
+        return reducer.message
+
+    messages = _rebuild_messages_from_events(
+        event_log,
+        events,
+        include_completion_note=True,
+        reply_loader=load_reply,
+    )
+    if boundary is not None:
+        messages.insert(0, build_compaction_summary_message(boundary))
+    return BoundedPriorTranscript(
+        messages=tuple(messages),
+        source_through_sequence=sparse.through_sequence,
+        source_event_count=sparse.through_sequence,
+        checkpoint_event=boundary.event if boundary is not None else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,8 +234,13 @@ def rebuild_prior_messages(
             if event.reply_id in seen_replies:
                 continue
             seen_replies.add(event.reply_id)
-            message = event_log.replay(event.reply_id)
-            if event.run_id in terminal_run_ids:
+            try:
+                message = event_log.replay(event.reply_id)
+            except MessageReplayControlError:
+                if event.run_id not in terminal_run_ids:
+                    raise
+                message = None
+            if message is not None and event.run_id in terminal_run_ids:
                 message = _strip_unfinished_tool_calls(
                     message,
                     completed_tool_call_ids=completed_tool_call_ids_by_run.get(event.run_id, set()),
@@ -181,6 +323,7 @@ def _rebuild_messages_from_events(
     events: list[AgentEvent],
     *,
     include_completion_note: bool,
+    reply_loader: Callable[[str], Msg] | None = None,
 ) -> list[Msg]:
     recovery = project_recovery_from_events(events)
     note_target = _last_terminal_run_note_target(events, recovery)
@@ -208,8 +351,17 @@ def _rebuild_messages_from_events(
             if event.reply_id in seen_replies:
                 continue
             seen_replies.add(event.reply_id)
-            message = event_log.replay(event.reply_id)
-            if event.run_id in terminal_run_ids:
+            try:
+                message = (
+                    reply_loader(event.reply_id)
+                    if reply_loader is not None
+                    else event_log.replay(event.reply_id)
+                )
+            except MessageReplayControlError:
+                if event.run_id not in terminal_run_ids:
+                    raise
+                message = None
+            if message is not None and event.run_id in terminal_run_ids:
                 message = _strip_unfinished_tool_calls(
                     message,
                     completed_tool_call_ids=completed_tool_call_ids_by_run.get(event.run_id, set()),

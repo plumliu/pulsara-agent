@@ -14,13 +14,25 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from pulsara_agent.event import RunEndEvent, RunStartEvent
+from pulsara_agent.event import (
+    ContextWindowClosedEvent,
+    RolloutBudgetAccountClosedEvent,
+    RunEndEvent,
+    RunStartEvent,
+)
 from pulsara_agent.event_log import PostgresEventLog
+from pulsara_agent.llm.recovery import ModelStreamRecoveryService
+from pulsara_agent.llm.control_recovery import (
+    ModelCallControlDispositionRecoveryService,
+)
+from pulsara_agent.primitives.long_horizon import ContextWindowCloseReason
 from pulsara_agent.primitives.run_lifecycle import (
     RunStopReason,
     RunTerminalizationKind,
 )
 from pulsara_agent.runtime.recovery import AbortKind
+from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
+from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
 from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
 
 
@@ -33,6 +45,8 @@ class DanglingRunRepairResult:
     repaired_run_ids: tuple[str, ...]
     skipped_run_ids: tuple[str, ...]
     projection_rows_updated: int
+    recovered_model_call_ids: tuple[str, ...]
+    recovered_model_control_call_ids: tuple[str, ...]
 
     @property
     def repaired_count(self) -> int:
@@ -54,17 +68,35 @@ def repair_dangling_runs_for_resume(
     """
 
     _ensure_schema(dsn)
+    log = PostgresEventLog(
+        dsn=dsn,
+        runtime_session_id=runtime_session_id,
+        workspace_root=workspace_root,
+    )
+    model_recovery = ModelStreamRecoveryService(
+        event_log=log
+    ).repair_incomplete_model_streams()
+    recovered_model_call_ids = tuple(
+        item.resolved_model_call_id for item in model_recovery.repaired
+    )
+    control_recovery = ModelCallControlDispositionRecoveryService(
+        event_log=log
+    ).repair_missing_dispositions()
+    recovered_model_control_call_ids = tuple(
+        item.resolved_model_call_id for item in control_recovery.recovered
+    )
     running = _running_runs_with_latest_context(dsn, runtime_session_id)
     if not running:
-        log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=workspace_root)
         return DanglingRunRepairResult(
             runtime_session_id=runtime_session_id,
             repaired_run_ids=(),
             skipped_run_ids=(),
             projection_rows_updated=log.repair_run_projection(),
+            recovered_model_call_ids=recovered_model_call_ids,
+            recovered_model_control_call_ids=recovered_model_control_call_ids,
         )
 
-    log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=workspace_root)
+    state_store = LongHorizonStateStore(log.iter())
     repaired: list[str] = []
     skipped: list[str] = []
     for row in running:
@@ -88,22 +120,89 @@ def repair_dangling_runs_for_resume(
             skipped.append(run_id)
             continue
         started = starts[0]
-        log.append(
-            RunEndEvent(
-                id=started.terminal_run_end_event_id,
-                run_id=run_id,
-                turn_id=turn_id,
-                reply_id=reply_id,
-                status="aborted",
-                stop_reason=RunStopReason.ABORTED,
-                terminalization_kind=RunTerminalizationKind.RECOVERED_INTERRUPTED,
-                abort_kind=AbortKind.HOST_TEARDOWN.value,
-                metadata={
-                    "recovered_by": "resume",
-                    "resume_stop_reason": RESUME_RECOVERED_STOP_REASON,
-                },
+        if started.child_rollout_subaccount is not None:
+            raise RuntimeError(
+                "Host resume cannot terminalize a child-native runtime ledger"
             )
+        window_state = state_store.window_state(run_id)
+        account = state_store.rollout_account(
+            started.long_horizon.rollout_account_id
         )
+        account_state = state_store.rollout_state(
+            started.long_horizon.rollout_account_id
+        )
+        if (
+            window_state is None
+            or window_state.active_window_id is None
+            or account is None
+            or account_state is None
+        ):
+            raise RuntimeError(
+                "dangling run is missing its required window/account opening batch"
+            )
+        if account_state.active_reservations:
+            raise RuntimeError(
+                "dangling run recovery requires reservation recovery before RunEnd"
+            )
+        window = window_state.windows[window_state.active_window_id]
+        projection_state = state_store.projection_state(window.window_id)
+        if projection_state is None:
+            raise RuntimeError("dangling run is missing projection state")
+        next_sequence = log.next_sequence()
+        metadata = {
+            "recovered_by": "resume",
+            "resume_stop_reason": RESUME_RECOVERED_STOP_REASON,
+        }
+        window_close = ContextWindowClosedEvent(
+            id=window.stable_close_event_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            reply_id=reply_id,
+            window_id=window.window_id,
+            window_generation=window.generation,
+            close_reason=ContextWindowCloseReason.RECOVERED_INTERRUPTED,
+            final_projection_generation=projection_state.projection_generation,
+            final_projection_state_fingerprint=(
+                projection_state.state_semantic_fingerprint
+            ),
+            source_through_sequence=next_sequence - 1,
+            next_window_id=None,
+            compaction_terminal_event_id=None,
+            metadata=metadata,
+        )
+        _, state_before_close = apply_rollout_event(
+            account=account,
+            state=account_state,
+            event=window_close.model_copy(update={"sequence": next_sequence}),
+        )
+        assert state_before_close is not None
+        account_close = RolloutBudgetAccountClosedEvent(
+            id=f"rollout_budget_account_closed:{account.account_id}",
+            run_id=run_id,
+            turn_id=turn_id,
+            reply_id=reply_id,
+            account_id=account.account_id,
+            final_state_fingerprint=state_before_close.state_fingerprint,
+            charged_milliunits=state_before_close.charged_milliunits,
+            model_call_count=state_before_close.model_call_count,
+            tool_call_count=state_before_close.tool_call_count,
+            active_reservation_count=0,
+            run_end_event_id=started.terminal_run_end_event_id,
+            metadata=metadata,
+        )
+        run_end = RunEndEvent(
+            id=started.terminal_run_end_event_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            reply_id=reply_id,
+            status="aborted",
+            stop_reason=RunStopReason.ABORTED,
+            terminalization_kind=RunTerminalizationKind.RECOVERED_INTERRUPTED,
+            abort_kind=AbortKind.HOST_TEARDOWN.value,
+            metadata=metadata,
+        )
+        stored = tuple(log.extend((window_close, account_close, run_end)))
+        state_store.apply_committed(stored)
         repaired.append(run_id)
 
     return DanglingRunRepairResult(
@@ -111,6 +210,8 @@ def repair_dangling_runs_for_resume(
         repaired_run_ids=tuple(repaired),
         skipped_run_ids=tuple(skipped),
         projection_rows_updated=log.repair_run_projection(),
+        recovered_model_call_ids=recovered_model_call_ids,
+        recovered_model_control_call_ids=recovered_model_control_call_ids,
     )
 
 

@@ -193,6 +193,9 @@ class CapabilityResultRenderContractFact(FrozenContextFact):
     semantics_builder_version: str = Field(min_length=1)
     semantics_builder_contract: ToolResultSemanticsBuilderContractFact
     semantics_builder_contract_fingerprint: str = Field(min_length=1)
+    rollup_renderer_id: str = Field(min_length=1)
+    rollup_renderer_version: str = Field(min_length=1)
+    rollup_renderer_contract_fingerprint: str = Field(min_length=1)
     pre_execution_denial_variant_code: ToolResultRenderVariantCode
     contract_fingerprint: str = Field(min_length=1)
 
@@ -512,6 +515,7 @@ class ToolResultExecutionSemanticsFact(FrozenContextFact):
     essential_capture_policy: ToolResultEssentialCapturePolicyFact | None
     essential_result: ToolResultEssentialFact | None
     terminal_payload_timing: TerminalPayloadTimingFact | None
+    rollup_semantics: ToolResultRollupSemanticsFact | None
 
     @model_validator(mode="after")
     def _semantics(self) -> "ToolResultExecutionSemanticsFact":
@@ -540,6 +544,40 @@ class ToolResultExecutionSemanticsFact(FrozenContextFact):
             variant.essential_envelope_kind is not ToolResultEssentialEnvelopeKind.NONE
         ):
             raise ValueError("selected variant requires essential result")
+        return self
+
+
+class ToolResultRollupSemanticsFact(FrozenContextFact):
+    schema_version: Literal["tool-result-rollup-semantics.v1"] = (
+        "tool-result-rollup-semantics.v1"
+    )
+    rollup_kind: Literal[
+        "repeated_search_results",
+        "repeated_file_reads",
+        "terminal_inventory",
+        "repeated_error_family",
+        "subagent_result_index",
+    ]
+    family_key: str = Field(min_length=1, max_length=512)
+    evidence_keys: tuple[str, ...]
+    renderer_id: str = Field(min_length=1)
+    renderer_version: str = Field(min_length=1)
+    renderer_contract_fingerprint: str = Field(min_length=1)
+    semantics_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _rollup(self) -> "ToolResultRollupSemanticsFact":
+        if len(self.evidence_keys) > 16:
+            raise ValueError("tool-result rollup evidence keys exceed bound")
+        if tuple(sorted(set(self.evidence_keys))) != self.evidence_keys:
+            raise ValueError("tool-result rollup evidence keys must be sorted and unique")
+        if any(not value or len(value) > 256 for value in self.evidence_keys):
+            raise ValueError("tool-result rollup evidence key is invalid")
+        _validate_fingerprint(
+            self,
+            "tool-result-rollup-semantics:v1",
+            "semantics_fingerprint",
+        )
         return self
 
 
@@ -631,6 +669,7 @@ class ToolResultRenderUnit(FrozenContextFact):
     render_profile: ToolResultRenderProfileFact
     essential_capture_policy: ToolResultEssentialCapturePolicyFact | None
     essential: ToolResultEssentialFact | None
+    rollup_semantics: ToolResultRollupSemanticsFact | None
     source_sequence_start: int = Field(ge=1)
     source_sequence_end: int = Field(ge=1)
     source_event_ids: tuple[str, ...]
@@ -660,6 +699,7 @@ class ToolResultRenderUnit(FrozenContextFact):
             essential_capture_policy=self.essential_capture_policy,
             essential_result=self.essential,
             terminal_payload_timing=self.terminal_payload_timing,
+            rollup_semantics=self.rollup_semantics,
         )
         del semantics
         artifact_ids = tuple(item.artifact_id for item in self.artifacts)

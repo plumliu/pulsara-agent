@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from threading import RLock
 
 from pulsara_agent.event import AgentEvent
@@ -23,6 +24,16 @@ class SubagentGraphStateStore:
         self._lock = RLock()
         self._state = fold_subagent_graph(events)
         self._reconciliation_required = not self._state.consistent
+
+    @classmethod
+    def from_state(cls, state: SubagentGraphState) -> "SubagentGraphStateStore":
+        if not state.consistent or state.through_sequence < 0:
+            raise ValueError("live subagent graph requires a trusted state")
+        store = cls()
+        with store._lock:
+            store._state = replace(state)
+            store._reconciliation_required = False
+        return store
 
     @property
     def state(self) -> SubagentGraphState:

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from math import ceil
+from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from typing import Iterable
+from threading import RLock
 
-import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -19,16 +19,45 @@ from pulsara_agent.event.events import (
     RunEndEvent,
     RunStartEvent,
 )
-from pulsara_agent.event_log.serialization import dump_agent_event, load_agent_event
+from pulsara_agent.event_log.serialization import (
+    DEFAULT_EVENT_SCHEMA_REGISTRY,
+    EventSchemaContractMismatch,
+    dump_agent_event,
+)
+from pulsara_agent.event_log.postgres_pool import (
+    PostgresConnectionLane,
+    postgres_event_connection,
+)
 from pulsara_agent.event_log.protocol import (
     EventBatchConfirmation,
     EventIdConflict,
     EventLogReadSnapshot,
+    RawCheckpointLedgerCandidate,
+    RawCheckpointLedgerSnapshot,
+    RawContextAuthorityBundle,
+    RawContextAuthorityBundleRequest,
+    RawEventLogReadSnapshot,
+    RawEventIdSelectionSnapshot,
+    RawEventTypeSelectionSnapshot,
+    RawEventSelectionBounds,
+    RawReplyEventGroup,
+    RawReplySelectionSnapshot,
+    RawStoredEventEnvelope,
     EventLogWriteConflict,
+    raw_checkpoint_catalog_identity,
     same_event_payload,
+    same_event_raw_payload,
+)
+from pulsara_agent.primitives.context import (
+    canonical_json_bytes,
+    canonical_utc_timestamp,
+    context_fingerprint,
 )
 from pulsara_agent.message.message import AssistantMsg, Msg
-from pulsara_agent.message.reducer import MessageReducer
+from pulsara_agent.message.reducer import (
+    MessageReducer,
+    require_canonical_reply_control,
+)
 
 
 @dataclass(slots=True)
@@ -36,86 +65,129 @@ class PostgresEventLog:
     dsn: str
     runtime_session_id: str
     workspace_root: str | Path | None = None
+    write_timeout_seconds: float = 30.0
+    read_timeout_seconds: float = 30.0
+    _parent_cache_lock: RLock = field(default_factory=RLock, init=False, repr=False)
+    _session_parent_confirmed: bool = field(default=False, init=False, repr=False)
+    _confirmed_parent_run_ids: set[str] = field(
+        default_factory=set, init=False, repr=False
+    )
+    _confirmed_parent_turn_runs: dict[str, str] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def ensure_runtime_session_owner(self) -> None:
         """Create the session row needed by artifacts produced before RunStart."""
 
-        with psycopg.connect(self.dsn) as connection:
+        with postgres_event_connection(self.dsn) as connection:
             with connection.cursor() as cursor:
                 self._lock_session(cursor)
                 self._ensure_session_row(cursor)
+        with self._parent_cache_lock:
+            self._session_parent_confirmed = True
 
     def append(
         self,
         event: AgentEvent,
         *,
         expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
     ) -> AgentEvent:
         _validate_live_batch([event])
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                self._lock_session(cursor)
-                existing = self._get_by_id(cursor, event.id)
-                if existing is not None:
-                    if same_event_payload(event, existing):
-                        return existing
-                    raise EventIdConflict(event.id)
-                next_sequence = self._next_sequence(cursor)
-                actual_last_sequence = next_sequence - 1
-                if (
-                    expected_last_sequence is not None
-                    and expected_last_sequence != actual_last_sequence
-                ):
-                    raise EventLogWriteConflict(
-                        expected_last_sequence=expected_last_sequence,
-                        actual_last_sequence=actual_last_sequence,
+        deadline = self._write_deadline(deadline_monotonic)
+        with self._parent_cache_lock:
+            with postgres_event_connection(
+                self.dsn,
+                lane=PostgresConnectionLane.CRITICAL_WRITE,
+                deadline_monotonic=deadline,
+            ) as connection:
+                with connection.cursor() as cursor:
+                    self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                    self._lock_session(cursor)
+                    existing = self._get_by_id(cursor, event.id)
+                    if existing is not None:
+                        if same_event_payload(event, existing):
+                            return existing
+                        raise EventIdConflict(event.id)
+                    next_sequence = self._next_sequence(cursor)
+                    actual_last_sequence = next_sequence - 1
+                    if (
+                        expected_last_sequence is not None
+                        and expected_last_sequence != actual_last_sequence
+                    ):
+                        raise EventLogWriteConflict(
+                            expected_last_sequence=expected_last_sequence,
+                            actual_last_sequence=actual_last_sequence,
+                        )
+                    ensured_runs, ensured_turns = self._ensure_parent_rows_batch(
+                        cursor, [event]
                     )
-                self._ensure_parent_rows(cursor, event)
-                stored, _ = self._with_canonical_sequence(event, next_sequence)
-                self._insert_event(cursor, stored)
-                self._sync_run_projection(cursor, stored)
-                return stored
+                    stored, _ = self._with_canonical_sequence(event, next_sequence)
+                    self._insert_event(cursor, stored)
+                    self._sync_run_projection(cursor, stored)
+            self._session_parent_confirmed = True
+            self._confirmed_parent_run_ids.update(ensured_runs)
+            self._confirmed_parent_turn_runs.update(
+                (turn_id, event.run_id) for turn_id, event in ensured_turns
+            )
+            return stored
 
     def extend(
         self,
         events: Iterable[AgentEvent],
         *,
         expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]:
         event_list = list(events)
         if not event_list:
             return []
         _validate_live_batch(event_list)
+        deadline = self._write_deadline(deadline_monotonic)
 
-        with psycopg.connect(self.dsn) as connection:
-            with connection.cursor() as cursor:
-                self._lock_session(cursor)
-                stored_events: list[AgentEvent] = []
-                next_sequence = self._next_sequence(cursor)
-                actual_last_sequence = next_sequence - 1
-                if (
-                    expected_last_sequence is not None
-                    and expected_last_sequence != actual_last_sequence
-                ):
-                    raise EventLogWriteConflict(
-                        expected_last_sequence=expected_last_sequence,
-                        actual_last_sequence=actual_last_sequence,
+        with self._parent_cache_lock:
+            with postgres_event_connection(
+                self.dsn,
+                lane=PostgresConnectionLane.CRITICAL_WRITE,
+                deadline_monotonic=deadline,
+            ) as connection:
+                with connection.cursor() as cursor:
+                    self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                    self._lock_session(cursor)
+                    stored_events: list[AgentEvent] = []
+                    next_sequence = self._next_sequence(cursor)
+                    actual_last_sequence = next_sequence - 1
+                    if (
+                        expected_last_sequence is not None
+                        and expected_last_sequence != actual_last_sequence
+                    ):
+                        raise EventLogWriteConflict(
+                            expected_last_sequence=expected_last_sequence,
+                            actual_last_sequence=actual_last_sequence,
+                        )
+                    self._ensure_event_ids_available(cursor, event_list)
+                    ensured_runs, ensured_turns = self._ensure_parent_rows_batch(
+                        cursor, event_list
                     )
-                self._ensure_event_ids_available(cursor, event_list)
-                for event in event_list:
-                    self._ensure_parent_rows(cursor, event)
-                    stored, next_sequence = self._with_canonical_sequence(
-                        event, next_sequence
-                    )
-                    self._insert_event(cursor, stored)
-                    self._sync_run_projection(cursor, stored)
-                    stored_events.append(stored)
-                return stored_events
+                    for event in event_list:
+                        stored, next_sequence = self._with_canonical_sequence(
+                            event, next_sequence
+                        )
+                        stored_events.append(stored)
+                    self._insert_events(cursor, stored_events)
+                    for stored in stored_events:
+                        self._sync_run_projection(cursor, stored)
+            self._session_parent_confirmed = True
+            self._confirmed_parent_run_ids.update(ensured_runs)
+            self._confirmed_parent_turn_runs.update(
+                (turn_id, event.run_id) for turn_id, event in ensured_turns
+            )
+            return stored_events
 
     def repair_run_projection(self) -> int:
         """Rebuild this session's runs summary rows from canonical events."""
 
-        with psycopg.connect(self.dsn) as connection:
+        with postgres_event_connection(self.dsn) as connection:
             with connection.cursor() as cursor:
                 self._lock_session(cursor)
                 cursor.execute(
@@ -201,41 +273,85 @@ class PostgresEventLog:
 
         query = sql.SQL(
             """
-            select payload
+            select id, session_id, run_id, turn_id, reply_id, sequence,
+                   event_type, event_schema_version,
+                   event_schema_fingerprint,
+                   event_domain_contract_fingerprint,
+                   created_at, payload
             from agent_events
             where {where}
             order by sequence asc
             """
         ).format(where=sql.SQL(" and ").join(predicates))
 
-        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
-            with connection.cursor() as cursor:
+        deadline = self._read_deadline(None)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(query, params)
-                return [load_agent_event(row["payload"]) for row in cursor.fetchall()]
+                return [
+                    self._raw_from_row(row).decode_owned(
+                        DEFAULT_EVENT_SCHEMA_REGISTRY
+                    )
+                    for row in cursor.fetchall()
+                ]
 
     def get_by_id(self, event_id: str) -> AgentEvent | None:
-        with psycopg.connect(self.dsn) as connection:
+        deadline = self._read_deadline(None)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
             with connection.cursor() as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 return self._get_by_id(cursor, event_id)
 
-    def confirm_batch(self, candidates) -> EventBatchConfirmation:
+    def confirm_batch(
+        self,
+        candidates,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> EventBatchConfirmation:
         candidate_list = list(candidates)
         ids = [event.id for event in candidate_list]
         if len(ids) != len(set(ids)):
             raise ValueError("Confirmed event ids must be unique within one batch")
-        with psycopg.connect(self.dsn) as connection:
+        deadline = self._write_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.CRITICAL_WRITE,
+            deadline_monotonic=deadline,
+        ) as connection:
             with connection.cursor() as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=True)
                 self._lock_session(cursor)
                 committed: list[AgentEvent] = []
                 missing: list[str] = []
                 for candidate in candidate_list:
-                    existing = self._get_by_id(cursor, candidate.id)
-                    if existing is None:
+                    raw = self._get_raw_by_id(cursor, candidate.id)
+                    if raw is None:
                         missing.append(candidate.id)
                         continue
-                    if not same_event_payload(candidate, existing):
+                    contract = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(
+                        candidate
+                    ).schema_contract
+                    if (
+                        contract.event_schema_version != raw.event_schema_version
+                        or contract.event_schema_fingerprint
+                        != raw.event_schema_fingerprint
+                        or contract.domain_contract_fingerprint
+                        != raw.event_domain_contract_fingerprint
+                        or not same_event_raw_payload(candidate, raw)
+                    ):
                         raise EventIdConflict(candidate.id)
-                    committed.append(existing)
+                    committed.append(
+                        raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                    )
                 return EventBatchConfirmation(
                     committed_events=tuple(committed),
                     missing_event_ids=tuple(missing),
@@ -249,25 +365,43 @@ class PostgresEventLog:
         through_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> EventLogReadSnapshot:
+        raw = self.read_raw_range_snapshot(
+            minimum_sequence=minimum_sequence,
+            through_sequence=through_sequence,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return EventLogReadSnapshot(
+            through_sequence=raw.through_sequence,
+            events=tuple(
+                event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                for event in raw.events
+            ),
+        )
+
+    def read_raw_range_snapshot(
+        self,
+        *,
+        minimum_sequence: int,
+        through_sequence: int | None = None,
+        max_events: int | None = None,
+        max_payload_bytes: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> RawEventLogReadSnapshot:
         if minimum_sequence < 1:
             raise ValueError("minimum sequence must be positive")
-        connection_kwargs = {"row_factory": dict_row}
-        if deadline_monotonic is not None:
-            remaining = deadline_monotonic - monotonic()
-            if remaining <= 0:
-                raise TimeoutError("event-slice read deadline exceeded")
-            connection_kwargs["connect_timeout"] = max(1, ceil(remaining))
-        with psycopg.connect(self.dsn, **connection_kwargs) as connection:
-            with connection.cursor() as cursor:
+        if max_events is not None and max_events < 1:
+            raise ValueError("event range max_events must be positive")
+        if max_payload_bytes is not None and max_payload_bytes < 1:
+            raise ValueError("event range max_payload_bytes must be positive")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute("set transaction isolation level repeatable read")
-                if deadline_monotonic is not None:
-                    remaining_ms = int((deadline_monotonic - monotonic()) * 1000)
-                    if remaining_ms <= 0:
-                        raise TimeoutError("event-slice read deadline exceeded")
-                    cursor.execute(
-                        "select set_config('statement_timeout', %s, true)",
-                        (str(max(1, remaining_ms)),),
-                    )
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 cursor.execute(
                     "select coalesce(max(sequence), 0) as high_water "
                     "from agent_events where session_id = %s",
@@ -283,31 +417,815 @@ class PostgresEventLog:
                     )
                 if effective_through < minimum_sequence:
                     raise ValueError("event read range is empty or reversed")
+                limit_clause = " limit %s" if max_events is not None else ""
+                parameters: tuple[object, ...] = (
+                    self.runtime_session_id,
+                    minimum_sequence,
+                    effective_through,
+                    *((max_events + 1,) if max_events is not None else ()),
+                )
                 cursor.execute(
-                    """
-                    select payload
+                    f"""
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
                     from agent_events
                     where session_id = %s
                       and sequence >= %s
                       and sequence <= %s
                     order by sequence asc
+                    {limit_clause}
+                    """,
+                    parameters,
+                )
+                events = tuple(self._raw_from_row(row) for row in cursor.fetchall())
+                if max_events is not None and len(events) > max_events:
+                    raise ValueError("event range exceeds its event bound")
+                if max_payload_bytes is not None and sum(
+                    len(event.canonical_payload_bytes) for event in events
+                ) > max_payload_bytes:
+                    raise ValueError("event range exceeds its payload-byte bound")
+        return RawEventLogReadSnapshot(
+            through_sequence=effective_through,
+            events=events,
+            snapshot_fingerprint=context_fingerprint(
+                "raw-event-log-read-snapshot:v1",
+                {
+                    "through_sequence": effective_through,
+                    "envelopes": tuple(
+                        event.envelope_fingerprint for event in events
+                    ),
+                },
+            ),
+        )
+
+    def read_raw_events_by_id(
+        self,
+        event_ids: tuple[str, ...],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[RawStoredEventEnvelope, ...]:
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("raw event ids must be unique")
+        if not event_ids:
+            return ()
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    """
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s and id = any(%s)
+                    """,
+                    (self.runtime_session_id, list(event_ids)),
+                )
+                by_id = {
+                    row["id"]: self._raw_from_row(row) for row in cursor.fetchall()
+                }
+        return tuple(by_id[event_id] for event_id in event_ids if event_id in by_id)
+
+    def read_raw_events_by_id_snapshot(
+        self,
+        event_ids: tuple[str, ...],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawEventIdSelectionSnapshot:
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("raw event ids must be unique")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("set transaction isolation level repeatable read")
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    "select coalesce(max(sequence), 0) as high_water "
+                    "from agent_events where session_id = %s",
+                    (self.runtime_session_id,),
+                )
+                through_sequence = int(cursor.fetchone()["high_water"])
+                by_id: dict[str, RawStoredEventEnvelope] = {}
+                if event_ids:
+                    cursor.execute(
+                        """
+                        select id, session_id, run_id, turn_id, reply_id, sequence,
+                               event_type, event_schema_version,
+                               event_schema_fingerprint,
+                               event_domain_contract_fingerprint,
+                               created_at, payload
+                        from agent_events
+                        where session_id = %s and id = any(%s)
+                        """,
+                        (self.runtime_session_id, list(event_ids)),
+                    )
+                    by_id = {
+                        row["id"]: self._raw_from_row(row)
+                        for row in cursor.fetchall()
+                    }
+        return RawEventIdSelectionSnapshot(
+            through_sequence=through_sequence,
+            events=tuple(
+                by_id[event_id] for event_id in event_ids if event_id in by_id
+            ),
+        )
+
+    def read_raw_events_by_type(
+        self,
+        event_type: str,
+        *,
+        limit: int,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[RawStoredEventEnvelope, ...]:
+        if limit < 1:
+            raise ValueError("raw event type read limit must be positive")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    """
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s and event_type = %s
+                    order by sequence desc
+                    limit %s
+                    """,
+                    (self.runtime_session_id, event_type, limit),
+                )
+                return tuple(self._raw_from_row(row) for row in cursor.fetchall())
+
+    def read_raw_model_call_events(
+        self,
+        resolved_model_call_id: str,
+        *,
+        max_events: int,
+        max_payload_bytes: int,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[RawStoredEventEnvelope, ...]:
+        if not resolved_model_call_id:
+            raise ValueError("resolved model call id must be non-empty")
+        if max_events < 1 or max_payload_bytes < 1:
+            raise ValueError("model-call read bounds must be positive")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    """
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s
+                      and coalesce(
+                            payload #>> '{resolved_call,resolved_model_call_id}',
+                            payload #>> '{resolved_model_call_id}',
+                            payload #>> '{model_stream_attribution,resolved_model_call_id}'
+                          ) = %s
+                    order by sequence asc
+                    limit %s
                     """,
                     (
                         self.runtime_session_id,
-                        minimum_sequence,
-                        effective_through,
+                        resolved_model_call_id,
+                        max_events + 1,
                     ),
                 )
-                events = tuple(
-                    load_agent_event(row["payload"]) for row in cursor.fetchall()
+                selected = tuple(
+                    self._raw_from_row(row) for row in cursor.fetchall()
                 )
-        return EventLogReadSnapshot(
-            through_sequence=effective_through,
-            events=events,
+                if len(selected) > max_events:
+                    raise ValueError("model-call event count exceeds its read bound")
+                if (
+                    sum(len(event.canonical_payload_bytes) for event in selected)
+                    > max_payload_bytes
+                ):
+                    raise ValueError(
+                        "model-call payload bytes exceed their read bound"
+                    )
+                return selected
+
+    def read_raw_events_by_types(
+        self,
+        event_types: tuple[str, ...],
+        *,
+        active_runs_only: bool = False,
+        run_ids: tuple[str, ...] | None = None,
+        minimum_sequence: int = 1,
+        max_events: int = 16_384,
+        max_payload_bytes: int = 16 * 1024 * 1024,
+        deadline_monotonic: float | None = None,
+    ) -> RawEventTypeSelectionSnapshot:
+        if not event_types or len(event_types) != len(set(event_types)):
+            raise ValueError("raw event types must be non-empty and unique")
+        if run_ids is not None and (
+            not run_ids or len(run_ids) != len(set(run_ids))
+        ):
+            raise ValueError("run id selection must be non-empty and unique")
+        if minimum_sequence < 1 or max_events < 1 or max_payload_bytes < 1:
+            raise ValueError("sparse event read bounds are invalid")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("set transaction isolation level repeatable read")
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    "select coalesce(max(sequence), 0) as high_water "
+                    "from agent_events where session_id = %s",
+                    (self.runtime_session_id,),
+                )
+                high_water = int(cursor.fetchone()["high_water"])
+                active_run_clause = (
+                    """
+                      and run_id in (
+                        select id from runs
+                        where session_id = %s and status = 'running'
+                      )
+                    """
+                    if active_runs_only
+                    else ""
+                )
+                run_id_clause = " and run_id = any(%s)" if run_ids is not None else ""
+                parameters: list[object] = [
+                    self.runtime_session_id,
+                    list(event_types),
+                    minimum_sequence,
+                ]
+                if run_ids is not None:
+                    parameters.append(list(run_ids))
+                if active_runs_only:
+                    parameters.append(self.runtime_session_id)
+                parameters.append(max_events + 1)
+                cursor.execute(
+                    f"""
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s and event_type = any(%s)
+                      and sequence >= %s
+                    {run_id_clause}
+                    {active_run_clause}
+                    order by sequence asc
+                    limit %s
+                    """,
+                    tuple(parameters),
+                )
+                events = tuple(
+                    self._raw_from_row(row) for row in cursor.fetchall()
+                )
+                if len(events) > max_events:
+                    raise ValueError(
+                        "sparse event selection exceeds its event bound"
+                    )
+                if sum(len(item.canonical_payload_bytes) for item in events) > max_payload_bytes:
+                    raise ValueError(
+                        "sparse event selection exceeds its byte bound"
+                    )
+                return RawEventTypeSelectionSnapshot(
+                    through_sequence=high_water,
+                    events=events,
+                )
+
+    def read_context_authority_bundle(
+        self,
+        request: RawContextAuthorityBundleRequest,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawContextAuthorityBundle:
+        """Freeze one context high-water and return every local authority channel."""
+
+        deadline = self._read_deadline(deadline_monotonic)
+        channels: dict[str, list[RawStoredEventEnvelope]] = {
+            "primary": [],
+            "run_sparse": [],
+            "session_sparse": [],
+            "exact": [],
+        }
+        high_water: int | None = None
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as control:
+                control.execute("set transaction isolation level repeatable read")
+                self._apply_transaction_deadline(control, deadline, include_lock=False)
+            with connection.cursor(
+                name="pulsara_context_authority_bundle",
+                row_factory=dict_row,
+            ) as cursor:
+                cursor.execute(
+                    """
+                    with boundary as (
+                        select coalesce(max(sequence), 0)::bigint as high_water
+                        from agent_events
+                        where session_id = %s
+                    ),
+                    primary_events as (
+                        select 'primary'::text as channel, b.high_water,
+                               e.id, e.session_id, e.run_id, e.turn_id, e.reply_id,
+                               e.sequence, e.event_type, e.event_schema_version,
+                               e.event_schema_fingerprint,
+                               e.event_domain_contract_fingerprint,
+                               e.created_at, e.payload
+                        from boundary b
+                        join lateral (
+                            select * from agent_events
+                            where session_id = %s
+                              and sequence >= %s
+                              and sequence <= b.high_water
+                            order by sequence asc
+                            limit %s
+                        ) e on true
+                    ),
+                    run_sparse_events as (
+                        select 'run_sparse'::text as channel, b.high_water,
+                               e.id, e.session_id, e.run_id, e.turn_id, e.reply_id,
+                               e.sequence, e.event_type, e.event_schema_version,
+                               e.event_schema_fingerprint,
+                               e.event_domain_contract_fingerprint,
+                               e.created_at, e.payload
+                        from boundary b
+                        join lateral (
+                            select * from agent_events
+                            where session_id = %s
+                              and run_id = %s
+                              and event_type = any(%s)
+                              and sequence <= b.high_water
+                            order by sequence asc
+                            limit %s
+                        ) e on true
+                    ),
+                    session_sparse_events as (
+                        select 'session_sparse'::text as channel, b.high_water,
+                               e.id, e.session_id, e.run_id, e.turn_id, e.reply_id,
+                               e.sequence, e.event_type, e.event_schema_version,
+                               e.event_schema_fingerprint,
+                               e.event_domain_contract_fingerprint,
+                               e.created_at, e.payload
+                        from boundary b
+                        join lateral (
+                            select * from agent_events
+                            where session_id = %s
+                              and event_type = any(%s)
+                              and sequence <= b.high_water
+                            order by sequence asc
+                            limit %s
+                        ) e on true
+                    ),
+                    exact_events as (
+                        select 'exact'::text as channel, b.high_water,
+                               e.id, e.session_id, e.run_id, e.turn_id, e.reply_id,
+                               e.sequence, e.event_type, e.event_schema_version,
+                               e.event_schema_fingerprint,
+                               e.event_domain_contract_fingerprint,
+                               e.created_at, e.payload
+                        from boundary b
+                        join lateral (
+                            select * from agent_events
+                            where session_id = %s
+                              and id = any(%s)
+                              and sequence <= b.high_water
+                            order by sequence asc
+                            limit %s
+                        ) e on true
+                    )
+                    select * from primary_events
+                    union all select * from run_sparse_events
+                    union all select * from session_sparse_events
+                    union all select * from exact_events
+                    union all
+                    select 'meta'::text, b.high_water,
+                           null::text, null::text, null::text, null::text,
+                           null::text, null::bigint, null::text, null::text,
+                           null::text, null::text, null::timestamptz, null::jsonb
+                    from boundary b
+                    order by channel, sequence nulls first
+                    """,
+                    (
+                        self.runtime_session_id,
+                        self.runtime_session_id,
+                        request.primary_minimum_sequence,
+                        request.primary_bounds.max_events + 1,
+                        self.runtime_session_id,
+                        request.run_id,
+                        list(request.run_sparse_event_types),
+                        request.run_sparse_bounds.max_events + 1,
+                        self.runtime_session_id,
+                        list(request.session_sparse_event_types),
+                        request.session_sparse_bounds.max_events + 1,
+                        self.runtime_session_id,
+                        list(request.exact_event_ids),
+                        request.exact_bounds.max_events + 1,
+                    ),
+                )
+                while rows := cursor.fetchmany(128):
+                    for row in rows:
+                        row_high_water = int(row["high_water"])
+                        if high_water is None:
+                            high_water = row_high_water
+                        elif row_high_water != high_water:
+                            raise ValueError("authority bundle high-water drifted")
+                        channel = str(row["channel"])
+                        if channel == "meta":
+                            continue
+                        if channel not in channels:
+                            raise ValueError("authority bundle returned unknown channel")
+                        channels[channel].append(self._raw_from_row(row))
+        if high_water is None:
+            raise ValueError("authority bundle did not return a high-water")
+        primary = tuple(channels["primary"])
+        run_sparse = tuple(channels["run_sparse"])
+        session_sparse = tuple(channels["session_sparse"])
+        exact = tuple(channels["exact"])
+        _validate_bundle_channel(primary, request.primary_bounds, "primary")
+        _validate_bundle_channel(run_sparse, request.run_sparse_bounds, "run sparse")
+        _validate_bundle_channel(
+            session_sparse,
+            request.session_sparse_bounds,
+            "session sparse",
+        )
+        _validate_bundle_channel(exact, request.exact_bounds, "exact")
+        return RawContextAuthorityBundle.build(
+            runtime_session_id=self.runtime_session_id,
+            request=request,
+            through_sequence=high_water,
+            primary_events=primary,
+            run_sparse_events=run_sparse,
+            session_sparse_events=session_sparse,
+            exact_events=exact,
+        )
+
+    def read_raw_reply_events(
+        self,
+        reply_id: str,
+        *,
+        max_events: int,
+        max_payload_bytes: int,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[RawStoredEventEnvelope, ...]:
+        if not reply_id or max_events < 1 or max_payload_bytes < 1:
+            raise ValueError("reply event read bounds are invalid")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    """
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s and reply_id = %s
+                    order by sequence asc
+                    limit %s
+                    """,
+                    (self.runtime_session_id, reply_id, max_events + 1),
+                )
+                selected = tuple(
+                    self._raw_from_row(row) for row in cursor.fetchall()
+                )
+        if len(selected) > max_events:
+            raise ValueError("reply event count exceeds its read bound")
+        if sum(len(item.canonical_payload_bytes) for item in selected) > max_payload_bytes:
+            raise ValueError("reply payload bytes exceed their read bound")
+        return selected
+
+    def read_raw_replies_snapshot(
+        self,
+        reply_ids: tuple[str, ...],
+        *,
+        through_sequence: int,
+        max_total_events: int,
+        max_total_payload_bytes: int,
+        deadline_monotonic: float | None = None,
+    ) -> RawReplySelectionSnapshot:
+        _validate_reply_snapshot_request(
+            reply_ids=reply_ids,
+            through_sequence=through_sequence,
+            max_total_events=max_total_events,
+            max_total_payload_bytes=max_total_payload_bytes,
+        )
+        deadline = self._read_deadline(deadline_monotonic)
+        selected: list[RawStoredEventEnvelope] = []
+        payload_bytes = 0
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as control:
+                control.execute("set transaction isolation level repeatable read")
+                self._apply_transaction_deadline(control, deadline, include_lock=False)
+            with connection.cursor(
+                name="pulsara_reply_snapshot",
+                row_factory=dict_row,
+            ) as cursor:
+                cursor.execute(
+                    """
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s and reply_id = any(%s)
+                      and sequence <= %s
+                    order by sequence asc
+                    limit %s
+                    """,
+                    (
+                        self.runtime_session_id,
+                        list(reply_ids),
+                        through_sequence,
+                        max_total_events + 1,
+                    ),
+                )
+                while rows := cursor.fetchmany(128):
+                    for row in rows:
+                        item = self._raw_from_row(row)
+                        selected.append(item)
+                        payload_bytes += len(item.canonical_payload_bytes)
+                        if len(selected) > max_total_events:
+                            raise ValueError(
+                                "reply snapshot event count exceeds its aggregate bound"
+                            )
+                        if payload_bytes > max_total_payload_bytes:
+                            raise ValueError(
+                                "reply snapshot payload exceeds its aggregate byte bound"
+                            )
+        by_reply = {reply_id: [] for reply_id in reply_ids}
+        for item in selected:
+            by_reply[item.reply_id].append(item)
+        return RawReplySelectionSnapshot(
+            through_sequence=through_sequence,
+            groups=tuple(
+                RawReplyEventGroup(reply_id=reply_id, events=tuple(by_reply[reply_id]))
+                for reply_id in reply_ids
+            ),
+        )
+
+    def read_raw_run_events(
+        self,
+        run_id: str,
+        *,
+        max_events: int,
+        max_payload_bytes: int,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[RawStoredEventEnvelope, ...]:
+        if not run_id or max_events < 1 or max_payload_bytes < 1:
+            raise ValueError("run event read bounds are invalid")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    """
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s and run_id = %s
+                    order by sequence asc
+                    limit %s
+                    """,
+                    (self.runtime_session_id, run_id, max_events + 1),
+                )
+                selected = tuple(
+                    self._raw_from_row(row) for row in cursor.fetchall()
+                )
+        if len(selected) > max_events:
+            raise ValueError("run event count exceeds its read bound")
+        if sum(len(item.canonical_payload_bytes) for item in selected) > max_payload_bytes:
+            raise ValueError("run payload bytes exceed their read bound")
+        return selected
+
+    def read_raw_checkpoint_ledger_snapshot(
+        self,
+        *,
+        checkpoint_event_type: str,
+        requested_through_sequence: int,
+        graph_reducer_id: str,
+        graph_reducer_version: str,
+        graph_reducer_contract_fingerprint: str,
+        preferred_checkpoint_id: str | None,
+        max_delta_events: int,
+        max_delta_bytes: int,
+        max_checkpoint_candidates: int,
+        deadline_monotonic: float | None = None,
+    ) -> RawCheckpointLedgerSnapshot:
+        if requested_through_sequence < 1:
+            raise ValueError("checkpoint requested high-water must be positive")
+        if (
+            max_delta_events < 0
+            or max_delta_bytes < 0
+            or max_checkpoint_candidates < 1
+        ):
+            raise ValueError("checkpoint read bounds are invalid")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("set transaction isolation level repeatable read")
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    "select coalesce(max(sequence), 0) as high_water "
+                    "from agent_events where session_id = %s",
+                    (self.runtime_session_id,),
+                )
+                high_water = int(cursor.fetchone()["high_water"])
+                if requested_through_sequence > high_water:
+                    raise ValueError(
+                        "requested checkpoint high-water has not been committed"
+                    )
+                cursor.execute(
+                    """
+                    select count(*) as checkpoint_count
+                    from agent_events
+                    where session_id = %s and event_type = %s
+                    """,
+                    (self.runtime_session_id, checkpoint_event_type),
+                )
+                confirmed_count = int(cursor.fetchone()["checkpoint_count"])
+                compatible_predicate = """
+                    session_id = %s
+                    and event_type = %s
+                    and payload #>> '{checkpoint,graph_reducer_id}' = %s
+                    and payload #>> '{checkpoint,graph_reducer_version}' = %s
+                    and payload #>> '{checkpoint,graph_reducer_contract_fingerprint}' = %s
+                """
+                contract_params = (
+                    self.runtime_session_id,
+                    checkpoint_event_type,
+                    graph_reducer_id,
+                    graph_reducer_version,
+                    graph_reducer_contract_fingerprint,
+                )
+                cursor.execute(
+                    f"select count(*) as compatible_count from agent_events where {compatible_predicate}",
+                    contract_params,
+                )
+                compatible_count = int(cursor.fetchone()["compatible_count"])
+                cursor.execute(
+                    f"""
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where {compatible_predicate}
+                      and (payload #>> '{{checkpoint,through_sequence}}')::bigint <= %s
+                    order by
+                      case when payload #>> '{{checkpoint,checkpoint_id}}' = %s
+                           then 0 else 1 end,
+                      (payload #>> '{{checkpoint,through_sequence}}')::bigint desc,
+                      sequence desc
+                    limit %s
+                    """,
+                    (
+                        *contract_params,
+                        requested_through_sequence,
+                        preferred_checkpoint_id,
+                        max_checkpoint_candidates,
+                    ),
+                )
+                catalog_rows = tuple(cursor.fetchall())
+                catalog: list[
+                    tuple[RawStoredEventEnvelope, str, int]
+                ] = []
+                for row in catalog_rows:
+                    raw = self._raw_from_row(row)
+                    (
+                        checkpoint_id,
+                        checkpoint_through,
+                        _reducer_id,
+                        _reducer_version,
+                        _reducer_fingerprint,
+                    ) = raw_checkpoint_catalog_identity(raw)
+                    catalog.append((raw, checkpoint_id, checkpoint_through))
+                candidates: list[RawCheckpointLedgerCandidate] = []
+                for checkpoint_event, checkpoint_id, checkpoint_through in catalog:
+                    delta_count = requested_through_sequence - checkpoint_through
+                    if delta_count > max_delta_events:
+                        candidates.append(
+                            RawCheckpointLedgerCandidate(
+                                checkpoint_id=checkpoint_id,
+                                checkpoint_through_sequence=checkpoint_through,
+                                checkpoint_event=checkpoint_event,
+                                delta_events=(),
+                                delta_event_count=delta_count,
+                                delta_payload_bytes=0,
+                                event_bound_satisfied=False,
+                                byte_bound_satisfied=False,
+                            )
+                        )
+                        continue
+                    cursor.execute(
+                        """
+                        select id, session_id, run_id, turn_id, reply_id, sequence,
+                               event_type, event_schema_version,
+                               event_schema_fingerprint,
+                               event_domain_contract_fingerprint,
+                               created_at, payload
+                        from agent_events
+                        where session_id = %s
+                          and sequence > %s
+                          and sequence <= %s
+                        order by sequence asc
+                        """,
+                        (
+                            self.runtime_session_id,
+                            checkpoint_through,
+                            requested_through_sequence,
+                        ),
+                    )
+                    delta = tuple(
+                        self._raw_from_row(row) for row in cursor.fetchall()
+                    )
+                    delta_bytes = sum(
+                        len(event.canonical_payload_bytes) for event in delta
+                    )
+                    candidates.append(
+                        RawCheckpointLedgerCandidate(
+                            checkpoint_id=checkpoint_id,
+                            checkpoint_through_sequence=checkpoint_through,
+                            checkpoint_event=checkpoint_event,
+                            delta_events=delta,
+                            delta_event_count=delta_count,
+                            delta_payload_bytes=delta_bytes,
+                            event_bound_satisfied=True,
+                            byte_bound_satisfied=delta_bytes <= max_delta_bytes,
+                        )
+                    )
+        nearest = max(catalog, key=lambda item: item[2], default=None)
+        return RawCheckpointLedgerSnapshot.build(
+            runtime_session_id=self.runtime_session_id,
+            requested_through_sequence=requested_through_sequence,
+            ledger_high_water_observed=high_water,
+            candidates=tuple(candidates),
+            confirmed_checkpoint_count=confirmed_count,
+            contract_compatible_checkpoint_count=compatible_count,
+            nearest_compatible_checkpoint_id=(nearest[1] if nearest else None),
+            nearest_compatible_checkpoint_through_sequence=(
+                nearest[2] if nearest else None
+            ),
         )
 
     def replay(self, reply_id: str) -> Msg:
         events = self.iter(reply_id=reply_id)
+        require_canonical_reply_control(events)
         start = next(
             (event for event in events if isinstance(event, ReplyStartEvent)), None
         )
@@ -323,8 +1241,14 @@ class PostgresEventLog:
         return reducer.message
 
     def next_sequence(self) -> int:
-        with psycopg.connect(self.dsn) as connection:
+        deadline = self._read_deadline(None)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
             with connection.cursor() as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 return self._next_sequence(cursor)
 
     def _lock_session(self, cursor) -> None:
@@ -333,29 +1257,109 @@ class PostgresEventLog:
             (self.runtime_session_id,),
         )
 
-    def _ensure_parent_rows(self, cursor, event: AgentEvent) -> None:
-        self._ensure_session_row(cursor)
+    def _write_deadline(self, deadline_monotonic: float | None) -> float:
+        if deadline_monotonic is not None:
+            if deadline_monotonic <= monotonic():
+                raise TimeoutError("event-write deadline exceeded")
+            return deadline_monotonic
+        if self.write_timeout_seconds <= 0:
+            raise ValueError("event-write timeout must be positive")
+        return monotonic() + self.write_timeout_seconds
 
+    def _read_deadline(self, deadline_monotonic: float | None) -> float:
+        if deadline_monotonic is not None:
+            if deadline_monotonic <= monotonic():
+                raise TimeoutError("event-read deadline exceeded")
+            return deadline_monotonic
+        if self.read_timeout_seconds <= 0:
+            raise ValueError("event-read timeout must be positive")
+        return monotonic() + self.read_timeout_seconds
+
+    @staticmethod
+    def _apply_transaction_deadline(
+        cursor,
+        deadline_monotonic: float,
+        *,
+        include_lock: bool,
+    ) -> None:
+        remaining_ms = int((deadline_monotonic - monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise TimeoutError("PostgreSQL operation deadline exceeded")
+        timeout = str(max(1, remaining_ms))
         cursor.execute(
-            """
-            insert into runs (id, session_id)
-            values (%s, %s)
-            on conflict (id) do nothing
-            """,
-            (event.run_id, self.runtime_session_id),
+            "select set_config('statement_timeout', %s, true)",
+            (timeout,),
         )
-        self._ensure_run_belongs_to_session(cursor, event)
-        cursor.execute(
-            """
-            insert into turns (id, session_id, run_id, turn_index)
-            select %s, %s, %s, coalesce(max(turn_index), 0) + 1
-            from turns
-            where run_id = %s
-            on conflict (id) do nothing
-            """,
-            (event.turn_id, self.runtime_session_id, event.run_id, event.run_id),
+        if include_lock:
+            cursor.execute(
+                "select set_config('lock_timeout', %s, true)",
+                (timeout,),
+            )
+
+    def _ensure_parent_rows_batch(
+        self,
+        cursor,
+        events: list[AgentEvent],
+    ) -> tuple[tuple[str, ...], tuple[tuple[str, AgentEvent], ...]]:
+        """Validate each unique run/turn identity once per committed batch."""
+
+        if not self._session_parent_confirmed:
+            self._ensure_session_row(cursor)
+        runs: dict[str, AgentEvent] = {}
+        turns: dict[str, AgentEvent] = {}
+        for event in events:
+            prior_run = runs.setdefault(event.run_id, event)
+            if prior_run.run_id != event.run_id:
+                raise ValueError("event batch run identity drifted")
+            prior_turn = turns.setdefault(event.turn_id, event)
+            if prior_turn.run_id != event.run_id:
+                raise ValueError("event batch reuses a turn across runs")
+        ensured_runs = tuple(
+            run_id
+            for run_id in runs
+            if run_id not in self._confirmed_parent_run_ids
         )
-        self._ensure_turn_belongs_to_run(cursor, event)
+        ensured_turns = tuple(
+            (turn_id, event)
+            for turn_id, event in turns.items()
+            if turn_id not in self._confirmed_parent_turn_runs
+        )
+        for turn_id, event in turns.items():
+            confirmed_run_id = self._confirmed_parent_turn_runs.get(turn_id)
+            if confirmed_run_id is not None and confirmed_run_id != event.run_id:
+                raise ValueError(
+                    f"turn {turn_id!r} already belongs to runtime session "
+                    f"run {confirmed_run_id!r}, not {event.run_id!r}"
+                )
+        for run_id in ensured_runs:
+            event = runs[run_id]
+            cursor.execute(
+                """
+                insert into runs (id, session_id)
+                values (%s, %s)
+                on conflict (id) do nothing
+                """,
+                (event.run_id, self.runtime_session_id),
+            )
+            self._ensure_run_belongs_to_session(cursor, event)
+        for turn_id, event in ensured_turns:
+            cursor.execute(
+                """
+                insert into turns (id, session_id, run_id, turn_index)
+                select %s, %s, %s, coalesce(max(turn_index), 0) + 1
+                from turns
+                where run_id = %s
+                on conflict (id) do nothing
+                """,
+                (
+                    event.turn_id,
+                    self.runtime_session_id,
+                    event.run_id,
+                    event.run_id,
+                ),
+            )
+            self._ensure_turn_belongs_to_run(cursor, event)
+        return ensured_runs, ensured_turns
 
     def _ensure_session_row(self, cursor) -> None:
         cursor.execute(
@@ -396,7 +1400,6 @@ class PostgresEventLog:
             )
 
     def _insert_event(self, cursor, stored: AgentEvent) -> None:
-        payload = dump_agent_event(stored)
         cursor.execute(
             """
             insert into agent_events (
@@ -407,22 +1410,61 @@ class PostgresEventLog:
                 reply_id,
                 sequence,
                 event_type,
+                event_schema_version,
+                event_schema_fingerprint,
+                event_domain_contract_fingerprint,
                 created_at,
                 payload
             )
-            values (%s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)
             """,
-            (
-                stored.id,
-                self.runtime_session_id,
-                stored.run_id,
-                stored.turn_id,
-                stored.reply_id,
-                stored.sequence,
-                str(stored.type),
-                stored.created_at,
-                Jsonb(payload),
-            ),
+            self._event_insert_params(stored),
+        )
+
+    def _insert_events(self, cursor, stored_events: list[AgentEvent]) -> None:
+        row_template = (
+            "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)"
+        )
+        # Keep well below PostgreSQL's parameter ceiling while preserving one
+        # physical INSERT for the normal model-stream/event batch.
+        for offset in range(0, len(stored_events), 1_000):
+            chunk = stored_events[offset : offset + 1_000]
+            parameters = tuple(
+                value
+                for stored in chunk
+                for value in self._event_insert_params(stored)
+            )
+            cursor.execute(
+                """
+                insert into agent_events (
+                    id, session_id, run_id, turn_id, reply_id, sequence,
+                    event_type, event_schema_version, event_schema_fingerprint,
+                    event_domain_contract_fingerprint, created_at, payload
+                )
+                values
+                """
+                + ",".join(row_template for _ in chunk),
+                parameters,
+            )
+
+    def _event_insert_params(self, stored: AgentEvent) -> tuple[object, ...]:
+        payload = dump_agent_event(stored)
+        contract = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(
+            stored
+        ).schema_contract
+        return (
+            stored.id,
+            self.runtime_session_id,
+            stored.run_id,
+            stored.turn_id,
+            stored.reply_id,
+            stored.sequence,
+            str(stored.type),
+            contract.event_schema_version,
+            contract.event_schema_fingerprint,
+            contract.domain_contract_fingerprint,
+            stored.created_at,
+            Jsonb(payload),
         )
 
     def _ensure_event_ids_available(self, cursor, events: list[AgentEvent]) -> None:
@@ -436,15 +1478,89 @@ class PostgresEventLog:
             raise ValueError(f"Event id already exists in this session: {row[0]}")
 
     def _get_by_id(self, cursor, event_id: str) -> AgentEvent | None:
+        raw = self._get_raw_by_id(cursor, event_id)
+        if raw is None:
+            return None
+        return raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+
+    def _get_raw_by_id(
+        self, cursor, event_id: str
+    ) -> RawStoredEventEnvelope | None:
         cursor.execute(
-            "select payload from agent_events where session_id = %s and id = %s",
+            """
+            select id, session_id, run_id, turn_id, reply_id, sequence,
+                   event_type, event_schema_version,
+                   event_schema_fingerprint,
+                   event_domain_contract_fingerprint,
+                   created_at, payload
+            from agent_events
+            where session_id = %s and id = %s
+            """,
             (self.runtime_session_id, event_id),
         )
         row = cursor.fetchone()
         if row is None:
             return None
-        payload = row[0]
-        return load_agent_event(payload)
+        if not isinstance(row, dict):
+            columns = (
+                "id",
+                "session_id",
+                "run_id",
+                "turn_id",
+                "reply_id",
+                "sequence",
+                "event_type",
+                "event_schema_version",
+                "event_schema_fingerprint",
+                "event_domain_contract_fingerprint",
+                "created_at",
+                "payload",
+            )
+            row = dict(zip(columns, row, strict=True))
+        return self._raw_from_row(row)
+
+    def _raw_from_row(self, row) -> RawStoredEventEnvelope:
+        schema_identity = (
+            row["event_schema_version"],
+            row["event_schema_fingerprint"],
+            row["event_domain_contract_fingerprint"],
+        )
+        if any(value is None or not str(value) for value in schema_identity):
+            raise EventSchemaContractMismatch(
+                "stored event row lacks explicit per-event schema identity"
+            )
+        payload_bytes = canonical_json_bytes(row["payload"])
+        values = {
+            "stored_envelope_version": "stored-agent-event:v1",
+            "event_id": str(row["id"]),
+            "runtime_session_id": str(row["session_id"]),
+            "run_id": str(row["run_id"]),
+            "turn_id": str(row["turn_id"]),
+            "reply_id": str(row["reply_id"]),
+            "sequence": int(row["sequence"]),
+            "created_at_utc": canonical_utc_timestamp(
+                row["created_at"].isoformat()
+            ),
+            "event_type": str(row["event_type"]),
+            "event_schema_version": str(row["event_schema_version"]),
+            "event_schema_fingerprint": str(row["event_schema_fingerprint"]),
+            "event_domain_contract_fingerprint": str(
+                row["event_domain_contract_fingerprint"]
+            ),
+            "canonical_payload_bytes": payload_bytes,
+            "payload_fingerprint": f"sha256:{sha256(payload_bytes).hexdigest()}",
+        }
+        return RawStoredEventEnvelope(
+            **values,
+            envelope_fingerprint=context_fingerprint(
+                "stored-agent-event-envelope:v1",
+                {
+                    key: value
+                    for key, value in values.items()
+                    if key != "canonical_payload_bytes"
+                },
+            ),
+        )
 
     def _sync_run_projection(self, cursor, stored: AgentEvent) -> None:
         if isinstance(stored, RunStartEvent):
@@ -502,3 +1618,34 @@ def _validate_live_batch(events: list[AgentEvent]) -> None:
     ids = [event.id for event in events]
     if len(ids) != len(set(ids)):
         raise ValueError("Event ids must be unique within one batch")
+
+
+def _validate_bundle_channel(
+    events: tuple[RawStoredEventEnvelope, ...],
+    bounds: RawEventSelectionBounds,
+    label: str,
+) -> None:
+    if len(events) > bounds.max_events:
+        raise ValueError(f"authority bundle {label} exceeds its event bound")
+    if (
+        sum(len(item.canonical_payload_bytes) for item in events)
+        > bounds.max_payload_bytes
+    ):
+        raise ValueError(f"authority bundle {label} exceeds its byte bound")
+
+
+def _validate_reply_snapshot_request(
+    *,
+    reply_ids: tuple[str, ...],
+    through_sequence: int,
+    max_total_events: int,
+    max_total_payload_bytes: int,
+) -> None:
+    if (
+        not reply_ids
+        or any(not item for item in reply_ids)
+        or len(reply_ids) != len(set(reply_ids))
+    ):
+        raise ValueError("reply snapshot ids must be non-empty and unique")
+    if through_sequence < 0 or max_total_events < 1 or max_total_payload_bytes < 1:
+        raise ValueError("reply snapshot bounds are invalid")

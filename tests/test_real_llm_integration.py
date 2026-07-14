@@ -7,7 +7,14 @@ from uuid import uuid4
 
 import pytest
 
-from tests.support import bind_test_context, run_agent_task, test_llm_context
+from tests.support import (
+    bind_test_context,
+    model_call_end_fields,
+    model_call_start_fields,
+    run_agent_task,
+    start_test_direct_model_stream,
+    test_llm_context,
+)
 from tests.support.context_input import render_event_log_transcript
 import psycopg
 
@@ -15,10 +22,12 @@ from tests.conftest import run_end_contract_fields, run_start_permission_fields
 
 from pulsara_agent.event import (
     EventContext,
+    ContextWindowOpenedEvent,
     MemoryReflectionFailedEvent,
     MemoryWriteFailedEvent,
     MemoryWriteResultEvent,
     ModelCallEndEvent,
+    ModelCallControlDispositionResolvedEvent,
     ModelCallStartEvent,
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
@@ -29,10 +38,12 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
+    RolloutBudgetAccountOpenedEvent,
     TextBlockDeltaEvent,
     ThinkingBlockDeltaEvent,
     TerminalProcessCompletedEvent,
     ToolCallDeltaEvent,
+    ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
@@ -65,8 +76,13 @@ from pulsara_agent.memory import (
     summarize_run_timeline,
     workspace_scope,
 )
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
-from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.model_call import (
+    ModelCallControlDisposition,
+    ModelCallPurpose,
+    sha256_fingerprint,
+)
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.reconcile import PostgresMemoryReconciler
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
@@ -82,7 +98,7 @@ from pulsara_agent.memory.reflection.engine import (
 )
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
-from pulsara_agent.message import TextBlock, ThinkingBlock, ToolCallBlock, UserMsg
+from pulsara_agent.message import TextBlock, ToolCallBlock, UserMsg
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
     ApprovalResolution,
@@ -92,6 +108,8 @@ from pulsara_agent.runtime import (
     ToolApprovalDecision,
     build_agent_runtime_wiring,
 )
+from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.settings import PulsaraSettings
@@ -131,6 +149,20 @@ def _workspace_on_request_policy() -> EffectivePermissionPolicy:
     return preset_to_policy(PermissionMode.ASK_PERMISSIONS)
 
 
+def _direct_real_runtime_session(
+    *,
+    event_log: PostgresEventLog,
+    runtime_session_id: str,
+) -> RuntimeSession:
+    return RuntimeSession(
+        Path.cwd(),
+        runtime_session_id=runtime_session_id,
+        event_log=event_log,
+        archive=InMemoryArchiveStore(),
+        tool_result_artifacts=InMemoryToolResultArtifactIndex(),
+    )
+
+
 def test_real_flash_model_emits_replayable_agent_events():
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip(
@@ -140,11 +172,11 @@ def test_real_flash_model_emits_replayable_agent_events():
     result = asyncio.run(_run_real_flash_smoke())
 
     assert result["errors"] == []
-    assert result["event_type_names"][0] == "ReplyStartEvent"
+    assert result["event_type_names"][0] == "ModelCallStartEvent"
     assert "ModelCallStartEvent" in result["event_type_names"]
     assert "TextBlockDeltaEvent" in result["event_type_names"]
     assert "ModelCallEndEvent" in result["event_type_names"]
-    assert result["event_type_names"][-1] == "ReplyEndEvent"
+    assert result["event_type_names"][-1] == "ModelCallEndEvent"
     assert "PULSARA_OK" in result["text"]
     assert result["replayed_text"]
     assert "PULSARA_OK" in result["replayed_text"]
@@ -179,10 +211,10 @@ def test_real_flash_model_accepts_message_level_system_item():
     result = asyncio.run(_run_real_message_level_system_smoke())
 
     assert result["errors"] == []
-    assert result["event_type_names"][0] == "ReplyStartEvent"
+    assert result["event_type_names"][0] == "ModelCallStartEvent"
     assert "ModelCallStartEvent" in result["event_type_names"]
     assert "ModelCallEndEvent" in result["event_type_names"]
-    assert result["event_type_names"][-1] == "ReplyEndEvent"
+    assert result["event_type_names"][-1] == "ModelCallEndEvent"
     assert "PULSARA_SYSTEM_MSG_OK" in result["text"]
     assert "PULSARA_SYSTEM_MSG_OK" in result["replayed_text"]
 
@@ -1279,6 +1311,101 @@ def test_real_flash_accepts_aborted_unfinished_tool_recovery_context():
     assert result["tool_call_count"] == 0
 
 
+@pytest.fixture(scope="module")
+def _real_long_horizon_trajectory(tmp_path_factory):
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
+    if os.getenv("PULSARA_RUN_LONG_HORIZON_DOGFOOD") != "1":
+        pytest.skip(
+            "Set PULSARA_RUN_LONG_HORIZON_DOGFOOD=1 to run long-horizon dogfood."
+        )
+    result = asyncio.run(
+        _run_real_long_horizon_trajectory(tmp_path_factory.mktemp("real-long-horizon"))
+    )
+    print(
+        "\nREAL_LLM_LONG_HORIZON_DOGFOOD="
+        + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    )
+    return result
+
+
+def test_real_llm_long_horizon_repeated_search_converges(
+    _real_long_horizon_trajectory,
+) -> None:
+    result = _real_long_horizon_trajectory
+    assert result["status"] == "finished", result
+    assert result["tool_names"].count("search_files") == 1, result
+    assert result["tool_names"].count("read_file") >= 3, result
+    assert result["settled_tool_call_count"] >= 5, result
+    assert result["settled_tool_call_count"] < 256, result
+    assert "PULSARA_LONG_HORIZON_COMPLETE" in result["final_text"], result
+
+
+def test_real_llm_long_horizon_writes_requested_artifact_before_finalization(
+    _real_long_horizon_trajectory,
+) -> None:
+    result = _real_long_horizon_trajectory
+    assert result["report_exists"], result
+    assert "PULSARA_LONG_HORIZON_REPORT" in result["report_text"], result
+    assert result["write_result_sequence"] < result["final_model_start_sequence"], (
+        result
+    )
+
+
+def test_real_llm_long_horizon_tool_projection_exceeds_old_36k_chars(
+    _real_long_horizon_trajectory,
+) -> None:
+    result = _real_long_horizon_trajectory
+    assert result["max_model_visible_tool_result_chars"] > 36_000, result
+    assert result["max_projection_generation"] >= 0, result
+
+
+def test_real_llm_long_horizon_current_run_projection_preserves_pairing(
+    _real_long_horizon_trajectory,
+) -> None:
+    result = _real_long_horizon_trajectory
+    assert result["max_tool_pair_count"] >= 5, result
+    assert result["pairing_errors"] == [], result
+
+
+def test_real_llm_long_horizon_exact_replay_matches_live_manifest(
+    _real_long_horizon_trajectory,
+) -> None:
+    result = _real_long_horizon_trajectory
+    assert result["compiled_context_count"] >= 2, result
+    assert set(result["replay_statuses"]) == {"exact_replay"}, result
+    assert result["replay_payload_mismatches"] == 0, result
+
+
+def test_real_llm_long_horizon_finalization_reserve_survives_denied_search(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
+        pytest.skip(
+            "Set PULSARA_RUN_REAL_LLM=1 to call the configured real LLM provider."
+        )
+    if os.getenv("PULSARA_RUN_LONG_HORIZON_DOGFOOD") != "1":
+        pytest.skip(
+            "Set PULSARA_RUN_LONG_HORIZON_DOGFOOD=1 to run long-horizon dogfood."
+        )
+    result = asyncio.run(
+        _run_real_finalization_denied_search(tmp_path, monkeypatch=monkeypatch)
+    )
+    print(
+        "\nREAL_LLM_LONG_HORIZON_FINALIZATION="
+        + json.dumps(result, ensure_ascii=False, sort_keys=True)
+    )
+    assert result["status"] == "finished", result
+    assert result["finalization_transition_count"] == 1, result
+    assert result["denied_search_count"] >= 1, result
+    assert result["model_call_count"] >= 2, result
+    assert result["finalization_agent_charge_milliunits"] > 0, result
+    assert "PULSARA_FINALIZATION_RESERVE_OK" in result["final_text"], result
+
+
 async def _run_real_flash_smoke() -> dict:
     settings = _load_settings_for_real_llm()
     runtime = build_llm_runtime(settings.llm)
@@ -1294,6 +1421,10 @@ async def _run_real_flash_smoke() -> dict:
     log = PostgresEventLog(
         dsn=settings.storage.postgres_dsn, runtime_session_id=runtime_session_id
     )
+    runtime_session = _direct_real_runtime_session(
+        event_log=log,
+        runtime_session_id=runtime_session_id,
+    )
     text_parts: list[str] = []
     errors: list[dict] = []
 
@@ -1306,22 +1437,23 @@ async def _run_real_flash_smoke() -> dict:
             target=target,
             purpose=ModelCallPurpose.MEMORY_REFLECTION,
         )
-        async for event in runtime.stream(
+        handle = start_test_direct_model_stream(
+            runtime,
             call=call,
             context=bind_test_context(call, context),
             event_context=event_context,
-        ):
-            log.append(event)
+            runtime_session=runtime_session,
+        )
+        completion = await handle.wait_completed()
+        model_result = await handle.wait_result()
+        for event in completion.committed_events:
             if isinstance(event, TextBlockDeltaEvent):
                 text_parts.append(event.delta)
             if isinstance(event, RunErrorEvent):
                 errors.append(_run_error_diagnostic(event))
 
         events = log.iter(reply_id=event_context.reply_id)
-        message = log.replay(event_context.reply_id)
-        replayed_text = "".join(
-            block.text for block in message.content if isinstance(block, TextBlock)
-        )
+        replayed_text = model_result.combined_text
 
         assert any(isinstance(event, ModelCallStartEvent) for event in events)
         end = next(event for event in events if isinstance(event, ModelCallEndEvent))
@@ -1336,6 +1468,7 @@ async def _run_real_flash_smoke() -> dict:
             "model_identity_policy": target.fact.model_identity_policy,
         }
     finally:
+        runtime_session.close()
         _delete_postgres_runtime_session(
             settings.storage.postgres_dsn, runtime_session_id
         )
@@ -1354,19 +1487,104 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
         dsn=settings.storage.postgres_dsn, runtime_session_id=runtime_session_id
     )
     try:
+        from pulsara_agent.runtime.long_horizon.run_contract import (
+            empty_projection_state_fingerprint,
+            prepare_root_long_horizon_run,
+        )
+
+        run_start = RunStartEvent(
+            id=f"run_start:{ctx.run_id}",
+            **ctx.event_fields(),
+            **run_start_permission_fields(
+                ctx.run_id,
+                user_input=user_input,
+                turn_id=ctx.turn_id,
+                reply_id=ctx.reply_id,
+                mcp_installation_owner_runtime_session_id=runtime_session_id,
+            ),
+            user_input_chars=len(user_input),
+        )
+        prepared = prepare_root_long_horizon_run(
+            runtime_session_id=runtime_session_id,
+            run_id=ctx.run_id,
+            run_start_event_id=run_start.id,
+            primary_target=run_start.model_target,
+            summarizer_target=run_start.model_target,
+            graph_reducer_contract=run_start.subagent_graph_reducer_contract,
+            source_through_sequence_at_open=0,
+            initial_projection_unit_count=0,
+            initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+        )
+        run_start = run_start.model_copy(
+            update={"long_horizon": prepared.contract},
+            deep=True,
+        )
+        account = prepared.root_account
+        assert account is not None
+        model_start = ModelCallStartEvent(
+            **ctx.event_fields(),
+            **model_call_start_fields(),
+        )
+        model_end = ModelCallEndEvent(
+            id=model_start.recovery_plan.stable_model_call_end_event_id,
+            **ctx.event_fields(),
+            **model_call_end_fields(resolved_call=model_start.resolved_call),
+        )
+        disposition_fields = {
+            "id": (
+                f"model_call_control_disposition:{ctx.run_id}:"
+                f"{model_start.resolved_call.resolved_model_call_id}:1"
+            ),
+            **ctx.event_fields(),
+            "resolved_model_call_id": (
+                model_start.resolved_call.resolved_model_call_id
+            ),
+            "model_call_start_event_id": model_start.id,
+            "model_call_end_event_id": model_end.id,
+            "model_call_index": 1,
+            "source_result_fingerprint": "sha256:" + "e" * 64,
+            "run_execution_activation": (
+                model_start.recovery_plan.run_execution_activation
+            ),
+            "disposition": ModelCallControlDisposition.ACCEPTED,
+            "termination_intent": None,
+            "recovery_reason_code": None,
+        }
+        provisional = ModelCallControlDispositionResolvedEvent.model_construct(
+            **disposition_fields,
+            event_fingerprint="pending",
+        )
+        disposition_payload = provisional.model_dump(
+            mode="json",
+            exclude={"event_fingerprint", "sequence"},
+        )
+        disposition = ModelCallControlDispositionResolvedEvent(
+            **disposition_payload,
+            event_fingerprint=sha256_fingerprint(
+                "model-call-control-disposition-event:v1",
+                disposition_payload,
+            ),
+        )
         prior_events = log.extend(
             [
-                RunStartEvent(
+                run_start,
+                ContextWindowOpenedEvent(
+                    id=prepared.contract.initial_window_open_event_id,
                     **ctx.event_fields(),
-                    **run_start_permission_fields(
-                        ctx.run_id,
-                        user_input=user_input,
-                        turn_id=ctx.turn_id,
-                        reply_id=ctx.reply_id,
-                        mcp_installation_owner_runtime_session_id=(runtime_session_id),
-                    ),
-                    user_input_chars=len(user_input),
+                    window=prepared.initial_window,
+                    opening_batch_id=prepared.opening_batch_id,
                 ),
+                RolloutBudgetAccountOpenedEvent(
+                    id=f"rollout_budget_account_opened:{account.account_id}",
+                    **ctx.event_fields(),
+                    account=account,
+                ),
+                ReplyStartEvent(
+                    id=model_start.recovery_plan.reply_start_event_id,
+                    **ctx.event_fields(),
+                    name="assistant",
+                ),
+                model_start,
                 ToolCallStartEvent(
                     **ctx.event_fields(),
                     tool_call_id="call:danger",
@@ -1377,6 +1595,17 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
                     tool_call_id="call:danger",
                     delta='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
                 ),
+                ToolCallEndEvent(
+                    **ctx.event_fields(),
+                    tool_call_id="call:danger",
+                ),
+                model_end,
+                ReplyEndEvent(
+                    id=model_start.recovery_plan.stable_reply_end_event_id,
+                    **ctx.event_fields(),
+                    model_terminal_outcome="completed",
+                ),
+                disposition,
                 RequireUserConfirmEvent(
                     **ctx.event_fields(),
                     tool_calls=[
@@ -1387,7 +1616,6 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
                         )
                     ],
                 ),
-                ReplyEndEvent(**ctx.event_fields()),
                 RunEndEvent(
                     **run_end_contract_fields(
                         ctx.run_id, status="aborted", abort_kind="user_stop"
@@ -1404,22 +1632,55 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
             turn_id=f"turn:real-aborted-validation:{uuid4().hex}",
             reply_id=f"reply:real-aborted-validation:{uuid4().hex}",
         )
-        validation_start = log.append(
-            RunStartEvent(
-                id=f"run-start:real-aborted-validation:{uuid4().hex}",
-                **validation_ctx.event_fields(),
-                **run_start_permission_fields(
-                    validation_ctx.run_id,
-                    user_input="validate the recovery note",
-                    turn_id=validation_ctx.turn_id,
-                    reply_id=validation_ctx.reply_id,
-                    mcp_installation_owner_runtime_session_id=runtime_session_id,
-                    transcript_source_through_sequence=(prior_events[-1].sequence or 0),
-                    transcript_source_event_count=len(prior_events),
-                ),
-                user_input_chars=len("validate the recovery note"),
-            )
+        validation_start = RunStartEvent(
+            id=f"run-start:real-aborted-validation:{uuid4().hex}",
+            **validation_ctx.event_fields(),
+            **run_start_permission_fields(
+                validation_ctx.run_id,
+                user_input="validate the recovery note",
+                turn_id=validation_ctx.turn_id,
+                reply_id=validation_ctx.reply_id,
+                mcp_installation_owner_runtime_session_id=runtime_session_id,
+                transcript_source_through_sequence=(prior_events[-1].sequence or 0),
+                transcript_source_event_count=len(prior_events),
+            ),
+            user_input_chars=len("validate the recovery note"),
         )
+        validation_prepared = prepare_root_long_horizon_run(
+            runtime_session_id=runtime_session_id,
+            run_id=validation_ctx.run_id,
+            run_start_event_id=validation_start.id,
+            primary_target=validation_start.model_target,
+            summarizer_target=validation_start.model_target,
+            graph_reducer_contract=(validation_start.subagent_graph_reducer_contract),
+            source_through_sequence_at_open=prior_events[-1].sequence or 0,
+            initial_projection_unit_count=0,
+            initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+        )
+        validation_start = validation_start.model_copy(
+            update={"long_horizon": validation_prepared.contract},
+            deep=True,
+        )
+        validation_account = validation_prepared.root_account
+        assert validation_account is not None
+        validation_start = log.extend(
+            (
+                validation_start,
+                ContextWindowOpenedEvent(
+                    id=validation_prepared.contract.initial_window_open_event_id,
+                    **validation_ctx.event_fields(),
+                    window=validation_prepared.initial_window,
+                    opening_batch_id=validation_prepared.opening_batch_id,
+                ),
+                RolloutBudgetAccountOpenedEvent(
+                    id=(
+                        f"rollout_budget_account_opened:{validation_account.account_id}"
+                    ),
+                    **validation_ctx.event_fields(),
+                    account=validation_account,
+                ),
+            )
+        )[0]
         llm_messages = list(
             render_event_log_transcript(
                 log,
@@ -1487,7 +1748,7 @@ async def _run_real_tool_call_smoke() -> dict:
         label="real-tool-call",
     )
     events = result["events"]
-    message = result["message"]
+    model_result = result["model_result"]
     tool_call_name = next(
         (
             event.tool_call_name
@@ -1499,19 +1760,16 @@ async def _run_real_tool_call_smoke() -> dict:
     tool_call_input = "".join(
         event.delta for event in events if isinstance(event, ToolCallDeltaEvent)
     )
-    replayed_tool_call = next(
-        (block for block in message.content if isinstance(block, ToolCallBlock)),
-        None,
-    )
+    replayed_tool_call = next(iter(model_result.tool_calls), None)
 
     return {
         **_summarize_collected_result(result),
         "tool_call_name": tool_call_name,
         "tool_call_input": tool_call_input,
-        "replayed_tool_call_name": replayed_tool_call.name
+        "replayed_tool_call_name": replayed_tool_call.tool_call_name
         if replayed_tool_call
         else "",
-        "replayed_tool_call_input": replayed_tool_call.input
+        "replayed_tool_call_input": replayed_tool_call.raw_arguments_json
         if replayed_tool_call
         else "",
     }
@@ -1549,13 +1807,9 @@ async def _run_real_thinking_text_smoke() -> dict:
         options=LLMOptions(),
         label="real-thinking-text",
     )
-    message = result["message"]
-    replayed_text = "".join(
-        block.text for block in message.content if isinstance(block, TextBlock)
-    )
-    replayed_thinking = "".join(
-        block.thinking for block in message.content if isinstance(block, ThinkingBlock)
-    )
+    model_result = result["model_result"]
+    replayed_text = model_result.combined_text
+    replayed_thinking = "".join(block.text for block in model_result.thinking_blocks)
     return {
         **_summarize_collected_result(result),
         "replayed_text": replayed_text.strip(),
@@ -1577,13 +1831,9 @@ async def _run_real_chat_thinking_delta_smoke() -> dict:
         options=LLMOptions(),
         label="real-chat-thinking-delta",
     )
-    message = result["message"]
-    replayed_text = "".join(
-        block.text for block in message.content if isinstance(block, TextBlock)
-    )
-    replayed_thinking = "".join(
-        block.thinking for block in message.content if isinstance(block, ThinkingBlock)
-    )
+    model_result = result["model_result"]
+    replayed_text = model_result.combined_text
+    replayed_thinking = "".join(block.text for block in model_result.thinking_blocks)
     return {
         **_summarize_collected_result(result),
         "replayed_text": replayed_text.strip(),
@@ -4346,6 +4596,304 @@ async def _run_real_agent_multi_tool_rollout(tmp_path: Path) -> dict:
         )
 
 
+async def _run_real_long_horizon_trajectory(tmp_path: Path) -> dict:
+    from pulsara_agent.event import (
+        ContextCompiledEvent,
+        ContextProjectionRewritePageEvent,
+        ContextWindowOpenedEvent,
+        RolloutBudgetAccountOpenedEvent,
+        RolloutBudgetReservationSettledEvent,
+    )
+    from pulsara_agent.llm import MessageRole
+    from pulsara_agent.runtime.context_input.event_slice import ContextEventSlice
+    from pulsara_agent.runtime.context_input.replay import replay_compiled_context
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    filler = "verified evidence " * 1_100
+    (tmp_path / "evidence-a.txt").write_text(
+        "PULSARA_LH_EVIDENCE_A\n" + filler,
+        encoding="utf-8",
+    )
+    (tmp_path / "evidence-b.txt").write_text(
+        "PULSARA_LH_EVIDENCE_B\n" + filler,
+        encoding="utf-8",
+    )
+    wiring = _build_real_durable_agent(
+        tmp_path,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        system_prompt=(
+            "You are running Pulsara's long-horizon dogfood. Perform every step "
+            "in order before answering: search_files once for PULSARA_LH_EVIDENCE; "
+            "read_file evidence-a.txt; read_file evidence-b.txt; write_file report.md "
+            "with exactly PULSARA_LONG_HORIZON_REPORT; read_file report.md to verify it. "
+            "Do not use terminal or memory tools. Then answer exactly "
+            "PULSARA_LONG_HORIZON_COMPLETE."
+        ),
+    )
+    runtime_session = wiring.runtime_wiring.runtime_session
+    try:
+        run_result = await run_agent_task(
+            wiring.agent_runtime,
+            "Execute the required long-horizon evidence and report workflow now.",
+        )
+        events = tuple(runtime_session.event_log.iter(run_id=run_result.state.run_id))
+        tool_calls = tuple(
+            event for event in events if isinstance(event, ToolCallStartEvent)
+        )
+        tool_names = tuple(event.tool_call_name for event in tool_calls)
+        call_name_by_id = {
+            event.tool_call_id: event.tool_call_name for event in tool_calls
+        }
+        write_result = next(
+            event
+            for event in events
+            if isinstance(event, ToolResultEndEvent)
+            and call_name_by_id.get(event.tool_call_id) == "write_file"
+        )
+        model_starts = tuple(
+            event for event in events if isinstance(event, ModelCallStartEvent)
+        )
+        compiled_events = tuple(
+            event
+            for event in events
+            if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
+        )
+        replay_statuses: list[str] = []
+        replay_payload_mismatches = 0
+        max_visible_tool_chars = 0
+        max_tool_pair_count = 0
+        max_projection_generation = 0
+        pairing_errors: list[str] = []
+        rollout_states = []
+        for compiled in compiled_events:
+            assert compiled.input_audit is not None
+            audit = compiled.input_audit
+            read = runtime_session.event_log.read_raw_range_snapshot(
+                minimum_sequence=audit.authority_from_sequence,
+                through_sequence=audit.source_through_sequence,
+            )
+            event_slice = ContextEventSlice.from_read_snapshot(
+                runtime_session_id=audit.source_runtime_session_id,
+                minimum_sequence=audit.authority_from_sequence,
+                snapshot=read,
+            )
+            replayed = replay_compiled_context(
+                event=compiled,
+                archive=runtime_session.archive,
+                event_log=runtime_session.event_log,
+                event_slice=event_slice,
+            )
+            replay_statuses.append(replayed.status.value)
+            if replayed.compiled_context.llm_context.context_id != compiled.context_id:
+                replay_payload_mismatches += 1
+            visible_tool_chars = sum(
+                len(part)
+                for message in replayed.compiled_context.llm_context.messages
+                if message.role is MessageRole.TOOL_RESULT
+                for part in message.content
+            )
+            max_visible_tool_chars = max(max_visible_tool_chars, visible_tool_chars)
+            pairs = replayed.inputs.normalized_transcript.transcript.tool_pairs
+            max_tool_pair_count = max(max_tool_pair_count, len(pairs))
+            if any(pair.call_sequence > pair.result_sequence for pair in pairs):
+                pairing_errors.append(compiled.context_id)
+            manifest = replayed.inputs.manifest
+            max_projection_generation = max(
+                max_projection_generation,
+                manifest.projection_state.projection_generation,
+            )
+            rollout_states.append(manifest.rollout_state)
+
+        account_open = next(
+            event
+            for event in events
+            if isinstance(event, RolloutBudgetAccountOpenedEvent)
+        )
+        tool_settlements = tuple(
+            event
+            for event in events
+            if isinstance(event, RolloutBudgetReservationSettledEvent)
+            and event.usage_status == "tool_terminal"
+        )
+        report_path = tmp_path / "report.md"
+        chain = runtime_session.long_horizon_state_store.window_state(
+            run_result.state.run_id
+        )
+        evidence = {
+            "status": run_result.status.value,
+            "final_text": run_result.final_text.strip(),
+            "run_id": run_result.state.run_id,
+            "tool_names": list(tool_names),
+            "model_call_count": len(model_starts),
+            "settled_tool_call_count": len(tool_settlements),
+            "compiled_context_count": len(compiled_events),
+            "max_model_visible_tool_result_chars": max_visible_tool_chars,
+            "max_tool_pair_count": max_tool_pair_count,
+            "pairing_errors": pairing_errors,
+            "replay_statuses": replay_statuses,
+            "replay_payload_mismatches": replay_payload_mismatches,
+            "max_projection_generation": max_projection_generation,
+            "projection_rewrite_count": sum(
+                isinstance(event, ContextProjectionRewritePageEvent) for event in events
+            ),
+            "window_open_count": sum(
+                isinstance(event, ContextWindowOpenedEvent) for event in events
+            ),
+            "rollout_phases": [state.phase.value for state in rollout_states],
+            "finalization_reserve_milliunits": (
+                account_open.account.finalization_reserve_milliunits
+            ),
+            "remaining_exploration_milliunits": [
+                max(
+                    0,
+                    account_open.account.exploration_allowance_milliunits
+                    - state.exploration_charged_milliunits
+                    - state.exploration_reserved_milliunits,
+                )
+                for state in rollout_states
+            ],
+            "recurrence": [],
+            "report_exists": report_path.exists(),
+            "report_text": (
+                report_path.read_text(encoding="utf-8") if report_path.exists() else ""
+            ),
+            "write_result_sequence": write_result.sequence,
+            "final_model_start_sequence": model_starts[-1].sequence,
+            "window_consistent": bool(chain and chain.consistent),
+        }
+        (tmp_path / "long-horizon-evidence.json").write_text(
+            json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return evidence
+    finally:
+        await _cleanup_real_durable_wiring_async(wiring)
+
+
+async def _run_real_finalization_denied_search(
+    tmp_path: Path,
+    *,
+    monkeypatch,
+) -> dict[str, object]:
+    import pulsara_agent.runtime.long_horizon.run_contract as run_contract
+    from pulsara_agent.event import (
+        CapabilityGateDecisionEvent,
+        RolloutBudgetAccountOpenedEvent,
+        RolloutBudgetReservationCreatedEvent,
+        RolloutBudgetReservationSettledEvent,
+        RolloutPhaseTransitionedEvent,
+    )
+    from pulsara_agent.primitives.context import context_fingerprint
+    from pulsara_agent.primitives.long_horizon import (
+        RolloutBudgetPolicyFact,
+        RolloutPhase,
+        default_rollout_budget_policy,
+    )
+
+    base_policy = default_rollout_budget_policy()
+    policy_payload = base_policy.model_dump(
+        mode="python",
+        exclude={"policy_fingerprint"},
+    )
+    policy_payload.update(
+        warning_consumption_ratio_ppm=1,
+        restricted_consumption_ratio_ppm=2,
+        finalization_consumption_ratio_ppm=3,
+    )
+    accelerated_policy = RolloutBudgetPolicyFact(
+        **policy_payload,
+        policy_fingerprint=context_fingerprint(
+            "rollout-budget-policy:v1",
+            policy_payload,
+        ),
+    )
+    monkeypatch.setattr(
+        run_contract,
+        "default_rollout_budget_policy",
+        lambda: accelerated_policy,
+    )
+    (tmp_path / "needle.txt").write_text(
+        "PULSARA_FINALIZATION_SEARCH_NEEDLE\n",
+        encoding="utf-8",
+    )
+    wiring = _build_real_durable_agent(
+        tmp_path,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(),
+        permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        system_prompt=(
+            "Call search_files exactly once for PULSARA_FINALIZATION_SEARCH_NEEDLE. "
+            "If Pulsara denies the tool because the rollout entered finalization, do "
+            "not retry any tool. Answer exactly PULSARA_FINALIZATION_RESERVE_OK."
+        ),
+    )
+    try:
+        run_result = await run_agent_task(
+            wiring.agent_runtime,
+            "Run the finalization reserve validation now.",
+        )
+        events = tuple(
+            wiring.runtime_wiring.event_log.iter(run_id=run_result.state.run_id)
+        )
+        account_open = next(
+            event
+            for event in events
+            if isinstance(event, RolloutBudgetAccountOpenedEvent)
+        )
+        finalization_transitions = tuple(
+            event
+            for event in events
+            if isinstance(event, RolloutPhaseTransitionedEvent)
+            and event.to_phase is RolloutPhase.FINALIZATION_ONLY
+        )
+        denied_searches = tuple(
+            event
+            for event in events
+            if isinstance(event, CapabilityGateDecisionEvent)
+            and event.tool_name == "search_files"
+            and event.decision == "deny"
+            and event.reason_code == "rollout_phase_tool_denied"
+        )
+        finalization_reservation_ids = {
+            event.reservation.reservation_id
+            for event in events
+            if isinstance(event, RolloutBudgetReservationCreatedEvent)
+            and event.reservation.budget_bucket.value == "finalization_agent"
+        }
+        finalization_settlements = tuple(
+            event
+            for event in events
+            if isinstance(event, RolloutBudgetReservationSettledEvent)
+            and event.reservation_id in finalization_reservation_ids
+        )
+        return {
+            "status": run_result.status.value,
+            "final_text": run_result.final_text.strip(),
+            "error_message": run_result.error_message,
+            "run_errors": _run_error_diagnostics(events),
+            "model_call_count": sum(
+                isinstance(event, ModelCallStartEvent) for event in events
+            ),
+            "finalization_transition_count": len(finalization_transitions),
+            "denied_search_count": len(denied_searches),
+            "finalization_reserve_milliunits": (
+                account_open.account.finalization_reserve_milliunits
+            ),
+            "finalization_agent_charge_milliunits": sum(
+                event.charged_milliunits for event in finalization_settlements
+            ),
+            "reservation_buckets": [
+                event.reservation.budget_bucket.value
+                for event in events
+                if isinstance(event, RolloutBudgetReservationCreatedEvent)
+            ],
+        }
+    finally:
+        await _cleanup_real_durable_wiring_async(wiring)
+
+
 _MEMORY_NODE_TYPES = (
     memory.PREFERENCE,
     memory.CLAIM,
@@ -4588,6 +5136,10 @@ async def _collect_real_events(
     log = PostgresEventLog(
         dsn=settings.storage.postgres_dsn, runtime_session_id=runtime_session_id
     )
+    runtime_session = _direct_real_runtime_session(
+        event_log=log,
+        runtime_session_id=runtime_session_id,
+    )
     text_parts: list[str] = []
     thinking_parts: list[str] = []
     errors: list[dict] = []
@@ -4598,12 +5150,16 @@ async def _collect_real_events(
             target=target,
             purpose=ModelCallPurpose.MEMORY_REFLECTION,
         )
-        async for event in runtime.stream(
+        handle = start_test_direct_model_stream(
+            runtime,
             call=call,
             context=bind_test_context(call, context),
             event_context=event_context,
-        ):
-            log.append(event)
+            runtime_session=runtime_session,
+        )
+        completion = await handle.wait_completed()
+        model_result = await handle.wait_result()
+        for event in completion.committed_events:
             if isinstance(event, TextBlockDeltaEvent):
                 text_parts.append(event.delta)
             if isinstance(event, ThinkingBlockDeltaEvent):
@@ -4612,19 +5168,19 @@ async def _collect_real_events(
                 errors.append(_run_error_diagnostic(event))
 
         events = log.iter(reply_id=event_context.reply_id)
-        message = log.replay(event_context.reply_id)
         assert any(isinstance(event, ModelCallStartEvent) for event in events)
         assert any(isinstance(event, ModelCallEndEvent) for event in events) or errors
-        assert isinstance(events[0], ReplyStartEvent)
-        assert isinstance(events[-1], ReplyEndEvent) or errors
+        assert isinstance(events[0], ModelCallStartEvent)
+        assert isinstance(events[-1], ModelCallEndEvent) or errors
         return {
             "events": events,
-            "message": message,
+            "model_result": model_result,
             "text": "".join(text_parts).strip(),
             "thinking": "".join(thinking_parts).strip(),
             "errors": errors,
         }
     finally:
+        runtime_session.close()
         _delete_postgres_runtime_session(
             settings.storage.postgres_dsn, runtime_session_id
         )
@@ -4641,6 +5197,10 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
     graph = _build_real_durable_graph(settings)
     candidate_pool = PostgresCandidatePool(dsn=dsn)
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
+    runtime_session = _direct_real_runtime_session(
+        event_log=event_log,
+        runtime_session_id=runtime_session_id,
+    )
     archive = PostgresArtifactStore(dsn=dsn)
     ledger = ExecutionEvidenceLedger(
         graph=graph,
@@ -4654,6 +5214,7 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
         graph=graph,
         graph_id=graph_id,
         options=MemoryReflectionOptions(llm_options=LLMOptions()),
+        runtime_session=runtime_session,
     )
     state = LoopState(session_id=runtime_session_id)
     state.messages.append(
@@ -4756,6 +5317,7 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
             "outbox_applied_count": outbox_applied_count,
         }
     finally:
+        runtime_session.close()
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
         graph.delete_graph(graph_id)
         _delete_postgres_runtime_session(dsn, runtime_session_id)
@@ -4850,6 +5412,10 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
     graph = _build_real_durable_graph(settings)
     candidate_pool = PostgresCandidatePool(dsn=dsn)
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
+    runtime_session = _direct_real_runtime_session(
+        event_log=event_log,
+        runtime_session_id=runtime_session_id,
+    )
     archive = PostgresArtifactStore(dsn=dsn)
     ledger = ExecutionEvidenceLedger(
         graph=graph,
@@ -4902,6 +5468,7 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
             llm_runtime=build_llm_runtime(settings.llm),
             executor=executor,
             options=MemoryGovernanceOptions(llm_options=LLMOptions()),
+            runtime_session=runtime_session,
         )
 
         result = await engine.run_pending(
@@ -4952,6 +5519,7 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
             "outbox_applied_count": outbox_applied_count,
         }
     finally:
+        runtime_session.close()
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
         graph.delete_graph(graph_id)
         _delete_postgres_runtime_session(dsn, runtime_session_id)
@@ -5013,6 +5581,10 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
     retrieval_resources = build_retrieval_runtime_resources(settings.retrieval)
     event_log = PostgresEventLog(
         dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
+    )
+    runtime_session = _direct_real_runtime_session(
+        event_log=event_log,
+        runtime_session_id=runtime_session_id,
     )
     event_log.append(
         TextBlockDeltaEvent(
@@ -5102,6 +5674,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
                     ),
                 ),
             ),
+            runtime_session=runtime_session,
         )
 
         result = await engine.run_pending(
@@ -5158,6 +5731,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             "relatedness_diagnostics": result.relatedness_diagnostics,
         }
     finally:
+        runtime_session.close()
         await retrieval_resources.aclose()
         graph.delete_graph(graph_id)
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
@@ -5165,10 +5739,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
 
 
 def _summarize_collected_result(result: dict) -> dict:
-    message = result["message"]
-    replayed_text = "".join(
-        block.text for block in message.content if isinstance(block, TextBlock)
-    ).strip()
+    replayed_text = result["model_result"].combined_text.strip()
     return {
         "event_type_names": [type(event).__name__ for event in result["events"]],
         "text": result["text"],

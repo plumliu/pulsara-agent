@@ -19,6 +19,20 @@ CTX = EventContext(run_id="run:parent", turn_id="turn:parent", reply_id="reply:p
 
 def _runtime(tmp_path):
     parent = in_memory_runtime_session(tmp_path, runtime_session_id="runtime:parent")
+    asyncio.run(
+        parent.write_event(
+            RunStartEvent(
+                **CTX.event_fields(),
+                **run_start_permission_fields(
+                    CTX.run_id,
+                    user_input="delegate",
+                    turn_id=CTX.turn_id,
+                    reply_id=CTX.reply_id,
+                ),
+                user_input_chars=8,
+            )
+        )
+    )
     locator = InMemoryEventLogLocator()
 
     def child_factory(runtime_session_id: str) -> InMemoryEventLog:

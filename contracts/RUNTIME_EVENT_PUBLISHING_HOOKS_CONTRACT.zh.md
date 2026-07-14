@@ -283,3 +283,15 @@ mailbox：
 - block ids across replies 隔离。
 - `RUN_ERROR` / `REPLY_END` 清理未完成 block。
 - `build_tool_result_error_events()` 产出标准 tool result event shape。
+
+---
+
+## 11. Model stream 与 control disposition 提交分相
+
+model stream commit port 分为 ledger commit/confirm、同步 reducer fold、锁外 ordered publication。control linearization lock 内只允许 guard
+校验、durable confirm、fold 与 permit CAS；禁止 inline 等待 publisher 或 observer callback。ordered publisher 只向 bounded mailbox 入队，
+observer failure只产生 operational diagnostic，不能撤销 durable disposition、fold、reservation settlement或process-local permit。
+
+start/semantic/terminal 的 CAS 语义不同：semantic NONE 可用同一 stable bytes重试；terminal必须在 latest rollout account state上重做 guard，
+但不得改变 event IDs/payload；PARTIAL/UNKNOWN 保留 owner并 latch。publication waiter cancellation只 detach，commit worker与physical operation
+继续完成。observer回调触发 stop/close不得 self-join或在 control lock 内重入。

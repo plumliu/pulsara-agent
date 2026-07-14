@@ -31,7 +31,6 @@ def _should_replay(event) -> bool:
     if getattr(event, "type", None) in {
         EventType.REPLY_END,
         EventType.RUN_ERROR,
-        EventType.EXCEED_MAX_ITERS,
     }:
         return True
     return isinstance(event, RunEndEvent)

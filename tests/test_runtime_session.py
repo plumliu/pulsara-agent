@@ -1,5 +1,7 @@
 import json
 import asyncio
+from threading import Event
+from time import monotonic
 
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
@@ -8,7 +10,10 @@ from pulsara_agent.event import EventContext, TextBlockDeltaEvent
 from pulsara_agent.event_log import EventIdConflict, InMemoryEventLog
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime import (
+    EventBatchCommitOutcome,
+    EventCommitError,
     EventReconciliationRequired,
+    EventWriteCancelled,
     RuntimePublishedEvent,
     RuntimeSession,
 )
@@ -38,9 +43,19 @@ class RecordingExtendEventLog(InMemoryEventLog):
         super().__init__()
         self.extend_calls = 0
 
-    def extend(self, events, *, expected_last_sequence=None):
+    def extend(
+        self,
+        events,
+        *,
+        expected_last_sequence=None,
+        deadline_monotonic=None,
+    ):
         self.extend_calls += 1
-        return super().extend(events, expected_last_sequence=expected_last_sequence)
+        return super().extend(
+            events,
+            expected_last_sequence=expected_last_sequence,
+            deadline_monotonic=deadline_monotonic,
+        )
 
 
 class CommitThenRaiseExtendEventLog(InMemoryEventLog):
@@ -48,11 +63,69 @@ class CommitThenRaiseExtendEventLog(InMemoryEventLog):
         super().__init__()
         self.fail_once = True
 
-    def extend(self, events, *, expected_last_sequence=None):
-        stored = super().extend(events, expected_last_sequence=expected_last_sequence)
+    def extend(
+        self,
+        events,
+        *,
+        expected_last_sequence=None,
+        deadline_monotonic=None,
+    ):
+        stored = super().extend(
+            events,
+            expected_last_sequence=expected_last_sequence,
+            deadline_monotonic=deadline_monotonic,
+        )
         if self.fail_once:
             self.fail_once = False
             raise RuntimeError("simulated lost commit acknowledgement")
+        return stored
+
+
+class DeadlineRecordingCommitFailureEventLog(InMemoryEventLog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.commit_deadline: float | None = None
+        self.confirmation_deadline: float | None = None
+
+    def extend(
+        self,
+        events,
+        *,
+        expected_last_sequence=None,
+        deadline_monotonic=None,
+    ):
+        del events, expected_last_sequence
+        self.commit_deadline = deadline_monotonic
+        raise TimeoutError("simulated pre-commit timeout")
+
+    def confirm_batch(self, candidates, *, deadline_monotonic=None):
+        self.confirmation_deadline = deadline_monotonic
+        return super().confirm_batch(
+            candidates,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+
+class CommitThenBlockEventLog(InMemoryEventLog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.committed = Event()
+        self.release = Event()
+
+    def extend(
+        self,
+        events,
+        *,
+        expected_last_sequence=None,
+        deadline_monotonic=None,
+    ):
+        stored = super().extend(
+            events,
+            expected_last_sequence=expected_last_sequence,
+            deadline_monotonic=deadline_monotonic,
+        )
+        self.committed.set()
+        self.release.wait(timeout=2.0)
         return stored
 
 
@@ -96,6 +169,98 @@ def test_runtime_session_confirms_uncertain_commit_and_catches_up_reducer_and_pu
         assert [event.id for event in event_log.iter()] == [candidate.id]
         assert reduced == [candidate.id]
         assert [item.event.id for item in subscriber.events] == [candidate.id]
+
+    asyncio.run(run())
+
+
+def test_runtime_session_reserves_deadline_for_stable_commit_confirmation(
+    tmp_path,
+) -> None:
+    async def run() -> None:
+        event_log = DeadlineRecordingCommitFailureEventLog()
+        runtime = in_memory_runtime_session(tmp_path, event_log=event_log)
+        candidate = TextBlockDeltaEvent(
+            **CTX.event_fields(),
+            block_id="text:deadline-reserve",
+            delta="candidate",
+        )
+
+        with pytest.raises(EventCommitError, match="commit failed"):
+            await runtime.emit(candidate)
+
+        assert event_log.commit_deadline is not None
+        assert event_log.confirmation_deadline is not None
+        assert event_log.commit_deadline < event_log.confirmation_deadline
+
+    asyncio.run(run())
+
+
+def test_runtime_session_confirmation_requires_writer_owner_or_explicit_deadline(
+    tmp_path,
+) -> None:
+    event_log = DeadlineRecordingCommitFailureEventLog()
+    runtime = in_memory_runtime_session(tmp_path, event_log=event_log)
+    candidate = TextBlockDeltaEvent(
+        **CTX.event_fields(),
+        block_id="text:explicit-confirmation-deadline",
+        delta="candidate",
+    )
+    event_log.append(candidate)
+
+    with pytest.raises(RuntimeError, match="critical writer owner"):
+        runtime.confirm_event_batch((candidate,))
+
+    deadline = monotonic() + 1.0
+    confirmation = asyncio.run(
+        runtime.confirm_event_batch_async(
+            (candidate,),
+            deadline_monotonic=deadline,
+        )
+    )
+
+    assert confirmation.missing_event_ids == ()
+    assert event_log.confirmation_deadline == deadline
+
+
+def test_runtime_session_cancellation_returns_writer_owned_full_and_none_outcomes(
+    tmp_path,
+) -> None:
+    async def run() -> None:
+        event_log = CommitThenBlockEventLog()
+        runtime = in_memory_runtime_session(tmp_path, event_log=event_log)
+        first = TextBlockDeltaEvent(
+            **CTX.event_fields(),
+            block_id="text:active-cancel",
+            delta="first",
+        )
+        second = TextBlockDeltaEvent(
+            **CTX.event_fields(),
+            block_id="text:queued-cancel",
+            delta="second",
+        )
+
+        active = asyncio.create_task(runtime.write_event(first))
+        assert await asyncio.to_thread(event_log.committed.wait, 1.0)
+        queued = asyncio.create_task(runtime.write_event(second))
+        await asyncio.sleep(0)
+
+        queued.cancel()
+        with pytest.raises(EventWriteCancelled) as queued_error:
+            await queued
+        assert queued_error.value.outcome == EventBatchCommitOutcome(
+            status="none",
+            deadline_monotonic=queued_error.value.outcome.deadline_monotonic,
+        )
+
+        active.cancel()
+        await asyncio.sleep(0)
+        assert not active.done()
+        event_log.release.set()
+        with pytest.raises(EventWriteCancelled) as active_error:
+            await active
+        assert active_error.value.outcome.status == "full"
+        assert active_error.value.outcome.committed_events[0].id == first.id
+        assert [event.id for event in event_log.iter()] == [first.id]
 
     asyncio.run(run())
 
@@ -267,7 +432,12 @@ def test_runtime_session_create_tool_executor_can_explicitly_record_to_shared_ev
     )
 
     assert result.status is ToolResultState.SUCCESS
-    assert [event.sequence for event in runtime.event_log.iter(reply_id="reply:runtime")] == [1, 2, 3, 4, 5]
+    assert result.prepared_terminal_result is not None
+    # The executor records streaming observations. The Agent-owned terminal
+    # batch later commits ToolResultEnd atomically with rollout settlement.
+    assert [
+        event.sequence for event in runtime.event_log.iter(reply_id="reply:runtime")
+    ] == [1, 2, 3, 4]
 
 
 def test_runtime_session_close_kills_background_terminal_process(tmp_path) -> None:

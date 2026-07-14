@@ -14,6 +14,8 @@ from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support import (
     compaction_completed_contract_fields,
     context_compiled_contract_fields,
+    model_call_end_fields,
+    model_call_start_fields,
     test_resolved_call_fact,
 )
 from tests.support.runtime_session import in_memory_runtime_session
@@ -45,11 +47,21 @@ from pulsara_agent.event_log import (
     EventLog,
     EventLogWriteConflict,
     PostgresEventLog,
+    RawContextAuthorityBundleRequest,
+    RawEventSelectionBounds,
     dump_agent_event,
     load_agent_event,
 )
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
+from pulsara_agent.llm.control import build_model_call_control_disposition_event
+from pulsara_agent.llm.materialize import materialize_committed_model_call_result
+from pulsara_agent.primitives.model_call import ModelCallControlDisposition
+from pulsara_agent.runtime.tool_action import (
+    builtin_tool_action_policy,
+    default_tool_action_classifier_registry,
+)
+from pulsara_agent.tools.base import ToolCall
 
 
 def _connect_or_skip(dsn: str):
@@ -94,8 +106,60 @@ def _reply_events(ctx: EventContext):
         TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello "),
         TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="world"),
         TextBlockEndEvent(**ctx.event_fields(), block_id="text:1"),
-        ReplyEndEvent(**ctx.event_fields()),
+        ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
     ]
+
+
+def _append_canonical_reply_events(event_log: EventLog, ctx: EventContext) -> None:
+    call = test_resolved_call_fact()
+    start = ModelCallStartEvent(
+        **ctx.event_fields(),
+        **model_call_start_fields(resolved_call=call),
+    )
+    events = (
+        ReplyStartEvent(
+            id=start.recovery_plan.reply_start_event_id,
+            **ctx.event_fields(),
+            name="assistant",
+        ),
+        start,
+        TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
+        TextBlockDeltaEvent(
+            **ctx.event_fields(), block_id="text:1", delta="hello "
+        ),
+        TextBlockDeltaEvent(
+            **ctx.event_fields(), block_id="text:1", delta="world"
+        ),
+        TextBlockEndEvent(**ctx.event_fields(), block_id="text:1"),
+        ModelCallEndEvent(
+            id=start.recovery_plan.stable_model_call_end_event_id,
+            **ctx.event_fields(),
+            **model_call_end_fields(resolved_call=call),
+        ),
+        ReplyEndEvent(
+            id=start.recovery_plan.stable_reply_end_event_id,
+            **ctx.event_fields(),
+            model_terminal_outcome="completed",
+        ),
+    )
+    event_log.extend(events)
+    result = materialize_committed_model_call_result(
+        event_log,
+        resolved_model_call_id=call.resolved_model_call_id,
+    )
+    activation = start.recovery_plan.run_execution_activation
+    assert activation is not None
+    event_log.append(
+        build_model_call_control_disposition_event(
+            result=result,
+            model_call_index=1,
+            event_context=ctx,
+            activation=activation,
+            disposition=ModelCallControlDisposition.ACCEPTED,
+            termination_intent=None,
+            recovery_reason_code=None,
+        )
+    )
 
 
 @pytest.fixture
@@ -156,7 +220,7 @@ def test_event_log_single_append_is_idempotent_by_exact_event_payload(
 
 def test_event_log_replay_rebuilds_assistant_message(event_log: EventLog) -> None:
     ctx = _ctx("contract:replay")
-    event_log.extend(_reply_events(ctx))
+    _append_canonical_reply_events(event_log, ctx)
 
     message = event_log.replay(ctx.reply_id)
 
@@ -183,6 +247,168 @@ def test_run_lifecycle_events_round_trip_through_agent_event_serialization() -> 
 
     assert load_agent_event(dump_agent_event(started)) == started
     assert load_agent_event(dump_agent_event(ended)) == ended
+
+
+def test_raw_event_type_selection_can_limit_to_active_runs(
+    event_log: EventLog,
+) -> None:
+    ended_ctx = _ctx("contract:active-selection:ended")
+    active_ctx = _ctx("contract:active-selection:active")
+    ended_start = RunStartEvent(
+        **ended_ctx.event_fields(),
+        **run_start_permission_fields(ended_ctx.run_id, user_input="ended"),
+        user_input_chars=5,
+    )
+    active_start = RunStartEvent(
+        **active_ctx.event_fields(),
+        **run_start_permission_fields(active_ctx.run_id, user_input="active"),
+        user_input_chars=6,
+    )
+    ended = RunEndEvent(
+        **run_end_contract_fields(
+            ended_ctx.run_id,
+            status="aborted",
+            abort_kind="user_stop",
+        ),
+        **ended_ctx.event_fields(),
+        status="aborted",
+        stop_reason="aborted",
+        abort_kind="user_stop",
+    )
+    event_log.extend((ended_start, active_start, ended))
+
+    snapshot = event_log.read_raw_events_by_types(
+        ("RUN_START", "RUN_END"),
+        active_runs_only=True,
+    )
+
+    assert snapshot.through_sequence == 3
+    assert tuple(event.run_id for event in snapshot.events) == (active_ctx.run_id,)
+    assert tuple(event.event_type for event in snapshot.events) == ("RUN_START",)
+
+
+def test_context_authority_bundle_freezes_all_channels_at_one_high_water(
+    event_log: EventLog,
+) -> None:
+    ctx = _ctx("contract:authority-bundle")
+    stored = event_log.extend(
+        (
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id, user_input="bundle"),
+                user_input_chars=6,
+            ),
+            TextBlockDeltaEvent(
+                **ctx.event_fields(),
+                block_id="text:bundle",
+                delta="payload",
+            ),
+            RunEndEvent(
+                **run_end_contract_fields(
+                    ctx.run_id,
+                    status="aborted",
+                    abort_kind="user_stop",
+                ),
+                **ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
+            ),
+        )
+    )
+    bounds = RawEventSelectionBounds(
+        max_events=8,
+        max_payload_bytes=1024 * 1024,
+    )
+    request = RawContextAuthorityBundleRequest(
+        primary_minimum_sequence=2,
+        run_id=ctx.run_id,
+        run_sparse_event_types=("RUN_START",),
+        session_sparse_event_types=("RUN_END",),
+        exact_event_ids=(stored[1].id,),
+        primary_bounds=bounds,
+        run_sparse_bounds=bounds,
+        session_sparse_bounds=bounds,
+        exact_bounds=bounds,
+    )
+
+    bundle = event_log.read_context_authority_bundle(request)
+
+    assert bundle.through_sequence == 3
+    assert tuple(item.sequence for item in bundle.primary_events) == (2, 3)
+    assert tuple(item.event_type for item in bundle.run_sparse_events) == (
+        "RUN_START",
+    )
+    assert tuple(item.event_type for item in bundle.session_sparse_events) == (
+        "RUN_END",
+    )
+    assert tuple(item.event_id for item in bundle.exact_events) == (stored[1].id,)
+    assert all(
+        item.sequence <= bundle.through_sequence
+        for channel in (
+            bundle.primary_events,
+            bundle.run_sparse_events,
+            bundle.session_sparse_events,
+            bundle.exact_events,
+        )
+        for item in channel
+    )
+
+    empty_delta = event_log.read_context_authority_bundle(
+        RawContextAuthorityBundleRequest(
+            primary_minimum_sequence=4,
+            run_id=ctx.run_id,
+            run_sparse_event_types=(),
+            session_sparse_event_types=(),
+            exact_event_ids=(),
+            primary_bounds=bounds,
+            run_sparse_bounds=bounds,
+            session_sparse_bounds=bounds,
+            exact_bounds=bounds,
+        )
+    )
+    assert empty_delta.through_sequence == 3
+    assert empty_delta.primary_events == ()
+
+
+def test_raw_range_and_run_reads_enforce_physical_bounds(
+    event_log: EventLog,
+) -> None:
+    ctx = _ctx("contract:bounded-range")
+    event_log.extend(
+        (
+            RunStartEvent(
+                **ctx.event_fields(),
+                **run_start_permission_fields(ctx.run_id, user_input="bounded"),
+                user_input_chars=7,
+            ),
+            RunEndEvent(
+                **run_end_contract_fields(
+                    ctx.run_id,
+                    status="aborted",
+                    abort_kind="user_stop",
+                ),
+                **ctx.event_fields(),
+                status="aborted",
+                stop_reason="aborted",
+                abort_kind="user_stop",
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError, match="event bound"):
+        event_log.read_raw_range_snapshot(minimum_sequence=1, max_events=1)
+    with pytest.raises(ValueError, match="payload-byte bound"):
+        event_log.read_raw_range_snapshot(
+            minimum_sequence=1,
+            max_payload_bytes=1,
+        )
+    with pytest.raises(ValueError, match="event count"):
+        event_log.read_raw_run_events(
+            ctx.run_id,
+            max_events=1,
+            max_payload_bytes=1024 * 1024,
+        )
 
 
 def test_run_start_permission_policy_equals_preset_expansion() -> None:
@@ -490,6 +716,16 @@ def test_context_compiled_pressure_event_round_trips_through_agent_event_seriali
 def test_capability_gate_decision_event_round_trips_through_agent_event_serialization() -> (
     None
 ):
+    action_classification = default_tool_action_classifier_registry().classify(
+        call=ToolCall(
+            id="call:terminal",
+            name="terminal",
+            arguments={"command": "pwd"},
+        ),
+        descriptor_id="builtin:terminal",
+        descriptor_fingerprint="descriptor:test:terminal",
+        policy=builtin_tool_action_policy("terminal"),
+    )
     event = CapabilityGateDecisionEvent(
         **_ctx("contract:capability-gate").event_fields(),
         tool_call_id="call:terminal",
@@ -510,6 +746,7 @@ def test_capability_gate_decision_event_round_trips_through_agent_event_serializ
             "context_kind": "active_skill_present",
             "active_skill_names": ["hf-cli"],
         },
+        action_classification=action_classification,
     )
 
     assert load_agent_event(dump_agent_event(event)) == event
@@ -599,14 +836,15 @@ def test_postgres_event_log_reloads_persisted_events(tmp_path: Path) -> None:
             dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
         )
         ctx = _ctx("postgres:reload")
-        first_log.extend(_reply_events(ctx))
+        _append_canonical_reply_events(first_log, ctx)
 
         second_log = PostgresEventLog(
             dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
         )
-        assert [
-            event.sequence for event in second_log.iter(reply_id=ctx.reply_id)
-        ] == list(range(1, 7))
+        reply_events = second_log.iter(reply_id=ctx.reply_id)
+        assert [event.sequence for event in reply_events] == list(
+            range(1, len(reply_events) + 1)
+        )
         assert second_log.replay(ctx.reply_id).content[0].text == "hello world"
     finally:
         _cleanup_session(dsn, runtime_session_id)
@@ -1125,9 +1363,11 @@ def test_model_call_end_usage_breakdown_round_trips_postgres(
         (
             ModelCallStartEvent(
                 **ctx.event_fields(),
-                resolved_call=call,
-                context_id="context:postgres:model-usage",
-                model_call_index=0,
+                **model_call_start_fields(
+                    resolved_call=call,
+                    context_id="context:postgres:model-usage",
+                    model_call_index=1,
+                ),
             ),
             ModelCallEndEvent(
                 **ctx.event_fields(),
@@ -1135,6 +1375,7 @@ def test_model_call_end_usage_breakdown_round_trips_postgres(
                 target_fingerprint=call.target.target_fingerprint,
                 reported_model_id="provider-snapshot",
                 outcome="completed",
+                provider_dispatch_status="dispatched",
                 usage_status="reported",
                 usage=ModelTokenUsageFact(
                     input_tokens=120,
@@ -1213,9 +1454,11 @@ def test_postgres_model_call_facts_round_trip(event_log: EventLog) -> None:
             ),
             ModelCallStartEvent(
                 **ctx.event_fields(),
-                resolved_call=call,
-                context_id="context:postgres:model-facts",
-                model_call_index=1,
+                **model_call_start_fields(
+                    resolved_call=call,
+                    context_id="context:postgres:model-facts",
+                    model_call_index=1,
+                ),
             ),
         )
     )

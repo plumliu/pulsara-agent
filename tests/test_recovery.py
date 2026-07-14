@@ -98,7 +98,7 @@ def test_project_recovery_from_events_aborted_plan_turn_uses_plan_aborted_guidan
             user_input_chars=len("ask"),
             metadata={"user_input": "ask"},
         ),
-        ReplyEndEvent(**CTX.event_fields()),
+        ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         RunEndEvent(
             **run_end_contract_fields(
                 CTX.run_id, status="aborted", abort_kind="user_stop"

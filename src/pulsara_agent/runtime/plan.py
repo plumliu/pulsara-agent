@@ -63,6 +63,12 @@ class PlanWorkflowState:
     entry_reason: str = ""
     latest_accepted_plan_summary: str = ""
     latest_accepted_plan_artifact_id: str | None = None
+    revision: int = 0
+    entered_event_id: str | None = None
+    entered_event_sequence: int | None = None
+    entry_run_id: str | None = None
+    entry_turn_id: str | None = None
+    entry_reply_id: str | None = None
 
     def begin(
         self,
@@ -100,8 +106,48 @@ class PlanWorkflowState:
         self.pre_plan_permission_policy = None
         self.pending_entry_audit = False
         self.entry_reason = ""
+        self.entered_event_id = None
+        self.entered_event_sequence = None
+        self.entry_run_id = None
+        self.entry_turn_id = None
+        self.entry_reply_id = None
         self.latest_accepted_plan_summary = accepted_plan_summary
         self.latest_accepted_plan_artifact_id = accepted_plan_artifact_id
+
+    def apply_durable_event(self, event: AgentEvent) -> None:
+        if event.sequence is None:
+            raise ValueError("plan workflow projection requires a committed event")
+        self._apply_projection_event(event)
+
+    def _apply_projection_event(self, event: AgentEvent) -> None:
+        if isinstance(event, PlanModeEnteredEvent):
+            self.active = True
+            self.entered_by = event.source
+            self.entered_at = None
+            self.pre_plan_permission_mode = event.previous_permission_mode
+            self.pre_plan_permission_policy = dict(event.previous_permission_policy)
+            self.pending_entry_audit = False
+            self.entry_reason = event.reason
+            self.entered_event_id = event.id
+            self.entered_event_sequence = event.sequence
+            self.entry_run_id = event.run_id
+            self.entry_turn_id = event.turn_id
+            self.entry_reply_id = event.reply_id
+            self.revision += 1
+        elif isinstance(event, PlanModeExitedEvent):
+            self.finish(
+                accepted_plan_summary=(
+                    event.accepted_plan_summary
+                    if event.source == "approved_exit_plan"
+                    else ""
+                ),
+                accepted_plan_artifact_id=(
+                    event.accepted_plan_artifact_id
+                    if event.source == "approved_exit_plan"
+                    else None
+                ),
+            )
+            self.revision += 1
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -114,6 +160,12 @@ class PlanWorkflowState:
             "entry_reason": self.entry_reason,
             "latest_accepted_plan_summary": self.latest_accepted_plan_summary,
             "latest_accepted_plan_artifact_id": self.latest_accepted_plan_artifact_id,
+            "revision": self.revision,
+            "entered_event_id": self.entered_event_id,
+            "entered_event_sequence": self.entered_event_sequence,
+            "entry_run_id": self.entry_run_id,
+            "entry_turn_id": self.entry_turn_id,
+            "entry_reply_id": self.entry_reply_id,
         }
 
 
@@ -299,21 +351,8 @@ def reduce_plan_workflow_state(events: Iterable[AgentEvent]) -> PlanWorkflowStat
         key=lambda event: event.sequence if event.sequence is not None else 0,
     )
     for event in ordered:
-        if isinstance(event, PlanModeEnteredEvent):
-            state.active = True
-            state.entered_by = event.source
-            state.entered_at = None
-            state.pre_plan_permission_mode = event.previous_permission_mode
-            state.pre_plan_permission_policy = dict(event.previous_permission_policy)
-            state.pending_entry_audit = False
-            state.entry_reason = event.reason
-        elif isinstance(event, PlanModeExitedEvent):
-            state.finish(
-                accepted_plan_summary=(
-                    event.accepted_plan_summary if event.source == "approved_exit_plan" else ""
-                ),
-                accepted_plan_artifact_id=(
-                    event.accepted_plan_artifact_id if event.source == "approved_exit_plan" else None
-                ),
-            )
+        if isinstance(event, (PlanModeEnteredEvent, PlanModeExitedEvent)):
+            # Recovery projections also accept caller-owned event sequences;
+            # only the live process projection requires committed envelopes.
+            state._apply_projection_event(event)
     return state
