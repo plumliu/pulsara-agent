@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -116,6 +117,54 @@ _SEMANTIC_BATCH_MAX_CHARS = 4_096
 _SEMANTIC_BATCH_MAX_AGE_SECONDS = 0.025
 
 
+@dataclass(frozen=True, slots=True)
+class SemanticBatchHardLimits:
+    max_events: int = _SEMANTIC_BATCH_MAX_EVENTS
+    max_chars: int = _SEMANTIC_BATCH_MAX_CHARS
+    max_age_seconds: float = _SEMANTIC_BATCH_MAX_AGE_SECONDS
+
+    def __post_init__(self) -> None:
+        if (
+            self.max_events != _SEMANTIC_BATCH_MAX_EVENTS
+            or self.max_chars != _SEMANTIC_BATCH_MAX_CHARS
+            or self.max_age_seconds != _SEMANTIC_BATCH_MAX_AGE_SECONDS
+        ):
+            raise ValueError("semantic batch hard limits are fixed by V1")
+
+
+PRODUCTION_SEMANTIC_BATCH_HARD_LIMITS = SemanticBatchHardLimits()
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticBatchTargetPolicy:
+    max_events: int = _SEMANTIC_BATCH_MAX_EVENTS
+    max_chars: int = _SEMANTIC_BATCH_MAX_CHARS
+    max_age_seconds: float = _SEMANTIC_BATCH_MAX_AGE_SECONDS
+    flush_structural_events: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_events < 1:
+            raise ValueError("semantic batch target max events must be positive")
+        if self.max_chars < 1:
+            raise ValueError("semantic batch target max chars must be positive")
+        if self.max_age_seconds <= 0:
+            raise ValueError("semantic batch target max age must be positive")
+
+    def validate_against(
+        self,
+        hard_limits: SemanticBatchHardLimits,
+    ) -> None:
+        if self.max_events > hard_limits.max_events:
+            raise ValueError("semantic batch target exceeds the event hard limit")
+        if self.max_chars > hard_limits.max_chars:
+            raise ValueError("semantic batch target exceeds the character hard limit")
+        if self.max_age_seconds > hard_limits.max_age_seconds:
+            raise ValueError("semantic batch target exceeds the age hard limit")
+
+
+DEFAULT_SEMANTIC_BATCH_TARGET_POLICY = SemanticBatchTargetPolicy()
+
+
 def _semantic_event_content_chars(event: AgentEvent) -> int:
     if isinstance(
         event,
@@ -128,9 +177,21 @@ def _semantic_event_content_chars(event: AgentEvent) -> int:
 
 
 class LLMRuntime:
-    def __init__(self, *, config: LLMConfig, registry: LLMTransportRegistry) -> None:
+    def __init__(
+        self,
+        *,
+        config: LLMConfig,
+        registry: LLMTransportRegistry,
+        semantic_batch_policy: SemanticBatchTargetPolicy = (
+            DEFAULT_SEMANTIC_BATCH_TARGET_POLICY
+        ),
+    ) -> None:
+        semantic_batch_policy.validate_against(
+            PRODUCTION_SEMANTIC_BATCH_HARD_LIMITS
+        )
         self._config = config
         self._registry = registry
+        self._semantic_batch_policy = semantic_batch_policy
 
     def resolve_target(
         self,
@@ -495,7 +556,7 @@ class LLMRuntime:
                                 flush_delay = max(
                                     0.0,
                                     pending_semantic_started_at
-                                    + _SEMANTIC_BATCH_MAX_AGE_SECONDS
+                                    + self._semantic_batch_policy.max_age_seconds
                                     - monotonic(),
                                 )
                                 flush_task = asyncio.create_task(
@@ -684,12 +745,16 @@ class LLMRuntime:
                         ),
                     )
                     if (
-                        structural
+                        (
+                            structural
+                            and self._semantic_batch_policy.flush_structural_events
+                        )
                         or len(pending_semantic_events)
-                        >= _SEMANTIC_BATCH_MAX_EVENTS
-                        or pending_semantic_chars >= _SEMANTIC_BATCH_MAX_CHARS
+                        >= self._semantic_batch_policy.max_events
+                        or pending_semantic_chars
+                        >= self._semantic_batch_policy.max_chars
                         or monotonic() - pending_semantic_started_at
-                        >= _SEMANTIC_BATCH_MAX_AGE_SECONDS
+                        >= self._semantic_batch_policy.max_age_seconds
                     ):
                         await flush_semantic_events()
 

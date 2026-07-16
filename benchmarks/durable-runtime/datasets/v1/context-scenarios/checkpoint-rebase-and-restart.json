@@ -1,0 +1,91 @@
+{
+  "schema_version": "pulsara.durable-runtime.context-scenario.v1",
+  "scenario_id": "checkpoint-rebase-and-restart",
+  "seed": 452006,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "Cold reopen from a preferred transcript checkpoint, deterministic rebase, and bounded delta continuation.",
+  "generator_contract": {
+    "generator_id": "pulsara.context.checkpoint-rebase-and-restart",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.context.checkpoint-rebase",
+    "grader_version": "1",
+    "assertion_ids": [
+      "checkpoint_is_acceleration_only",
+      "rebase_selection_deterministic",
+      "cold_reopen_semantics_equal",
+      "delta_read_bounded",
+      "provider_semantic_identity_stable"
+    ]
+  },
+  "ledger": {
+    "runtime_sessions": 1,
+    "runs": 1,
+    "semantic_events_before_first_checkpoint": 2048,
+    "semantic_events_before_preferred_checkpoint": 4096,
+    "semantic_events_before_close": 6144,
+    "characters_per_semantic_delta": 24,
+    "checkpoints": [
+      {
+        "checkpoint_id": "checkpoint-2048",
+        "logical_semantic_high_water": 2048,
+        "artifact_state": "available"
+      },
+      {
+        "checkpoint_id": "checkpoint-4096",
+        "logical_semantic_high_water": 4096,
+        "artifact_state": "available",
+        "preferred": true
+      }
+    ],
+    "restart": {
+      "close_after_logical_semantic_high_water": 6144,
+      "reopen_same_runtime_session": true,
+      "post_reopen_model_calls": 4,
+      "post_reopen_semantic_delta_events_per_call": 256
+    }
+  },
+  "execution_matrix": [
+    {
+      "case_id": "preferred-hit",
+      "case_kind": "production_valid",
+      "preferred_checkpoint_artifact_state": "available"
+    },
+    {
+      "case_id": "preferred-missing-rebase",
+      "case_kind": "production_valid",
+      "preferred_checkpoint_artifact_state": "missing",
+      "expected_rebase_checkpoint_id": "checkpoint-2048"
+    },
+    {
+      "case_id": "process-cold-no-cache",
+      "case_kind": "production_valid",
+      "preferred_checkpoint_artifact_state": "available",
+      "drop_all_process_local_caches_before_reopen": true
+    }
+  ],
+  "compile_schedule": {
+    "phases": [
+      "immediately_after_reopen",
+      "after_post_reopen_model_call_1",
+      "after_post_reopen_model_call_2",
+      "after_post_reopen_model_call_3",
+      "after_post_reopen_model_call_4"
+    ]
+  },
+  "measurement": {
+    "warmup_iterations": 1,
+    "measured_iterations": 20
+  },
+  "invariants": [
+    "checkpoint artifacts remain acceleration rather than semantic authority",
+    "preferred checkpoint loss selects a deterministic compatible rebase",
+    "reopen with empty process caches produces the same authority and normalized transcript",
+    "only the bounded delta after the adopted checkpoint is read from the ledger",
+    "checkpoint schedule and storage references do not change provider semantic identity"
+  ]
+}

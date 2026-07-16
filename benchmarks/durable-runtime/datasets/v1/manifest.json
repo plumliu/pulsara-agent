@@ -1,0 +1,60 @@
+{
+  "schema_version": "pulsara.durable-runtime.dataset-manifest.v1",
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "clock_contract": {
+    "origin_utc": "2026-01-01T00:00:00Z",
+    "logical_tick_microseconds": 1000
+  },
+  "identity_contract": {
+    "algorithm": "sha256-scenario-seed-owner-ordinal-v1",
+    "timestamps": "origin-plus-logical-tick-v1",
+    "payload_text": "ascii-counter-pattern-v1"
+  },
+  "database_lifecycle_contract": {
+    "contract_id": "pulsara.durable-runtime.database-lifecycle",
+    "contract_version": "1",
+    "iteration_isolation": "fresh_database_from_template",
+    "setup_timing": "excluded",
+    "cleanup_timing": "excluded",
+    "postgres_cache_policy": "recorded_not_forced",
+    "baseline_outer_parallelism": "serial_unless_dedicated_postgres_instance_per_worker"
+  },
+  "result_contract": {
+    "contract_id": "pulsara.durable-runtime.result",
+    "contract_version": "1",
+    "raw_sample_vector_required": true,
+    "production_acceptance_excludes_counterfactual": true,
+    "production_acceptance_excludes_sensitivity": true,
+    "production_acceptance_requires_clean_git": true,
+    "required_production_environment_fields": [
+      "git.commit",
+      "git.dirty",
+      "python.version",
+      "python.implementation",
+      "runner_build_fingerprint",
+      "postgres.server_version",
+      "postgres.configuration_fingerprint",
+      "postgres.connection_pool_fingerprint",
+      "runtime_capacity.configuration_fingerprint"
+    ]
+  },
+  "writer_scenarios": [
+    "writer-scenarios/mixed-runtime-accounting.json",
+    "writer-scenarios/model-semantic-batch-matrix.json",
+    "writer-scenarios/model-semantic-structural-grouping.json",
+    "writer-scenarios/multi-session-contention.json",
+    "writer-scenarios/stable-confirmation-faults.json"
+  ],
+  "context_scenarios": [
+    "context-scenarios/artifact-heavy-tools.json",
+    "context-scenarios/checkpoint-rebase-and-restart.json",
+    "context-scenarios/incremental-active-window.json",
+    "context-scenarios/long-plan-prefix-growth.json",
+    "context-scenarios/single-long-compaction.json",
+    "context-scenarios/subagent-two-children.json"
+  ]
+}

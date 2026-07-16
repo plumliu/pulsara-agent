@@ -1,0 +1,86 @@
+{
+  "schema_version": "pulsara.durable-runtime.writer-scenario.v1",
+  "scenario_id": "model-semantic-batch-matrix",
+  "seed": 451001,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "One completed model call with a large text stream committed under multiple deterministic batch sizes.",
+  "generator_contract": {
+    "generator_id": "pulsara.writer.model-semantic-batch",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.writer.model-semantic-equivalence",
+    "grader_version": "1",
+    "assertion_ids": [
+      "ordered_semantic_content_equal",
+      "terminal_projection_equal",
+      "physical_settlement_valid",
+      "accounted_writer_path_only"
+    ]
+  },
+  "workload": {
+    "runtime_sessions": 1,
+    "runs_per_session": 1,
+    "model_calls_per_run": 1,
+    "model_stream": {
+      "blocks": [
+        {
+          "kind": "text",
+          "block_count": 1,
+          "delta_events_per_block": 8192,
+          "characters_per_delta": 16
+        }
+      ],
+      "terminal_outcome": "completed",
+      "usage_status": "missing"
+    }
+  },
+  "execution_matrix": [
+    {
+      "case_id": "batch-1",
+      "case_kind": "counterfactual_analysis",
+      "max_business_events_per_commit": 1
+    },
+    {
+      "case_id": "batch-4",
+      "case_kind": "sensitivity_analysis",
+      "max_business_events_per_commit": 4
+    },
+    {
+      "case_id": "batch-8",
+      "case_kind": "sensitivity_analysis",
+      "max_business_events_per_commit": 8
+    },
+    {
+      "case_id": "batch-16",
+      "case_kind": "production_valid",
+      "max_business_events_per_commit": 16
+    },
+    {
+      "case_id": "batch-32",
+      "case_kind": "counterfactual_analysis",
+      "max_business_events_per_commit": 32
+    },
+    {
+      "case_id": "batch-64",
+      "case_kind": "counterfactual_analysis",
+      "max_business_events_per_commit": 64
+    }
+  ],
+  "production_baseline_case_id": "batch-16",
+  "semantic_reference_case_id": "batch-16",
+  "measurement": {
+    "warmup_iterations": 5,
+    "measured_iterations": 30,
+    "reset_mode": "fresh_runtime_session_per_iteration"
+  },
+  "invariants": [
+    "all cases produce the same ordered model-visible semantic content",
+    "all cases produce the same terminal projection semantic fingerprint",
+    "every case closes its physical reservation with exact balance",
+    "no case bypasses RuntimeEventWriteService or the materialization account"
+  ]
+}

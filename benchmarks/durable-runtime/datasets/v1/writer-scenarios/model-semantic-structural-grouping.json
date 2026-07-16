@@ -1,0 +1,94 @@
+{
+  "schema_version": "pulsara.durable-runtime.writer-scenario.v1",
+  "scenario_id": "model-semantic-structural-grouping",
+  "seed": 451002,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "Mixed semantic blocks used to compare immediate structural flushes with pairing-safe structural grouping.",
+  "generator_contract": {
+    "generator_id": "pulsara.writer.model-semantic-structural-grouping",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.writer.structural-semantic-equivalence",
+    "grader_version": "1",
+    "assertion_ids": [
+      "transport_order_equal",
+      "start_precedes_delta",
+      "end_follows_delta",
+      "tool_call_control_safe",
+      "committed_model_result_equal"
+    ]
+  },
+  "workload": {
+    "runtime_sessions": 1,
+    "runs_per_session": 1,
+    "model_calls_per_run": 1,
+    "model_stream": {
+      "blocks": [
+        {
+          "kind": "thinking",
+          "block_count": 32,
+          "delta_events_per_block": 8,
+          "characters_per_delta": 32
+        },
+        {
+          "kind": "text",
+          "block_count": 48,
+          "delta_events_per_block": 8,
+          "characters_per_delta": 32
+        },
+        {
+          "kind": "data",
+          "block_count": 24,
+          "delta_events_per_block": 8,
+          "characters_per_delta": 48,
+          "media_type": "application/json"
+        },
+        {
+          "kind": "tool_call",
+          "block_count": 24,
+          "delta_events_per_block": 8,
+          "characters_per_delta": 24,
+          "tool_name_pattern": "benchmark_tool_{ordinal}"
+        }
+      ],
+      "terminal_outcome": "completed",
+      "usage_status": "reported"
+    }
+  },
+  "execution_matrix": [
+    {
+      "case_id": "immediate-structural",
+      "case_kind": "production_valid",
+      "structural_policy": "flush_each_start_and_end",
+      "max_business_events_per_commit": 16
+    },
+    {
+      "case_id": "pairing-safe-grouping",
+      "case_kind": "production_valid",
+      "structural_policy": "group_start_with_following_delta_and_end_with_preceding_delta",
+      "max_business_events_per_commit": 16
+    },
+    {
+      "case_id": "pairing-safe-grouping-32",
+      "case_kind": "counterfactual_analysis",
+      "structural_policy": "group_start_with_following_delta_and_end_with_preceding_delta",
+      "max_business_events_per_commit": 32
+    }
+  ],
+  "measurement": {
+    "warmup_iterations": 5,
+    "measured_iterations": 30,
+    "reset_mode": "fresh_runtime_session_per_iteration"
+  },
+  "invariants": [
+    "structural grouping never changes transport sequence order",
+    "no delta is committed before its matching start",
+    "no end is committed before all matching deltas",
+    "ToolCallEnd remains audit-only until the completed terminal and accepted disposition",
+    "terminal projection and final committed model result are identical across policies"
+  ]
+}

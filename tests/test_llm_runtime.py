@@ -72,7 +72,10 @@ from pulsara_agent.llm.registry import (
     LLMTransportRegistry,
 )
 from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.llm.runtime import LLMRuntime
+from pulsara_agent.llm.runtime import (
+    LLMRuntime,
+    SemanticBatchTargetPolicy,
+)
 from pulsara_agent.llm.commit import (
     ModelStreamCommitContractError,
     RuntimeSessionModelStreamEventCommitPort,
@@ -415,6 +418,121 @@ def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -
         assert max(port.semantic_batch_sizes) > 1
 
     asyncio.run(scenario())
+
+
+def test_runtime_accepts_an_explicit_semantic_batch_policy(tmp_path) -> None:
+    class BurstTransport:
+        api = "mock"
+        binding_id = "test.explicit-batch-policy"
+        contract_version = "v1"
+
+        async def stream(self, *, call, context, event_context):
+            del call, context
+            block_id = "text:explicit-policy"
+            yield TextBlockStartEvent(
+                **event_context.event_fields(), block_id=block_id
+            )
+            for _ in range(10):
+                yield TextBlockDeltaEvent(
+                    **event_context.event_fields(),
+                    block_id=block_id,
+                    delta="x",
+                )
+            yield TextBlockEndEvent(
+                **event_context.event_fields(), block_id=block_id
+            )
+
+    class RecordingCommitPort(RuntimeSessionModelStreamEventCommitPort):
+        def __init__(self, *, runtime_session):
+            super().__init__(runtime_session=runtime_session, state=None)
+            self.semantic_batch_sizes: list[int] = []
+
+        async def commit_semantic(self, candidates, *, guard, live_cursor):
+            self.semantic_batch_sizes.append(len(candidates))
+            return await super().commit_semantic(
+                candidates,
+                guard=guard,
+                live_cursor=live_cursor,
+            )
+
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(BurstTransport())
+        runtime = LLMRuntime(
+            config=config,
+            registry=registry,
+            semantic_batch_policy=SemanticBatchTargetPolicy(
+                max_events=4,
+                flush_structural_events=False,
+            ),
+        )
+        session = in_memory_runtime_session(tmp_path)
+        port = RecordingCommitPort(runtime_session=session)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:explicit-semantic-batch",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+            commit_port=port,
+        )
+
+        completion = await handle.wait_completed()
+
+        assert completion.terminal_outcome == "completed"
+        assert port.semantic_batch_sizes == [4, 4, 4]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        SemanticBatchTargetPolicy(max_events=17),
+        SemanticBatchTargetPolicy(max_chars=4_097),
+        SemanticBatchTargetPolicy(max_age_seconds=0.026),
+    ],
+)
+def test_runtime_rejects_semantic_batch_targets_above_hard_limits(
+    policy,
+) -> None:
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+        api="mock",
+    )
+    registry = LLMTransportRegistry()
+    registry.register(MockTransport("ok"))
+
+    with pytest.raises(ValueError, match="semantic batch target exceeds"):
+        LLMRuntime(
+            config=config,
+            registry=registry,
+            semantic_batch_policy=policy,
+        )
 
 
 def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> None:

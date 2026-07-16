@@ -1,0 +1,68 @@
+{
+  "schema_version": "pulsara.durable-runtime.writer-scenario.v1",
+  "scenario_id": "mixed-runtime-accounting",
+  "seed": 451005,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "One long accounted session mixing model, tool, subagent, context-audit, checkpoint, and terminal facts.",
+  "generator_contract": {
+    "generator_id": "pulsara.writer.mixed-runtime-accounting",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.writer.mixed-runtime-accounting",
+    "grader_version": "1",
+    "assertion_ids": [
+      "account_high_water_matches",
+      "reservations_explained",
+      "checkpoint_barriers_closed",
+      "terminal_causality_valid",
+      "session_close_drained"
+    ]
+  },
+  "workload": {
+    "runtime_sessions": 1,
+    "runs_per_session": 1,
+    "cycles": 32,
+    "per_cycle": {
+      "model_calls": 1,
+      "model_semantic_delta_events": 128,
+      "model_semantic_characters_per_delta": 24,
+      "accepted_control_dispositions": 1,
+      "tool_calls": 4,
+      "tool_result_payload_characters": 4096,
+      "subagent_graph_events": 6,
+      "context_audit_events": 3
+    },
+    "checkpoint_after_cycles": [
+      8,
+      16,
+      24,
+      32
+    ],
+    "terminal_status": "finished"
+  },
+  "execution_matrix": [
+    {
+      "case_id": "production-shape",
+      "case_kind": "production_valid",
+      "model_semantic_batch_events": 16,
+      "tool_result_batching": "production",
+      "checkpoint_policy": "pairing_safe"
+    }
+  ],
+  "measurement": {
+    "warmup_iterations": 3,
+    "measured_iterations": 20,
+    "reset_mode": "fresh_runtime_session_per_iteration"
+  },
+  "invariants": [
+    "ledger materialization account high-water equals the committed ledger high-water",
+    "all physical reservations settle or remain represented by an active durable owner",
+    "checkpoint barriers do not admit unexplained producers",
+    "RunEnd occurs only after required model dispositions and tool terminal facts",
+    "session close leaves no pending writer, reservation, or checkpoint owner"
+  ]
+}

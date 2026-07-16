@@ -29,15 +29,28 @@ Stage 4 与 Authority Materialization hard cut 已经解决了以下正确性问
 
 但 real-LLM dogfood 表明，当前物理实现的本地 durable 成本已经和远程 provider 等待处于同一量级。下一步不应删除 durable
 facts、弱化 account、不记录 semantic delta，或把 correctness 换成吞吐；应新增一个范围严格受控的 **Stage 4.5 Durable Runtime
-性能稳定化**：
+性能稳定化**。
 
-1. 先把 writer 的 queue、PostgreSQL commit、account CAS、reducer fold 与 publication 分段测量；
-2. 将 model semantic stream 从“reader逐batch等待commit”改成“bounded write-behind persistence pipeline”；
-3. 在pipeline基础上减少 transaction / charge batch amplification；
-4. 将 transcript projection evidence 从“每次从 base 重读”改成“verified incremental memoization”；
-5. 只在上述三项不足时，才讨论 durable semantic delta coalescing；
-6. 所有 queue、cache、batching 与 connection reuse 都不得改变 event payload、stable ID、replay、accounting 或 provider-visible semantic
-   identity。
+冻结顺序为：
+
+1. 先补齐 model control disposition 在持续 `NONE` 后的 session-owned live retry/drain owner；
+2. 建立 deterministic runtime / PostgreSQL profiling，而不是用三次 real-LLM 估算稳定 p95；
+3. 先优化 semantic batching 与 structural grouping，减少 transaction amplification；
+4. 再压缩 PostgreSQL 单 batch 固定成本；
+5. 重新测量后，只有剩余同步 durable wait 仍显著位于 model-stream 关键路径时，才实现 bounded one-inflight write-behind；
+6. 将 transcript projection evidence 从“每次从 base 重读”改成 verified projection cursor；
+7. 再做 verified artifact hydration 与 Stage-4-owned prepared context reuse；
+8. 只有上述路径仍不足时，才讨论 durable semantic delta coalescing。
+
+所有 retry owner、queue、cache、batching 与 connection reuse 都不得改变 event payload、stable ID、replay、accounting 或
+provider-visible semantic identity。
+
+两个已经闭环的事实不得在 Stage 4.5 中重新误判：
+
+- memory governance mutation 与 stable governance runtime event candidate 已使用同事务 transactional outbox；ledger dispatch
+  失败只形成可重试 pending dispatch，不再构成永久 split-brain；
+- model control disposition 的 cancel-after-`FULL` 已消费 typed write outcome、执行 fold、安装 permit 并 adopt durable winner；当前只剩
+  持续 `NONE` 后缺少独立 live retry/drain service 的 liveness 空洞。
 
 本计划不是新的产品能力，也不改变 Stage 4 的长程预算策略。它只优化：
 
@@ -113,7 +126,7 @@ Context 时间覆盖：
 - Long Plan 与 Subagent system 通过；
 - Long PR4 compaction 已完成真实 compaction，但生成摘要未包含测试要求的字面量 `pr4`，因此语义断言失败；完整调用链的性能
   数据仍然有效；
-- 单次采样不能作为稳定 benchmark，后续 PERF0 必须使用同一轨迹至少三次的 median / p95；
+- 单次采样不能作为稳定 benchmark；PERF0必须使用20–50次确定性fixture计算median/p95，real-LLM只保留三次median/range；
 - 三条轨迹的远程 provider 速度、输出长度和工具行为不同，不能只比较总墙钟。
 
 ### 1.3 关键明细
@@ -295,9 +308,11 @@ stable entries/document/artifact的重复hydration与projection
 
 - transport source item 的 sanitization、sequence index与terminal projection保持 lossless；
 - completed/provider_error/cancelled/runtime_error 的 terminal outcome不变；
-- write-behind queue只保存stable frozen candidates，不保存可被后续修改的draft对象；
+- batching buffer或条件性write-behind queue只保存stable frozen candidates，不保存可被后续修改的draft对象；
 - confirmed semantic cursor只能由单一persistence owner推进；
-- provider reader可以领先confirmed cursor，但不得领先physical reservation与burst hard bound；
+- 同步batching阶段provider reader不得越过当前commit boundary；
+- 只有条件性write-behind启用后，provider reader才可在hard bound内领先confirmed cursor；
+- provider reader任何时候都不得领先physical reservation与burst hard bound；
 - terminal projection必须等待semantic queue seal并FULL drain；
 - control disposition仍只能消费confirmed terminal projection；
 - provider stream observer仍只是 UI/live observation，不得成为 runtime control owner。
@@ -311,84 +326,78 @@ stable entries/document/artifact的重复hydration与projection
 
 ### 2.5 Context exactness
 
-- context cache只能缓存canonical reducer的纯函数结果；
-- cache identity必须绑定base identity、through sequence、contract fingerprint与semantic accumulator；
-- mismatch时丢弃cache并fail closed或执行现有exact restore；
-- cache schedule、hit/miss不得进入provider semantic fingerprint；
-- exact replay不得依赖process-local cache存在。
+- projection cursor与context cache只能保存canonical reducer的可验证加速结果；
+- cursor/cache identity必须绑定base identity、through sequence、contract fingerprint与semantic accumulator；
+- cursor必须保存构造当前durable authority所需的完整delta identities，不能只保存prefix accumulator；
+- mismatch时丢弃cursor/cache并fail closed或执行现有exact restore；
+- schedule、hit/miss不得进入provider semantic fingerprint；
+- exact replay不得依赖process-local cursor/cache存在。
 
 ---
 
 ## 3. 优化优先级
 
-### 3.1 P0：Model semantic stream write-behind persistence
+### 3.1 Correctness prelude：Disposition `NONE` live retry/drain
 
-当前PostgreSQL操作已经由`RuntimeEventWriteService`在线程池中执行，event loop不会直接运行blocking transaction。但model stream仍在每次
-flush时：
-
-```text
-await commit_semantic(batch)
-    ->
-commit FULL
-    ->
-才继续读取下一批provider items
-```
-
-年龄定时器触发时，已经启动的next `read_next()`可以与commit部分重叠；但structural、max-events、max-chars触发的flush仍会在开始下一次
-provider read前等待durable commit。Long Plan中provider与durable writer只有约`7.3s`重叠，说明现有并行度远未覆盖大部分durable成本。
-
-第一优先应新增service-owned：
+`SessionModelCallControlDispositionOwner` 已经能持有 stable candidate、adopt durable winner，并在存在 pending candidate 时阻止
+`RunEnd` 与 `RuntimeSession.close()`。但持续 `NONE` 超过当前 bounded inline retry 后，尚无独立 service-owned worker继续：
 
 ```text
-ModelSemanticPersistencePipeline
+retry same stable candidate
+    -> FULL: fold + install permit/suppression + adopt winner
+    -> NONE: retain candidate + bounded backoff
+    -> UNKNOWN/PARTIAL: latch reconciliation
 ```
 
-让provider reader与durable persistence成为两个受同一`ModelStreamExecutionHandle`拥有的并行owner：
+因此 Stage 4.5 的第一个 PR 必须新增 session-owned retry/drain owner：
+
+- stable candidate仍只有一份；
+- waiter cancellation只detach，不取消owner；
+- safe point可以触发或join同一attempt，但不创建第二candidate；
+- close执行bounded drain；仍为`NONE`时保持fail-closed，不清除candidate；
+- `UNKNOWN/PARTIAL`立即latch，不降级成`NONE`；
+- restart recovery与live owner使用同一candidate identity和winner invariant。
+
+建议收敛为：
+
+```python
+class SessionModelCallControlDispositionRetryService:
+    def adopt_pending(
+        self,
+        candidate: ModelCallControlDispositionResolvedEvent,
+    ) -> DispositionRetryHandle: ...
+
+    async def join_or_retry(
+        self,
+        resolved_model_call_id: str,
+        *,
+        deadline_monotonic: float,
+    ) -> ModelCallControlResolutionResult: ...
+
+    async def drain_pending(
+        self,
+        *,
+        deadline_monotonic: float,
+    ) -> None: ...
+```
+
+每个call只允许一个entry：
 
 ```text
-commit ModelStart
-        |
-        v
-provider reader
-        |
-        +--> frozen stable semantic batches
-                  |
-                  v
-        bounded process-local queue
-                  |
-                  v
-        sequential persistence worker
-                  |
-                  v
-        commit + fold + publication enqueue
+PENDING_NONE
+    -> RETRYING(generation)
+    -> WINNER_FULL
 
-provider terminal draft
-        |
-        v
-seal queue -> drain all semantic batches FULL
-        |
-        v
-commit Terminal Projection + ModelCallEnd
-        |
-        v
-resolve Control Disposition
+PENDING_NONE / RETRYING
+    -> RECONCILIATION_REQUIRED
 ```
 
-这不是fire-and-forget：
+worker由service拥有，waiter使用`asyncio.shield()`或等价detach机制。Retry使用bounded exponential backoff与绝对deadline；generation/CAS
+防止迟到attempt覆盖新winner。`FULL`后必须完成fold、permit/suppression安装与winner adoption，才允许清除pending entry。
 
-- semantic candidates在enqueue前必须具有stable event ID/payload；
-- persistence worker严格按transport sequence顺序commit；
-- terminal、control、tool execution与final reply仍等待drain barrier；
-- queue达到events/bytes/batches hard bound时停止provider read并施加backpressure；
-- NONE重试原stable batch；
-- FULL推进confirmed cursor和terminal projection reducer；
-- UNKNOWN/PARTIAL保留owner、latch ledger并阻止terminal/control；
-- caller detach不取消pipeline；
-- Host close必须drain provider physical operation与semantic persistence owner。
+这是 correctness/liveness mini-PR，不依赖PERF0，也不授权提前实现通用write-behind subsystem。
 
-这项优化改变的是等待拓扑，不改变EventLog schema、semantic event数量或accounting。
-
-### 3.2 P0：Model semantic stream durable amplification
+### 3.2 P0：Model semantic stream batching amplification
 
 这是当前最高优先级。
 
@@ -416,7 +425,7 @@ event writer FIFO
 25ms latency bound可在持续输出中产生接近每秒40次flush机会。即使pool已消除多数物理connection建立，transaction、WAL、account CAS、
 bookkeeping event与Python DTO/fingerprint成本仍按batch重复。
 
-Write-behind pipeline完成后的batching阶段目标不是合并durable semantic events，而是：
+第一轮优化目标不是合并durable semantic events，也不是先改变reader/writer等待拓扑，而是：
 
 ```text
 减少 batch 次数
@@ -424,7 +433,79 @@ Write-behind pipeline完成后的batching阶段目标不是合并durable semanti
 保持 source item 与 durable semantic event 的 lossless 一一对应
 ```
 
-### 3.3 P0：Transcript projection evidence 重复读取
+当前样本给出强信号：
+
+```text
+Long Plan:       8019 provider reads / 1125 writer waits ~= 7.1
+Long compaction: 3584 provider reads /  635 writer waits ~= 5.6
+```
+
+这不是严格的`semantic events / transaction`，因为分子、分母都含少量其他操作；但足以说明实际batch远未稳定接近16-event hard bound。
+Long compaction只有少量block Start/End，主要放大器更可能是25ms age flush。
+
+PERF0必须先记录每次flush的：
+
+```text
+reason
+event count
+semantic UTF-8 bytes
+canonical stored-envelope bytes
+oldest event age
+```
+
+再选择target，不得直接将`25ms`武断改成`100ms`。
+
+### 3.3 P0：PostgreSQL fixed-cost reduction
+
+Batching会改变transaction workload，因此应先于SQL tuning落地。随后基于同一确定性fixture检查：
+
+```text
+queue wait
+connection lease wait
+transaction begin
+session advisory lock
+parent identity ensure
+candidate serialization
+materialization account read/CAS
+event multi-row insert
+run projection update
+commit/WAL
+reducer fold
+publication enqueue
+```
+
+优先优化有分段证据的fixed cost；不允许用更大pool、更大线程池或降低durability掩盖transaction amplification。
+
+### 3.4 P0 conditional：One-inflight write-behind
+
+Write-behind保留在路线中，但降级为batching与SQL优化后的条件性步骤。
+
+只有重新测量证明以下任一成立时才实施：
+
+- transaction数量已经明显下降，但单次commit latency仍串行占据model stream关键路径；
+- durable synchronous wait仍占显著墙钟，且存在可观测provider/persistence overlap headroom；
+- PostgreSQL RTT/WAL抖动在远程数据库或快速provider下重新成为主要阻塞；
+- first-visible latency、terminal drain与最大uncommitted tail仍能受hard bound约束。
+
+V1只允许：
+
+```text
+one in-flight physical semantic commit
+    +
+one bounded accumulation buffer
+```
+
+不得建立无界logical batch queue。释放provider read的边界是：
+
+```text
+durable FULL
+    +
+committed reducer fold complete
+```
+
+不得等待observer delivery；observer failure只能形成operational diagnostic。
+
+### 3.5 P0：Transcript projection evidence 重复读取
 
 Long Plan 中：
 
@@ -440,11 +521,11 @@ stable state的semantic count/accumulator与canonical ledger一致。
 这个证明是正确性所需，但同一个active base在连续model steps中会反复读取高度重叠的prefix。下一步应将其改为：
 
 ```text
-verified evidence cache at H
+verified projection cursor at H
         +
 canonical delta (H, new_H]
         ->
-verified evidence cache at new_H
+verified projection cursor at new_H
 ```
 
 而不是：
@@ -455,7 +536,7 @@ base
 read entire delta through new_H
 ```
 
-### 3.4 P1：Context artifact hydration 与 prepared projection复用
+### 3.6 P1：Context artifact hydration 与 Stage-4-owned prepared reuse
 
 以下内容可按immutable identity复用：
 
@@ -479,44 +560,18 @@ semantic owner fingerprint
 
 任何identity变化自然miss；cache read error与miss不得改变durable semantic identity。
 
-### 3.5 P1：PostgreSQL transaction 与writer物理路径
+PERF3只允许复用Stage 4已经冻结的transcript、rollup、manifest canonical representation等identity。不得缓存Stage 5尚未hard-cut的
+ContextSource collector、source registry或旧source ownership中间结果。
 
-当前已有：
-
-- critical ledger executor与auxiliary I/O executor分离；
-- process-owned PostgreSQL connection pool；
-- session-owned FIFO event writer；
-- write attempt absolute deadline；
-- parent session/run/turn identity cache；
-- multi-row event insert。
-
-下一步不是再引入另一套writer，而是测清并压缩现有一次batch的固定成本：
-
-```text
-queue wait
-connection lease wait
-transaction begin
-session advisory lock
-parent identity ensure
-candidate serialization
-materialization account read/CAS
-event multi-row insert
-run projection update
-commit
-reducer fold
-publisher enqueue
-```
-
-在没有分段数据前，不应凭直觉调整pool size、worker count或PostgreSQL timeout。
-
-### 3.6 P2：Durable semantic delta coalescing
+### 3.7 P2：Durable semantic delta coalescing
 
 只有在完成：
 
-1. model semantic write-behind pipeline；
-2. writer固定成本优化；
-3. adaptive batching；
-4. verified evidence cache；
+1. deterministic profiling；
+2. semantic batching与structural grouping；
+3. PostgreSQL fixed-cost优化；
+4. 条件性write-behind decision gate；
+5. verified projection cursor；
 
 之后，durable writer仍显著占用墙钟，才考虑将相邻source delta合并为durable chunk event。
 
@@ -569,17 +624,44 @@ charged_payload_bytes
 postgres_round_trip_count
 ```
 
-Model semantic pipeline还必须记录：
+Session-owned retry/outbox liveness还必须记录：
 
 ```text
-semantic_pipeline_backlog_batches
-semantic_pipeline_backlog_events
-semantic_pipeline_backlog_bytes
+disposition_pending_candidate_count
+disposition_oldest_pending_age_seconds
+disposition_retry_attempt_count
+disposition_retry_outcome
+governance_outbox_pending_count
+governance_outbox_oldest_pending_age_seconds
+governance_outbox_dispatch_attempt_count
+governance_outbox_dispatch_outcome
+```
+
+Model semantic batching必须记录：
+
+```text
+semantic_flush_reason
+semantic_flush_event_count
+semantic_flush_source_item_count
+semantic_flush_utf8_bytes
+semantic_flush_canonical_envelope_bytes
+semantic_flush_oldest_age_seconds
+semantic_first_visible_commit_seconds
+logical_semantic_batches_per_1k_source_items
+semantic_events_per_logical_batch
+```
+
+若re-measure gate最终启用条件性write-behind，还必须追加：
+
+```text
+semantic_pipeline_pending_events
+semantic_pipeline_pending_bytes
+semantic_pipeline_oldest_unconfirmed_age_seconds
+semantic_pipeline_provider_ahead_seconds
 semantic_pipeline_backpressure_seconds
 semantic_pipeline_commit_inflight_seconds
 provider_persistence_overlap_seconds
-semantic_pipeline_drain_seconds
-semantic_pipeline_terminal_tail_seconds
+semantic_pipeline_terminal_drain_seconds
 ```
 
 这些metrics是operational observation：
@@ -598,7 +680,11 @@ authority_bundle_read_seconds
 authority_bundle_events/bytes
 projection_evidence_read_seconds
 projection_evidence_delta_events/bytes
-projection_evidence_cache_outcome
+projection_cursor_outcome
+projection_cursor_previous_through_sequence
+projection_cursor_requested_through_sequence
+projection_cursor_new_delta_events/bytes
+projection_authority_assembly_entries/bytes
 terminal_artifact_hydration_seconds
 named_fact_artifact_hydration_seconds
 subagent_checkpoint_restore_seconds
@@ -619,7 +705,9 @@ stream_read_wait_seconds
 source_item_count
 semantic_batch_count
 events_per_semantic_batch
-chars_per_semantic_batch
+semantic_utf8_bytes_per_batch
+canonical_envelope_bytes_per_batch
+oldest_event_age_per_batch
 semantic_batch_flush_reason
 terminal_commit_seconds
 ```
@@ -627,49 +715,135 @@ terminal_commit_seconds
 `semantic_batch_flush_reason`至少区分：
 
 ```text
-structural
-max_events
-max_chars
-max_age
+block_end
+tool_call_end
+hard_max_events
+hard_max_bytes
+target_age
 terminal
+provider_error
 cancellation
 ```
 
 ### 4.5 Benchmark协议
 
-固定三条代表轨迹：
+主要性能gate使用确定性fixture：
+
+1. 固定sanitized provider stream、固定source item与interarrival timing的model stream replay；
+2. 真实PostgreSQL上的固定candidate batch与固定account state；
+3. 冻结长ledger上的连续compile与projection cursor推进；
+4. batching、SQL与cursor fixture每项运行20–50次；
+5. 分别记录冷cache与稳定warm-cache结果。
+
+若PERF0分段证明时间仍主要消耗在PostgreSQL内部，后续深挖可以包含：
+
+- `pg_stat_statements`；
+- WAL bytes；
+- `EXPLAIN (ANALYZE, BUFFERS, WAL)`；
+- pool lease、advisory lock、transaction与commit/WAL分段。
+
+这些不是首轮batching baseline的前置条件。首轮不声称精确归因PostgreSQL实际commit transaction数量，也不声称精确归因单个Pulsara writer独占产生的WAL bytes。当前commit-port instrumentation只提供caller-observed wall time和logical batch count；cluster LSN差值只能作为`postgres_cluster_wal_lsn_delta_bytes`诊断趋势，不进入acceptance。
+
+Real-LLM只保留最终dogfood：
 
 1. Long Plan；
 2. Long manual compaction；
 3. Subagent system。
 
-每次性能验收：
+同一版本每条运行3次，报告median、range和最慢样本，不用3个样本计算稳定p95。记录模型slot、provider binding、输出
+tokens/source items与工具调用数量；provider总时间只作背景，不作为唯一pass/fail阈值。
 
-- 同一代码版本每条至少运行3次；
-- 报告median、p95与最慢样本；
-- 记录模型slot、provider binding、输出tokens/source items与工具调用数量；
-- provider总时间只作背景，不作为唯一pass/fail阈值；
-- 本地metrics使用绝对值与归一化值：
+所有fixture与dogfood都使用绝对值与归一化值：
 
 ```text
 durable seconds / 1,000 stored events
-transactions / 1,000 semantic source items
+logical semantic batches / 1,000 semantic source items
+events and canonical bytes / logical semantic batch
 bookkeeping events / business events
 context evidence bytes read / new transcript-domain bytes
 context prepare seconds / model step
 ```
+
+#### 4.5.1 Durable Runtime Dataset V1 接线状态
+
+离线数据集入口冻结为：
+
+```text
+benchmarks/durable-runtime/datasets/v1/
+├── writer-scenarios/
+└── context-scenarios/
+```
+
+`validate`、`plan`、`smoke`只验证typed dataset contract、case展开和worker隔离，不产生性能结论。首个真实production adapter为：
+
+```text
+model-semantic-batch-matrix
+```
+
+执行命令：
+
+```bash
+uv run python benchmarks/durable-runtime/runners/run_dataset.py \
+  benchmark-writer \
+  --postgres-dsn "$PULSARA_POSTGRES_DSN" \
+  --postgres-admin-dsn "$PULSARA_BENCHMARK_POSTGRES_ADMIN_DSN" \
+  --template-database pulsara \
+  --output .benchmarks/model-semantic-batch.jsonl
+```
+
+冻结规则：
+
+- application DSN使用普通Pulsara角色；
+- admin DSN只负责本地`CREATE DATABASE ... TEMPLATE ...`与`DROP DATABASE`；
+- 每个sample在计时前克隆clean template，计时后关闭RuntimeSession/pool并删除clone；
+- 外层baseline串行执行，场景内部并发由scenario自己控制；
+- batch 16是唯一production-valid baseline与semantic reference；
+- batch 4/8是显式`sensitivity_analysis`矩阵，只用于解释batching曲线，不得进入production acceptance；
+- batch 1/32/64只属于dataset counterfactual analysis，production writer adapter拒绝执行；
+- manifest中的5次warmup、30次measured才是production baseline；
+- scenario必须显式冻结`production_baseline_case_id=batch-16`，且必须与`semantic_reference_case_id`相同；
+- production acceptance要求`git.dirty=false`；dirty worktree即使grader和iteration完整也只能生成diagnostic结果；
+- `--case-id`或`--diagnostic-*-iterations`只用于接线诊断，结果必须写`measurement_contract_adhered=false`，不得进入acceptance；
+- `--case-kind sensitivity_analysis`可正式执行batch 4/8的5次warmup与30次measured，但所有sample必须保持`production_acceptance_eligible=false`；
+- 每个measured sample先通过ordered semantic content、terminal projection、physical settlement balance和accounted writer path四项grader，再接纳性能数据；
+- 输出为sample JSONL及同名`.summary.json`，必须保存case/manifest/build/PostgreSQL/runtime-capacity identity、raw vector hash，以及每case的median、nearest-rank p95、min/max；
+- `semantic_commit_port_wall_seconds`是caller等待完整production commit port的墙钟时间，不冒充纯PostgreSQL时间；
+- `logical_semantic_batch_count`与`logical_model_commit_count`是commit-port调用数，不冒充物理transaction数；
+- `postgres_cluster_wal_lsn_delta_bytes`只作diagnostic，不进入acceptance。
+
+2026-07-16的单次diagnostic wiring结果不是正式baseline，但证明adapter已走通真实：
+
+```text
+LLMRuntime
+→ RuntimeSessionModelStreamEventCommitPort
+→ RuntimeEventWriteService
+→ PostgreSQL EventLog/materialization account
+→ terminal projection/rollout settlement
+```
+
+同一8192-delta workload的观测为：
+
+| case | logical semantic batches | model stream wall | semantic commit-port wall | ledger events | cluster WAL LSN delta |
+|---|---:|---:|---:|---:|---:|
+| batch-4 | 2050 | 32.124s | 29.347s | 10253 | 44,182,704 |
+| batch-8 | 1026 | 27.195s | 24.474s | 9229 | 37,470,424 |
+| batch-16 | 514 | 26.616s | 23.020s | 8717 | 33,748,896 |
+
+三组结果的ordered semantic content与terminal projection semantic identity完全一致；每组physical settlement分别通过自身余额闭合验证，且materialization account high-water与ledger high-water一致。physical charged/bookkeeping成本允许随batch schedule变化，并作为解释性metric输出。该结果只用于证明fixture/grader有辨识力，并支持“先优化batching/固定commit成本”的优先级；正式决策仍以完整20–50次baseline为准。
 
 ### 4.6 PERF0完成条件
 
 - 不再依赖临时pytest plugin获取上述分段；
 - metrics关闭时不改变EventLog、manifest或provider payload；
 - metrics开启时同一test的durable fingerprints完全一致；
+- deterministic fixtures可以重复生成稳定median/p95、range与归一化writer指标；
 - 三条dogfood均输出machine-readable profile artifact；
+- dogfood只报告三次median/range，不伪装成稳定p95；
 - profile可区分queue、PostgreSQL、account/reducer与publication成本。
 
 ---
 
-## 5. PERF1：Model Semantic Write-Behind 与自适应批处理
+## 5. PERF1：Semantic Batching、PostgreSQL 与条件性 Write-Behind
 
 ### 5.1 当前等待拓扑
 
@@ -702,142 +876,86 @@ commit while read_task remains alive
 
 但size/char/structural flush会在下一次read task创建前等待commit。这解释了Long Plan中只有`7.3s` provider/durable overlap。
 
-### 5.2 `ModelSemanticPersistencePipeline`
+### 5.2 Structural grouping
 
-新增process-local、service-owned handle：
+Semantic block boundary与durable transaction boundary不是同一概念。V1冻结：
 
-```python
-class ModelSemanticPersistencePipeline:
-    async def enqueue(
-        self,
-        batch: FrozenModelSemanticBatch,
-    ) -> None: ...
+- Text/Thinking/Data/ToolCall `Start` 可以等待后续delta，不单独flush；
+- `End` 与该block前面尚未提交的delta同批，然后flush；
+- `ToolCallEnd`只表示参数流闭合，不是tool execution permit，不要求独立transaction；
+- 无delta的`Start -> End`允许同批提交；
+- Provider error、cancel和provider terminal必须形成drain/commit barrier；
+- `ModelCallStart`、terminal projection、`ModelCallEnd`、control disposition继续保持原有同步边界；
+- tool execution仍只能发生在terminal FULL、materialized result FULL与accepted disposition FULL之后。
 
-    async def seal_and_drain(self) -> ConfirmedSemanticPrefix: ...
-
-    async def request_cancel(self, *, reason: str) -> None: ...
-
-    async def wait_physical_completion(self) -> SemanticPersistenceOutcome: ...
-```
-
-推荐状态机：
+该分组只改变transaction边界，不改变：
 
 ```text
-ACCEPTING
-    -> SEALED
-    -> DRAINING
-    -> DRAINED_FULL
-
-ACCEPTING/SEALED/DRAINING
-    -> RECONCILIATION_REQUIRED
-
-ACCEPTING
-    -> CANCEL_REQUESTED
-    -> DRAINING
+event type
+stable event ID
+event payload
+canonical event order
+terminal projection
+replay result
 ```
 
-Pipeline由`ModelStreamExecutionHandle/Registry`拥有，而不是provider subscriber或Agent caller拥有。
+### 5.3 Batching hard bounds
 
-每个queued batch保存：
+当前physical burst contract继续是绝对上界。Batching controller只能在上界内选择target：
+
+```text
+target_batch_events <= max_batch_events
+target_batch_utf8_bytes <= max_batch_payload_bytes
+target_batch_age <= max_batch_age
+```
+
+Batch candidate必须在进入writer前冻结：
 
 ```text
 resolved_model_call_id
 model_call_start_event_id
-first_transport_sequence_index
-semantic_item_count
-expected_previous_semantic_event_id
+first/last transport sequence index
+expected previous semantic event ID
 stable event candidates
-candidate events/bytes
+source item count
+semantic UTF-8 bytes
+canonical envelope byte estimate
 batch fingerprint
-enqueue order
+flush reason
 ```
 
-### 5.3 单一物理writer与本地bounded backlog
+canonical pre-commit charge validation与事务内真实stored-envelope校验保持不变。
 
-Pipeline不得一次把大量logical batches塞入session event writer FIFO。正确形态是：
+### 5.4 Flush matrix
 
-```text
-最多一个 active RuntimeEventWriteService operation
-    +
-pipeline-owned bounded pending batches
-```
+#### Block Start
 
-这样：
+- 不单独flush；
+- 等待delta、对应End、target age或hard bound。
 
-- semantic backlog不会长期占满全session writer queue；
-- RunEnd、checkpoint repair或其他control facts仍能获得writer admission；
-- pipeline可以在前一个commit期间继续接收provider items；
-- commit worker完成后从本地queue取下一batch；
-- terminal drain具有唯一owner。
+#### Block End / ToolCallEnd
 
-建议冻结三重上限：
+- 与前面的pending delta同批；
+- 形成一次flush；
+- 不产生tool execution permit。
 
-```text
-max_pending_semantic_batches
-max_pending_semantic_events
-max_pending_semantic_payload_bytes
-```
+#### Hard max events/bytes
 
-并要求：
+- 立即冻结当前batch；
+- 同步模式等待FULL后继续provider read；
+- 不改变下一batch expected previous semantic event identity。
 
-```text
-queued uncommitted usage
-    <= active model physical reservation remaining capacity
-    <= model physical burst contract
-```
+#### Target age
 
-达到任一上限后，provider reader停止调用`read_next()`，直到backlog下降到low-water。
+- 由单一timer主动唤醒；
+- 不因每个25ms tick创建多个commit owner；
+- age从batch内最早尚未FULL的semantic event计算。
 
-### 5.4 Commit、terminal 与 cancellation矩阵
+#### Provider error / cancellation / terminal
 
-#### Semantic FULL
-
-- fold committed reducer；
-- apply committed terminal projection reducer；
-- 推进confirmed semantic cursor；
-- 完成对应batch waiter；
-- 启动下一batch。
-
-#### Semantic NONE
-
-- 保留同一stable candidate；
-- 按bounded retry policy重试；
-- 不允许后续batch越过；
-- deadline耗尽后终止provider read；
-- 将candidate转移给session-owned pending persistence owner；
-- 阻止terminal/control/close越过；
-- 后续safe point或close继续bounded retry；进程退出后的Start-without-End才由reopen recovery收口。
-
-#### Semantic UNKNOWN/PARTIAL
-
-- latch ledger reconciliation；
-- 停止新provider read；
-- 保留pipeline与physical reservation owner；
-- 不得生成terminal projection或control disposition；
-- Host close fail closed。
-
-#### Provider terminal先到达
-
-- 保存terminal draft；
-- seal pipeline；
-- 等待全部semantic batch FULL；
-- 验证terminal semantic item count等于confirmed cursor；
-- 然后才生成并commit terminal batch。
-
-#### Explicit cancellation
-
-- 同时request cancel provider physical operation；
-- seal semantic pipeline；
-- physical provider与persistence owner分别drain；
-- 已接收且已enqueue的semantic facts仍按stable candidate收口；
-- 两个owner均可信完成后才能commitcancelled terminal。
-
-#### Process crash
-
-- 未commit的process-localbacklog不是durable authority；
-- reopen仍按Start-without-End recovery处理；
-- 因此backlog hard bound同时也是最大uncommitted semantic tail contract；
-- 不得通过无界queue换取吞吐。
+- 先flush并确认此前semantic prefix；
+- provider error与cancelled/runtime_error结果仅供审计和UI，不进入成功tool/reply控制路径；
+- terminal lifecycle不得越过`NONE/UNKNOWN/PARTIAL`。
 
 ### 5.5 不直接写死一个更大的25ms
 
@@ -863,19 +981,19 @@ queued uncommitted usage
 
 ```text
 target_batch_events
-target_batch_chars
+target_batch_utf8_bytes
 target_batch_age
 recent_commit_latency_ewma
 recent_provider_interarrival_ewma
 pending_source_items
-pending_chars
+pending_utf8_bytes
 ```
 
 Hard bounds仍来自versioned physical burst contract：
 
 ```text
 events <= max_batch_events
-chars <= max_batch_chars
+UTF-8 bytes <= max_batch_payload_bytes
 age <= max_batch_age
 ```
 
@@ -883,16 +1001,16 @@ Controller只在hard bounds以内选择更合适的flush点。
 
 建议规则：
 
-1. structural event仍立即flush；
-2. terminal/cancellation前必须flush；
-3. pending batch达到hard event/char bound立即flush；
-4. provider item密集且最近commit latency高时，增大target events/chars，减少transaction；
+1. Start不单独flush，End/ToolCallEnd与前面的delta同批后flush；
+2. provider error、terminal与cancellation前必须flush；
+3. pending batch达到hard event/byte bound立即flush；
+4. provider item密集且最近commit latency高时，在hard bound内增大target events/bytes；
 5. provider item稀疏或UI latency接近上界时，按age flush；
 6. writer queue已有积压时，不为每个25ms tick继续创建独立commit owner；
-7. 同一个call始终只有一个pending semantic commit；
+7. 同步batching阶段同一个call始终只有一个pending semantic commit；
 8. controller状态不durable，不进入fingerprint；reopen仍只从confirmed semantic cursor恢复。
 
-### 5.7 Writer侧可选micro-coalescing
+### 5.7 PERF1B可选：Writer侧micro-coalescing
 
 RuntimeEventWriteService可以在物理开始前识别：
 
@@ -917,7 +1035,7 @@ no structural/terminal boundary
 
 若实现复杂度超过LLMRuntime侧adaptive batching收益，则V1不做writer-side coalescing。
 
-### 5.8 PostgreSQL优化
+### 5.8 PERF1B：PostgreSQL fixed-cost优化
 
 在PERF0确认瓶颈后，按顺序检查：
 
@@ -937,19 +1055,18 @@ no structural/terminal boundary
 - 将publication success误当作commit success；
 - 将多个session塞入同一无deadline巨型transaction。
 
-### 5.9 PERF1目标
+### 5.9 PERF1A/PERF1B目标
 
 在不改变source item数量、durable event数量和semantic fingerprint的前提下：
 
-- provider reader与semantic persistence在backlog未达hard bound时保持并行；
-- Long Plan provider/durable overlap的三次median至少增加30s；
 - terminal/control/tool execution仍只消费FULL committed semantic prefix；
+- deterministic stream fixture的`logical semantic batches / 1,000 source items`至少下降40%；
 - Long Plan `durable writer waits / model call`至少下降40%；
-- Long compaction `transactions / 1,000 source items`至少下降40%；
-- writer p95 queue wait不恶化；
+- Long compaction `logical semantic batches / 1,000 source items`至少下降40%；
+- deterministic PostgreSQL fixture的writer p95 queue wait与commit p95不恶化；
 - first-item与UI semantic latency不超过contract上界；
 - cancellation/recovery/UNKNOWN测试保持全绿；
-- durable exclusive time的三次median至少下降25%。
+- dogfood durable exclusive三次median应显著下降，但不以provider随机变快作为通过依据。
 
 Long Plan当前provider与durable联合关键路径近似为：
 
@@ -960,14 +1077,146 @@ Long Plan当前provider与durable联合关键路径近似为：
 =124.4s
 ```
 
-理想完全重叠的理论下界为`max(56.5s, 75.2s)=75.2s`，即最多可隐藏约`49s`。实际仍有Start、terminal、
-disposition、queue backpressure与跨model-step barrier，因此PERF1不承诺达到理论上界，但应证明节省不是仅来自provider随机变快。
+理想完全重叠的理论下界为`max(56.5s, 75.2s)=75.2s`，即最多可隐藏约`49s`。这只是后续write-behind的理论headroom，
+不是PERF1A/PERF1B的目标。
 
 这些是初始工程目标，不是永久产品常量；PERF0基线可在实施前调整具体阈值，但不得删除量化验收。
 
+### 5.10 Re-measure gate
+
+PERF1A batching与PERF1B PostgreSQL fixed-cost优化完成后，必须先重新运行确定性fixture与三条real-LLM dogfood。
+
+只有在以下判断成立时才进入PERF1C：
+
+```text
+logical batch amplification已显著下降
+    &&
+单次durable commit latency仍串行进入model stream关键路径
+    &&
+provider read与persistence存在可观测重叠空间
+    &&
+hard-bound queue不会突破physical reservation、UI latency或terminal drain contract
+```
+
+至少比较：
+
+```text
+durable critical-path share
+logical semantic batches / 1,000 source items
+commit p50/p95
+provider interarrival p50/p95
+first-visible semantic latency
+estimated overlap headroom
+```
+
+若剩余成本主要仍是transaction数量或单batch SQL放大，则继续优化batching/SQL，不得用write-behind隐藏它。
+
+Gate必须输出machine-readable、非durable、secret-safe report：
+
+```text
+baseline_profile_id
+candidate_profile_id
+fixture_contract_fingerprint
+logical_semantic_batches_per_1k_source_items
+commit_latency_p50/p95
+provider_interarrival_p50/p95
+durable_critical_path_seconds
+estimated_overlap_headroom_seconds
+first_visible_latency_p95
+decision = implement_write_behind | skip_write_behind
+bounded_reason_codes
+```
+
+该report不进入EventLog、manifest或provider fingerprint，但作为PERF1C PR是否存在的审计依据。
+
+### 5.11 PERF1C：`ModelSemanticPersistencePipeline`
+
+只有通过re-measure gate才新增process-local、service-owned handle：
+
+```python
+class ModelSemanticPersistencePipeline:
+    async def enqueue(
+        self,
+        batch: FrozenModelSemanticBatch,
+    ) -> None: ...
+
+    async def seal_and_drain(self) -> ConfirmedSemanticPrefix: ...
+
+    async def request_cancel(self, *, reason: str) -> None: ...
+
+    async def wait_physical_completion(self) -> SemanticPersistenceOutcome: ...
+```
+
+Pipeline由`ModelStreamExecutionHandle/Registry`拥有，不由provider subscriber或Agent caller拥有。状态机：
+
+```text
+ACCEPTING
+    -> SEALED
+    -> DRAINING
+    -> DRAINED_FULL
+
+ACCEPTING/SEALED/DRAINING
+    -> RECONCILIATION_REQUIRED
+
+ACCEPTING
+    -> CANCEL_REQUESTED
+    -> DRAINING
+```
+
+物理拓扑严格限制为：
+
+```text
+one active RuntimeEventWriteService operation
+    +
+one bounded accumulation buffer
+```
+
+不得将大量logical batches预先塞入session writer FIFO。
+
+### 5.12 Write-behind hard bounds
+
+至少冻结：
+
+```text
+max_pending_events
+max_pending_payload_bytes
+max_oldest_unconfirmed_age
+max_provider_ahead_seconds
+max_terminal_drain_seconds
+```
+
+并要求：
+
+```text
+uncommitted usage
+    <= active model physical reservation remaining capacity
+    <= model physical burst contract
+```
+
+provider可在一个commit in-flight期间继续填充唯一bounded accumulation buffer。达到任一pending上限后暂停provider
+`read_next()`；解除backpressure只依赖前一batch durable `FULL`与reducer fold，不等待publisher/observer。
+
+Commit矩阵：
+
+- `FULL`：fold reducer、推进confirmed cursor、释放buffer；
+- `NONE`：保留同一candidate、bounded retry，不允许后续batch越过；
+- 持续`NONE`：终止provider read，将candidate提升给session-owned persistence retry owner；
+- `UNKNOWN/PARTIAL`：latch、保留physical owner，禁止terminal/control；
+- provider terminal：保存terminal draft，seal并FULL drain后才提交terminal batch；
+- explicit cancellation：provider physical operation与persistence owner分别drain；
+- process crash：未commit buffer不是authority，按Start-without-End recovery处理。
+
+### 5.13 PERF1C目标
+
+- provider/persistence overlap在确定性fixture中可重复测得；
+- Long Plan provider/durable overlap三次median至少增加30s，或由PERF0重新冻结等价归一化目标；
+- durable exclusive三次median至少下降25%，且不是provider随机差异；
+- bounded backlog、terminal drain、NONE/UNKNOWN/PARTIAL与close测试全绿；
+- 关闭PERF1C后，ordered durable events、terminal projection、disposition和provider payload完全相同。
+
 ---
 
-## 6. PERF2：Verified Incremental Transcript Evidence
+## 6. PERF2：Verified Transcript Projection Cursor
 
 ### 6.1 当前重复工作
 
@@ -1051,16 +1300,16 @@ O(repeated historical prefixes)
 `context-live-authority-read`只有约`2.2s`。同样的verified incremental原则尚未应用到projection evidence，才造成`19.0s`
 的单项成本。
 
-### 6.3 新cache
+### 6.3 `VerifiedTranscriptProjectionCursor`
 
 新增session-owned：
 
 ```python
-class VerifiedTranscriptProjectionEvidenceCache:
+class VerifiedTranscriptProjectionCursor:
     ...
 ```
 
-cache entry至少包含：
+Cursor至少包含：
 
 ```text
 runtime_session_id
@@ -1068,77 +1317,164 @@ projection_base_identity
 projection_base_fingerprint
 event_domain_registry_contract_fingerprint
 reducer_contract_fingerprint
+verified_through_sequence
+prefix_semantic_event_count
+prefix_semantic_accumulator
+prefix_ledger_continuity_accumulator
+delta_identity_chunk_vector
+stable_state_fingerprint
+cursor_fingerprint
+```
+
+`delta_identity_chunk_vector`保存完整、按canonical顺序排列的semantic delta identities；它是process-local、immutable、
+structurally-shared persistent data structure，不是新的durable artifact或authority。
+
+每个identity至少保存：
+
+```text
+runtime_session_id
+sequence
+event_id
+event_type
+event_schema_version
+event_schema_fingerprint
+payload_fingerprint
+envelope_fingerprint
+```
+
+它必须足以原样重建当前`transcript_domain_delta_refs`与prepared semantic-envelope fingerprint序列，不能只保存event ID或单一prefix
+accumulator。
+
+Cursor不得复制：
+
+- stable transcript entries；
+- terminal projection documents；
+- artifact content registry；
+- complete normalized transcript；
+- manifest payload。
+
+这些仍由既有`TranscriptProjectionStateStore`与document/artifact registry拥有。Cursor只证明durable prefix并保存构造完整authority
+所必需的delta identities。
+
+Cursor key不得只使用`run_id`或`window_id`。
+
+### 6.4 Committed reducer seam 与原子快照
+
+每次canonical event batch `FULL` 且committed reducer成功后，通过同一seam增量推进：
+
+```text
+TranscriptProjectionStateStore
+    +
+VerifiedTranscriptProjectionCursor
+```
+
+二者必须：
+
+- 使用同一canonical high-water；
+- 在同一session-owned lock或单一composite state owner下推进；
+- 对外提供同一版本的atomic snapshot；
+- 不允许先读cursor、再从另一个时刻读取stable state；
+- reducer failure、sequence gap或contract mismatch时同时停止推进并fail closed。
+
+非transcript event只推进ledger continuity/high-water，不向delta identity vector追加元素。
+
+### 6.5 PostgreSQL exact prefix API
+
+PostgreSQL每条event row已经保存prefix semantic count、semantic accumulator与ledger continuity accumulator。新增：
+
+```python
+def read_transcript_prefix_fact_at_sequence(
+    runtime_session_id: str,
+    sequence: int,
+) -> TranscriptPrefixFact: ...
+```
+
+该API按exact sequence执行O(1) indexed read，不扫描prefix。它必须返回并验证：
+
+```text
+runtime_session_id
 through_sequence
 semantic_event_count
 semantic_accumulator
 ledger_continuity_accumulator
-stable_state_fingerprint
-stable_entries
-terminal_document_refs
-verified_artifact_content identities
-entry_fact_fingerprint
+event row identity/schema attribution
 ```
 
-cache key不得只使用`run_id`或`window_id`。
-
-### 6.4 增量扩展
+### 6.6 增量扩展
 
 请求`Hnew`时：
 
-#### Cache exact hit
+#### Cursor exact hit
 
 ```text
-cached.through_sequence == Hnew
+cursor.verified_through_sequence == Hnew
 ```
 
-直接复用prepared evidence。
+读取`Hnew`的durable prefix fact，与cursor及stable state snapshot精确比较；一致后直接使用cursor中的完整delta identities组装authority。
 
-#### Cache incremental hit
+#### Cursor incremental hit
 
 ```text
-cached.through_sequence < Hnew
+cursor.verified_through_sequence < Hnew
 ```
 
 只读取：
 
 ```text
-(cached.through_sequence, Hnew]
+(cursor.verified_through_sequence, Hnew]
 ```
 
 并验证：
 
-- delta.before与cached prefix count/accumulator完全一致；
-- delta ledger continuity before与cached accumulator一致；
-- reducer从cached stable/live state增量apply后得到delta.after；
+- delta.before与cursor prefix count/accumulator完全一致；
+- delta ledger continuity before与cursor continuity一致；
+- reducer从cursor对应的stable state增量apply后得到delta.after；
 - final state与RuntimeSession committed reducer snapshot一致；
+- durable prefix fact at `Hnew`与delta.after一致；
+- 新delta identities追加到chunk vector，不重建旧chunk；
 - named terminal document refs可按exact IDs补充hydrate。
 
-#### Base/key mismatch
+#### Cursor落后、倒退与base mismatch
 
-以下任一发生时cache miss：
+以下任一发生时discard cursor并走existing exact restore：
 
 - run seed改变；
 - checkpoint/rebase改变；
 - active window generation改变；
 - event-domain/reducer contract改变；
 - semantic accumulator不连续；
-- cache payload损坏；
+- cursor payload损坏；
 - requested high-water倒退。
 
-Miss走现有canonical restore，不猜测、不修补。
+Cursor不得猜测或静默修补。若canonical restore本身无法证明连续性，则fail closed。
 
-### 6.5 Boundedness
+### 6.7 Boundedness与复杂度口径
 
-cache必须：
+Cursor owner必须：
 
 - 只保存active/recent bounded projection bases；
-- 具有entry count与payload bytes双上限；
-- immutable entry可结构共享；
-- oversized entry在mutation前跳过，不清空已有cache；
+- chunk具有固定最大identity count与byte bound；
+- 通过immutable chunk结构共享旧prefix；
+- base/window/reducer contract变化时明确retire旧cursor；
 - close时可直接丢弃；
-- cache eviction不影响replay或checkpointability。
+- cursor eviction不影响replay或checkpointability。
 
-### 6.6 Artifact hydration cache
+V1只承诺：
+
+```text
+database range read + event decode = O(new transcript-domain delta)
+```
+
+V1不承诺：
+
+```text
+entire compile = O(new delta)
+```
+
+因为最终authority DTO、完整refs tuple、fingerprint与manifest serialization仍是`O(active prefix)`。端到端增量化需要Merkle/range-proof
+durable schema hard cut，不属于Stage 4.5。
+
+### 6.8 Verified artifact hydration cache
 
 新增或复用bounded verified-content cache：
 
@@ -1157,12 +1493,12 @@ cache必须：
 
 禁止只按artifact ID缓存未验证正文。
 
-### 6.7 可并行的context准备
+### 6.9 可并行的context准备
 
 在authority high-water、active window与projection base冻结后，以下操作可按依赖图并行，而不是全部串行await：
 
 ```text
-projection evidence delta read
+projection cursor new-delta read
 subagent graph checkpoint restore
 compaction summary/source artifact read
 已知exact named artifact hydration
@@ -1183,7 +1519,7 @@ subagent graph restore
     -> source selection
     -> selected result exact reads
 
-projection evidence
+projection cursor / stable state snapshot
     -> required terminal content refs
     -> terminal artifact hydration
     -> normalized transcript
@@ -1195,30 +1531,40 @@ normalized transcript
 
 不得为了并行化而在多个任务中复制snapshot truth。
 
-### 6.8 PERF2目标
+### 6.10 PERF2目标
 
 - 连续compile只读取new transcript-domain delta；
 - Long Plan的
   `transcript-projection-evidence-read` median从约19s下降至少70%；
 - Long Plan `context prepare / model step` median低于0.75s；
-- cache hit/miss生成相同Context Input Manifest fingerprint；
-- 删除cache后exact replay结果不变；
+- cursor hit/exact restore生成相同完整delta identities与Context Input Manifest fingerprint；
+- cursor与stable state必须在同一high-water原子快照；
+- 删除cursor后exact replay结果不变；
 - corruption、contract drift、high-water rollback均fail closed；
 - context evidence read bytes接近`O(new delta + newly referenced artifacts)`，不再接近`O(base..H)`。
+- 不把最终authority DTO构建或manifest serialization误报为`O(new delta)`。
 
 ---
 
-## 7. PERF3：Prepared Context 复用
+## 7. PERF3：Stage-4-Owned Prepared Context 复用
 
 PERF2完成后，再优化以下CPU与artifact路径。
+
+本阶段只允许复用Stage 4已经冻结、且不会被Stage 5 ContextSource Ownership Hard Cut重新定义的输入。禁止缓存：
+
+- 旧ContextSource collector输出；
+- 尚未hard-cut的source registry决定；
+- 旧source ownership facade；
+- current `AgentRuntime` context拼接顺序；
+- 任何以mutable producer状态为key的prepared context。
 
 ### 7.1 Provider projection
 
 Invocation timing是每次compile动态事实，因此不能缓存跨invocation的最终timing header；但可以复用：
 
 - durable stable transcript semantic；
-- section membership basis；
-- lowering lane；
+- transcript message/block placement basis；
+- transcript lowering lane；
 - timing source attribution；
 - normalized content hydration；
 - token estimate中不依赖`compiled_at`的静态部分。
@@ -1267,6 +1613,7 @@ carrier contract fingerprint
 - dynamic timing仍按本次compiled_at正确重算；
 - manifest大型fixture每次compile只做一次完整canonical serialization；
 - active rollup不因unrelated append失效；
+- Stage 5删除旧ContextSource ownership时不需要迁移或兼容PERF3 cache schema；
 - exact provider payload与当前实现byte-for-byte一致。
 
 ---
@@ -1288,111 +1635,166 @@ Stage 4.5不做：
 - 让context compiler读取mutable LoopState；
 - 把Long-Horizon token compaction用于处理event transaction pressure；
 - 提前实现Stage 5 ContextSource registry；
+- 在PERF1A/PERF1B重新测量前默认实施write-behind；
+- 将governance transactional outbox误判为永久split-brain并另造第二事实通道；
+- 将projection cursor称为durable authority或声称整个compile已是`O(new delta)`；
 - 以单次最快dogfood作为性能完成证据。
 
 ---
 
 ## 9. 建议PR顺序
 
+### DISP0：Disposition live retry/drain owner
+
+- session-owned stable candidate retry service；
+- shared attempt/future与waiter cancellation isolation；
+- `FULL/NONE/UNKNOWN/PARTIAL`矩阵；
+- safe point join、RunEnd blocker与Host close bounded drain；
+- restart recovery identity join；
+- 不引入semantic write-behind。
+
 ### PERF0：Typed runtime profiling
 
 - writer/context/provider分段metrics；
-- machine-readable dogfood profile；
-- 三次median基线；
+- deterministic provider stream、PostgreSQL batch与long-ledger compile fixtures；
+- 每个fixture运行20–50次并报告median/p95；
+- machine-readable dogfood profile与三次median/range；
+- `pg_stat_statements`、WAL bytes与`EXPLAIN (ANALYZE, BUFFERS, WAL)`；
 - metrics关闭/开启semantic equality测试。
 
-### PERF1A：Model semantic write-behind pipeline
-
-- `ModelSemanticPersistencePipeline`与registry ownership；
-- 单active writer + bounded local backlog；
-- provider reader/persistence并行；
-- terminal seal/drain barrier；
-- NONE/FULL/UNKNOWN/PARTIAL/cancellation矩阵；
-- Host close与restart recovery；
-- 不改durable event schema。
-
-### PERF1B：Semantic batching controller
+### PERF1A：Semantic batching与structural grouping
 
 - flush reason；
+- Start等待delta，End与delta同批后flush；
+- ToolCallEnd不形成独立transaction或execution permit；
 - adaptive target；
 - hard burst bounds不变；
-- cancellation/terminal/structural立即flush；
+- provider error/cancellation/terminal形成barrier；
+- first-visible latency与oldest pending age上限；
 - 不改durable event schema。
 
-### PERF1C：Writer/PostgreSQL fixed-cost reduction
+### PERF1B：Writer/PostgreSQL fixed-cost reduction
 
 - 根据PERF0数据减少round trip；
 - account CAS、event insert、parent projection批处理；
 - connection/pool/lock telemetry；
 - 可选writer-side compatible queue coalescing。
 
-### PERF2：Verified incremental evidence cache
+### PERF1R：Re-measure decision gate
 
-- evidence cache DTO与owner；
-- delta extension；
-- bounded artifact hydration cache；
+- 重跑deterministic fixture与三条dogfood；
+- 判断剩余成本来自transaction amplification还是同步commit latency；
+- 冻结是否进入PERF1C的量化结论；
+- 若write-behind收益不足，直接跳过PERF1C。
+
+### PERF1C：Conditional one-inflight write-behind
+
+- `ModelSemanticPersistencePipeline`与registry ownership；
+- one active commit + one bounded accumulation buffer；
+- max events/bytes/age/provider-ahead/terminal-drain hard bounds；
+- provider reader/persistence并行；
+- terminal seal/drain barrier；
+- persistent `NONE`提升到session-owned persistence owner；
+- `FULL/NONE/UNKNOWN/PARTIAL/cancellation`矩阵；
+- Host close与restart recovery；
+- 不改durable event schema。
+
+### PERF2A：Verified transcript projection cursor
+
+- cursor DTO与session owner；
+- structurally-shared chunked delta identity vector；
+- cursor与stable state同high-water原子推进/快照；
+- PostgreSQL exact-sequence prefix fact API；
+- new-delta extension；
 - checkpoint/rebase/window invalidation；
 - exact restore fallback与negative tests。
 
-### PERF3：Prepared context reuse
+### PERF2B：Verified artifact hydration cache
+
+- digest/size/media type/codec/owner完整key；
+- terminal/named fact/compaction/checkpoint hydration；
+- bounded LRU与oversize pre-check；
+- cache hit/miss semantic equality。
+
+### PERF3：Stage-4-owned prepared context reuse
 
 - static provider projection basis；
 - single canonical manifest representation；
 - prepared rollup cache修正；
 - token estimate静态部分复用。
 
-### PERF4：Re-measure and decision gate
+### PERF4：Final re-measure and acceptance
 
-- 重跑三条dogfood各至少3次；
+- 重跑deterministic fixtures；
+- 重跑三条dogfood各3次；
 - 全量non-real；
 - 全量real-LLM + dogfood；
 - PostgreSQL/Inspector/close/recovery故障矩阵；
 - 决定是否需要另立durable semantic delta coalescing hard-cut规格；
-- 若PERF1/PERF2已达到目标，直接回到Stage 5。
+- 若已达到目标，直接回到Stage 5。
 
 ---
 
 ## 10. 测试矩阵
 
+名称以`conditional_model_semantic_pipeline`开头的测试只在PERF1R选择实施PERF1C时成为required acceptance；若decision为
+`skip_write_behind`，则必须改为验证pipeline生产类型、配置入口与owner没有进入production wiring。
+
 ### 10.1 Performance
 
+- `test_disposition_none_live_retry_adopts_same_candidate_winner`
+- `test_deterministic_provider_stream_profile_is_reproducible`
+- `test_postgres_semantic_batch_benchmark_reports_cluster_wal_diagnostic`
+- `test_long_ledger_compile_benchmark_reads_only_new_delta`
 - `test_real_long_plan_emits_runtime_performance_profile`
 - `test_real_long_compaction_emits_runtime_performance_profile`
 - `test_real_subagent_system_emits_runtime_performance_profile`
-- `test_model_semantic_pipeline_overlaps_provider_read_and_durable_commit`
-- `test_model_semantic_pipeline_applies_bounded_backpressure`
-- `test_semantic_batching_reduces_transactions_without_changing_events`
+- `test_semantic_start_waits_and_end_flushes_with_prior_delta`
+- `test_tool_call_end_does_not_force_standalone_transaction`
+- `test_semantic_batching_reduces_logical_batches_without_changing_events`
+- `test_semantic_batching_records_flush_reason_bytes_and_oldest_age`
+- `test_conditional_model_semantic_pipeline_overlaps_provider_and_commit`
+- `test_conditional_model_semantic_pipeline_applies_bounded_backpressure`
 - `test_incremental_evidence_reads_only_new_delta`
-- `test_projection_evidence_cache_avoids_repeated_prefix_decode`
+- `test_projection_cursor_avoids_repeated_prefix_decode`
+- `test_projection_cursor_and_stable_state_freeze_same_high_water`
 - `test_manifest_factory_serializes_once_per_compile_attempt`
 - `test_prepared_rollup_cache_survives_unrelated_transcript_append`
 
 ### 10.2 Semantic equality
 
-- synchronous/pipelined persistence产生相同ordered semantic events；
-- pipeline backlog形状不影响terminal projection；
+- disposition live retry与restart recovery采用同一stable candidate/winner；
+- batching on/off产生相同ordered semantic events；
+- Start/End grouping改变不影响terminal projection；
+- synchronous/conditional-pipelined persistence产生相同ordered semantic events；
+- conditional pipeline backlog形状不影响terminal projection；
 - provider terminal必须等待confirmed semantic prefix；
-- adaptive batching on/off产生相同ordered semantic events；
 - batch size改变不影响terminal projection；
 - batch schedule改变不影响control disposition；
-- evidence cache hit/miss产生相同snapshot/manifest/provider payload；
+- cursor hit/exact restore产生相同snapshot/manifest/provider payload；
 - artifact cache hit/miss产生相同normalized content；
 - provider projection static cache不复用旧invocation timing；
 - manifest canonical representation复用不跳过untrusted replay validation。
 
 ### 10.3 Failure
 
-- pipeline queued NONE保留原stable candidate；
-- pipeline UNKNOWN/PARTIAL保留owner并latch；
-- pipeline backlog达到hard bound时停止provider read；
-- provider terminal先到达时必须seal/drain；
-- caller detach不取消pipeline；
-- Host close不得越过pending pipeline或provider physical owner；
+- disposition live retry `NONE`保留原stable candidate；
+- disposition live retry `UNKNOWN/PARTIAL` latch；
+- disposition waiter cancellation只detach owner；
+- Host close不得越过pending disposition candidate；
+- batching timer只创建一个flush owner；
 - semantic batch commit NONE重试原stable candidate；
 - semantic batch UNKNOWN保留owner并latch；
 - adaptive controller crash不改变recovery；
-- cache corrupted自动discard，canonical restore成功；
-- cache accumulator mismatch fail closed；
+- conditional pipeline queued NONE保留原stable candidate；
+- conditional pipeline UNKNOWN/PARTIAL保留owner并latch；
+- conditional pipeline backlog达到hard bound时停止provider read；
+- conditional pipeline provider terminal先到达时必须seal/drain；
+- conditional pipeline caller detach不取消worker；
+- Host close不得越过conditional pipeline或provider physical owner；
+- cursor corrupted自动discard，canonical restore成功；
+- cursor accumulator mismatch fail closed；
+- cursor/stable-state high-water mismatch fail closed；
 - cache artifact digest mismatch fail closed；
 - connection断线重连不重复event；
 - queue deadline、caller cancellation与Host close保持原语义；
@@ -1404,14 +1806,17 @@ Stage 4.5不做：
 
 - metrics进入event-safe fingerprint；
 - cache对象进入ContextFactSnapshot durable truth；
-- compile/replay依赖cache存在；
+- compile/replay依赖cursor或cache存在；
 - new direct PostgreSQL writer绕过RuntimeEventWriteService；
 - provider transport自行提交semantic events；
-- Agent/subscriber直接拥有semantic persistence task；
-- pipeline向session FIFO无界enqueuelogical batches；
+- Agent/subscriber直接拥有conditional semantic persistence task；
+- conditional pipeline向session FIFO无界enqueuelogical batches；
 - terminal/control读取unconfirmed semantic backlog；
 - adaptive batching越过physical burst hard bounds；
-- context evidence cache按run ID弱定址；
+- projection cursor按run ID弱定址；
+- projection cursor与stable state分别读取不同high-water；
+- PERF3缓存旧ContextSource collector/source registry中间结果；
+- PERF1R决定`skip_write_behind`后仍把pipeline生产类型或配置入口接入runtime；
 - production raw semantic coalescing在无独立schema规格时出现。
 
 ---
@@ -1424,23 +1829,26 @@ Stage 4.5只有同时满足以下条件才完成。
 
 - 全部现有durable/replay/account/checkpoint invariant保持；
 - stable IDs、payload fingerprints和provider-visible payload不因优化变化；
-- model semantic pipeline由service-owned handle持有，subscriber/caller detach不影响durable收口；
+- disposition持续`NONE`由session-owned live retry/drain owner收口；
+- semantic structural grouping只改变batch边界，不改变event order或terminal semantics；
+- 若PERF1C启用，model semantic pipeline由service-owned handle持有，subscriber/caller detach不影响durable收口；
 - terminal projection、ModelCallEnd和control disposition只消费FULL confirmed semantic prefix；
-- pending semantic backlog具有events/bytes/batches hard bound；
+- 若PERF1C启用，pending semantic backlog具有events/bytes/age/provider-ahead/terminal-drain hard bound；
 - 所有failure/cancellation/recovery/close测试通过；
-- cache可完全删除并从canonical authority恢复。
+- cursor/cache可完全删除并从canonical authority恢复；
+- cursor与stable transcript state只能以同一high-water原子快照消费。
 
 ### 11.2 Performance
 
-- 三条dogfood各至少3次；
+- deterministic provider/PostgreSQL/long-ledger fixture各运行20–50次；
+- 三条dogfood各3次并报告median/range；
 - durable writer fixed-cost有分段证据；
-- provider read与semantic persistence具有可观测并行重叠；
-- Long Plan provider/durable overlap median至少增加30s；
-- Long Plan durable exclusive median至少下降25%；
-- semantic transactions / 1,000 source items至少下降40%；
+- logical semantic batches / 1,000 source items至少下降40%；
 - transcript evidence read median至少下降70%；
 - Long Plan context prepare / model step median低于0.75s；
 - provider first-item与UI streaming latency不越过冻结contract；
+- 若PERF1C启用，provider read与semantic persistence具有可重复测得的并行重叠；
+- 若PERF1C启用，Long Plan overlap与durable exclusive达到PERF1R冻结的量化目标；
 - 没有通过增大无界queue、线程、cache或payload上限伪造吞吐提升。
 
 ### 11.3 Operability
@@ -1449,7 +1857,8 @@ Stage 4.5只有同时满足以下条件才完成。
 - profile输出bounded、secret-safe；
 - production默认metrics开销有明确上限；
 - Host close仍能bounded drain全部physical owners；
-- PostgreSQL pool、writer queue与cache均有容量/eviction/timeout观测。
+- PostgreSQL pool、writer queue、cursor与cache均有容量/eviction/timeout观测；
+- governance outbox pending count/oldest age作为operational liveness观测，不再误报为split-brain correctness。
 
 ---
 
@@ -1458,24 +1867,34 @@ Stage 4.5只有同时满足以下条件才完成。
 下一步建议暂停扩大Stage 5改动面，先实施：
 
 ```text
-PERF0 typed profiling
+DISP0 disposition persistent-NONE live retry/drain
     ->
-PERF1A model semantic write-behind pipeline
+PERF0 deterministic typed profiling
     ->
-PERF1B adaptive batching
+PERF1A semantic batching + structural grouping
     ->
-PERF1C writer/PostgreSQL fixed-cost reduction
+PERF1B writer/PostgreSQL fixed-cost reduction
     ->
-PERF2 incremental transcript evidence
+PERF1R re-measure gate
+    + justified: PERF1C one-inflight write-behind
+    + not justified: skip PERF1C
+    ->
+PERF2A verified transcript projection cursor
+    ->
+PERF2B verified artifact hydration
+    ->
+PERF3 Stage-4-owned prepared reuse
 ```
 
-完成后重新测量。
+`PERF1C`是条件分支，不是默认必做步骤。若PERF1A/PERF1B已经把durable critical path压低到目标范围，直接跳到PERF2A。
 
-如果届时：
+最终如果：
 
 ```text
 durable exclusive << provider exclusive
 context prepare / model step < 0.75s
+logical semantic batches / 1,000 source items达到冻结目标
+cursor database read/decode接近O(new delta)
 ```
 
 则停止性能重构，回到Stage 5。
@@ -1483,9 +1902,10 @@ context prepare / model step < 0.75s
 只有当：
 
 ```text
-provider/durable pipeline已经完成
+batching与SQL fixed-cost已经优化
+条件性write-behind已经被明确实施或明确判定无收益
 transaction固定成本已经压缩
-evidence读取已经增量化
+projection cursor读取已经增量化
 durable writer仍是主要墙钟瓶颈
 ```
 
@@ -1496,4 +1916,5 @@ durable writer仍是主要墙钟瓶颈
 1. 因为本地durable成本高，就削弱刚完成的authority/accounting正确性；
 2. 在没有分段证据前，提前引入新的event schema与historical decoder复杂度。
 
-Stage 4.5的目标不是让Pulsara少记录事实，而是让它以更低的物理成本记录同一组正确事实。
+Stage 4.5的目标不是让Pulsara少记录事实，也不是默认用异步队列隐藏数据库延迟，而是先减少不必要的transaction，再以受控并发隐藏
+仍然存在的不可消除latency，最终以更低的物理成本记录同一组正确事实。

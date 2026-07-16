@@ -1,0 +1,69 @@
+{
+  "schema_version": "pulsara.durable-runtime.context-scenario.v1",
+  "scenario_id": "artifact-heavy-tools",
+  "seed": 452005,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "Many large artifact-backed tool results repeatedly hydrated across context compile points.",
+  "generator_contract": {
+    "generator_id": "pulsara.context.artifact-heavy-tools",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.context.artifact-hydration",
+    "grader_version": "1",
+    "assertion_ids": [
+      "artifact_identity_verified",
+      "cache_semantics_equal",
+      "checkpoint_root_excludes_large_content",
+      "authority_fingerprint_stable"
+    ]
+  },
+  "ledger": {
+    "runtime_sessions": 1,
+    "runs": 1,
+    "model_calls": 8,
+    "semantic_delta_events_per_call": 128,
+    "characters_per_semantic_delta": 24,
+    "tool_calls_per_model_call": 8,
+    "tool_results": {
+      "total_results": 64,
+      "canonical_result_characters": 131072,
+      "inline_envelope_characters": 512,
+      "artifact_backed": true,
+      "media_type": "text/plain",
+      "content_pattern": "unique-sentinel-plus-padding-v1"
+    },
+    "checkpoint_policy": "pairing_safe_when_required"
+  },
+  "compile_schedule": {
+    "after_model_call_ordinals": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "repeat_last_compile": 5
+  },
+  "measurement": {
+    "modes": [
+      "process_cold",
+      "steady_state",
+      "verified_artifact_cache_warm"
+    ],
+    "warmup_iterations": 3,
+    "measured_iterations": 20
+  },
+  "invariants": [
+    "artifact digest, size, media type, and terminal content identity are always verified",
+    "cache hits and misses produce the same normalized tool-result semantics",
+    "large canonical content is not duplicated into the transcript checkpoint root",
+    "repeated final compile does not alter invocation-independent authority fingerprints"
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "schema_version": "pulsara.durable-runtime.writer-scenario.v1",
+  "scenario_id": "multi-session-contention",
+  "seed": 451003,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "Concurrent independent runtime sessions sharing the process PostgreSQL pool and critical ledger executor.",
+  "generator_contract": {
+    "generator_id": "pulsara.writer.multi-session-contention",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.writer.multi-session-isolation",
+    "grader_version": "1",
+    "assertion_ids": [
+      "per_session_sequence_contiguous",
+      "cross_session_order_isolated",
+      "resource_capacity_bounded",
+      "session_close_drained"
+    ]
+  },
+  "workload": {
+    "runtime_sessions": 8,
+    "runs_per_session": 1,
+    "model_calls_per_run": 4,
+    "model_stream": {
+      "blocks_per_call": 1,
+      "kind": "text",
+      "delta_events_per_block": 512,
+      "characters_per_delta": 24,
+      "max_business_events_per_commit": 16,
+      "terminal_outcome": "completed",
+      "usage_status": "missing"
+    }
+  },
+  "execution_matrix": [
+    {
+      "case_id": "serial",
+      "case_kind": "production_valid",
+      "concurrent_sessions": 1
+    },
+    {
+      "case_id": "concurrency-2",
+      "case_kind": "production_valid",
+      "concurrent_sessions": 2
+    },
+    {
+      "case_id": "concurrency-4",
+      "case_kind": "production_valid",
+      "concurrent_sessions": 4
+    },
+    {
+      "case_id": "concurrency-8",
+      "case_kind": "production_valid",
+      "concurrent_sessions": 8
+    }
+  ],
+  "measurement": {
+    "warmup_iterations": 3,
+    "measured_iterations": 20,
+    "reset_mode": "fresh_session_set_per_iteration"
+  },
+  "invariants": [
+    "each session preserves its own contiguous event sequence",
+    "one slow session cannot corrupt or reorder another session",
+    "connection pool and critical executor capacity remain bounded",
+    "all session close operations drain their own physical writers"
+  ]
+}

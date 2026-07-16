@@ -1,0 +1,90 @@
+{
+  "schema_version": "pulsara.durable-runtime.writer-scenario.v1",
+  "scenario_id": "stable-confirmation-faults",
+  "seed": 451004,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "Deterministic write and confirmation faults applied to stable semantic batches.",
+  "generator_contract": {
+    "generator_id": "pulsara.writer.stable-confirmation-faults",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.writer.stable-confirmation",
+    "grader_version": "1",
+    "assertion_ids": [
+      "stable_candidate_reused",
+      "exactly_once_storage",
+      "full_cancellation_adopted",
+      "unknown_outcome_latched",
+      "predecessor_order_preserved"
+    ]
+  },
+  "workload": {
+    "runtime_sessions": 1,
+    "runs_per_session": 1,
+    "model_calls_per_run": 1,
+    "semantic_business_events": 2048,
+    "characters_per_delta": 16,
+    "max_business_events_per_commit": 8
+  },
+  "execution_matrix": [
+    {
+      "case_id": "control",
+      "case_kind": "production_valid",
+      "fault": {
+        "kind": "none"
+      }
+    },
+    {
+      "case_id": "fail-before-commit",
+      "case_kind": "production_valid",
+      "fault": {
+        "kind": "fail_before_commit",
+        "every_nth_batch": 17,
+        "max_failures_per_batch": 1
+      }
+    },
+    {
+      "case_id": "commit-then-raise",
+      "case_kind": "production_valid",
+      "fault": {
+        "kind": "commit_then_raise",
+        "every_nth_batch": 17,
+        "max_failures_per_batch": 1
+      }
+    },
+    {
+      "case_id": "cancel-after-physical-start",
+      "case_kind": "production_valid",
+      "fault": {
+        "kind": "caller_cancel_after_physical_start",
+        "every_nth_batch": 23
+      }
+    },
+    {
+      "case_id": "confirmation-unknown",
+      "case_kind": "production_valid",
+      "fault": {
+        "kind": "confirmation_unknown",
+        "batch_ordinals": [
+          31
+        ]
+      }
+    }
+  ],
+  "measurement": {
+    "warmup_iterations": 1,
+    "measured_iterations": 20,
+    "reset_mode": "fresh_runtime_session_per_iteration"
+  },
+  "invariants": [
+    "retry reuses the exact event IDs and payload fingerprints",
+    "commit-then-raise stores each event exactly once",
+    "FULL cancellation adopts the canonical committed result before propagating cancellation",
+    "UNKNOWN latches reconciliation and prevents terminal commit and destructive close",
+    "no later batch may overtake an unresolved predecessor"
+  ]
+}

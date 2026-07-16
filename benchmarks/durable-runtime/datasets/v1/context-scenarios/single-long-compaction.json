@@ -1,0 +1,63 @@
+{
+  "schema_version": "pulsara.durable-runtime.context-scenario.v1",
+  "scenario_id": "single-long-compaction",
+  "seed": 452003,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "A large pre-compaction transcript, one durable window compaction, and a bounded post-compaction delta.",
+  "generator_contract": {
+    "generator_id": "pulsara.context.single-long-compaction",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.context.compaction-authority",
+    "grader_version": "1",
+    "assertion_ids": [
+      "window_base_correct",
+      "post_compaction_authority_bounded",
+      "summary_source_verified",
+      "cold_warm_transcript_equal"
+    ]
+  },
+  "ledger": {
+    "runtime_sessions": 1,
+    "runs": 1,
+    "prior_tool_observations": 20,
+    "prior_tool_observation_characters": 12000,
+    "model_calls_before_compaction": 20,
+    "semantic_delta_events_before_compaction": 3584,
+    "characters_per_semantic_delta": 24,
+    "window_compaction": {
+      "summary_characters": 12000,
+      "retained_recent_messages": 4,
+      "source_document_artifact": true,
+      "completed_terminal": true
+    },
+    "post_compaction_model_calls": 2,
+    "post_compaction_semantic_delta_events_per_call": 256
+  },
+  "compile_schedule": {
+    "phases": [
+      "before_compaction",
+      "immediately_after_compaction",
+      "after_first_post_compaction_call",
+      "after_second_post_compaction_call"
+    ]
+  },
+  "measurement": {
+    "modes": [
+      "process_cold",
+      "steady_state"
+    ],
+    "warmup_iterations": 3,
+    "measured_iterations": 20
+  },
+  "invariants": [
+    "pre-compaction and post-compaction authority use their correct window bases",
+    "post-compaction primary authority never widens back to the original RunStart range",
+    "the compaction summary and source document are fingerprint-verified",
+    "the final normalized transcript remains exact under cold and warm preparation"
+  ]
+}

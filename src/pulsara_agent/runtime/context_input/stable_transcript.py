@@ -113,6 +113,17 @@ def project_stable_context_transcript(
         stable_entries,
         projection_window=projection_window,
     )
+    window_baseline = None
+    if projection_window.window_kind == "window_compaction":
+        if window_compaction_source_document is None:
+            raise TranscriptNormalizationError("window compaction source is missing")
+        window_baseline = parse_window_compaction_transcript_baseline(
+            window_compaction_source_document.retained_transcript_baseline
+        )
+        if window_baseline.current_user_anchor != current_user_anchor:
+            raise TranscriptNormalizationError(
+                "window baseline current-user anchor mismatch"
+            )
     prior_run_starts = tuple(
         entry.source_event_refs[0].sequence
         for entry in selected_entries
@@ -126,11 +137,34 @@ def project_stable_context_transcript(
         if isinstance(entry, TranscriptMessageLeafEntryFact)
         and entry.attribution.message_id == current_user_anchor
     )
-    current_run_start = (
-        current_user_candidates[0].source_event_refs[0].sequence
-        if len(current_user_candidates) == 1
-        else None
+    baseline_current_user_candidates = (
+        tuple(
+            message
+            for message in window_baseline.retained_messages
+            if message.message_id == current_user_anchor
+        )
+        if window_baseline is not None
+        else ()
     )
+    if (
+        len(current_user_candidates)
+        + len(baseline_current_user_candidates)
+        != 1
+    ):
+        raise TranscriptNormalizationError(
+            "stable transcript requires one exact current-user anchor"
+        )
+    if current_user_candidates:
+        current_run_start = current_user_candidates[0].source_event_refs[0].sequence
+        current_run_id = current_user_candidates[0].attribution.run_id
+    else:
+        baseline_current_user = baseline_current_user_candidates[0]
+        current_run_start = baseline_current_user.source_sequence_start
+        current_run_id = baseline_current_user.run_id
+    if current_run_id is None:
+        raise TranscriptNormalizationError(
+            "stable transcript current-user anchor lacks run attribution"
+        )
     previous_run_start = prior_run_starts[-1] if prior_run_starts else None
     selected_entries = tuple(
         entry
@@ -146,18 +180,6 @@ def project_stable_context_transcript(
             < current_run_start
         )
     )
-    current_user_entries = tuple(
-        entry
-        for entry in selected_entries
-        if isinstance(entry, TranscriptMessageLeafEntryFact)
-        and entry.attribution.message_id == current_user_anchor
-    )
-    if len(current_user_entries) != 1:
-        raise TranscriptNormalizationError(
-            "stable transcript requires one exact current-user anchor"
-        )
-    current_run_id = current_user_entries[0].attribution.run_id
-
     messages: list[TranscriptMessageFact] = []
     message_entries: dict[str, TranscriptMessageLeafEntryFact] = {}
     result_entries: dict[str, TranscriptToolResultLeafEntryFact] = {}
@@ -262,14 +284,10 @@ def project_stable_context_transcript(
     baseline_pairs: tuple[ToolInteractionPairFact, ...] = ()
     baseline_units: tuple[ToolResultRenderUnit, ...] = ()
     if projection_window.window_kind == "window_compaction":
-        if window_compaction_source_document is None:
-            raise TranscriptNormalizationError("window compaction source is missing")
-        baseline = parse_window_compaction_transcript_baseline(
-            window_compaction_source_document.retained_transcript_baseline
-        )
-        messages = [*baseline.retained_messages, *messages]
-        baseline_pairs = baseline.retained_tool_pairs
-        baseline_units = baseline.retained_tool_result_units
+        assert window_baseline is not None
+        messages = [*window_baseline.retained_messages, *messages]
+        baseline_pairs = window_baseline.retained_tool_pairs
+        baseline_units = window_baseline.retained_tool_result_units
     if compacted_window is not None:
         messages.insert(0, compacted_window[0])
 
@@ -282,7 +300,40 @@ def project_stable_context_transcript(
         )
     }
     pairs = list(baseline_pairs)
-    units = list(baseline_units)
+    units: list[ToolResultRenderUnit] = []
+    baseline_pair_by_call = {
+        pair.tool_call_id: pair for pair in baseline_pairs
+    }
+    for unit in baseline_units:
+        pair = baseline_pair_by_call.get(unit.tool_call_id)
+        if pair is None:
+            raise TranscriptNormalizationError(
+                "window baseline result unit lacks its durable pair"
+            )
+        try:
+            call_position = positions[
+                (pair.call_message_id, pair.call_block_index)
+            ]
+            result_position = positions[
+                (pair.result_message_id, pair.result_block_index)
+            ]
+        except KeyError as exc:
+            raise TranscriptNormalizationError(
+                "window baseline pair escaped its retained messages"
+            ) from exc
+        payload = unit.model_dump(mode="python", exclude={"unit_fingerprint"})
+        payload.update(
+            call_position=call_position,
+            result_position=result_position,
+        )
+        units.append(
+            ToolResultRenderUnit(
+                **payload,
+                unit_fingerprint=context_fingerprint(
+                    "tool-result-render-unit:v1", payload
+                ),
+            )
+        )
     for call_id, unit in units_by_call.items():
         assistant = next(
             message
