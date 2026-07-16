@@ -19,6 +19,7 @@ class _Engine:
         self.executor = SimpleNamespace(
             runtime_session_id=session_id,
             candidate_pool=_Pool(session_id),
+            event_dispatch_retry_required=False,
         )
         self.calls = 0
 
@@ -56,11 +57,11 @@ def test_governance_coordinator_debounces_safe_points_and_wakes_index_worker() -
     asyncio.run(scenario())
 
 
-def test_governance_coordinator_ignores_sessions_without_pending_candidates() -> None:
+def test_governance_coordinator_keeps_safe_point_without_pending_candidates() -> None:
     engine = _Engine("runtime:no-pending")
     engine.executor.candidate_pool.pending.clear()
     coordinator = MemoryGovernanceCoordinator()
 
     coordinator.notify(engine)  # type: ignore[arg-type]
 
-    assert coordinator._pending == {}
+    assert coordinator._pending == {"runtime:no-pending": engine}

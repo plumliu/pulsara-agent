@@ -44,7 +44,9 @@ PLAN_SENTINEL = "PULSARA_PLAN_QUEUE_DOGFOOD_OK"
 PLAN_REASON = "visibility timeout dogfood"
 PLAN_QUESTION_ANSWER = (
     "Use lazy/passive sweep during take, do not create per-job timers or background workers, "
-    "and require a receipt/token when completing a processing job."
+    "and require a receipt/token when completing a processing job. Before calling exit_plan, "
+    "make its plan text explicitly include the literal file name main.py and the exact command "
+    f"{TEST_COMMAND}."
 )
 
 
@@ -244,6 +246,13 @@ async def _run_real_plan_mode_job_queue_long_dogfood(
                 session.run_turn(_PLAN_DOGFOOD_APPROVED_IMPLEMENTATION_REQUEST),
                 evidence,
                 "round_after_exit_implementation",
+            )
+        if PLAN_SENTINEL not in last_result.final_text:
+            last_result = await _await_with_plan_trace(
+                session,
+                session.run_turn(_PLAN_DOGFOOD_FINALIZATION_REQUEST),
+                evidence,
+                "round_finalization_sentinel",
             )
 
         events = session.replay_events()
@@ -724,6 +733,7 @@ _PLAN_DOGFOOD_USER_REQUEST = """
 - 先只读探索 README.md、main.py、tests/test_visibility_timeout.py。
 - 在计划阶段先问我一个关键设计问题。
 - 我确认后，用 exit_plan 提交计划，得到批准后再改代码。
+- exit_plan 的计划正文必须明确包含字面量 `main.py` 和 `{TEST_COMMAND}`。
 - 获批后实现 lazy/passive timeout recovery + receipt/token，运行 `uv run pytest tests/test_visibility_timeout.py -q`。
 - 测试通过后，用一句话总结并包含 PULSARA_PLAN_QUEUE_DOGFOOD_OK。
 """.strip()
@@ -736,6 +746,12 @@ Now implement the approved lazy/passive visibility timeout + receipt/token desig
 Then run exactly: `{TEST_COMMAND}`.
 If tests fail, inspect the failure, fix main.py, and rerun the same command.
 When tests pass, answer with a short final response containing {PLAN_SENTINEL}.
+""".strip()
+
+
+_PLAN_DOGFOOD_FINALIZATION_REQUEST = f"""
+The implementation and its required test command are already complete.
+Do not call any tools. Reply with exactly: {PLAN_SENTINEL}
 """.strip()
 
 

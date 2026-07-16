@@ -79,6 +79,7 @@ from pulsara_agent.primitives.run_boundary import (
 from pulsara_agent.primitives.long_horizon import (
     RolloutReservationFact,
 )
+from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.execution import (
     ModelStreamCompletion,
@@ -91,10 +92,16 @@ from pulsara_agent.llm.lifecycle import (
 )
 from pulsara_agent.llm.materialize import (
     ModelStreamMaterializationError,
-    materialize_committed_model_call_result,
+    materialize_committed_model_call_result_from_terminal_projection,
 )
 from pulsara_agent.llm.sanitizing_transport import (
     ProviderTransportPhysicalCompletionStatus,
+)
+from pulsara_agent.llm.terminal_projection import (
+    ModelTerminalProjectionReducer,
+    PreparedModelTerminalProjection,
+    bind_model_terminal_projection_to_session,
+    persist_model_terminal_projection,
 )
 from pulsara_agent.llm.accounting import (
     build_model_reservation_settlement_event,
@@ -170,6 +177,11 @@ class LLMRuntime:
         """
 
         runtime_session = commit_port.runtime_session
+        model_burst_contract = (
+            runtime_session.authority_materialization_contracts.burst_registry
+            .unique_binding_for_operation(PhysicalOperationKind.MODEL_CALL)
+            .contract
+        )
         call_id = call.fact.resolved_model_call_id
         handle_id = f"model_stream:{call_id}:{uuid4().hex}"
 
@@ -181,6 +193,7 @@ class LLMRuntime:
             semantic_item_count = 0
             last_semantic_event_id: str | None = None
             live_semantic_cursor = None
+            terminal_projection_reducer: ModelTerminalProjectionReducer | None = None
 
             try:
                 validate_model_lifecycle_start_bundle(
@@ -229,15 +242,26 @@ class LLMRuntime:
 
             async def materialize_terminal_result() -> bool:
                 try:
-                    deadline = monotonic() + 30.0
-                    result = await runtime_session.context_input_io_service.execute(
-                        operation_name="model-call-result-materialize",
-                        operation=lambda: materialize_committed_model_call_result(
-                            runtime_session.event_log,
-                            resolved_model_call_id=call_id,
-                            deadline_monotonic=deadline,
-                        ),
-                        deadline_monotonic=deadline,
+                    ends = tuple(
+                        event
+                        for event in committed
+                        if isinstance(event, ModelCallEndEvent)
+                        and event.resolved_model_call_id == call_id
+                    )
+                    if len(ends) != 1:
+                        raise ModelStreamMaterializationError(
+                            "committed model stream lacks one terminal projection"
+                        )
+                    document = (
+                        runtime_session.transcript_projection_document_registry.resolve(
+                            ends[0].terminal_projection.projection_reference
+                        )
+                    )
+                    result = materialize_committed_model_call_result_from_terminal_projection(
+                        tuple(committed),
+                        resolved_model_call_id=call_id,
+                        runtime_session_id=runtime_session.runtime_session_id,
+                        document=document,
                     )
                 except BaseException:
                     runtime_session.latch_event_commit_outcome_unknown()
@@ -321,6 +345,7 @@ class LLMRuntime:
                 freeze_event_write_candidate(start_event),
             )
             try:
+                await commit_port.ensure_physical_headroom()
                 stored_start_batch = record_commit(
                     await commit_port.commit_start(
                         start_batch,
@@ -334,6 +359,16 @@ class LLMRuntime:
                 )
                 live_semantic_cursor = handle.install_live_semantic_cursor(
                     committed_start
+                )
+                terminal_projection_reducer = ModelTerminalProjectionReducer(
+                    runtime_session_id=runtime_session.runtime_session_id,
+                    start_event=committed_start,
+                    contracts=runtime_session.terminal_projection_contracts,
+                    model_stream_semantic_domain_contract_fingerprint=(
+                        runtime_session.authority_materialization_contracts
+                        .event_domain.contract
+                        .transcript_semantic_domain_contract_fingerprint
+                    ),
                 )
             except BaseException as exc:
                 if runtime_session.reconciliation_required:
@@ -356,7 +391,9 @@ class LLMRuntime:
                     call.target.transport,
                     reason_code="public_transport_open_stream_fault",
                 )
-                terminal_events = self._terminal_batch(
+                if terminal_projection_reducer is None:
+                    raise RuntimeError("model terminal projection reducer is missing")
+                terminal_events = await self._prepare_terminal_batch(
                     call=call,
                     event_context=event_context,
                     recovery_plan=recovery_plan,
@@ -366,6 +403,7 @@ class LLMRuntime:
                     usage_report=None,
                     runtime_session=runtime_session,
                     reservation=rollout_reservation,
+                    projection_reducer=terminal_projection_reducer,
                 )
                 try:
                     await commit_stable_terminal(terminal_events)
@@ -389,20 +427,30 @@ class LLMRuntime:
             pending_semantic_events: list[AgentEvent] = []
             pending_semantic_chars = 0
             pending_semantic_started_at: float | None = None
+            semantic_commit_batch_count = 0
 
             async def flush_semantic_events() -> None:
                 nonlocal semantic_item_count
                 nonlocal last_semantic_event_id
                 nonlocal pending_semantic_chars
                 nonlocal pending_semantic_started_at
+                nonlocal semantic_commit_batch_count
                 if not pending_semantic_events:
                     return
+                if (
+                    semantic_commit_batch_count
+                    >= model_burst_contract.max_commit_batches
+                ):
+                    raise LLMTransportContractError(
+                        "model semantic commit batch limit exceeded",
+                        reason_code="provider_semantic_commit_batch_limit_exceeded",
+                    )
                 if live_semantic_cursor is None:
                     raise RuntimeError(
                         "model semantic commit lacks its live semantic cursor"
                     )
                 batch = tuple(pending_semantic_events)
-                record_commit(
+                stored_semantic = record_commit(
                     await commit_port.commit_semantic(
                         tuple(freeze_event_write_candidate(event) for event in batch),
                         guard=ModelStreamSemanticCommitGuard(
@@ -417,6 +465,10 @@ class LLMRuntime:
                         live_cursor=live_semantic_cursor,
                     )
                 )
+                if terminal_projection_reducer is None:
+                    raise RuntimeError("model semantic projection reducer is missing")
+                terminal_projection_reducer.apply_committed(stored_semantic)
+                semantic_commit_batch_count += 1
                 semantic_item_count += len(batch)
                 last_semantic_event_id = batch[-1].id
                 pending_semantic_events.clear()
@@ -490,7 +542,11 @@ class LLMRuntime:
                                         physical.diagnostic_code
                                         or "provider_physical_completion_untrusted"
                                     )
-                                terminal_events = self._terminal_batch(
+                                if terminal_projection_reducer is None:
+                                    raise RuntimeError(
+                                        "model terminal projection reducer is missing"
+                                    )
+                                terminal_events = await self._prepare_terminal_batch(
                                     call=call,
                                     event_context=event_context,
                                     recovery_plan=recovery_plan,
@@ -499,6 +555,7 @@ class LLMRuntime:
                                     usage_report=None,
                                     runtime_session=runtime_session,
                                     reservation=rollout_reservation,
+                                    projection_reducer=terminal_projection_reducer,
                                 )
                                 await commit_stable_terminal(terminal_events)
                                 if not await materialize_terminal_result():
@@ -545,7 +602,11 @@ class LLMRuntime:
                                 physical.diagnostic_code
                                 or "provider_physical_completion_untrusted"
                             )
-                        terminal_events = self._terminal_batch(
+                        if terminal_projection_reducer is None:
+                            raise RuntimeError(
+                                "model terminal projection reducer is missing"
+                            )
+                        terminal_events = await self._prepare_terminal_batch(
                             call=call,
                             event_context=event_context,
                             recovery_plan=recovery_plan,
@@ -554,6 +615,7 @@ class LLMRuntime:
                             usage_report=None,
                             runtime_session=runtime_session,
                             reservation=rollout_reservation,
+                            projection_reducer=terminal_projection_reducer,
                         )
                         await commit_stable_terminal(terminal_events)
                         if not await materialize_terminal_result():
@@ -631,7 +693,9 @@ class LLMRuntime:
                     ):
                         await flush_semantic_events()
 
-                terminal_events = self._terminal_batch(
+                if terminal_projection_reducer is None:
+                    raise RuntimeError("model terminal projection reducer is missing")
+                terminal_events = await self._prepare_terminal_batch(
                     call=call,
                     event_context=event_context,
                     recovery_plan=recovery_plan,
@@ -644,6 +708,7 @@ class LLMRuntime:
                     ),
                     runtime_session=runtime_session,
                     reservation=rollout_reservation,
+                    projection_reducer=terminal_projection_reducer,
                 )
                 await commit_stable_terminal(terminal_events)
                 if not await materialize_terminal_result():
@@ -665,7 +730,11 @@ class LLMRuntime:
                         error=exc,
                     )
                 if start_committed and not terminal_committed:
-                    terminal_events = self._terminal_batch(
+                    if terminal_projection_reducer is None:
+                        raise RuntimeError(
+                            "model terminal projection reducer is missing"
+                        )
+                    terminal_events = await self._prepare_terminal_batch(
                         call=call,
                         event_context=event_context,
                         recovery_plan=recovery_plan,
@@ -674,6 +743,7 @@ class LLMRuntime:
                         usage_report=None,
                         runtime_session=runtime_session,
                         reservation=rollout_reservation,
+                        projection_reducer=terminal_projection_reducer,
                     )
                     await commit_stable_terminal(terminal_events)
                     if not await materialize_terminal_result():
@@ -701,15 +771,49 @@ class LLMRuntime:
                 diagnostic_code=diagnostic_code,
             )
 
-        return execution_registry.install_and_start(
-            handle_id=handle_id,
-            run_id=event_context.run_id,
-            resolved_model_call_id=call.fact.resolved_model_call_id,
-            subscription_start_sequence=(
-                runtime_session.long_horizon_state_store.through_sequence
-            ),
-            worker=worker,
-        )
+        shadow_owner_id: str | None = handle_id
+        try:
+            model_burst = (
+                runtime_session.authority_materialization_contracts.burst_registry
+                .unique_binding_for_operation(PhysicalOperationKind.MODEL_CALL)
+                .contract
+            )
+            runtime_session.authority_materialization_shadow.observe_candidate(
+                owner_id=handle_id,
+                contract=model_burst,
+            )
+        except Exception:
+            # AP0 shadow is diagnostic-only. It must never become an accidental
+            # admission gate before AP4 installs the durable reservation owner.
+            shadow_owner_id = None
+
+        async def observed_worker(
+            handle: ModelStreamExecutionHandle,
+        ) -> ModelStreamCompletion:
+            try:
+                return await worker(handle)
+            finally:
+                if shadow_owner_id is not None:
+                    runtime_session.authority_materialization_shadow.release_candidate(
+                        shadow_owner_id
+                    )
+
+        try:
+            return execution_registry.install_and_start(
+                handle_id=handle_id,
+                run_id=event_context.run_id,
+                resolved_model_call_id=call.fact.resolved_model_call_id,
+                subscription_start_sequence=(
+                    runtime_session.long_horizon_state_store.through_sequence
+                ),
+                worker=observed_worker,
+            )
+        except BaseException:
+            if shadow_owner_id is not None:
+                runtime_session.authority_materialization_shadow.release_candidate(
+                    shadow_owner_id
+                )
+            raise
 
     @staticmethod
     def _semantic_event_from_draft(
@@ -788,6 +892,53 @@ class LLMRuntime:
             return ProviderModelStreamErrorEvent(**common, error=draft.error)
         raise TypeError(f"unsupported provider semantic draft: {type(draft).__name__}")
 
+    async def _prepare_terminal_batch(
+        self,
+        *,
+        call: ResolvedModelCall,
+        event_context: EventContext,
+        recovery_plan: ModelStreamRecoveryPlanFact,
+        validation_estimate: int,
+        outcome: str,
+        provider_dispatch_status: str = "dispatched",
+        usage_report: TransportUsageReport | None,
+        runtime_session: "RuntimeSession",
+        reservation: RolloutReservationFact | None,
+        projection_reducer: ModelTerminalProjectionReducer,
+    ) -> tuple[AgentEvent, ...]:
+        normalized_usage = usage_report or TransportUsageReport(
+            usage_status="missing", usage=None
+        )
+        projection = bind_model_terminal_projection_to_session(
+            runtime_session,
+            projection_reducer.prepare_terminal(
+                event_context=event_context,
+                terminal_outcome=outcome,
+                usage_report=normalized_usage,
+            ),
+        )
+        await persist_model_terminal_projection(
+            runtime_session,
+            projection,
+            run_id=event_context.run_id,
+        )
+        runtime_session.transcript_projection_document_registry.register(
+            projection.projection_reference,
+            projection.document,
+        )
+        return self._terminal_batch(
+            call=call,
+            event_context=event_context,
+            recovery_plan=recovery_plan,
+            validation_estimate=validation_estimate,
+            outcome=outcome,
+            provider_dispatch_status=provider_dispatch_status,
+            usage_report=normalized_usage,
+            runtime_session=runtime_session,
+            reservation=reservation,
+            terminal_projection=projection,
+        )
+
     def _terminal_batch(
         self,
         *,
@@ -800,6 +951,7 @@ class LLMRuntime:
         usage_report: TransportUsageReport | None,
         runtime_session: "RuntimeSession",
         reservation: RolloutReservationFact | None,
+        terminal_projection: PreparedModelTerminalProjection,
     ) -> tuple[AgentEvent, ...]:
         usage_report = usage_report or TransportUsageReport(
             usage_status="missing", usage=None
@@ -816,8 +968,12 @@ class LLMRuntime:
             usage=usage_report.usage,
             estimated_input_tokens=validation_estimate,
             diagnostics=usage_report.provider_diagnostics,
+            terminal_projection=terminal_projection.end_reference,
         )
-        events: list[AgentEvent] = [model_end]
+        events: list[AgentEvent] = [
+            terminal_projection.committed_event,
+            model_end,
+        ]
         if reservation is not None:
             settlement = self._build_model_settlement_event(
                 event_context=event_context,

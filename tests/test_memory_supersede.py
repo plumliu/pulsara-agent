@@ -79,6 +79,7 @@ def test_explicit_fake_uow_supersedes_with_full_relatedness() -> None:
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=fake_memory_uow_factory(
@@ -162,7 +163,11 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
         assert old_doc[memory.STATUS.name] == memory.NodeStatus.SUPERSEDED.value
         assert {"@id": old_id} in new_doc[memory.SUPERSEDES.name]
         assert _governance_candidate_count(pool) == 0
-        assert pool.list_pending() == []
+        assert [
+            candidate
+            for candidate in pool.list_pending()
+            if candidate.source_session_id == runtime_session_id
+        ] == []
 
         fetched = {view.id: view for view in query.fetch_nodes([old_id, new_id], graph_id=graph_id)}
         assert fetched[old_id].status is memory.NodeStatus.SUPERSEDED
@@ -664,13 +669,14 @@ def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(tmp_pa
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
-                memory_write_uow_factory=lambda: _FailingLifecycleUow(
-                    dsn=dsn,
-                    runtime_session_id=runtime_session_id,
-                    archive=PostgresArtifactStore(dsn=dsn),
-                    graph_id=graph_id,
+            memory_write_uow_factory=lambda: _FailingLifecycleUow(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
+                graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
         )
@@ -765,6 +771,7 @@ def test_supersede_without_relatedness_context_is_blocked_and_downgraded() -> No
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id="runtime:test",
         memory_write_uow_factory=fake_memory_uow_factory(
@@ -858,6 +865,7 @@ def _postgres_executor(
         candidate_pool=pool,
         memory_write_service=_service_on(InMemoryGraphStore()),
         event_log=log,
+        event_commit_port=log.extend,
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(

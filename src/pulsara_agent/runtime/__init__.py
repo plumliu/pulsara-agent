@@ -121,6 +121,14 @@ _LAZY_EXPORTS = {
     "EventWriteConflict": ("pulsara_agent.runtime.session", "EventWriteConflict"),
     "EventWriteCancelled": ("pulsara_agent.runtime.session", "EventWriteCancelled"),
     "EventWriteResult": ("pulsara_agent.runtime.session", "EventWriteResult"),
+    "ExternalExecutionCommitContractError": (
+        "pulsara_agent.runtime.external_execution",
+        "ExternalExecutionCommitContractError",
+    ),
+    "ExternalExecutionCommitPort": (
+        "pulsara_agent.runtime.external_execution",
+        "ExternalExecutionCommitPort",
+    ),
     "event_batch_commit_outcome_from_error": (
         "pulsara_agent.runtime.session",
         "event_batch_commit_outcome_from_error",

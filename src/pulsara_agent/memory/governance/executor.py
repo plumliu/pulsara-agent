@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from functools import partial
+from time import monotonic
 from typing import Any
 
 from pulsara_agent.event import AgentEvent, MemoryWriteFailedEvent, MemoryWriteResultEvent
@@ -34,6 +37,10 @@ from pulsara_agent.memory.governance.relatedness import (
     RelatednessExecutionContext,
 )
 from pulsara_agent.memory.canonical.unit_of_work import GovernanceWriteUnitOfWork
+from pulsara_agent.memory.governance.event_outbox import (
+    GovernanceEventDispatchTicket,
+    GovernanceEventOutboxDispatcher,
+)
 from pulsara_agent.memory.canonical.mutation_outbox import (
     CanonicalMutationSurface,
     governed_memory_mutation_payload,
@@ -63,20 +70,33 @@ class MemoryGovernanceExecutor:
     candidate_pool: CandidatePool
     memory_write_service: MemoryWriteService
     event_log: EventLog
+    event_commit_port: Callable[[Sequence[AgentEvent]], Sequence[AgentEvent]]
     graph: GraphStore
     runtime_session_id: str
     memory_write_uow_factory: Callable[[], GovernanceWriteUnitOfWork]
     graph_id: str | None = None
     allowed_write_scopes: frozenset[str] = frozenset({CTX_USER})
-    stored_event_publisher: Callable[[list[AgentEvent]], None] | None = None
     async_surfaces: tuple[str, ...] = (
         CanonicalMutationSurface.SEARCH_INDEX.value,
         CanonicalMutationSurface.OXIGRAPH.value,
+    )
+    event_outbox_dispatcher: GovernanceEventOutboxDispatcher | None = None
+    async_operation_port: Callable[
+        [str, Callable[[], Any], float], Awaitable[Any]
+    ] | None = None
+    _event_dispatch_retry_required: bool = field(
+        default=False,
+        init=False,
+        repr=False,
     )
 
     def __post_init__(self) -> None:
         if self.memory_write_uow_factory is None:
             raise ValueError("memory_write_uow_factory is required; no storage fallback is allowed")
+        if self.event_commit_port is None:
+            raise ValueError(
+                "event_commit_port is required; governance cannot append EventLog directly"
+            )
 
     def apply_decision(
         self,
@@ -93,6 +113,52 @@ class MemoryGovernanceExecutor:
             relatedness_context=relatedness_context,
             target_entries=target_entries,
         )
+
+    async def apply_decision_async(
+        self,
+        decision: GovernanceDecision,
+        *,
+        governance_batch_id: str | None = None,
+        relatedness_context: RelatednessExecutionContext | None = None,
+    ) -> MemoryGovernanceApplyResult:
+        operation = partial(
+            self.apply_decision,
+            decision,
+            governance_batch_id=governance_batch_id,
+            relatedness_context=relatedness_context,
+        )
+        return await self._run_auxiliary_operation(
+            "memory-governance-apply",
+            operation,
+        )
+
+    async def flush_pending_event_outbox_async(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[AgentEvent, ...]:
+        return await self._run_auxiliary_operation(
+            "memory-governance-event-outbox-dispatch",
+            self.flush_pending_event_outbox,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def flush_pending_event_outbox(self) -> tuple[AgentEvent, ...]:
+        dispatcher = self.event_outbox_dispatcher
+        if dispatcher is None:
+            self._event_dispatch_retry_required = False
+            return ()
+        try:
+            committed = dispatcher.dispatch_pending()
+        except BaseException:
+            self._event_dispatch_retry_required = True
+            raise
+        self._event_dispatch_retry_required = dispatcher.has_pending()
+        return committed
+
+    @property
+    def event_dispatch_retry_required(self) -> bool:
+        return self._event_dispatch_retry_required
 
     def _apply_decision_with_uow(
         self,
@@ -153,6 +219,7 @@ class MemoryGovernanceExecutor:
                 diagnostics=(compaction_lifecycle_block,),
             )
 
+        dispatch_ticket: GovernanceEventDispatchTicket | None = None
         with self.memory_write_uow_factory() as uow:
             if already_exists(candidate, uow.graph, graph_id=uow.resolved_graph_id):
                 # Dedupe wins before supersede: exact duplicates are skipped and
@@ -287,12 +354,31 @@ class MemoryGovernanceExecutor:
             uow.outbox.append_decision(
                 record,
                 graph_id=uow.resolved_graph_id,
-                payload=mutation_payload.model_dump(mode="json") if mutation_payload is not None else None,
+                payload=(
+                    mutation_payload.model_dump(mode="json")
+                    if mutation_payload is not None
+                    else None
+                ),
+            )
+            event_candidates = tuple(
+                outcome.events + supersede_events + contradiction_events
+            )
+            dispatch_ticket = uow.runtime_events.append_batch(
+                event_candidates,
+                governance_batch_id=governance_batch_id,
+                decision_id=record.decision_id,
             )
 
-        stored_events = self.event_log.extend(outcome.events + supersede_events + contradiction_events)
-        if stored_events and self.stored_event_publisher is not None:
-            self.stored_event_publisher(stored_events)
+        assert dispatch_ticket is not None
+        try:
+            stored_events = list(self._dispatch_event_ticket(dispatch_ticket))
+        except BaseException:
+            self._event_dispatch_retry_required = True
+            raise
+        self._event_dispatch_retry_required = bool(
+            self.event_outbox_dispatcher
+            and self.event_outbox_dispatcher.has_pending()
+        )
         diagnostics: list[str] = []
         blocked_reason = supersede_blocked_reason or contradiction_blocked_reason
         if blocked_reason is not None:
@@ -304,6 +390,30 @@ class MemoryGovernanceExecutor:
             events=stored_events,
             diagnostics=tuple(diagnostics),
         )
+
+    def _dispatch_event_ticket(
+        self,
+        ticket: GovernanceEventDispatchTicket,
+    ) -> Sequence[AgentEvent]:
+        dispatcher = self.event_outbox_dispatcher
+        if dispatcher is not None:
+            return dispatcher.dispatch_ticket(ticket)
+        return self.event_commit_port(ticket.events)
+
+    async def _run_auxiliary_operation(
+        self,
+        name: str,
+        operation,
+        *,
+        deadline_monotonic: float | None = None,
+    ):
+        deadline = deadline_monotonic or monotonic() + 30.0
+        if self.async_operation_port is not None:
+            return await self.async_operation_port(name, operation, deadline)
+        loop = asyncio.get_running_loop()
+        from pulsara_agent.runtime.blocking_executor import auxiliary_io_executor
+
+        return await loop.run_in_executor(auxiliary_io_executor(), operation)
 
     def submit_pending_as_is(
         self,

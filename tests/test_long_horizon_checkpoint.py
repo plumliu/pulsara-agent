@@ -594,16 +594,31 @@ def test_checkpoint_delta_bound_blocks_unbounded_full_fold(tmp_path) -> None:
     assert service.write_states() == {}
 
 
-def test_default_checkpoint_delta_bound_covers_one_maximum_model_call() -> None:
-    policy = default_subagent_graph_checkpoint_policy()
+def test_graph_checkpoint_delta_bound_uses_shared_ledger_hard_horizon() -> None:
+    from pulsara_agent.runtime.authority_materialization import (
+        build_default_authority_materialization_contract_bundle,
+    )
+
+    limits = build_default_authority_materialization_contract_bundle().limits
+    policy = default_subagent_graph_checkpoint_policy(
+        max_unreclaimable_ledger_events=limits.max_unreclaimable_ledger_events,
+        max_unreclaimable_charged_payload_bytes=(
+            limits.max_unreclaimable_charged_payload_bytes
+        ),
+    )
 
     assert (
         policy.checkpoint_max_delta_events
-        >= MAX_MODEL_CALL_MATERIALIZATION_EVENTS * 2
+        == limits.max_unreclaimable_ledger_events
     )
     assert (
         policy.checkpoint_max_delta_bytes
-        >= MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES * 2
+        == limits.max_unreclaimable_charged_payload_bytes
+    )
+    assert policy.checkpoint_max_delta_events > MAX_MODEL_CALL_MATERIALIZATION_EVENTS
+    assert (
+        policy.checkpoint_max_delta_bytes
+        > MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES
     )
 
 

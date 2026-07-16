@@ -27,6 +27,7 @@ from pulsara_agent.event import (
     RunStartEvent,
     ToolResultEndEvent,
     ToolResultTextDeltaEvent,
+    PhysicalOperationReservationSettledEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.llm.drafts import ProviderErrorDraft, build_semantic_draft
@@ -35,6 +36,7 @@ from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.runtime import LLMRuntime
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.adapters.mock import MockTransport
 from pulsara_agent.llm.models import ModelRole
@@ -87,7 +89,13 @@ from pulsara_agent.primitives.model_call import (
     ModelTokenUsageFact,
     ResolvedModelTargetFact,
 )
+from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
 from pulsara_agent.llm.recovery import ModelStreamRecoveryService
+from pulsara_agent.llm.terminal_projection import (
+    ModelTerminalProjectionReducer,
+    build_default_terminal_projection_contract_bundle,
+)
+from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.llm.control_recovery import (
     ModelCallControlDispositionRecoveryService,
     ModelCallControlRecoveryStructuralError,
@@ -111,6 +119,11 @@ from pulsara_agent.runtime.long_horizon.coordinator import (
 )
 from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_shadow,
+)
+from pulsara_agent.runtime.authority_materialization import (
+    LedgerMaterializationAccountStore,
+    LedgerMaterializationCoordinator,
+    build_default_authority_materialization_contract_bundle,
 )
 from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventAuthorityView,
@@ -182,6 +195,7 @@ from pulsara_agent.inspector.service import _context_window_projection
 from tests.support.model_call import (
     model_call_start_fields,
     model_call_end_fields,
+    model_terminal_projection_end_reference_fixture,
     test_resolved_call,
     test_resolved_target_fact,
     test_llm_config,
@@ -1883,6 +1897,10 @@ def _model_end(
         usage_status="reported" if usage is not None else "missing",
         usage=usage,
         estimated_input_tokens=estimated_input_tokens,
+        terminal_projection=model_terminal_projection_end_reference_fixture(
+            call_id,
+            outcome=outcome,
+        ),
     )
 
 
@@ -2321,6 +2339,7 @@ def test_tool_terminal_unknown_keeps_single_terminal_owner_and_blocks_close(
         **tool_result_end_contract_fields(
             reservation.owner_id,
             tool_name="search_files",
+            state=ToolResultState.ERROR,
         ),
     )
     settlement = RolloutBudgetReservationSettledEvent(
@@ -2398,7 +2417,11 @@ def test_direct_model_stream_recovery_writes_stable_runtime_error_end() -> None:
     )
     log.extend((start,))
 
-    report = ModelStreamRecoveryService(event_log=log).repair_incomplete_model_streams()
+    report = ModelStreamRecoveryService(
+        event_log=log,
+        archive=InMemoryArchiveStore(),
+        allow_unbootstrapped_test_events=True,
+    ).repair_incomplete_model_streams()
 
     assert report.repaired[0].terminal_outcome == "runtime_error"
     ends = [event for event in log.iter() if isinstance(event, ModelCallEndEvent)]
@@ -2407,6 +2430,79 @@ def test_direct_model_stream_recovery_writes_stable_runtime_error_end() -> None:
     assert ends[0].estimated_input_tokens == 17
     assert ends[0].provider_dispatch_status == "dispatched"
     assert not any(isinstance(event, ReplyEndEvent) for event in log.iter())
+
+
+def test_model_stream_recovery_atomically_settles_physical_reservation() -> None:
+    contracts = build_default_authority_materialization_contract_bundle()
+    log = InMemoryEventLog(runtime_session_id="runtime:model-recovery")
+    store = LedgerMaterializationAccountStore(
+        state=None,
+        charge_contract=contracts.charge_contract,
+    )
+    coordinator = LedgerMaterializationCoordinator(
+        runtime_session_id=log.runtime_session_id,
+        event_log=log,
+        store=store,
+        charge_contract=contracts.charge_contract,
+        limits=contracts.limits,
+    )
+    coordinator.bootstrap_genesis(
+        context=CTX,
+        business_events=(
+            CustomEvent(
+                id="event:model-recovery-genesis",
+                **CTX.event_fields(),
+                name="model-recovery-genesis",
+            ),
+        ),
+        genesis_profile="host_first_run",
+        genesis_burst_contract=(
+            contracts.burst_registry.unique_binding_for_operation(
+                PhysicalOperationKind.LEDGER_GENESIS
+            ).contract
+        ),
+        register_transcript_consumer=True,
+    )
+    call = test_resolved_call(purpose=ModelCallPurpose.MEMORY_REFLECTION)
+    start = ModelCallStartEvent(
+        **CTX.event_fields(),
+        **model_call_start_fields(
+            resolved_call=call.fact,
+            model_call_index=None,
+            lifecycle_kind="direct_internal_call",
+            pre_send_estimated_input_tokens=17,
+        ),
+    )
+    coordinator.reserve_and_commit_dispatch(
+        context=CTX,
+        business_events=(start,),
+        reservation_id=f"model_physical:{call.fact.resolved_model_call_id[-96:]}",
+        owner_id=call.fact.resolved_model_call_id,
+        burst_contract=(
+            contracts.burst_registry.unique_binding_for_operation(
+                PhysicalOperationKind.MODEL_CALL
+            ).contract
+        ),
+    )
+
+    report = ModelStreamRecoveryService(
+        event_log=log,
+        archive=InMemoryArchiveStore(),
+    ).repair_incomplete_model_streams()
+
+    assert report.repaired[0].terminal_outcome == "runtime_error"
+    account = log.read_materialization_account_state()
+    assert account is not None
+    assert account.active_reservations == ()
+    settlements = tuple(
+        event
+        for event in log.iter()
+        if isinstance(event, PhysicalOperationReservationSettledEvent)
+    )
+    assert len(settlements) == 1
+    assert settlements[0].settlement.reservation_id == (
+        f"model_physical:{call.fact.resolved_model_call_id[-96:]}"
+    )
 
 
 def test_main_model_stream_recovery_closes_reply_envelope() -> None:
@@ -2426,7 +2522,11 @@ def test_main_model_stream_recovery_closes_reply_envelope() -> None:
     )
     log.extend((reply_start, start))
 
-    ModelStreamRecoveryService(event_log=log).repair_incomplete_model_streams()
+    ModelStreamRecoveryService(
+        event_log=log,
+        archive=InMemoryArchiveStore(),
+        allow_unbootstrapped_test_events=True,
+    ).repair_incomplete_model_streams()
 
     events = log.iter()
     end = next(event for event in events if isinstance(event, ModelCallEndEvent))
@@ -2461,7 +2561,11 @@ def test_model_stream_recovery_preserves_durable_provider_error_winner() -> None
     )
     log.extend((start, provider_error))
 
-    report = ModelStreamRecoveryService(event_log=log).repair_incomplete_model_streams()
+    report = ModelStreamRecoveryService(
+        event_log=log,
+        archive=InMemoryArchiveStore(),
+        allow_unbootstrapped_test_events=True,
+    ).repair_incomplete_model_streams()
 
     assert report.repaired[0].terminal_outcome == "provider_error"
     end = next(
@@ -2470,7 +2574,10 @@ def test_model_stream_recovery_preserves_durable_provider_error_winner() -> None
     assert end.outcome == "provider_error"
 
 
-def _commit_completed_main_model_call(log: InMemoryEventLog) -> ModelCallStartEvent:
+def _commit_completed_main_model_call(
+    log: InMemoryEventLog,
+    archive: InMemoryArchiveStore,
+) -> ModelCallStartEvent:
     call = test_resolved_call()
     start = ModelCallStartEvent(
         **CTX.event_fields(),
@@ -2481,26 +2588,60 @@ def _commit_completed_main_model_call(log: InMemoryEventLog) -> ModelCallStartEv
         **CTX.event_fields(),
         name="assistant",
     )
+    committed_prefix = log.extend((reply_start, start))
+    committed_start = next(
+        event for event in committed_prefix if isinstance(event, ModelCallStartEvent)
+    )
+    usage = ModelTokenUsageFact(input_tokens=0, output_tokens=0, total_tokens=0)
+    reducer = ModelTerminalProjectionReducer(
+        runtime_session_id=log.runtime_session_id,
+        start_event=committed_start,
+        contracts=build_default_terminal_projection_contract_bundle(),
+        model_stream_semantic_domain_contract_fingerprint=(
+            build_default_authority_materialization_contract_bundle()
+            .event_domain.contract.transcript_semantic_domain_contract_fingerprint
+        ),
+    )
+    projection = reducer.prepare_terminal(
+        event_context=CTX,
+        terminal_outcome="completed",
+        usage_report=TransportUsageReport(
+            usage_status="reported",
+            usage=usage,
+            reported_model_id=call.fact.target.model_id,
+        ),
+    )
+    archive.put_text(
+        projection.projection_reference.document_artifact_id,
+        projection.canonical_document_bytes.decode("utf-8"),
+        session_id=log.runtime_session_id,
+        run_id=CTX.run_id,
+        media_type="application/vnd.pulsara.terminal-projection+json; version=2",
+    )
+    end_fields = model_call_end_fields(resolved_call=call.fact)
     end = ModelCallEndEvent(
-        id=start.recovery_plan.stable_model_call_end_event_id,
+        id=committed_start.recovery_plan.stable_model_call_end_event_id,
         **CTX.event_fields(),
-        **model_call_end_fields(resolved_call=call.fact),
+        **{**end_fields, "terminal_projection": projection.end_reference},
     )
     reply_end = ReplyEndEvent(
-        id=start.recovery_plan.stable_reply_end_event_id,
+        id=committed_start.recovery_plan.stable_reply_end_event_id,
         **CTX.event_fields(),
         model_terminal_outcome="completed",
     )
-    log.extend((reply_start, start, end, reply_end))
-    return start
+    log.extend((projection.committed_event, end, reply_end))
+    return committed_start
 
 
 def test_control_recovery_suppresses_completed_call_without_downstream() -> None:
     log = InMemoryEventLog()
-    start = _commit_completed_main_model_call(log)
+    archive = InMemoryArchiveStore()
+    start = _commit_completed_main_model_call(log, archive)
 
     report = ModelCallControlDispositionRecoveryService(
-        event_log=log
+        event_log=log,
+        archive=archive,
+        allow_unbootstrapped_test_events=True,
     ).repair_missing_dispositions()
 
     assert report.recovered[0].source == "recovered_suppression"
@@ -2519,7 +2660,8 @@ def test_control_recovery_suppresses_completed_call_without_downstream() -> None
 
 def test_control_recovery_rejects_run_end_without_prior_disposition() -> None:
     log = InMemoryEventLog()
-    _commit_completed_main_model_call(log)
+    archive = InMemoryArchiveStore()
+    _commit_completed_main_model_call(log, archive)
     log.append(
         RunEndEvent(
             **CTX.event_fields(),
@@ -2534,7 +2676,9 @@ def test_control_recovery_rejects_run_end_without_prior_disposition() -> None:
         match="downstream control facts",
     ):
         ModelCallControlDispositionRecoveryService(
-            event_log=log
+            event_log=log,
+            archive=archive,
+            allow_unbootstrapped_test_events=True,
         ).repair_missing_dispositions()
 
 

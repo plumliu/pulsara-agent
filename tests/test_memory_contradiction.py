@@ -162,6 +162,7 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=fake_memory_uow_factory(
@@ -442,13 +443,14 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
-                memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
-                    dsn=dsn,
-                    runtime_session_id=runtime_session_id,
-                    archive=PostgresArtifactStore(dsn=dsn),
-                    graph_id=graph_id,
+            memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
+                graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
         )
@@ -499,6 +501,7 @@ def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id="runtime:test",
         memory_write_uow_factory=fake_memory_uow_factory(
@@ -845,6 +848,7 @@ def _postgres_executor(
         candidate_pool=pool,
         memory_write_service=_service_on(InMemoryGraphStore()),
         event_log=log,
+        event_commit_port=log.extend,
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(

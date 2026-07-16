@@ -1,4 +1,4 @@
-"""Materialize canonical model-call results from committed EventLog facts."""
+"""Materialize production model-call results from terminal projections."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pulsara_agent.event import (
     DataBlockStartEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
     ProviderModelStreamErrorEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -31,17 +32,39 @@ from pulsara_agent.primitives.model_call import (
     ModelCallResultControlDisposition,
     sha256_fingerprint,
 )
+from pulsara_agent.primitives.terminal_projection import (
+    ModelDataBlockSemanticFact,
+    ModelProviderErrorSemanticFact,
+    ModelTerminalProjectionPayloadFact,
+    ModelTextBlockSemanticFact,
+    ModelThinkingBlockSemanticFact,
+    ModelToolCallBlockSemanticFact,
+    TerminalInlineContentFact,
+    TerminalProjectionDocumentFact,
+)
+from pulsara_agent.primitives.authority_materialization import (
+    MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS,
+    MAX_MODEL_STREAM_STRUCTURAL_TAIL_PAYLOAD_BYTES,
+    MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL,
+    MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
+)
 
 
 class ModelStreamMaterializationError(RuntimeError):
     pass
 
 
-MAX_MODEL_CALL_MATERIALIZATION_EVENTS = 16_384
-MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES = 16 * 1024 * 1024
+MAX_MODEL_CALL_MATERIALIZATION_EVENTS = (
+    MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL
+    + MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS
+)
+MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES = (
+    MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL
+    + MAX_MODEL_STREAM_STRUCTURAL_TAIL_PAYLOAD_BYTES
+)
 
 
-def materialize_committed_model_call_result(
+def _materialize_committed_model_call_result_from_raw_event_log(
     event_log: EventLog,
     *,
     resolved_model_call_id: str,
@@ -53,7 +76,7 @@ def materialize_committed_model_call_result(
         max_payload_bytes=MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES,
         deadline_monotonic=deadline_monotonic,
     )
-    return materialize_committed_model_call_result_from_events(
+    return _materialize_committed_model_call_result_from_raw_events(
         tuple(
             envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
             for envelope in raw
@@ -62,7 +85,7 @@ def materialize_committed_model_call_result(
     )
 
 
-def materialize_committed_model_call_result_from_events(
+def _materialize_committed_model_call_result_from_raw_events(
     events: tuple[AgentEvent, ...],
     *,
     resolved_model_call_id: str,
@@ -192,6 +215,178 @@ def materialize_committed_model_call_result_from_events(
     }
     return CommittedModelCallResult(
         **payload,
+        result_fingerprint=sha256_fingerprint(
+            "committed-model-call-result:v1", canonical
+        ),
+    )
+
+
+def materialize_committed_model_call_result_from_terminal_projection(
+    events: tuple[AgentEvent, ...],
+    *,
+    resolved_model_call_id: str,
+    runtime_session_id: str,
+    document: TerminalProjectionDocumentFact,
+) -> CommittedModelCallResult:
+    """Build the production control result from the durable projection authority."""
+
+    from pulsara_agent.llm.terminal_projection import (
+        validate_model_terminal_projection_document,
+    )
+
+    starts = tuple(
+        event
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+        and event.resolved_call.resolved_model_call_id == resolved_model_call_id
+    )
+    ends = tuple(
+        event
+        for event in events
+        if isinstance(event, ModelCallEndEvent)
+        and event.resolved_model_call_id == resolved_model_call_id
+    )
+    committed = tuple(
+        event
+        for event in events
+        if isinstance(event, ModelCallTerminalProjectionCommittedEvent)
+        and event.resolved_model_call_id == resolved_model_call_id
+    )
+    if len(starts) != 1 or len(ends) != 1 or len(committed) != 1:
+        raise ModelStreamMaterializationError(
+            "projection result requires one Start, projection commit, and End"
+        )
+    start, end, projection_event = starts[0], ends[0], committed[0]
+    if start.sequence is None or end.sequence is None or projection_event.sequence is None:
+        raise ModelStreamMaterializationError(
+            "projection result requires committed lifecycle sequences"
+        )
+    if not (start.sequence < projection_event.sequence < end.sequence):
+        raise ModelStreamMaterializationError(
+            "projection result lifecycle sequence is invalid"
+        )
+    try:
+        validate_model_terminal_projection_document(
+            runtime_session_id=runtime_session_id,
+            start=start,
+            committed=projection_event,
+            end=end,
+            document=document,
+        )
+    except ValueError as exc:
+        raise ModelStreamMaterializationError(str(exc)) from exc
+    payload = document.payload
+    if not isinstance(payload, ModelTerminalProjectionPayloadFact):
+        raise ModelStreamMaterializationError("model projection payload kind drifted")
+
+    text_facts: list[CommittedModelTextBlockFact] = []
+    thinking_facts: list[CommittedModelThinkingBlockFact] = []
+    data_facts: list[CommittedModelDataBlockFact] = []
+    tool_facts: list[CommittedModelToolCallFact] = []
+    provider_errors = []
+    for item in payload.items:
+        semantic = item.semantic_identity
+        if isinstance(semantic, ModelProviderErrorSemanticFact):
+            if item.provider_error is None:
+                raise ModelStreamMaterializationError(
+                    "provider projection item lacks its sanitized error"
+                )
+            provider_errors.append(item.provider_error)
+            continue
+        if isinstance(semantic, ModelToolCallBlockSemanticFact):
+            tool_facts.append(
+                CommittedModelToolCallFact(
+                    tool_call_id=semantic.tool_call_id,
+                    tool_call_name=semantic.tool_name,
+                    raw_arguments_json=semantic.raw_arguments_json,
+                    start_sequence=item.source_start_sequence,
+                    end_sequence=item.source_end_sequence,
+                    completion_status=semantic.completion_status,
+                )
+            )
+            continue
+        if not isinstance(item.content, TerminalInlineContentFact):
+            raise ModelStreamMaterializationError(
+                "model projection control materialization requires inline content"
+            )
+        if isinstance(semantic, ModelTextBlockSemanticFact):
+            text_facts.append(
+                CommittedModelTextBlockFact(
+                    block_id=semantic.block_id,
+                    text=item.content.text,
+                    start_sequence=item.source_start_sequence,
+                    end_sequence=item.source_end_sequence,
+                    completion_status=semantic.completion_status,
+                )
+            )
+        elif isinstance(semantic, ModelThinkingBlockSemanticFact):
+            thinking_facts.append(
+                CommittedModelThinkingBlockFact(
+                    block_id=semantic.block_id,
+                    text=item.content.text,
+                    start_sequence=item.source_start_sequence,
+                    end_sequence=item.source_end_sequence,
+                    completion_status=semantic.completion_status,
+                )
+            )
+        elif isinstance(semantic, ModelDataBlockSemanticFact):
+            data_facts.append(
+                CommittedModelDataBlockFact(
+                    block_id=semantic.block_id,
+                    media_type=semantic.media_type,
+                    data=item.content.text,
+                    start_sequence=item.source_start_sequence,
+                    end_sequence=item.source_end_sequence,
+                    completion_status=semantic.completion_status,
+                )
+            )
+        else:  # pragma: no cover - discriminated schema guard
+            raise ModelStreamMaterializationError(
+                f"unsupported model projection item: {type(semantic).__name__}"
+            )
+
+    source = document.source_fact
+    model_payload = {
+        "schema_version": "committed_model_call_result.v1",
+        "resolved_model_call_id": resolved_model_call_id,
+        "model_call_start_event_id": start.id,
+        "model_call_start_sequence": start.sequence,
+        "model_call_end_event_id": end.id,
+        "model_call_end_sequence": end.sequence,
+        "terminal_outcome": end.outcome,
+        "control_disposition": (
+            ModelCallResultControlDisposition.SUCCESS_ELIGIBLE
+            if end.outcome == "completed"
+            else ModelCallResultControlDisposition.AUDIT_ONLY
+        ),
+        "text_blocks": tuple(text_facts),
+        "combined_text": "".join(item.text for item in text_facts),
+        "thinking_blocks": tuple(thinking_facts),
+        "data_blocks": tuple(data_facts),
+        "tool_calls": tuple(tool_facts),
+        "provider_errors": tuple(provider_errors),
+        "usage_status": end.usage_status,
+        "usage": end.usage,
+        "reported_model_id": end.reported_model_id,
+        "semantic_item_count": source.source_semantic_item_count,
+        "source_through_sequence": end.sequence,
+    }
+    canonical = {
+        **model_payload,
+        "control_disposition": model_payload["control_disposition"].value,
+        "text_blocks": tuple(item.model_dump(mode="json") for item in text_facts),
+        "thinking_blocks": tuple(
+            item.model_dump(mode="json") for item in thinking_facts
+        ),
+        "data_blocks": tuple(item.model_dump(mode="json") for item in data_facts),
+        "tool_calls": tuple(item.model_dump(mode="json") for item in tool_facts),
+        "provider_errors": tuple(
+            item.model_dump(mode="json") for item in provider_errors
+        ),
+        "usage": end.usage.model_dump(mode="json") if end.usage is not None else None,
+    }
+    return CommittedModelCallResult(
+        **model_payload,
         result_fingerprint=sha256_fingerprint(
             "committed-model-call-result:v1", canonical
         ),
@@ -369,6 +564,5 @@ class _ToolAccumulator:
 
 __all__ = [
     "ModelStreamMaterializationError",
-    "materialize_committed_model_call_result",
-    "materialize_committed_model_call_result_from_events",
+    "materialize_committed_model_call_result_from_terminal_projection",
 ]

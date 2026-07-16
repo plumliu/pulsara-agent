@@ -16,6 +16,7 @@ from pulsara_agent.event import (
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
     ProviderModelStreamErrorEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -23,9 +24,25 @@ from pulsara_agent.event import (
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
 )
-from pulsara_agent.event_log import EventLog
+from pulsara_agent.event_log import EventLog, InMemoryEventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.model_call import ModelCallDiagnosticFact
+from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.terminal_projection import (
+    TERMINAL_PROJECTION_MEDIA_TYPE,
+    ModelTerminalProjectionReducer,
+    build_default_terminal_projection_contract_bundle,
+)
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
+from pulsara_agent.runtime.authority_materialization import (
+    LedgerMaterializationAccountStore,
+    LedgerMaterializationCoordinator,
+    build_default_authority_materialization_contract_bundle,
+)
+from pulsara_agent.primitives.authority_materialization import (
+    PhysicalOperationKind,
+    PhysicalOperationReservationFact,
+)
 from pulsara_agent.llm.accounting import (
     build_model_reservation_settlement_event,
 )
@@ -58,8 +75,28 @@ class ModelStreamRecoveryReport:
 class ModelStreamRecoveryService:
     """Recover Start-without-End lifecycles in one quiescent runtime ledger."""
 
-    def __init__(self, *, event_log: EventLog) -> None:
+    def __init__(
+        self,
+        *,
+        event_log: EventLog,
+        archive: ArtifactStore,
+        allow_unbootstrapped_test_events: bool = False,
+    ) -> None:
+        if allow_unbootstrapped_test_events and not isinstance(
+            event_log, InMemoryEventLog
+        ):
+            raise ValueError(
+                "unbootstrapped model recovery is restricted to the in-memory "
+                "pytest event log"
+            )
         self._event_log = event_log
+        self._archive = archive
+        self._allow_unbootstrapped_test_events = allow_unbootstrapped_test_events
+        self._terminal_contracts = build_default_terminal_projection_contract_bundle()
+        self._materialization_contracts = (
+            build_default_authority_materialization_contract_bundle()
+        )
+        self._domain_fingerprint = self._materialization_contracts.event_domain.contract.transcript_semantic_domain_contract_fingerprint
 
     def repair_incomplete_model_streams(
         self,
@@ -100,28 +137,19 @@ class ModelStreamRecoveryService:
                 )
 
             start = min(incomplete, key=_required_sequence)
-            batch, outcome = _build_recovery_terminal_batch(
+            batch, outcome = self._build_recovery_terminal_batch(
                 events=events,
                 start=start,
             )
-            try:
-                stored = tuple(
-                    self._event_log.extend(
-                        batch,
-                        expected_last_sequence=high_water,
-                    )
-                )
-            except BaseException:
-                confirmation = self._event_log.confirm_batch(batch)
-                if confirmation.missing_event_ids:
-                    if confirmation.committed_events:
-                        raise ModelStreamRecoveryStructuralError(
-                            "model recovery terminal batch committed partially"
-                        )
-                    raise
-                stored = confirmation.committed_events
+            stored = self._commit_recovery_terminal_batch(
+                batch=batch,
+                start=start,
+                high_water=high_water,
+                terminal_outcome=outcome,
+                deadline_monotonic=deadline_monotonic,
+            )
             expected_ids = tuple(event.id for event in batch)
-            if tuple(event.id for event in stored) != expected_ids:
+            if tuple(event.id for event in stored[: len(batch)]) != expected_ids:
                 raise ModelStreamRecoveryStructuralError(
                     "model recovery confirmation returned another terminal batch"
                 )
@@ -135,6 +163,193 @@ class ModelStreamRecoveryService:
                     terminal_event_ids=expected_ids,
                 )
             )
+
+    def _commit_recovery_terminal_batch(
+        self,
+        *,
+        batch: tuple[AgentEvent, ...],
+        start: ModelCallStartEvent,
+        high_water: int,
+        terminal_outcome: str,
+        deadline_monotonic: float | None,
+    ) -> tuple[AgentEvent, ...]:
+        account = self._event_log.read_materialization_account_state(
+            deadline_monotonic=deadline_monotonic
+        )
+        if account is None:
+            if not self._allow_unbootstrapped_test_events:
+                raise ModelStreamRecoveryStructuralError(
+                    "non-empty model recovery ledger is missing its required "
+                    "materialization account"
+                )
+            return self._commit_unbootstrapped_test_batch(
+                batch=batch,
+                high_water=high_water,
+            )
+        if account.ledger_through_sequence != high_water:
+            raise ModelStreamRecoveryStructuralError(
+                "model recovery account high-water does not match the ledger"
+            )
+        active = tuple(
+            item
+            for item in account.active_reservations
+            if item.owner_kind is PhysicalOperationKind.MODEL_CALL
+            and item.owner_id == start.resolved_call.resolved_model_call_id
+        )
+        if len(active) != 1:
+            raise ModelStreamRecoveryStructuralError(
+                "incomplete model stream does not have one exact physical reservation"
+            )
+        raw = self._event_log.read_raw_events_by_id(
+            (active[0].latest_reservation_event_id,),
+            deadline_monotonic=deadline_monotonic,
+        )
+        if len(raw) != 1:
+            raise ModelStreamRecoveryStructuralError(
+                "model recovery physical reservation creation event is missing"
+            )
+        reservation_event = raw[0].decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        from pulsara_agent.event import PhysicalOperationReservationCreatedEvent
+
+        if not isinstance(reservation_event, PhysicalOperationReservationCreatedEvent):
+            raise ModelStreamRecoveryStructuralError(
+                "model recovery reservation reference is not a creation event"
+            )
+        reservation: PhysicalOperationReservationFact = reservation_event.reservation
+        if (
+            reservation.reservation_id != active[0].reservation_id
+            or reservation.reservation_fingerprint
+            != active[0].reservation_fingerprint
+            or reservation.owner_kind is not PhysicalOperationKind.MODEL_CALL
+            or reservation.owner_id
+            != start.resolved_call.resolved_model_call_id
+        ):
+            raise ModelStreamRecoveryStructuralError(
+                "model recovery physical reservation identity drifted"
+            )
+        store = LedgerMaterializationAccountStore(
+            state=account,
+            charge_contract=self._materialization_contracts.charge_contract,
+        )
+        coordinator = LedgerMaterializationCoordinator(
+            runtime_session_id=self._event_log.runtime_session_id,
+            event_log=self._event_log,
+            store=store,
+            charge_contract=self._materialization_contracts.charge_contract,
+            limits=self._materialization_contracts.limits,
+        )
+        try:
+            committed = coordinator.commit_reserved_settlement(
+                context=EventContext(
+                    run_id=start.run_id,
+                    turn_id=start.turn_id,
+                    reply_id=start.reply_id,
+                ),
+                reservation=reservation,
+                business_events=batch,
+                terminal_outcome=terminal_outcome,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except BaseException as exc:
+            raise ModelStreamRecoveryStructuralError(
+                "model recovery terminal settlement could not be confirmed"
+            ) from exc
+        return committed.stored_events
+
+    def _commit_unbootstrapped_test_batch(
+        self,
+        *,
+        batch: tuple[AgentEvent, ...],
+        high_water: int,
+    ) -> tuple[AgentEvent, ...]:
+        try:
+            return tuple(
+                self._event_log.extend(
+                    batch,
+                    expected_last_sequence=high_water,
+                )
+            )
+        except BaseException:
+            confirmation = self._event_log.confirm_batch(batch)
+            if confirmation.missing_event_ids:
+                if confirmation.committed_events:
+                    raise ModelStreamRecoveryStructuralError(
+                        "model recovery terminal batch committed partially"
+                    )
+                raise
+            return confirmation.committed_events
+
+    def _build_recovery_terminal_batch(
+        self,
+        *,
+        events: tuple[AgentEvent, ...],
+        start: ModelCallStartEvent,
+    ) -> tuple[tuple[AgentEvent, ...], str]:
+        outcome = _recovery_terminal_outcome(events=events, start=start)
+        semantic = tuple(
+            event
+            for event in events
+            if getattr(event, "model_stream_attribution", None) is not None
+            and event.model_stream_attribution.resolved_model_call_id  # type: ignore[union-attr]
+            == start.resolved_call.resolved_model_call_id
+            and event.model_stream_attribution.model_call_start_event_id  # type: ignore[union-attr]
+            == start.id
+        )
+        reducer = ModelTerminalProjectionReducer(
+            runtime_session_id=self._event_log.runtime_session_id,
+            start_event=start,
+            contracts=self._terminal_contracts,
+            model_stream_semantic_domain_contract_fingerprint=(
+                self._domain_fingerprint
+            ),
+        )
+        reducer.apply_committed(semantic)
+        prepared = reducer.prepare_terminal(
+            event_context=EventContext(
+                run_id=start.run_id,
+                turn_id=start.turn_id,
+                reply_id=start.reply_id,
+            ),
+            terminal_outcome=outcome,  # type: ignore[arg-type]
+            usage_report=TransportUsageReport(
+                usage_status="missing",
+                usage=None,
+            ),
+        )
+        reference = prepared.projection_reference
+        confirmation = self._archive.put_text_if_absent_or_confirm_identical(
+            reference.document_artifact_id,
+            prepared.canonical_document_bytes.decode("utf-8"),
+            session_id=self._event_log.runtime_session_id,
+            run_id=start.run_id,
+            media_type=TERMINAL_PROJECTION_MEDIA_TYPE,
+            semantic_metadata={
+                "projection_kind": "model_call",
+                "document_fact_fingerprint": reference.document_fact_fingerprint,
+                "document_contract_fingerprint": (
+                    reference.document_contract_fingerprint
+                ),
+            },
+        )
+        if (
+            confirmation.result.id != reference.document_artifact_id
+            or confirmation.result.digest != reference.document_sha256
+            or confirmation.result.size_bytes != reference.document_byte_count
+        ):
+            raise ModelStreamRecoveryStructuralError(
+                "model recovery projection artifact confirmation drifted"
+            )
+        terminal_tail, checked_outcome = _build_recovery_terminal_batch(
+            events=events,
+            start=start,
+            terminal_projection=prepared.end_reference,
+        )
+        if checked_outcome != outcome:
+            raise AssertionError("model recovery terminal outcome drifted")
+        return (
+            (prepared.committed_event, *terminal_tail),
+            outcome,
+        )
 
     def _read_snapshot(
         self,
@@ -218,6 +433,23 @@ def _validate_existing_terminal(
         raise ModelStreamRecoveryStructuralError(
             "model stream terminal identity does not match Start"
         )
+    projections = tuple(
+        event
+        for event in events
+        if isinstance(event, ModelCallTerminalProjectionCommittedEvent)
+        and event.resolved_model_call_id
+        == start.resolved_call.resolved_model_call_id
+    )
+    if (
+        len(projections) != 1
+        or end.terminal_projection is None
+        or end.terminal_projection.projection_reference
+        != projections[0].projection_reference
+        or _required_sequence(projections[0]) + 1 != _required_sequence(end)
+    ):
+        raise ModelStreamRecoveryStructuralError(
+            "model terminal lacks its atomic projection"
+        )
     expected: list[AgentEvent] = [end]
     if plan.stable_settlement_event_id is not None:
         settlements = tuple(
@@ -263,37 +495,12 @@ def _build_recovery_terminal_batch(
     *,
     events: tuple[AgentEvent, ...],
     start: ModelCallStartEvent,
+    terminal_projection,
 ) -> tuple[tuple[AgentEvent, ...], str]:
     _validate_start_bundle(events=events, start=start)
     plan = start.recovery_plan
     call_id = start.resolved_call.resolved_model_call_id
-    semantic = tuple(
-        event
-        for event in events
-        if getattr(event, "model_stream_attribution", None) is not None
-        and event.model_stream_attribution.resolved_model_call_id == call_id  # type: ignore[union-attr]
-        and event.model_stream_attribution.model_call_start_event_id == start.id  # type: ignore[union-attr]
-    )
-    indexes = tuple(
-        event.model_stream_attribution.transport_sequence_index  # type: ignore[union-attr]
-        for event in semantic
-    )
-    if indexes != tuple(range(len(semantic))):
-        raise ModelStreamRecoveryStructuralError(
-            "model recovery semantic prefix is not contiguous"
-        )
-    provider_errors = tuple(
-        (index, event)
-        for index, event in enumerate(semantic)
-        if isinstance(event, ProviderModelStreamErrorEvent)
-    )
-    if len(provider_errors) > 1 or (
-        provider_errors and provider_errors[0][0] != len(semantic) - 1
-    ):
-        raise ModelStreamRecoveryStructuralError(
-            "model recovery provider-error winner is ambiguous"
-        )
-    outcome = "provider_error" if provider_errors else "runtime_error"
+    outcome = _recovery_terminal_outcome(events=events, start=start)
     event_context = EventContext(
         run_id=start.run_id,
         turn_id=start.turn_id,
@@ -317,6 +524,7 @@ def _build_recovery_terminal_batch(
                 message="Model stream was terminalized during session reopen.",
             ),
         ),
+        terminal_projection=terminal_projection,
     )
     batch: list[AgentEvent] = [model_end]
     reservation = _matching_reservation(events=events, start=start)
@@ -352,6 +560,41 @@ def _build_recovery_terminal_batch(
             )
         )
     return tuple(batch), outcome
+
+
+def _recovery_terminal_outcome(
+    *,
+    events: tuple[AgentEvent, ...],
+    start: ModelCallStartEvent,
+) -> str:
+    call_id = start.resolved_call.resolved_model_call_id
+    semantic = tuple(
+        event
+        for event in events
+        if getattr(event, "model_stream_attribution", None) is not None
+        and event.model_stream_attribution.resolved_model_call_id == call_id  # type: ignore[union-attr]
+        and event.model_stream_attribution.model_call_start_event_id == start.id  # type: ignore[union-attr]
+    )
+    indexes = tuple(
+        event.model_stream_attribution.transport_sequence_index  # type: ignore[union-attr]
+        for event in semantic
+    )
+    if indexes != tuple(range(len(semantic))):
+        raise ModelStreamRecoveryStructuralError(
+            "model recovery semantic prefix is not contiguous"
+        )
+    provider_errors = tuple(
+        (index, event)
+        for index, event in enumerate(semantic)
+        if isinstance(event, ProviderModelStreamErrorEvent)
+    )
+    if len(provider_errors) > 1 or (
+        provider_errors and provider_errors[0][0] != len(semantic) - 1
+    ):
+        raise ModelStreamRecoveryStructuralError(
+            "model recovery provider-error winner is ambiguous"
+        )
+    return "provider_error" if provider_errors else "runtime_error"
 
 
 def _validate_start_bundle(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -51,6 +51,10 @@ from pulsara_agent.memory.governance.coordinator import MemoryGovernanceCoordina
 from pulsara_agent.memory.governance.relatedness import (
     GovernanceRelatednessService,
     MemoryGovernanceRelatednessOptions,
+)
+from pulsara_agent.memory.governance.event_outbox import (
+    GovernanceEventOutboxDispatcher,
+    PostgresGovernanceEventOutboxStore,
 )
 from pulsara_agent.memory.canonical.unit_of_work import (
     GovernanceWriteUnitOfWork,
@@ -140,6 +144,7 @@ def build_in_memory_runtime_wiring(
         tool_result_artifacts=tool_result_artifacts,
         terminal_binding=terminal_binding,
         extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
+        allow_unbootstrapped_test_events=True,
     )
     _register_timeline_hook(
         runtime_session=runtime_session,
@@ -158,6 +163,10 @@ def build_in_memory_runtime_wiring(
         candidate_pool=candidate_pool,
         memory_write_service=memory_write_service,
         event_log=event_log,
+        event_commit_port=lambda events: (
+            runtime_session.write_events_from_thread(events).committed_events
+        ),
+        async_operation_port=_governance_async_operation_port(runtime_session),
         graph=graph,
         graph_id=resolved_graph_id,
         runtime_session_id=runtime_session.runtime_session_id,
@@ -166,9 +175,9 @@ def build_in_memory_runtime_wiring(
             candidate_pool=candidate_pool,
             memory_write_service=memory_write_service,
             graph_id=resolved_graph_id,
+            runtime_session_id=runtime_session.runtime_session_id,
         ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
-        stored_event_publisher=runtime_session.publish_stored_events,
     )
     return RuntimeWiring(
         runtime_session=runtime_session,
@@ -307,10 +316,22 @@ def build_durable_runtime_wiring(
         resolved_graph_id,
         mutation_outbox=MutationOutboxWriter(dsn=settings.storage.postgres_dsn),
     )
+    def governance_event_commit_port(events):
+        return runtime_session.write_events_from_thread(events).committed_events
+    governance_event_dispatcher = GovernanceEventOutboxDispatcher(
+        store=PostgresGovernanceEventOutboxStore(
+            dsn=settings.storage.postgres_dsn,
+            runtime_session_id=runtime_session.runtime_session_id,
+        ),
+        event_commit_port=governance_event_commit_port,
+    )
     memory_governance_executor = _build_memory_governance_executor(
         candidate_pool=candidate_pool,
         memory_write_service=memory_write_service,
         event_log=event_log,
+        event_commit_port=governance_event_commit_port,
+        event_outbox_dispatcher=governance_event_dispatcher,
+        async_operation_port=_governance_async_operation_port(runtime_session),
         graph=graph,
         graph_id=resolved_graph_id,
         runtime_session_id=runtime_session.runtime_session_id,
@@ -322,7 +343,6 @@ def build_durable_runtime_wiring(
             workspace_root=workspace_root,
         ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
-        stored_event_publisher=runtime_session.publish_stored_events,
         async_surfaces=(
             CanonicalMutationSurface.SEARCH_INDEX.value,
             CanonicalMutationSurface.OXIGRAPH.value,
@@ -596,12 +616,16 @@ def _build_memory_governance_executor(
     candidate_pool: CandidatePool,
     memory_write_service: MemoryWriteService,
     event_log: EventLog,
+    event_commit_port: Callable[[Sequence[AgentEvent]], Sequence[AgentEvent]],
+    event_outbox_dispatcher: GovernanceEventOutboxDispatcher | None = None,
+    async_operation_port: Callable[
+        [str, Callable[[], object], float], Awaitable[object]
+    ] | None = None,
     graph: GraphStore,
     graph_id: str | None,
     runtime_session_id: str,
     memory_write_uow_factory: Callable[[], GovernanceWriteUnitOfWork],
     allowed_write_scopes: frozenset[str],
-    stored_event_publisher: Callable[[list[AgentEvent]], None] | None = None,
     async_surfaces: tuple[str, ...] = (
         CanonicalMutationSurface.SEARCH_INDEX.value,
         CanonicalMutationSurface.OXIGRAPH.value,
@@ -611,14 +635,31 @@ def _build_memory_governance_executor(
         candidate_pool=candidate_pool,
         memory_write_service=memory_write_service,
         event_log=event_log,
+        event_commit_port=event_commit_port,
+        event_outbox_dispatcher=event_outbox_dispatcher,
+        async_operation_port=async_operation_port,
         graph=graph,
         graph_id=graph_id,
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=memory_write_uow_factory,
         allowed_write_scopes=allowed_write_scopes,
-        stored_event_publisher=stored_event_publisher,
         async_surfaces=async_surfaces,
     )
+
+
+def _governance_async_operation_port(runtime_session: RuntimeSession):
+    async def execute(
+        operation_name: str,
+        operation: Callable[[], object],
+        deadline_monotonic: float,
+    ) -> object:
+        return await runtime_session.context_input_io_service.execute(
+            operation_name=operation_name,
+            operation=operation,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    return execute
 
 
 def _register_timeline_hook(

@@ -144,6 +144,7 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
@@ -256,6 +257,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(

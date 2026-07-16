@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from threading import RLock
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Mapping
 
@@ -36,6 +37,9 @@ if TYPE_CHECKING:
 
 class ModelCallControlResolutionError(RuntimeError):
     """A completed call could not acquire a valid control disposition."""
+
+
+_CONTROL_DISPOSITION_COMMIT_ATTEMPTS = 3
 
 
 def model_call_control_disposition_event_id(
@@ -118,6 +122,7 @@ class _ConfirmedControlDispositionBatch:
     reducer_high_waters: Mapping[str, int]
     reconciliation_required: bool
     reducer_error_count: int
+    caller_cancellation: BaseException | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +143,95 @@ class ModelCallControlDispositionPublicationResult:
     diagnostic_code: str | None
 
 
+class SessionModelCallControlDispositionOwner:
+    """RuntimeSession owner for stable candidates and durable winners."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._pending: dict[str, ModelCallControlDispositionResolvedEvent] = {}
+        self._winners: dict[str, ModelCallControlResolutionResult] = {}
+
+    def get_or_register_candidate(
+        self,
+        candidate: ModelCallControlDispositionResolvedEvent,
+    ) -> ModelCallControlDispositionResolvedEvent:
+        call_id = candidate.resolved_model_call_id
+        with self._lock:
+            winner = self._winners.get(call_id)
+            if winner is not None:
+                if not _same_disposition_candidate(
+                    winner.disposition_event,
+                    candidate,
+                ):
+                    raise ModelCallControlResolutionError(
+                        "session disposition winner conflicts with candidate"
+                    )
+                return winner.disposition_event
+            current = self._pending.get(call_id)
+            if current is not None:
+                if not _same_disposition_candidate(current, candidate):
+                    raise ModelCallControlResolutionError(
+                        "session disposition candidate identity drifted"
+                    )
+                return current
+            self._pending[call_id] = candidate
+            return candidate
+
+    def winner_for(
+        self,
+        resolved_model_call_id: str,
+    ) -> ModelCallControlResolutionResult | None:
+        with self._lock:
+            return self._winners.get(resolved_model_call_id)
+
+    def adopt_winner(self, winner: ModelCallControlResolutionResult) -> None:
+        call_id = winner.disposition_event.resolved_model_call_id
+        with self._lock:
+            current = self._winners.get(call_id)
+            if current is not None and not _same_disposition_candidate(
+                current.disposition_event,
+                winner.disposition_event,
+            ):
+                raise ModelCallControlResolutionError(
+                    "session disposition winner identity drifted"
+                )
+            pending = self._pending.get(call_id)
+            if pending is not None and not _same_disposition_candidate(
+                pending,
+                winner.disposition_event,
+            ):
+                raise ModelCallControlResolutionError(
+                    "session disposition winner differs from pending candidate"
+                )
+            self._winners[call_id] = winner
+            self._pending.pop(call_id, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._pending.clear()
+            self._winners.clear()
+
+    @property
+    def pending_candidate_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+    @property
+    def pending_candidate_ids(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._pending))
+
+    @property
+    def winner_count(self) -> int:
+        with self._lock:
+            return len(self._winners)
+
+    @property
+    def winner_ids(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._winners))
+
+
 class RuntimeSessionModelCallControlDispositionCommitPort:
     """Three-phase control writer: commit/confirm, fold, then publish."""
 
@@ -154,6 +248,7 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
         self,
         *,
         candidate: ModelCallControlDispositionResolvedEvent,
+        deadline_monotonic: float,
     ) -> _ConfirmedControlDispositionBatch:
         def commit_or_confirm():
             try:
@@ -177,9 +272,31 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
                         "model disposition commit outcome is structurally untrusted"
                     ) from confirmation_error
 
-        write = await self._runtime_session.event_write_service.execute(
-            commit_or_confirm
-        )
+        caller_cancellation: BaseException | None = None
+        try:
+            write = await self._runtime_session.event_write_service.execute(
+                commit_or_confirm,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except BaseException as cancelled:
+            from pulsara_agent.runtime.event_write_service import (
+                RuntimeEventWriteCancelled,
+            )
+            from pulsara_agent.runtime.session import EventCommitError, EventWriteResult
+
+            if not isinstance(cancelled, RuntimeEventWriteCancelled):
+                raise
+            if isinstance(cancelled.operation_result, EventWriteResult):
+                write = cancelled.operation_result
+                caller_cancellation = cancelled
+            else:
+                operation_error = cancelled.operation_error
+                if not (
+                    isinstance(operation_error, EventCommitError)
+                    and operation_error.commit_outcome == "none"
+                ):
+                    self._runtime_session.latch_event_commit_outcome_unknown()
+                raise
         stored = write.committed_events
         if len(stored) != 1 or not isinstance(
             stored[0], ModelCallControlDispositionResolvedEvent
@@ -192,6 +309,7 @@ class RuntimeSessionModelCallControlDispositionCommitPort:
             reducer_high_waters=write.reducer_high_waters,
             reconciliation_required=write.reconciliation_required,
             reducer_error_count=len(write.reducer_errors),
+            caller_cancellation=caller_cancellation,
         )
 
     def fold_confirmed_resolution(
@@ -385,10 +503,33 @@ class RunModelCallControlOwner:
                     metadata=runtime_session.default_event_metadata,
                 )
                 self._pending_candidates[result.resolved_model_call_id] = candidate
-
-            confirmed = await commit_port.commit_and_confirm_resolution(
-                candidate=candidate,
+            candidate = (
+                runtime_session.model_call_control_disposition_owner
+                .get_or_register_candidate(candidate)
             )
+
+            commit_deadline = monotonic() + 30.0
+            confirmed = None
+            last_commit_error: Exception | None = None
+            for _attempt in range(_CONTROL_DISPOSITION_COMMIT_ATTEMPTS):
+                try:
+                    confirmed = await commit_port.commit_and_confirm_resolution(
+                        candidate=candidate,
+                        deadline_monotonic=commit_deadline,
+                    )
+                    break
+                except Exception as exc:
+                    if (
+                        getattr(exc, "commit_outcome", None) != "none"
+                        or runtime_session.reconciliation_required
+                        or monotonic() >= commit_deadline
+                    ):
+                        raise
+                    last_commit_error = exc
+            if confirmed is None:
+                raise ModelCallControlResolutionError(
+                    "stable model disposition remained uncommitted after bounded retry"
+                ) from last_commit_error
             folded = commit_port.fold_confirmed_resolution(confirmed=confirmed)
             durable = folded.disposition_event
             permit = (
@@ -406,6 +547,9 @@ class RunModelCallControlOwner:
                     diagnostic_code="model_control_publication_not_started",
                 ),
             )
+            runtime_session.model_call_control_disposition_owner.adopt_winner(
+                pending_publication
+            )
             self._winners[result.resolved_model_call_id] = pending_publication
             self._pending_candidates.pop(result.resolved_model_call_id, None)
 
@@ -418,6 +562,9 @@ class RunModelCallControlOwner:
                 self._winners[result.resolved_model_call_id] = resolved
             else:
                 resolved = current or resolved
+        runtime_session.model_call_control_disposition_owner.adopt_winner(resolved)
+        if confirmed.caller_cancellation is not None:
+            raise confirmed.caller_cancellation
         return resolved
 
     def _validate_durable_result_attribution(
@@ -543,6 +690,16 @@ __all__ = [
     "ModelCallControlResolutionResult",
     "RunModelCallControlOwner",
     "RuntimeSessionModelCallControlDispositionCommitPort",
+    "SessionModelCallControlDispositionOwner",
     "build_model_call_control_disposition_event",
     "model_call_control_disposition_event_id",
 ]
+
+
+def _same_disposition_candidate(
+    left: ModelCallControlDispositionResolvedEvent,
+    right: ModelCallControlDispositionResolvedEvent,
+) -> bool:
+    return left.model_copy(update={"sequence": None}) == right.model_copy(
+        update={"sequence": None}
+    )

@@ -240,12 +240,10 @@ def finalize_context_authority_slice_plan(
         if opened.window.source_summary_artifact_id != completed.summary_artifact_id:
             raise ContextEventSliceError("active compacted window summary drifted")
     elif latest_compaction_terminal_ref is None:
-        retained_from = (
-            event_slice.from_sequence
-            if event_slice.from_sequence <= prior_transcript_through_sequence
-            else None
+        retained_from = 1 if prior_transcript_through_sequence > 0 else None
+        retained_through = (
+            prior_transcript_through_sequence if retained_from is not None else None
         )
-        retained_through = prior_transcript_through_sequence if retained_from else None
         window_payload = {
             "window_kind": "uncompacted",
             "compaction_terminal_ref": None,

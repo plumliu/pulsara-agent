@@ -125,17 +125,20 @@ def execute_tool(tmp_path, name: str, arguments: dict) -> tuple[ToolExecutor, ob
 
 
 def _commit_prepared_terminal(
-    event_log: InMemoryEventLog,
+    runtime_session: RuntimeSession,
     result: ToolExecutionResult,
 ) -> ToolResultEndEvent:
     prepared = result.prepared_terminal_result
     assert prepared is not None
-    return event_log.append(
-        build_tool_result_terminal_event(
-            event_context=CTX,
-            prepared=prepared,
-        )
+    candidate = build_tool_result_terminal_event(
+        event_context=CTX,
+        prepared=prepared,
     )
+    events = asyncio.run(
+        runtime_session.tool_terminal_projection_service.prepare_batch((candidate,))
+    )
+    committed = runtime_session.write_events_from_thread(events).committed_events
+    return next(event for event in committed if isinstance(event, ToolResultEndEvent))
 
 
 def _completed_tool_result(
@@ -1318,9 +1321,8 @@ def test_todo_add_update_list_clear_and_validate_status(tmp_path) -> None:
 
 
 def test_tool_executor_prepares_terminal_for_runtime_owned_commit(tmp_path) -> None:
-    registry = make_registry(tmp_path)
-    event_log = InMemoryEventLog()
-    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+    runtime_session, executor = make_runtime_executor(tmp_path)
+    event_log = runtime_session.event_log
 
     result = executor.execute(
         ToolCall(
@@ -1328,7 +1330,7 @@ def test_tool_executor_prepares_terminal_for_runtime_owned_commit(tmp_path) -> N
         ),
         event_context=CTX,
     )
-    end_event = _commit_prepared_terminal(event_log, result)
+    end_event = _commit_prepared_terminal(runtime_session, result)
     block = _completed_tool_result(event_log, "call:terminal")
 
     assert result.status is ToolResultState.SUCCESS
@@ -1338,6 +1340,7 @@ def test_tool_executor_prepares_terminal_for_runtime_owned_commit(tmp_path) -> N
         3,
         4,
         5,
+        6,
     ]
     assert block.name == "terminal"
     assert block.state is ToolResultState.SUCCESS
@@ -1379,7 +1382,7 @@ def test_tool_executor_archives_generic_large_output(tmp_path) -> None:
     result = executor.execute(
         ToolCall(id="call:large", name="large_output"), event_context=CTX
     )
-    _commit_prepared_terminal(runtime_session.event_log, result)
+    _commit_prepared_terminal(runtime_session, result)
     block = _completed_tool_result(runtime_session.event_log, "call:large")
 
     assert result.status is ToolResultState.SUCCESS
@@ -1424,7 +1427,7 @@ def test_artifact_read_hides_cross_session_artifacts_with_not_found(tmp_path) ->
         event_context=CTX,
     )
     assert terminal_result.status is ToolResultState.SUCCESS
-    _commit_prepared_terminal(session_a.event_log, terminal_result)
+    _commit_prepared_terminal(session_a, terminal_result)
     block = _completed_tool_result(session_a.event_log, "call:terminal")
     assert isinstance(block, ToolResultBlock)
     artifact_id = block.artifacts[0].artifact_id
@@ -1544,14 +1547,16 @@ def test_artifact_read_result_carries_source_artifact_ref_without_rearchiving(
         ),
         event_context=CTX,
     )
-    _commit_prepared_terminal(runtime_session.event_log, result)
+    end_event = _commit_prepared_terminal(runtime_session, result)
     block = _completed_tool_result(runtime_session.event_log, "call:artifact-read")
 
     assert result.status is ToolResultState.SUCCESS
     assert len(result.output) > 8_000
     assert isinstance(block, ToolResultBlock)
     assert [artifact.artifact_id for artifact in block.artifacts] == [artifact_id]
-    assert len(runtime_session.archive.blobs) == 1
+    assert set(runtime_session.archive.blobs) - {artifact_id} == {
+        end_event.terminal_projection.projection_reference.document_artifact_id
+    }
 
 
 def test_tool_result_artifact_service_uses_primary_full_text_for_adaptive_preview() -> (
@@ -1646,9 +1651,8 @@ def test_tool_result_artifact_service_archives_multibyte_text_by_bytes_but_previ
 
 
 def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) -> None:
-    registry = make_registry(tmp_path)
-    event_log = InMemoryEventLog()
-    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+    runtime_session, executor = make_runtime_executor(tmp_path)
+    event_log = runtime_session.event_log
     result_holder = {}
 
     def execute_and_commit() -> None:
@@ -1668,7 +1672,7 @@ def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) ->
             event_context=CTX,
         )
         result_holder["result"] = result
-        _commit_prepared_terminal(event_log, result)
+        _commit_prepared_terminal(runtime_session, result)
 
     thread = threading.Thread(target=execute_and_commit)
     thread.start()
@@ -1695,9 +1699,8 @@ def test_terminal_streams_tool_result_delta_before_command_finishes(tmp_path) ->
 
 
 def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
-    registry = make_registry(tmp_path)
-    event_log = InMemoryEventLog()
-    executor = ToolExecutor(registry=registry, record_event=event_log.append)
+    runtime_session, executor = make_runtime_executor(tmp_path)
+    event_log = runtime_session.event_log
 
     result = executor.execute(
         ToolCall(
@@ -1707,7 +1710,7 @@ def test_terminal_streamed_json_deltas_match_final_result(tmp_path) -> None:
         ),
         event_context=CTX,
     )
-    _commit_prepared_terminal(event_log, result)
+    _commit_prepared_terminal(runtime_session, result)
     deltas = [
         event.delta
         for event in event_log.iter(reply_id="reply:tools")
@@ -1734,7 +1737,7 @@ def test_terminal_streaming_large_output_uses_conservative_live_head_then_tail(
         ),
         event_context=CTX,
     )
-    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
+    end_event = _commit_prepared_terminal(runtime_session, result)
     deltas = [
         event.delta
         for event in runtime_session.event_log.iter(reply_id="reply:tools")
@@ -1773,7 +1776,7 @@ def test_terminal_tiny_max_output_chars_is_clamped_for_artifact_budget(
         ),
         event_context=CTX,
     )
-    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
+    end_event = _commit_prepared_terminal(runtime_session, result)
 
     payload = json.loads(result.output)
     assert result.status is ToolResultState.SUCCESS
@@ -1795,7 +1798,7 @@ def test_terminal_huge_streaming_head_matches_display_metadata(tmp_path) -> None
         ),
         event_context=CTX,
     )
-    end_event = _commit_prepared_terminal(runtime_session.event_log, result)
+    end_event = _commit_prepared_terminal(runtime_session, result)
     streamed_json = "".join(
         event.delta
         for event in runtime_session.event_log.iter(reply_id="reply:tools")
@@ -1827,7 +1830,7 @@ def test_terminal_large_output_returns_preview_and_readable_artifact(tmp_path) -
         event_context=CTX,
     )
     payload = json.loads(result.output)
-    _commit_prepared_terminal(runtime_session.event_log, result)
+    _commit_prepared_terminal(runtime_session, result)
     block = _completed_tool_result(runtime_session.event_log, "call:terminal")
     assert isinstance(block, ToolResultBlock)
     replay_payload = json.loads(block.output[0].text)
@@ -1869,7 +1872,7 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
         ),
         event_context=CTX,
     )
-    _commit_prepared_terminal(runtime_session.event_log, start)
+    _commit_prepared_terminal(runtime_session, start)
     process_id = json.loads(start.output)["process_id"]
     assert process_id
     waited = executor.execute(
@@ -1885,7 +1888,7 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
         ),
         event_context=CTX,
     )
-    _commit_prepared_terminal(runtime_session.event_log, waited)
+    _commit_prepared_terminal(runtime_session, waited)
     logged = executor.execute(
         ToolCall(
             id="call:log",
@@ -1898,7 +1901,7 @@ def test_terminal_process_log_artifact_metadata_uses_real_process_status(
         ),
         event_context=CTX,
     )
-    _commit_prepared_terminal(runtime_session.event_log, logged)
+    _commit_prepared_terminal(runtime_session, logged)
 
     log_block = _completed_tool_result(
         runtime_session.event_log,

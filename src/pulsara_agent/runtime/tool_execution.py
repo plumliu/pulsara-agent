@@ -6,6 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha256
 from threading import RLock
 from typing import TYPE_CHECKING, Sequence
 
@@ -22,6 +23,13 @@ from pulsara_agent.runtime.long_horizon.accounting import (
     resolve_run_rollout_binding,
 )
 from pulsara_agent.primitives.long_horizon import RolloutReservationFact
+from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
+from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.runtime.authority_materialization import (
+    PhysicalDispatchReservationRequest,
+    PhysicalOneShotReservationRequest,
+)
+from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
@@ -244,14 +252,15 @@ class ToolExecutionTerminalRegistry:
                 if self._owners.get(owner.owner_id) is not owner:
                     continue
                 self._drain_in_flight.add(owner.owner_id)
-            worker = asyncio.to_thread(self._reconcile_terminal_owner, owner)
             try:
                 task = asyncio.create_task(
-                    worker,
+                    self._reconcile_terminal_owner(
+                        owner,
+                        deadline_monotonic=deadline_monotonic,
+                    ),
                     name=f"tool-terminal-drain:{owner.owner_id}",
                 )
             except BaseException:
-                worker.close()
                 with self._lock:
                     self._drain_in_flight.discard(owner.owner_id)
                 continue
@@ -274,30 +283,68 @@ class ToolExecutionTerminalRegistry:
                 "tool execution terminal owners remain active or untrusted"
             )
 
-    def _reconcile_terminal_owner(self, owner: ToolExecutionTerminalOwner) -> None:
+    async def _reconcile_terminal_owner(
+        self,
+        owner: ToolExecutionTerminalOwner,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
         try:
             candidates = owner.stable_candidates
             if not candidates:
                 return
-            confirmation = self._runtime_session.confirm_event_batch_from_thread(
-                candidates
+            terminals = tuple(
+                event for event in candidates if isinstance(event, ToolResultEndEvent)
             )
-            if confirmation.missing_event_ids:
-                if self._runtime_session.reconciliation_required:
-                    return
-                result = self._runtime_session.write_events_from_thread(
-                    candidates,
-                    expected_last_sequence=(
-                        self._runtime_session.long_horizon_state_store.through_sequence
+            if len(terminals) != 1:
+                self._runtime_session.latch_event_commit_outcome_unknown()
+                return
+            terminal = terminals[0]
+            physical_reservation = (
+                self._runtime_session.physical_reservation_for_owner(
+                    operation_kind=PhysicalOperationKind.TOOL_CALL,
+                    owner_id=owner.tool_call_id,
+                )
+            )
+            if physical_reservation is not None:
+                terminal_outcome = {
+                    "success": "completed",
+                    "denied": "denied",
+                    "interrupted": "cancelled",
+                    "error": "runtime_error",
+                }[terminal.state.value]
+                result = await _execute_runtime_event_write(
+                    self._runtime_session,
+                    lambda: (
+                        self._runtime_session.settle_physical_operation_from_thread(
+                            candidates,
+                            reservation=physical_reservation,
+                            terminal_outcome=terminal_outcome,
+                            state=None,
+                        )
                     ),
-                    state=None,
+                    deadline_monotonic=deadline_monotonic,
+                    operation_kind=PhysicalOperationKind.TOOL_CALL,
+                    operation_owner_id=owner.tool_call_id,
                 )
             else:
-                result = (
-                    self._runtime_session.confirm_and_handoff_event_batch_from_thread(
-                    candidates,
-                    state=None,
-                    )
+                account = self._runtime_session.materialization_account_store.snapshot()
+                if account is not None and any(
+                    item.owner_kind is PhysicalOperationKind.TOOL_CALL
+                    and item.owner_id == owner.tool_call_id
+                    for item in account.active_reservations
+                ):
+                    self._runtime_session.latch_event_commit_outcome_unknown()
+                    return
+                result = await _execute_runtime_event_write(
+                    self._runtime_session,
+                    lambda: (
+                        self._runtime_session.confirm_and_handoff_event_batch_from_thread(
+                            candidates,
+                            state=None,
+                        )
+                    ),
+                    deadline_monotonic=deadline_monotonic,
                 )
             if result.reconciliation_required or result.reducer_errors:
                 return
@@ -383,31 +430,80 @@ def _observe_background_task(task: asyncio.Task[None]) -> None:
         pass
 
 
+async def _execute_runtime_event_write(
+    runtime_session: RuntimeSession,
+    operation,
+    *,
+    deadline_monotonic: float,
+    operation_kind: PhysicalOperationKind | None = None,
+    operation_owner_id: str | None = None,
+) -> EventWriteResult:
+    """Recover the writer-owned FULL result when its async waiter is cancelled."""
+
+    from pulsara_agent.runtime.event_write_service import RuntimeEventWriteCancelled
+    from pulsara_agent.runtime.session import EventWriteResult
+
+    if (operation_kind is None) != (operation_owner_id is None):
+        raise ValueError(
+            "physical operation continuation requires kind and owner together"
+        )
+    admission_kwargs = {}
+    if operation_kind is not None and operation_owner_id is not None:
+        from pulsara_agent.primitives.authority_materialization import (
+            LedgerWriteAdmissionClass,
+        )
+
+        admission_kwargs = {
+            "admission_class": LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
+            "operation_owner_id": (
+                runtime_session.physical_operation_admission_owner_id(
+                    operation_kind=operation_kind,
+                    owner_id=operation_owner_id,
+                )
+            ),
+        }
+
+    try:
+        return await runtime_session.event_write_service.execute(
+            operation,
+            deadline_monotonic=deadline_monotonic,
+            **admission_kwargs,
+        )
+    except RuntimeEventWriteCancelled as cancelled:
+        if isinstance(cancelled.operation_result, EventWriteResult):
+            return cancelled.operation_result
+        raise
+
+
+def _tool_physical_reservation_id(*, run_id: str, tool_call_id: str) -> str:
+    digest = sha256(f"{run_id}\x00{tool_call_id}".encode("utf-8")).hexdigest()
+    return f"tool_physical:{digest}"
+
+
 
 def build_tool_result_terminal_event(
     *,
     event_context: EventContext,
     prepared: PreparedToolTerminalResult,
-) -> ToolResultEndEvent:
+) -> ToolResultEndCandidate:
     """Lower executor-owned terminal facts into one runtime-owned event candidate."""
 
     semantics = prepared.semantics
-    return ToolResultEndEvent(
+    return ToolResultEndCandidate(
         id=(
             f"tool_result_end:{event_context.run_id}:"
             f"{prepared.tool_call_id}"
         ),
-        **event_context.event_fields(),
+        run_id=event_context.run_id,
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
         created_at=prepared.created_at,
+        metadata={},
         tool_call_id=prepared.tool_call_id,
         state=prepared.state,
-        artifacts=list(prepared.artifacts),
+        artifacts=tuple(prepared.artifacts),
         observation_timing=prepared.observation_timing,
-        render_profile=semantics.render_profile,
-        essential_capture_policy=semantics.essential_capture_policy,
-        essential_result=semantics.essential_result,
-        terminal_payload_timing=semantics.terminal_payload_timing,
-        rollup_semantics=semantics.rollup_semantics,
+        execution_semantics=semantics,
     )
 
 
@@ -439,7 +535,9 @@ class RuntimeSessionToolExecutionEventCommitPort:
             reservation.account_id,
             expected_account_state_fingerprint,
         )
-        return await self._write((gate_candidate, reservation_candidate))
+        return await self._write_gate_items(
+            ((gate_candidate, reservation_candidate, ()),)
+        )
 
     async def commit_gate_and_reservation_batch(
         self,
@@ -498,7 +596,9 @@ class RuntimeSessionToolExecutionEventCommitPort:
             next(iter(account_ids)),
             expected_account_state_fingerprint,
         )
-        return await self._write(tuple(events))
+        return await self._write_gate_items(
+            tuple((gate, reservation, ()) for gate, reservation in admission_candidates)
+        )
 
     async def commit_gate_batch(
         self,
@@ -549,7 +649,9 @@ class RuntimeSessionToolExecutionEventCommitPort:
                     "tool gate batch supports only allow-with-reservation or deny"
                 )
             ends = tuple(
-                event for event in denied_events if isinstance(event, ToolResultEndEvent)
+                event
+                for event in denied_events
+                if isinstance(event, (ToolResultEndEvent, ToolResultEndCandidate))
             )
             if len(ends) != 1 or ends[0].tool_call_id != gate.tool_call_id:
                 raise ToolExecutionCommitContractError(
@@ -557,12 +659,12 @@ class RuntimeSessionToolExecutionEventCommitPort:
                 )
             events.extend((gate, *denied_events))
         self._require_account_state(account_id, expected_account_state_fingerprint)
-        return await self._write(tuple(events))
+        return await self._write_gate_items(gate_items)
 
     async def commit_terminal_and_settlement(
         self,
         *,
-        terminal_candidate: ToolResultEndEvent,
+        terminal_candidate: ToolResultEndCandidate,
         settlement_candidate: RolloutBudgetReservationSettledEvent,
         expected_reservation_fingerprint: str,
     ) -> EventWriteResult:
@@ -578,22 +680,22 @@ class RuntimeSessionToolExecutionEventCommitPort:
             raise ToolExecutionCommitContractError(
                 "tool terminal settlement identity mismatch"
             )
-        return await self._write(
+        return await self._write_terminal_batch(
             (terminal_candidate, settlement_candidate),
-            retry_on_write_conflict=True,
+            terminal=terminal_candidate,
         )
 
     async def commit_terminal_batch_and_settlement(
         self,
         *,
-        terminal_candidates: Sequence[AgentEvent],
+        terminal_candidates: Sequence[AgentEvent | ToolResultEndCandidate],
         settlement_candidate: RolloutBudgetReservationSettledEvent,
         expected_reservation_fingerprint: str,
     ) -> EventWriteResult:
         ends = tuple(
             event
             for event in terminal_candidates
-            if isinstance(event, ToolResultEndEvent)
+            if isinstance(event, (ToolResultEndEvent, ToolResultEndCandidate))
         )
         if len(ends) != 1:
             raise ToolExecutionCommitContractError(
@@ -623,16 +725,16 @@ class RuntimeSessionToolExecutionEventCommitPort:
             raise ToolExecutionCommitContractError(
                 "tool terminal batch gate identity mismatch"
             )
-        return await self._write(
+        return await self._write_terminal_batch(
             (*terminal_candidates, settlement_candidate),
-            retry_on_write_conflict=True,
+            terminal=terminal,
         )
 
     async def commit_gate_and_denial(
         self,
         *,
         gate_candidate: CapabilityGateDecisionEvent,
-        denied_terminal_candidates: Sequence[AgentEvent],
+        denied_terminal_candidates: Sequence[AgentEvent | ToolResultEndCandidate],
         expected_account_state_fingerprint: str,
         account_id: str,
     ) -> EventWriteResult:
@@ -643,14 +745,111 @@ class RuntimeSessionToolExecutionEventCommitPort:
         ends = tuple(
             event
             for event in denied_terminal_candidates
-            if isinstance(event, ToolResultEndEvent)
+            if isinstance(event, (ToolResultEndEvent, ToolResultEndCandidate))
         )
         if len(ends) != 1 or ends[0].tool_call_id != gate_candidate.tool_call_id:
             raise ToolExecutionCommitContractError(
                 "tool denial batch requires one matching terminal fact"
             )
         self._require_account_state(account_id, expected_account_state_fingerprint)
-        return await self._write((gate_candidate, *denied_terminal_candidates))
+        return await self._write_gate_items(
+            ((gate_candidate, None, tuple(denied_terminal_candidates)),)
+        )
+
+    async def _write_gate_items(
+        self,
+        gate_items: Sequence[
+            tuple[
+                CapabilityGateDecisionEvent,
+                RolloutBudgetReservationCreatedEvent | None,
+                Sequence[AgentEvent],
+            ]
+        ],
+    ) -> EventWriteResult:
+        events: list[AgentEvent] = []
+        decisions: dict[str, str] = {}
+        for gate, reservation, denied in gate_items:
+            decisions[gate.tool_call_id] = gate.decision
+            events.append(gate)
+            if reservation is not None:
+                events.append(reservation)
+            events.extend(denied)
+        deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
+        prepared = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+            tuple(events),
+            deadline_monotonic=deadline,
+        )
+        by_call: dict[str, list[AgentEvent]] = {
+            tool_call_id: [] for tool_call_id in decisions
+        }
+        for event in prepared:
+            tool_call_id = getattr(event, "tool_call_id", None)
+            if isinstance(event, RolloutBudgetReservationCreatedEvent):
+                tool_call_id = event.reservation.owner_id
+            if not isinstance(tool_call_id, str) or tool_call_id not in by_call:
+                raise ToolExecutionCommitContractError(
+                    "prepared tool gate fact cannot be attributed to one call"
+                )
+            by_call[tool_call_id].append(event)
+        tool_contract = (
+            self.runtime_session.authority_materialization_contracts.burst_registry
+            .unique_binding_for_operation(PhysicalOperationKind.TOOL_CALL)
+            .contract
+        )
+        dispatch_requests = tuple(
+            PhysicalDispatchReservationRequest(
+                reservation_id=_tool_physical_reservation_id(
+                    run_id=self.state.run_id,
+                    tool_call_id=tool_call_id,
+                ),
+                owner_id=tool_call_id,
+                burst_contract=tool_contract,
+                business_event_ids=tuple(event.id for event in by_call[tool_call_id]),
+            )
+            for tool_call_id, decision in decisions.items()
+            if decision == "allow"
+        )
+        denied_event_ids = tuple(
+            event.id
+            for tool_call_id, decision in decisions.items()
+            if decision == "deny"
+            for event in by_call[tool_call_id]
+        )
+        if not dispatch_requests:
+            return await self._write(prepared)
+        one_shot_request = None
+        if denied_event_ids:
+            denied_digest = sha256("\x1f".join(denied_event_ids).encode()).hexdigest()
+            runtime_contract = (
+                self.runtime_session.authority_materialization_contracts.burst_registry
+                .unique_binding_for_operation(
+                    PhysicalOperationKind.RUNTIME_INTERNAL_WRITE
+                )
+                .contract
+            )
+            one_shot_request = PhysicalOneShotReservationRequest(
+                reservation_id=f"tool_deny_physical:{denied_digest}",
+                owner_id=f"tool-deny-batch:{denied_digest}",
+                burst_contract=runtime_contract,
+                business_event_ids=denied_event_ids,
+                terminal_outcome="denied",
+            )
+        self.runtime_session.publisher.bind_running_loop()
+
+        def commit_gate_batch():
+            _, result = self.runtime_session.reserve_physical_operation_batch_from_thread(
+                prepared,
+                dispatch_requests=dispatch_requests,
+                one_shot_request=one_shot_request,
+                state=self.state,
+            )
+            return result
+
+        return await _execute_runtime_event_write(
+            self.runtime_session,
+            commit_gate_batch,
+            deadline_monotonic=deadline,
+        )
 
     async def commit_suspension(
         self,
@@ -667,7 +866,103 @@ class RuntimeSessionToolExecutionEventCommitPort:
             raise ToolExecutionCommitContractError(
                 "tool suspension reservation identity mismatch"
             )
-        return await self._write((suspension_candidate,))
+        physical_reservation = self.runtime_session.physical_reservation_for_owner(
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            owner_id=suspension_candidate.tool_call_id,
+        )
+        if physical_reservation is None:
+            if (
+                self.runtime_session.materialization_account_store.snapshot() is None
+                and self.runtime_session.allow_unbootstrapped_test_events
+            ):
+                return await self._write((suspension_candidate,))
+            raise ToolExecutionCommitContractError(
+                "tool suspension lacks its active physical reservation"
+            )
+        deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
+        binding_fingerprint = context_fingerprint(
+            "tool-physical-suspension-binding:v1",
+            {
+                "interaction_kind": suspension_candidate.interaction_kind,
+                "tool_call_id": suspension_candidate.tool_call_id,
+                "mcp_binding_identity": suspension_candidate.payload.get(
+                    "mcp_binding_identity"
+                ),
+                "mcp_pending_lease_reservation_id": suspension_candidate.payload.get(
+                    "mcp_pending_lease_reservation_id"
+                ),
+            },
+        )
+        suspension_id = str(
+            suspension_candidate.payload.get("interaction_id")
+            or suspension_candidate.id
+        )
+        self.runtime_session.publisher.bind_running_loop()
+
+        def commit_suspension_batch():
+            return self.runtime_session.suspend_physical_operation_from_thread(
+                (suspension_candidate,),
+                reservation=physical_reservation,
+                suspension_id=suspension_id,
+                binding_identity_fingerprint=binding_fingerprint,
+                state=self.state,
+            )
+
+        return await _execute_runtime_event_write(
+            self.runtime_session,
+            commit_suspension_batch,
+            deadline_monotonic=deadline,
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            operation_owner_id=suspension_candidate.tool_call_id,
+        )
+
+    async def _write_terminal_batch(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        terminal: ToolResultEndEvent | ToolResultEndCandidate,
+    ) -> EventWriteResult:
+        deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
+        prepared = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+            events,
+            deadline_monotonic=deadline,
+        )
+        physical_reservation = self.runtime_session.physical_reservation_for_owner(
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            owner_id=terminal.tool_call_id,
+        )
+        if physical_reservation is None:
+            if (
+                self.runtime_session.materialization_account_store.snapshot() is None
+                and self.runtime_session.allow_unbootstrapped_test_events
+            ):
+                return await self._write(prepared, retry_on_write_conflict=True)
+            raise ToolExecutionCommitContractError(
+                "tool terminal lacks its active physical reservation"
+            )
+        terminal_outcome = {
+            "success": "completed",
+            "denied": "denied",
+            "interrupted": "cancelled",
+            "error": "runtime_error",
+        }[terminal.state.value]
+        self.runtime_session.publisher.bind_running_loop()
+
+        def commit_terminal_batch():
+            return self.runtime_session.settle_physical_operation_from_thread(
+                prepared,
+                reservation=physical_reservation,
+                terminal_outcome=terminal_outcome,
+                state=self.state,
+            )
+
+        return await _execute_runtime_event_write(
+            self.runtime_session,
+            commit_terminal_batch,
+            deadline_monotonic=deadline,
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            operation_owner_id=terminal.tool_call_id,
+        )
 
     async def _write(
         self,
@@ -676,6 +971,11 @@ class RuntimeSessionToolExecutionEventCommitPort:
         retry_on_write_conflict: bool = False,
     ) -> EventWriteResult:
         self.runtime_session.publisher.bind_running_loop()
+        deadline = self.runtime_session.event_write_service.new_deadline_monotonic()
+        events = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+            events,
+            deadline_monotonic=deadline,
+        )
         for attempt in range(8):
             expected_sequence = (
                 self.runtime_session.long_horizon_state_store.through_sequence
@@ -701,8 +1001,10 @@ class RuntimeSessionToolExecutionEventCommitPort:
                         self.runtime_session.latch_event_commit_outcome_unknown()
                         raise
             try:
-                return await self.runtime_session.event_write_service.execute(
-                    commit_or_confirm
+                return await _execute_runtime_event_write(
+                    self.runtime_session,
+                    commit_or_confirm,
+                    deadline_monotonic=deadline,
                 )
             except BaseException as original:
                 from pulsara_agent.runtime.session import EventWriteConflict

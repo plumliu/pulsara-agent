@@ -7,6 +7,13 @@ from threading import Event, Lock
 
 import pytest
 
+from pulsara_agent.primitives.authority_materialization import (
+    LedgerWriteAdmissionClass,
+)
+from pulsara_agent.runtime.authority_materialization.dispatch_barrier import (
+    CheckpointDispatchBarrierCoordinator,
+    CheckpointDispatchGateClosed,
+)
 from pulsara_agent.runtime.context_input.io_service import ContextInputIoService
 from pulsara_agent.runtime.event_write_service import (
     PendingRuntimeEventWriteError,
@@ -17,6 +24,9 @@ from pulsara_agent.runtime.event_write_service import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = REPO_ROOT / "src" / "pulsara_agent" / "runtime"
 TOOLS_DIR = REPO_ROOT / "src" / "pulsara_agent" / "tools"
+MEMORY_GOVERNANCE_DIR = (
+    REPO_ROOT / "src" / "pulsara_agent" / "memory" / "governance"
+)
 
 
 def test_runtime_wiring_imports_in_clean_interpreter() -> None:
@@ -54,18 +64,75 @@ def test_runtime_business_code_does_not_directly_append_to_event_log() -> None:
         "runtime/long_horizon/checkpoint_doctor.py",
     }
 
-    for path in sorted(RUNTIME_DIR.rglob("*.py")) + sorted(TOOLS_DIR.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
+    business_paths = (
+        sorted(RUNTIME_DIR.rglob("*.py"))
+        + sorted(TOOLS_DIR.rglob("*.py"))
+        + sorted(MEMORY_GOVERNANCE_DIR.rglob("*.py"))
+    )
+    for path in business_paths:
         normalized = path.as_posix()
-        if "event_log.append(" in text and not any(
-            normalized.endswith(suffix) for suffix in offline_writer_suffixes
-        ):
-            append_violations.append(normalized)
-        if "event_log.extend(" in text and not normalized.endswith("runtime/session.py"):
-            extend_violations.append(normalized)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"append", "extend"}
+            ):
+                continue
+            receiver = ast.unparse(node.func.value).lower()
+            if "log" not in receiver:
+                continue
+            if node.func.attr == "append" and not any(
+                normalized.endswith(suffix) for suffix in offline_writer_suffixes
+            ):
+                append_violations.append(f"{normalized}:{node.lineno}:{receiver}")
+            if node.func.attr == "extend" and not normalized.endswith(
+                "runtime/session.py"
+            ):
+                extend_violations.append(f"{normalized}:{node.lineno}:{receiver}")
 
     assert append_violations == []
     assert extend_violations == []
+
+
+def test_production_control_never_calls_raw_model_stream_materializer() -> None:
+    violations: list[str] = []
+    source_root = REPO_ROOT / "src" / "pulsara_agent"
+    diagnostic_path = source_root / "llm" / "diagnostic_materialize.py"
+    raw_backend_path = source_root / "llm" / "materialize.py"
+    forbidden_names = {
+        "materialize_committed_model_call_result",
+        "materialize_committed_model_call_result_from_events",
+        "_materialize_committed_model_call_result_from_raw_event_log",
+        "_materialize_committed_model_call_result_from_raw_events",
+    }
+    for path in sorted(source_root.rglob("*.py")):
+        if path in {diagnostic_path, raw_backend_path}:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (
+                node.module == "pulsara_agent.llm.diagnostic_materialize"
+                or any(alias.name in forbidden_names for alias in node.names)
+            ):
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}"
+                )
+                continue
+            if not isinstance(node, ast.Call):
+                continue
+            name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else None
+            )
+            if name in forbidden_names:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}"
+                )
+    assert violations == []
 
 
 def test_runtime_business_code_does_not_use_hook_manager_dispatch_as_main_path() -> None:
@@ -238,6 +305,63 @@ def test_agent_host_and_subagent_modules_default_deny_full_event_log_scans() -> 
     assert violations == []
 
 
+def test_full_raw_transcript_fold_only_exists_in_privileged_doctor() -> None:
+    authority_dir = RUNTIME_DIR / "authority_materialization"
+    violations: list[str] = []
+    allowed = authority_dir / "doctor.py"
+    for path in sorted(authority_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "read_raw_range_snapshot"
+            ):
+                continue
+            minimum = next(
+                (
+                    keyword.value
+                    for keyword in node.keywords
+                    if keyword.arg == "minimum_sequence"
+                ),
+                None,
+            )
+            if (
+                isinstance(minimum, ast.Constant)
+                and minimum.value == 1
+                and path != allowed
+            ):
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}"
+                )
+    assert violations == []
+    doctor_text = allowed.read_text(encoding="utf-8")
+    assert "maintenance_authority.acquire_exclusive" in doctor_text
+    assert "max_events=max_events" in doctor_text
+    assert "max_payload_bytes=max_payload_bytes" in doctor_text
+
+    live_text = (
+        RUNTIME_DIR / "context_input/live.py"
+    ).read_text(encoding="utf-8")
+    live_reader = live_text.split(
+        "async def _read_live_primary_event_slice(", 1
+    )[1].split("\ndef _contiguous_exact_slices(", 1)[0]
+    assert "projection_delta_minimum_sequence()" in live_reader
+    assert "minimum_sequence = 1" not in live_reader
+    assert "if compacted_window else ()" not in live_reader
+
+
+def test_authority_hard_cut_has_no_legacy_account_migration_path() -> None:
+    authority_dir = RUNTIME_DIR / "authority_materialization"
+    text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(authority_dir.glob("*.py"))
+    )
+    assert "requires migration" not in text
+    assert "legacy account" not in text
+    assert "backfill_materialization" not in text
+
+
 def test_model_call_and_transcript_reads_keep_physical_bounds_and_indexes() -> None:
     schema = (REPO_ROOT / "src/pulsara_agent/storage/postgres_schema.py").read_text(
         encoding="utf-8"
@@ -262,6 +386,13 @@ def test_model_call_and_transcript_reads_keep_physical_bounds_and_indexes() -> N
     assert "event_log.get_by_id(" not in commit
     assert "read_raw_events_by_id(" not in commit
     assert "live_cursor" in commit
+    graph_contract = (
+        REPO_ROOT / "src/pulsara_agent/primitives/long_horizon.py"
+    ).read_text(encoding="utf-8")
+    assert "MAX_MODEL_CALL_MATERIALIZATION_EVENTS" not in graph_contract
+    assert "MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES" not in graph_contract
+    assert "MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL" not in graph_contract
+    assert "MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL" not in graph_contract
     live = (REPO_ROOT / "src/pulsara_agent/runtime/context_input/live.py").read_text(
         encoding="utf-8"
     )
@@ -427,6 +558,140 @@ def test_event_writer_queue_deadline_expires_before_physical_start() -> None:
         assert not release.is_set()
         release.set()
         assert await first_task == "first"
+        writer.close_if_idle()
+
+    asyncio.run(exercise())
+
+
+def test_checkpoint_drain_closes_new_writers_and_waits_admitted_fifo() -> None:
+    async def exercise() -> None:
+        gate = CheckpointDispatchBarrierCoordinator()
+        writer = RuntimeEventWriteService(operation_timeout_seconds=1.0)
+        writer.bind_admission_coordinator(gate)
+        entered = Event()
+        release = Event()
+
+        def admitted_writer() -> str:
+            entered.set()
+            assert release.wait(timeout=1)
+            return "admitted"
+
+        admitted = asyncio.create_task(writer.execute(admitted_writer))
+        assert await asyncio.to_thread(entered.wait, 1)
+        drain = gate.begin_checkpoint_drain(
+            checkpoint_id="checkpoint:dispatch-gate",
+            checkpoint_candidate_fingerprint="sha256:" + "a" * 64,
+        )
+        drain_waiter = asyncio.create_task(
+            asyncio.to_thread(
+                gate.wait_until_drained,
+                drain,
+                deadline_monotonic=asyncio.get_running_loop().time() + 1,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not drain_waiter.done()
+        with pytest.raises(CheckpointDispatchGateClosed, match="new producer"):
+            await writer.execute(lambda: "must-not-start")
+
+        release.set()
+        assert await admitted == "admitted"
+        await drain_waiter
+        assert gate.active_producer_count == 0
+        assert (
+            await writer.execute(
+                lambda: "checkpoint-control",
+                admission_class=(
+                    LedgerWriteAdmissionClass.CHECKPOINT_BARRIER_CONTROL
+                ),
+                checkpoint_id=drain.checkpoint_id,
+            )
+            == "checkpoint-control"
+        )
+        gate.abort_before_install(drain)
+        assert await writer.execute(lambda: "producer-reopened") == "producer-reopened"
+        writer.close_if_idle()
+
+    asyncio.run(exercise())
+
+
+def test_checkpoint_barrier_drains_promoted_operation_owners_before_freeze() -> None:
+    async def exercise() -> None:
+        gate = CheckpointDispatchBarrierCoordinator()
+        writer = RuntimeEventWriteService(operation_timeout_seconds=1.0)
+        writer.bind_admission_coordinator(gate)
+
+        def dispatch() -> tuple[object, ...]:
+            return writer.promote_current_producer_admission(
+                operation_owner_ids=("model:call-1", "tool:call-2"),
+            )
+
+        model_token, tool_token = await writer.execute(dispatch)
+        assert gate.active_producer_count == 2
+        drain = gate.begin_checkpoint_drain(
+            checkpoint_id="checkpoint:operation-drain",
+            checkpoint_candidate_fingerprint="sha256:" + "b" * 64,
+        )
+        waiter = asyncio.create_task(
+            asyncio.to_thread(
+                gate.wait_until_drained,
+                drain,
+                deadline_monotonic=asyncio.get_running_loop().time() + 1,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        gate.release_write_admission(model_token)
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        gate.release_write_admission(tool_token)
+        await waiter
+        gate.abort_before_install(drain)
+        writer.close_if_idle()
+
+    asyncio.run(exercise())
+
+
+def test_checkpoint_drain_allows_only_exact_operation_continuation() -> None:
+    async def exercise() -> None:
+        gate = CheckpointDispatchBarrierCoordinator()
+        writer = RuntimeEventWriteService(operation_timeout_seconds=1.0)
+        writer.bind_admission_coordinator(gate)
+
+        def dispatch():
+            return writer.promote_current_producer_admission(
+                operation_owner_ids=("model:call-1",)
+            )[0]
+
+        operation_token = await writer.execute(dispatch)
+        drain = gate.begin_checkpoint_drain(
+            checkpoint_id="checkpoint:continuation",
+            checkpoint_candidate_fingerprint="sha256:" + "c" * 64,
+        )
+        with pytest.raises(CheckpointDispatchGateClosed, match="exact admitted owner"):
+            await writer.execute(
+                lambda: None,
+                admission_class=LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
+                operation_owner_id="model:wrong-call",
+            )
+
+        def settle() -> str:
+            gate.release_write_admission(operation_token)
+            return "settled"
+
+        assert (
+            await writer.execute(
+                settle,
+                admission_class=LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
+                operation_owner_id="model:call-1",
+            )
+            == "settled"
+        )
+        gate.wait_until_drained(
+            drain,
+            deadline_monotonic=asyncio.get_running_loop().time() + 1,
+        )
+        gate.abort_before_install(drain)
         writer.close_if_idle()
 
     asyncio.run(exercise())

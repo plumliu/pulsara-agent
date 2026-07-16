@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pulsara_agent.llm.estimator import TokenEstimate
+from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.primitives.model_call import (
     ContextBudgetReportEvent,
@@ -16,6 +17,15 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultRenderDecisionFact,
     ToolResultRenderOperationalFact,
 )
+from pulsara_agent.primitives.transcript_projection import (
+    ModelVisibleNamedFactSemanticSelectionFact,
+    TranscriptProviderProjectionFact,
+)
+
+if TYPE_CHECKING:
+    from pulsara_agent.runtime.context_input.provider_projection import (
+        PreparedTranscriptProviderProjectionFact,
+    )
 
 ContextChannel = Literal[
     "system",
@@ -190,12 +200,26 @@ class CompiledContext:
     resolved_model_call: ResolvedModelCallFact
     final_token_estimate: TokenEstimate
     message_budget_scopes: tuple[Literal["transcript", "non_transcript"], ...]
+    prepared_transcript_provider_projection: (
+        PreparedTranscriptProviderProjectionFact
+    )
+    model_visible_named_fact_semantic_selection: (
+        ModelVisibleNamedFactSemanticSelectionFact
+    )
     tool_result_render_decisions: tuple[dict[str, Any], ...] = ()
     tool_result_budget_report: dict[str, Any] = field(default_factory=dict)
     tool_result_render_decision_facts: tuple[ToolResultRenderDecisionFact, ...] = ()
     tool_result_render_operational_facts: tuple[
         ToolResultRenderOperationalFact, ...
     ] = ()
+
+    @property
+    def transcript_provider_projection(self) -> TranscriptProviderProjectionFact:
+        return self.prepared_transcript_provider_projection.projection_fact
+
+    @property
+    def transcript_provider_messages(self) -> tuple[LLMMessage, ...]:
+        return self.prepared_transcript_provider_projection.lowered_provider_messages
 
     def to_event_value(self) -> dict[str, Any]:
         return {

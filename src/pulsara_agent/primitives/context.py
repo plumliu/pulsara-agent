@@ -9,7 +9,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -23,6 +23,7 @@ from pulsara_agent.primitives._context_base import (
     FrozenJsonObjectFact,
     FrozenJsonScalar,
     FrozenJsonValue,
+    ToolArgumentsParseErrorCode,
     canonical_json_bytes,
     canonical_utc_timestamp,
     context_fingerprint,
@@ -58,6 +59,12 @@ from pulsara_agent.primitives.run_entry import (
     CurrentUserMessageFact,
     SubagentRunEntryFact,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.primitives.transcript_projection import (
+        ContextTranscriptAuthorityFact,
+        TranscriptProviderProjectionFact,
+    )
 
 
 _TRUSTED_MANIFEST_FINGERPRINT: ContextVar[str | None] = ContextVar(
@@ -103,11 +110,6 @@ _CONTEXT_CANDIDATE_CHANNEL_MATRIX = {
     "subagent_results": (ContextChannelFact.LEADING_USER, "leading_user_context"),
     "rollout_status": (ContextChannelFact.TRAILING_STATUS, "trailing_status"),
 }
-
-
-class ToolArgumentsParseErrorCode(StrEnum):
-    INVALID_JSON_SYNTAX = "invalid_json_syntax"
-    JSON_ROOT_NOT_OBJECT = "json_root_not_object"
 
 
 class ContextRunEntryReferenceFact(FrozenContextFact):
@@ -944,10 +946,6 @@ class ContextFactSnapshotFact(FrozenContextFact):
             for item in (self.primary_event_range, *self.named_event_ranges)
             if item.runtime_session_id == identity.runtime_session_id
         )
-        if min(item.first_sequence for item in local_ranges) != (
-            self.authority_slice_plan.authority_from_sequence
-        ):
-            raise ValueError("snapshot authority range start mismatch")
         for ref in self.authority_slice_plan.required_local_event_refs:
             if not _event_ref_is_within_ranges(ref, local_ranges):
                 raise ValueError("required authority ref is outside local ranges")
@@ -1845,8 +1843,8 @@ class ContextCompileInputAuditFact(FrozenContextFact):
     input_manifest_artifact_id: str
     input_manifest_fingerprint: str
     long_horizon_attribution_fingerprint: str = Field(min_length=1)
-    input_manifest_schema_version: Literal["context-input-manifest:v2"] = (
-        "context-input-manifest:v2"
+    input_manifest_schema_version: Literal["context-input-manifest:v6"] = (
+        "context-input-manifest:v6"
     )
     input_manifest_write_outcome: Literal["stored", "confirmed_existing"]
 
@@ -1915,13 +1913,15 @@ class ContextCompileInputFailureFact(FrozenContextFact):
 
 
 class ContextCompileInputManifestFact(FrozenContextFact):
-    schema_version: Literal["context-input-manifest:v2"] = "context-input-manifest:v2"
+    schema_version: Literal["context-input-manifest:v6"] = "context-input-manifest:v6"
     input_aggregate_fingerprint: str
     snapshot: ContextFactSnapshotFact
     subagent_graph_semantic_source: SubagentGraphSemanticSourceFact
     subagent_graph_acceleration: SubagentGraphAccelerationFact
     prepared_candidate_set: PreparedContextCandidateSet
     transcript_fingerprint: str
+    transcript_provider_projection: "TranscriptProviderProjectionFact"
+    transcript_authority: "ContextTranscriptAuthorityFact"
     tool_result_units_fingerprint: str
     tool_result_render_policy: ResolvedToolResultRenderPolicyFact
     tool_result_render_input_fingerprint: str
@@ -1946,7 +1946,7 @@ class ContextCompileInputManifestFact(FrozenContextFact):
         """Validate a factory-owned payload without hashing it a second time."""
 
         fingerprint = context_fingerprint(
-            "context-compile-input-manifest:v2", payload
+            "context-compile-input-manifest:v6", payload
         )
         token = _TRUSTED_MANIFEST_FINGERPRINT.set(fingerprint)
         try:
@@ -1968,6 +1968,33 @@ class ContextCompileInputManifestFact(FrozenContextFact):
             raise ValueError("manifest tool-result policy basis mismatch")
         if self.prepared_candidate_set.policy != snapshot_policy.candidate_collection:
             raise ValueError("manifest candidate policy mismatch")
+        transcript_projection = self.transcript_provider_projection
+        if (
+            transcript_projection.context_id != self.snapshot.identity.context_id
+            or transcript_projection.model_call_index
+            != self.snapshot.identity.model_call_index
+            or transcript_projection.compile_attempt_index
+            != self.snapshot.identity.compile_attempt_index
+            or transcript_projection.semantic_identity.stable_normalized_transcript_fingerprint
+            != self.transcript_fingerprint
+        ):
+            raise ValueError("manifest transcript provider projection mismatch")
+        if (
+            self.transcript_authority.provider_projection
+            != transcript_projection
+            or self.transcript_authority.final_normalized_transcript_fingerprint
+            != self.transcript_fingerprint
+        ):
+            raise ValueError("manifest transcript authority mismatch")
+        for section in transcript_projection.sections:
+            timing = section.semantic_identity.timing_semantic
+            if (
+                timing.compiled_at_utc != self.snapshot.timing.compiled_at_utc
+                or timing.session_timezone != self.snapshot.timing.session_timezone
+                or timing.compiled_local_date
+                != self.snapshot.timing.compiled_local_date
+            ):
+                raise ValueError("manifest transcript provider timing mismatch")
         if (
             self.compiler_contract_version
             != self.snapshot.identity.compiler_contract_version
@@ -2025,10 +2052,12 @@ class ContextCompileInputManifestFact(FrozenContextFact):
         ):
             raise ValueError("manifest projection-unreachable audit mismatch")
         expected_aggregate = context_fingerprint(
-            "context-compile-input-aggregate:v2",
+            "context-compile-input-aggregate:v6",
             [
                 self.snapshot.snapshot_semantic_fingerprint,
                 self.transcript_fingerprint,
+                self.transcript_provider_projection.semantic_identity.semantic_fingerprint,
+                self.transcript_authority.provider_semantic_identity.provider_semantic_fingerprint,
                 self.tool_result_render_input_fingerprint,
                 self.prepared_candidate_set.candidate_set_fingerprint,
                 self.active_window.window_semantic_fingerprint,
@@ -2051,7 +2080,7 @@ class ContextCompileInputManifestFact(FrozenContextFact):
             raise ValueError("manifest aggregate input fingerprint mismatch")
         if _TRUSTED_MANIFEST_FINGERPRINT.get() != self.manifest_fingerprint:
             _validate_fingerprint(
-                self, "context-compile-input-manifest:v2", "manifest_fingerprint"
+                self, "context-compile-input-manifest:v6", "manifest_fingerprint"
             )
         return self
 
@@ -2095,6 +2124,21 @@ def _validate_fingerprint(
     )
     if getattr(model, field_name) != expected:
         raise ValueError(f"{field_name} mismatch")
+
+
+# Late binding keeps the low-level transcript projection schemas free to use
+# the public context argument enum without creating a module import cycle.
+from pulsara_agent.primitives.transcript_projection import (  # noqa: E402
+    ContextTranscriptAuthorityFact as _ContextTranscriptAuthorityFact,
+    TranscriptProviderProjectionFact as _TranscriptProviderProjectionFact,
+)
+
+ContextCompileInputManifestFact.model_rebuild(
+    _types_namespace={
+        "TranscriptProviderProjectionFact": _TranscriptProviderProjectionFact,
+        "ContextTranscriptAuthorityFact": _ContextTranscriptAuthorityFact,
+    }
+)
 
 
 __all__ = [

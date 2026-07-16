@@ -375,11 +375,29 @@ def test_postgres_deterministic_artifact_concurrent_writers_confirm_identity() -
 def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path) -> None:
     dsn = StorageConfig.from_env().postgres_dsn
     runtime_session_id = _runtime_session_id()
-    event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
+    event_log = PostgresEventLog(
+        dsn=dsn,
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    event_log.ensure_runtime_session_owner()
+    ctx = _event_context("timeline-artifact")
+    with _connect_or_skip(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "insert into runs (id, session_id) values (%s, %s)",
+                (ctx.run_id, runtime_session_id),
+            )
+            cursor.execute(
+                """
+                insert into turns (id, session_id, run_id, turn_index)
+                values (%s, %s, %s, 0)
+                """,
+                (ctx.turn_id, runtime_session_id, ctx.run_id),
+            )
     runtime = in_memory_runtime_session(
         tmp_path,
         runtime_session_id=runtime_session_id,
-        event_log=event_log,
     )
     archive = PostgresArtifactStore(dsn=dsn)
     graph_id = f"graph:test:{uuid4().hex}"
@@ -393,7 +411,6 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
             graph_id=graph_id,
         ),
     )
-    ctx = _event_context("timeline-artifact")
 
     async def run() -> None:
         await runtime.emit(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello"))

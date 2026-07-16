@@ -9,10 +9,12 @@ from pulsara_agent.event import (
     EventType,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
+    RunEndEvent,
     RunErrorEvent,
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -85,11 +87,18 @@ from pulsara_agent.event_log import (
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.materialize import (
+    materialize_committed_model_call_result_from_terminal_projection,
+)
 from pulsara_agent.primitives.model_call import (
     ModelCallControlDisposition,
     ModelCallPurpose,
     RunTerminationIntentAttributionFact,
     sha256_fingerprint,
+)
+from pulsara_agent.primitives.run_lifecycle import (
+    RunStopReason,
+    RunTerminalizationKind,
 )
 from pulsara_agent.runtime.state import LoopState
 
@@ -318,9 +327,15 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
     assert events[4].block_id == events[3].block_id
     assert events[4].delta == "hello"
     assert isinstance(events[5], TextBlockEndEvent)
-    assert isinstance(events[6], ModelCallEndEvent)
-    assert isinstance(events[7], RolloutBudgetReservationSettledEvent)
-    assert isinstance(events[8], ReplyEndEvent)
+    assert isinstance(events[6], ModelCallTerminalProjectionCommittedEvent)
+    assert isinstance(events[7], ModelCallEndEvent)
+    assert events[7].terminal_projection is not None
+    assert (
+        events[7].terminal_projection.projection_reference
+        == events[6].projection_reference
+    )
+    assert isinstance(events[8], RolloutBudgetReservationSettledEvent)
+    assert isinstance(events[9], ReplyEndEvent)
 
 
 def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -> None:
@@ -665,7 +680,79 @@ def test_direct_model_start_has_no_reply_reservation_or_run_activation(tmp_path)
     asyncio.run(scenario())
 
 
-def test_model_call_start_rejects_stale_rollout_account_fingerprint(
+def test_model_call_start_allows_noop_ledger_progress_after_rollout_preparation(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="dispatches after noop"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:noop-account-progress",
+                model_call_index=1,
+            ),
+        )
+        activation = make_test_run_execution_activation()
+        open_test_root_rollout_run(
+            session,
+            event_context=EVENT_CONTEXT,
+            model_target=call.target.fact,
+        )
+        bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            lifecycle_kind="main_assistant_reply",
+            run_execution_activation=activation,
+        )
+        await session.write_event(
+            RunErrorEvent(
+                **EVENT_CONTEXT.event_fields(),
+                message="synthetic non-rollout durable fact",
+                code="test_rollout_noop_progress",
+            )
+        )
+        handle = runtime.start_stream(
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            start_bundle=bundle,
+            commit_port=RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=session,
+                state=None,
+            ),
+            execution_registry=session.model_stream_execution_registry,
+        )
+
+        completion = await handle.wait_completed()
+
+        assert completion.terminal_outcome == "completed"
+        assert any(
+            isinstance(event, ModelCallStartEvent)
+            for event in session.event_log.iter()
+        )
+
+    asyncio.run(scenario())
+
+
+def test_model_call_start_rejects_semantic_rollout_state_change_after_preparation(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
@@ -689,11 +776,10 @@ def test_model_call_start_rejects_stale_rollout_account_fingerprint(
             call,
             test_llm_context(
                 messages=(LLMMessage.user("Say hi"),),
-                context_id="context:stale-account",
+                context_id="context:semantic-account-drift",
                 model_call_index=1,
             ),
         )
-        activation = make_test_run_execution_activation()
         open_test_root_rollout_run(
             session,
             event_context=EVENT_CONTEXT,
@@ -705,13 +791,14 @@ def test_model_call_start_rejects_stale_rollout_account_fingerprint(
             event_context=EVENT_CONTEXT,
             runtime_session=session,
             lifecycle_kind="main_assistant_reply",
-            run_execution_activation=activation,
+            run_execution_activation=make_test_run_execution_activation(),
         )
+        assert bundle.reservation is not None
         await session.write_event(
-            RunErrorEvent(
+            RolloutBudgetReservationCreatedEvent(
+                id="rollout_budget_reservation_created:test:concurrent",
                 **EVENT_CONTEXT.event_fields(),
-                message="synthetic concurrent durable fact",
-                code="test_rollout_state_drift",
+                reservation=bundle.reservation,
             )
         )
         handle = runtime.start_stream(
@@ -1204,6 +1291,11 @@ def test_control_disposition_publication_after_commit_folds_full_before_permit(
         session, result, owner, state, _activation = (
             await _completed_control_fixture(tmp_path)
         )
+        pending_projection = session.transcript_projection_state_store.snapshot()
+        assert pending_projection.checkpointable is False
+        assert pending_projection.pending_model_disposition_call_ids == (
+            result.resolved_model_call_id,
+        )
         event_log_type = type(session.event_log)
         original_extend = event_log_type.extend
 
@@ -1228,6 +1320,225 @@ def test_control_disposition_publication_after_commit_folds_full_before_permit(
             if event.type is EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
         )
         assert durable == (resolution.disposition_event,)
+        accepted_projection = session.transcript_projection_state_store.snapshot()
+        assert accepted_projection.checkpointable is True
+        assert accepted_projection.pending_model_disposition_call_ids == ()
+
+    asyncio.run(scenario())
+
+
+def test_projection_authority_not_raw_semantic_stream_controls_completed_result(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        session, result, _owner, _state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        events = tuple(session.event_log.iter())
+        drifted: list = []
+        for event in events:
+            if isinstance(event, TextBlockDeltaEvent):
+                drifted.append(
+                    TextBlockDeltaEvent.model_validate(
+                        {**event.model_dump(mode="json"), "delta": "RAW-DRIFT"}
+                    )
+                )
+            else:
+                drifted.append(event)
+        end = next(event for event in events if isinstance(event, ModelCallEndEvent))
+        document = session.transcript_projection_document_registry.resolve(
+            end.terminal_projection.projection_reference
+        )
+
+        projected = (
+            materialize_committed_model_call_result_from_terminal_projection(
+                tuple(drifted),
+                resolved_model_call_id=result.resolved_model_call_id,
+                runtime_session_id=session.runtime_session_id,
+                document=document,
+            )
+        )
+
+        assert projected.combined_text == "control result"
+        assert projected.result_fingerprint == result.result_fingerprint
+        assert "RAW-DRIFT" not in projected.combined_text
+
+    asyncio.run(scenario())
+
+
+def test_control_disposition_precommit_failure_retries_exact_stable_candidate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.runtime.session import EventCommitError
+
+    async def scenario() -> None:
+        session, result, owner, state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        session_type = type(session)
+        original = session_type.commit_reduce_events_from_thread
+        attempts: list[tuple[str, str]] = []
+
+        def fail_once(self, events, **kwargs):
+            candidate = events[0]
+            attempts.append((candidate.id, candidate.event_fingerprint))
+            if len(attempts) == 1:
+                raise EventCommitError("synthetic disposition pre-commit failure")
+            return original(self, events, **kwargs)
+
+        monkeypatch.setattr(
+            session_type,
+            "commit_reduce_events_from_thread",
+            fail_once,
+        )
+        resolution = await owner.resolve_completed_call(
+            result=result,
+            model_call_index=1,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            state=state,
+        )
+
+        assert len(attempts) == 2
+        assert len(set(attempts)) == 1
+        assert resolution.accepted_permit is not None
+        assert session.transcript_projection_state_store.snapshot().checkpointable
+
+    asyncio.run(scenario())
+
+
+def test_uncommitted_model_disposition_blocks_run_end_and_remains_retryable(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.runtime.session import EventCommitError
+
+    async def scenario() -> None:
+        session, result, owner, state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        session_type = type(session)
+        attempted: list[tuple[str, str]] = []
+
+        def fail_before_commit(self, events, **_kwargs):
+            candidate = events[0]
+            attempted.append((candidate.id, candidate.event_fingerprint))
+            raise EventCommitError("synthetic persistent disposition outage")
+
+        def confirm_none(self, events, **_kwargs):
+            del events
+            raise EventCommitError("synthetic disposition confirmation miss")
+
+        monkeypatch.setattr(
+            session_type,
+            "commit_reduce_events_from_thread",
+            fail_before_commit,
+        )
+        monkeypatch.setattr(
+            session_type,
+            "confirm_and_reduce_event_batch",
+            confirm_none,
+        )
+        with pytest.raises(
+            ModelCallControlResolutionError,
+            match="stable model disposition remained uncommitted",
+        ):
+            await owner.resolve_completed_call(
+                result=result,
+                model_call_index=1,
+                event_context=EVENT_CONTEXT,
+                runtime_session=session,
+                state=state,
+            )
+
+        assert len(attempted) == 3
+        assert len(set(attempted)) == 1
+        projection = session.transcript_projection_state_store.snapshot()
+        assert projection.checkpointable is False
+        assert projection.pending_model_disposition_call_ids == (
+            result.resolved_model_call_id,
+        )
+        assert session.model_call_control_disposition_owner.pending_candidate_ids == (
+            result.resolved_model_call_id,
+        )
+        await owner.retire()
+        assert session.model_call_control_disposition_owner.pending_candidate_ids == (
+            result.resolved_model_call_id,
+        )
+        with pytest.raises(
+            ValueError,
+            match="FULL model control disposition commit",
+        ):
+            session.write_events_from_thread(
+                (
+                    RunEndEvent(
+                        **EVENT_CONTEXT.event_fields(),
+                        status="failed",
+                        stop_reason=RunStopReason.MODEL_ERROR,
+                        terminalization_kind=(
+                            RunTerminalizationKind.EXECUTION_FAILURE
+                        ),
+                        error_message="model control disposition unavailable",
+                    ),
+                )
+            )
+
+    asyncio.run(scenario())
+
+
+def test_control_disposition_cancel_after_full_adopts_session_winner(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.runtime.event_write_service import RuntimeEventWriteCancelled
+
+    async def scenario() -> None:
+        session, result, owner, state, _activation = (
+            await _completed_control_fixture(tmp_path)
+        )
+        original_execute = session.event_write_service.execute
+
+        async def cancel_after_full(operation, **kwargs):
+            write = await original_execute(operation, **kwargs)
+            raise RuntimeEventWriteCancelled(
+                operation_result=write,
+                operation_error=None,
+                deadline_monotonic=kwargs["deadline_monotonic"],
+            )
+
+        monkeypatch.setattr(
+            session.event_write_service,
+            "execute",
+            cancel_after_full,
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await owner.resolve_completed_call(
+                result=result,
+                model_call_index=1,
+                event_context=EVENT_CONTEXT,
+                runtime_session=session,
+                state=state,
+            )
+
+        durable = tuple(
+            event
+            for event in session.event_log.iter()
+            if event.type is EventType.MODEL_CALL_CONTROL_DISPOSITION_RESOLVED
+        )
+        assert len(durable) == 1
+        assert durable[0].disposition is ModelCallControlDisposition.ACCEPTED
+        assert session.model_call_control_disposition_owner.pending_candidate_count == 0
+        assert session.model_call_control_disposition_owner.winner_ids == (
+            result.resolved_model_call_id,
+        )
+        winner = session.model_call_control_disposition_owner.winner_for(
+            result.resolved_model_call_id
+        )
+        assert winner is not None and winner.accepted_permit is not None
+        assert await owner.permit_is_active(winner.accepted_permit)
+        assert session.transcript_projection_state_store.snapshot().checkpointable
 
     asyncio.run(scenario())
 

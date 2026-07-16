@@ -10,7 +10,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    persist_test_run_transcript_seed,
+    run_end_contract_fields,
+    run_start_permission_fields,
+)
 from tests.support import run_agent_task
 from tests.support.capability import preview_capability_plan
 
@@ -1023,19 +1027,42 @@ def _failed_dependency_parent_user_prompt(
 
 async def _write_seed_run_start(wiring, context: EventContext, user_input: str) -> None:
     runtime_session = wiring.runtime_wiring.runtime_session
+    ensure_runtime_session_owner = getattr(
+        runtime_session.event_log,
+        "ensure_runtime_session_owner",
+        None,
+    )
+    if ensure_runtime_session_owner is None:
+        raise TypeError("durable restart dogfood requires a PostgreSQL EventLog")
+    ensure_runtime_session_owner()
+    transcript_seed = persist_test_run_transcript_seed(
+        runtime_session,
+        run_id=context.run_id,
+    )
+    permission_fields = run_start_permission_fields(
+        context.run_id,
+        turn_id=context.turn_id,
+        reply_id=context.reply_id,
+        user_input=user_input,
+        mcp_installation_id=runtime_session.mcp_installation_id,
+        mcp_installation_owner_runtime_session_id=(
+            runtime_session.mcp_installation_owner_runtime_session_id
+        ),
+        model_target=wiring.agent_runtime.resolve_run_model_target().fact,
+        transcript_source_through_sequence=(
+            transcript_seed.seed_reference.source_ledger_through_sequence
+        ),
+        transcript_source_event_count=(
+            transcript_seed.seed_semantic.prior_semantic_source.semantic_source_event_count
+        ),
+    )
+    permission_fields.update(
+        run_transcript_seed_semantic=transcript_seed.seed_semantic,
+        run_transcript_seed_reference=transcript_seed.seed_reference,
+    )
     run_start = RunStartEvent(
         **context.event_fields(),
-        **run_start_permission_fields(
-            context.run_id,
-            turn_id=context.turn_id,
-            reply_id=context.reply_id,
-            user_input=user_input,
-            mcp_installation_id=runtime_session.mcp_installation_id,
-            mcp_installation_owner_runtime_session_id=(
-                runtime_session.mcp_installation_owner_runtime_session_id
-            ),
-            model_target=wiring.agent_runtime.resolve_run_model_target().fact,
-        ),
+        **permission_fields,
         user_input_chars=len(user_input),
     )
     prepared = prepare_root_long_horizon_run(
@@ -1055,7 +1082,7 @@ async def _write_seed_run_start(wiring, context: EventContext, user_input: str) 
     )
     account = prepared.root_account
     assert account is not None
-    await runtime_session.write_events(
+    stored = await runtime_session.write_events(
         (
             run_start,
             ContextWindowOpenedEvent(
@@ -1070,6 +1097,11 @@ async def _write_seed_run_start(wiring, context: EventContext, user_input: str) 
                 account=account,
             ),
         )
+    )
+    committed_run_start = stored.committed_events[0]
+    assert isinstance(committed_run_start, RunStartEvent)
+    runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+        committed_run_start
     )
 
 

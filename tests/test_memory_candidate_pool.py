@@ -63,7 +63,7 @@ def test_candidate_pool_round_trips_valid_and_invalid_payloads(pool_case: _PoolC
     pool_case.pool.append_candidate(valid)
     pool_case.pool.append_candidate(invalid)
 
-    pending = pool_case.pool.list_pending()
+    pending = _pending_for_case(pool_case)
     assert [candidate.entry_id for candidate in pending] == [valid.entry_id, invalid.entry_id]
     assert isinstance(pool_case.pool.get_candidate(valid.entry_id).payload, ValidCandidatePayload)
     assert isinstance(pool_case.pool.get_candidate(invalid.entry_id).payload, InvalidAttemptPayload)
@@ -83,7 +83,7 @@ def test_skip_decision_terminally_removes_candidate_from_pending(pool_case: _Poo
         )
     )
 
-    assert pool_case.pool.list_pending() == []
+    assert _pending_for_case(pool_case) == []
 
 
 def test_write_failed_decision_does_not_terminally_remove_candidate(pool_case: _PoolCase) -> None:
@@ -103,7 +103,9 @@ def test_write_failed_decision_does_not_terminally_remove_candidate(pool_case: _
         )
     )
 
-    assert [pending.entry_id for pending in pool_case.pool.list_pending()] == [candidate.entry_id]
+    assert [pending.entry_id for pending in _pending_for_case(pool_case)] == [
+        candidate.entry_id
+    ]
 
 
 def test_write_succeeded_decision_terminally_removes_candidate(pool_case: _PoolCase) -> None:
@@ -127,7 +129,7 @@ def test_write_succeeded_decision_terminally_removes_candidate(pool_case: _PoolC
         )
     )
 
-    assert pool_case.pool.list_pending() == []
+    assert _pending_for_case(pool_case) == []
 
 
 def test_governance_origin_candidates_are_audit_rows_not_pending(pool_case: _PoolCase) -> None:
@@ -139,8 +141,12 @@ def test_governance_origin_candidates_are_audit_rows_not_pending(pool_case: _Poo
 
     pool_case.pool.append_candidate(candidate)
 
-    assert pool_case.pool.list_candidates()[0].entry_id == candidate.entry_id
-    assert pool_case.pool.list_pending() == []
+    assert [
+        item.entry_id
+        for item in pool_case.pool.list_candidates()
+        if item.source_session_id == pool_case.session_id
+    ] == [candidate.entry_id]
+    assert _pending_for_case(pool_case) == []
 
 
 def test_compaction_origin_candidate_round_trips_provenance(pool_case: _PoolCase) -> None:
@@ -173,7 +179,9 @@ def test_compaction_origin_candidate_round_trips_provenance(pool_case: _PoolCase
     assert fetched.intent_fingerprint == "sha256:test-intent"
     assert fetched.metadata["compaction_id"] == "context_compaction:test"
     assert fetched.metadata["summary_excerpt"].startswith("The user repeatedly asks")
-    assert [pending.entry_id for pending in pool_case.pool.list_pending()] == [candidate.entry_id]
+    assert [pending.entry_id for pending in _pending_for_case(pool_case)] == [
+        candidate.entry_id
+    ]
 
 
 def test_candidate_pool_proposal_preserves_provenance_metadata(pool_case: _PoolCase) -> None:
@@ -249,6 +257,14 @@ def _preference(candidate_id: str) -> PreferenceCandidate:
         source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
         verification_status=memory.VerificationStatus.USER_CONFIRMED,
     )
+
+
+def _pending_for_case(pool_case: _PoolCase) -> list[PooledMemoryCandidate]:
+    return [
+        candidate
+        for candidate in pool_case.pool.list_pending()
+        if candidate.source_session_id == pool_case.session_id
+    ]
 
 
 def _pooled_valid(

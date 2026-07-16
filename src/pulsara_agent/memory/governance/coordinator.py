@@ -24,11 +24,8 @@ class MemoryGovernanceCoordinator:
         if self._stop.is_set():
             return
         session_id = engine.executor.runtime_session_id
-        if not any(
-            candidate.source_session_id == session_id
-            for candidate in engine.executor.candidate_pool.list_pending()
-        ):
-            return
+        # A safe point must also replay durable governance-event outbox rows.
+        # Candidate absence therefore cannot suppress the session-owned worker.
         self._pending[session_id] = engine
         self._wake.set()
 
@@ -56,6 +53,13 @@ class MemoryGovernanceCoordinator:
                 self._last_run[session_id] = time.monotonic()
                 if result.applied and self.on_commit is not None:
                     self.on_commit()
+                if engine.executor.event_dispatch_retry_required:
+                    self._pending[session_id] = engine
+                    deferred_delay = (
+                        self.session_min_interval_seconds
+                        if deferred_delay is None
+                        else min(deferred_delay, self.session_min_interval_seconds)
+                    )
             if self._pending:
                 if deferred_delay:
                     try:

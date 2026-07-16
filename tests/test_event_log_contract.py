@@ -55,7 +55,9 @@ from pulsara_agent.event_log import (
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.llm.control import build_model_call_control_disposition_event
-from pulsara_agent.llm.materialize import materialize_committed_model_call_result
+from pulsara_agent.llm.diagnostic_materialize import (
+    materialize_committed_model_call_result,
+)
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
 from pulsara_agent.runtime.tool_action import (
     builtin_tool_action_policy,
@@ -1325,10 +1327,27 @@ def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> Non
             tmp_path,
             runtime_session_id=runtime_session_id,
             event_log=event_log,
+            allow_unbootstrapped_test_events=False,
         )
         ctx = _ctx("postgres:runtime")
 
         async def run() -> None:
+            await runtime.emit(
+                RunStartEvent(
+                    id=f"run_start:test:{ctx.run_id}",
+                    **ctx.event_fields(),
+                    **run_start_permission_fields(
+                        ctx.run_id,
+                        user_input="postgres runtime contract",
+                        turn_id=ctx.turn_id,
+                        reply_id=ctx.reply_id,
+                        mcp_installation_owner_runtime_session_id=(
+                            runtime_session_id
+                        ),
+                    ),
+                    user_input_chars=len("postgres runtime contract"),
+                )
+            )
             first = await runtime.emit(
                 TextBlockDeltaEvent(
                     **ctx.event_fields(), block_id="text:1", delta="hello"
@@ -1339,17 +1358,25 @@ def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> Non
                     **ctx.event_fields(), block_id="text:1", delta=" world"
                 )
             )
-            assert [first.sequence, second.sequence] == [1, 2]
+            assert first.sequence is not None
+            assert second.sequence is not None
+            assert first.sequence < second.sequence
 
-        asyncio.run(run())
+        try:
+            asyncio.run(run())
+        finally:
+            runtime.close()
 
         reloaded = PostgresEventLog(
             dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
         )
-        assert [event.sequence for event in reloaded.iter(reply_id=ctx.reply_id)] == [
-            1,
-            2,
+        deltas = [
+            event
+            for event in reloaded.iter(reply_id=ctx.reply_id)
+            if isinstance(event, TextBlockDeltaEvent)
         ]
+        assert [event.delta for event in deltas] == ["hello", " world"]
+        assert all(event.sequence is not None for event in deltas)
     finally:
         _cleanup_session(dsn, runtime_session_id)
 
@@ -1383,9 +1410,12 @@ def test_model_call_end_usage_breakdown_round_trips_postgres(
                     output_tokens=30,
                     reasoning_output_tokens=10,
                     total_tokens=150,
+                    ),
+                    estimated_input_tokens=128,
+                    terminal_projection=model_call_end_fields(
+                        resolved_call=call
+                    )["terminal_projection"],
                 ),
-                estimated_input_tokens=128,
-            ),
         )
     )
 

@@ -503,6 +503,7 @@ def test_runtime_session_emit_many_uses_event_log_batch_extend(tmp_path) -> None
         event_log=event_log,
         archive=in_memory_runtime_session(tmp_path).archive,
         tool_result_artifacts=in_memory_runtime_session(tmp_path).tool_result_artifacts,
+        allow_unbootstrapped_test_events=True,
     )
 
     async def run() -> None:
@@ -529,6 +530,30 @@ def test_runtime_session_emit_from_thread_without_bound_loop_only_appends(tmp_pa
     assert stored.sequence == 1
     assert [event.sequence for event in runtime.event_log.iter()] == [1]
     assert subscriber.events == []
+
+
+def test_runtime_session_thread_writer_cannot_bypass_fresh_ledger_genesis(
+    tmp_path,
+) -> None:
+    runtime = in_memory_runtime_session(
+        tmp_path,
+        allow_unbootstrapped_test_events=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="fresh durable ledger genesis must use the async RunStart path",
+    ):
+        runtime.emit_from_thread(
+            TextBlockDeltaEvent(
+                **CTX.event_fields(),
+                block_id="text:thread-before-genesis",
+                delta="must not commit",
+            )
+        )
+
+    assert runtime.event_log.next_sequence() == 1
+    assert tuple(runtime.event_log.iter()) == ()
 
 
 def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(tmp_path) -> None:

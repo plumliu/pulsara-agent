@@ -66,6 +66,11 @@ from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStor
 from pulsara_agent.runtime.long_horizon.checkpoint_doctor import (
     verify_or_rebuild_subagent_graph_checkpoint,
 )
+from pulsara_agent.runtime.authority_materialization import (
+    build_default_authority_materialization_contract_bundle,
+    build_default_transcript_projection_materialization_contracts,
+    verify_or_rebuild_transcript_projection_checkpoint,
+)
 from pulsara_agent.runtime.long_horizon.checkpoint_gc import (
     garbage_collect_subagent_graph_checkpoint_artifacts,
 )
@@ -226,7 +231,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("verify", "rebuild"),
         default="verify",
     )
+    checkpoint_doctor.add_argument(
+        "--domain",
+        choices=("subagent_graph", "transcript"),
+        default="subagent_graph",
+        help="Checkpoint domain to verify or rebuild.",
+    )
     checkpoint_doctor.add_argument("--through-sequence", type=int, default=None)
+    checkpoint_doctor.add_argument("--max-events", type=int, default=1_000_000)
+    checkpoint_doctor.add_argument(
+        "--max-payload-bytes", type=int, default=1024 * 1024 * 1024
+    )
+    checkpoint_doctor.add_argument("--timeout-seconds", type=float, default=120.0)
     checkpoint_gc = _add_checkpoint_common_args(
         checkpoint_subcommands.add_parser(
             "gc",
@@ -584,6 +600,32 @@ def _checkpoint_command(args) -> dict[str, object]:
         settings.storage.postgres_dsn
     )
     if args.checkpoint_command == "doctor":
+        if args.domain == "transcript":
+            if args.through_sequence is not None:
+                raise ValueError(
+                    "transcript checkpoint doctor always freezes the current "
+                    "high-water; --through-sequence is unsupported"
+                )
+            authority_contracts = (
+                build_default_authority_materialization_contract_bundle()
+            )
+            report = verify_or_rebuild_transcript_projection_checkpoint(
+                runtime_session_id=runtime_session_id,
+                mode=args.mode,
+                event_log=event_log,
+                archive=archive,
+                maintenance_authority=maintenance,
+                authority_contracts=authority_contracts,
+                materialization_contracts=(
+                    build_default_transcript_projection_materialization_contracts(
+                        authority_contracts.limits
+                    )
+                ),
+                max_events=args.max_events,
+                max_payload_bytes=args.max_payload_bytes,
+                operation_timeout_seconds=args.timeout_seconds,
+            )
+            return report.model_dump(mode="json")
         through_sequence = args.through_sequence
         if through_sequence is None:
             through_sequence = event_log.next_sequence() - 1

@@ -18,6 +18,8 @@ from uuid import uuid4
 
 from pulsara_agent.event import (
     AgentEvent,
+    ChildRolloutSubaccountClosedEvent,
+    ContextWindowClosedEvent,
     EventContext,
     EventType,
     ModelCallStartEvent,
@@ -98,6 +100,11 @@ from pulsara_agent.runtime.subagent.store import SubagentGraphStateStore
 from pulsara_agent.runtime.subagent.run_entry import (
     SubagentRunEntryCommitUntrusted,
 )
+from pulsara_agent.runtime.authority_materialization import (
+    commit_quiescent_accounted_batch,
+)
+from pulsara_agent.runtime.long_horizon.accounting import child_settlement_aggregate
+from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
 from pulsara_agent.runtime.subagent.types import (
     SubagentBudget,
     SubagentCapabilityProfile,
@@ -112,6 +119,7 @@ from pulsara_agent.primitives.run_lifecycle import (
     RunStopReason,
     RunTerminalizationKind,
 )
+from pulsara_agent.primitives.long_horizon import ContextWindowCloseReason
 
 
 _ACTIVE_STATUSES: set[SubagentStatus] = {"running", "suspended"}
@@ -351,9 +359,6 @@ class SubagentRuntime:
                         expected_last_sequence=stale_sequence,
                         actual_last_sequence=state_before.through_sequence,
                     ) from exc
-            plan_was_current = (
-                plan.expected_through_sequence == state_before.through_sequence
-            )
             plan = self._command_planner.validate(plan, state=state_before)
             try:
                 result = await self.parent_runtime_session.write_events(
@@ -362,15 +367,24 @@ class SubagentRuntime:
                 )
             except EventWriteConflict:
                 state_after = self._graph_store.state
-                if not plan_was_current or not _same_graph_semantics(
-                    state_before,
-                    state_after,
-                ):
-                    raise
-                plan = replace(
+                stale_sequence = plan.expected_through_sequence
+                rebased = replace(
                     plan,
                     expected_through_sequence=state_after.through_sequence,
                 )
+                try:
+                    plan = self._command_planner.validate(
+                        rebased,
+                        state=state_after,
+                    )
+                except SubagentCommandPlanError as plan_error:
+                    raise EventWriteConflict(
+                        runtime_session_id=(
+                            self.parent_runtime_session.runtime_session_id
+                        ),
+                        expected_last_sequence=stale_sequence,
+                        actual_last_sequence=state_after.through_sequence,
+                    ) from plan_error
                 continue
             result.require_reduced(self._graph_reducer_id)
             return result.committed_events
@@ -452,9 +466,6 @@ class SubagentRuntime:
                         expected_last_sequence=stale_sequence,
                         actual_last_sequence=state_before.through_sequence,
                     ) from exc
-            plan_was_current = (
-                plan.expected_through_sequence == state_before.through_sequence
-            )
             plan = self._command_planner.validate(plan, state=state_before)
             try:
                 result = self.parent_runtime_session.write_events_from_thread(
@@ -463,15 +474,24 @@ class SubagentRuntime:
                 )
             except EventWriteConflict:
                 state_after = self._graph_store.state
-                if not plan_was_current or not _same_graph_semantics(
-                    state_before,
-                    state_after,
-                ):
-                    raise
-                plan = replace(
+                stale_sequence = plan.expected_through_sequence
+                rebased = replace(
                     plan,
                     expected_through_sequence=state_after.through_sequence,
                 )
+                try:
+                    plan = self._command_planner.validate(
+                        rebased,
+                        state=state_after,
+                    )
+                except SubagentCommandPlanError as plan_error:
+                    raise EventWriteConflict(
+                        runtime_session_id=(
+                            self.parent_runtime_session.runtime_session_id
+                        ),
+                        expected_last_sequence=stale_sequence,
+                        actual_last_sequence=state_after.through_sequence,
+                    ) from plan_error
                 continue
             result.require_reduced(self._graph_reducer_id)
             return result.committed_events
@@ -2397,24 +2417,31 @@ class SubagentRuntime:
                     terminalization_kind=RunTerminalizationKind.RECOVERED_INTERRUPTED,
                     abort_kind="host_teardown",
                 )
-                try:
-                    stored = child_log.extend(
-                        (recovered,),
-                        expected_last_sequence=child_log.next_sequence() - 1,
+                terminal_batch = _recovered_child_terminal_batch(
+                    child_events=child_events,
+                    start=start,
+                    recovered=recovered,
+                )
+                stored = commit_quiescent_accounted_batch(
+                    event_log=child_log,
+                    business_events=terminal_batch,
+                    owner_scope="subagent-dangling-child-terminal",
+                )
+                stored_by_id = {event.id: event for event in stored}
+                if any(event.id not in stored_by_id for event in terminal_batch):
+                    raise SubagentRuntimeError(
+                        "recovered child terminal batch was not confirmed in full"
                     )
-                    terminal = stored[0]
-                except BaseException:
-                    confirmation = child_log.confirm_batch((recovered,))
-                    if (
-                        confirmation.missing_event_ids
-                        or len(confirmation.committed_events) != 1
-                    ):
-                        raise
-                    terminal = confirmation.committed_events[0]
+                terminal = stored_by_id[recovered.id]
                 if not isinstance(terminal, RunEndEvent):
                     raise SubagentRuntimeError("recovered child terminal type mismatch")
             elif len(terminals) == 1:
                 terminal = terminals[0]
+                _require_complete_child_terminal_batch(
+                    child_events=child_events,
+                    start=start,
+                    terminal=terminal,
+                )
             else:
                 raise SubagentRuntimeError(
                     "child repair found multiple child terminal facts"
@@ -3496,6 +3523,9 @@ class SubagentRuntime:
             rollout_account_owner_state_store=(
                 self.parent_runtime_session.long_horizon_state_store
             ),
+            allow_unbootstrapped_test_events=(
+                self.parent_runtime_session.allow_unbootstrapped_test_events
+            ),
         )
         child.mcp_supervisor = self.parent_runtime_session.mcp_supervisor
         child.set_mcp_installation_contract(
@@ -3582,10 +3612,16 @@ class SubagentRuntime:
                         child_terminal.terminalization_kind
                         is RunTerminalizationKind.NORMAL
                     ):
-                        await self.complete_native_result(
-                            run.subagent_run_id,
-                            child_run_id=child_terminal.run_id,
-                        )
+                        if self.submitted_result(run.subagent_run_id) is not None:
+                            await self.complete_submitted_result(
+                                run.subagent_run_id,
+                                child_run_id=child_terminal.run_id,
+                            )
+                        else:
+                            await self.complete_native_result(
+                                run.subagent_run_id,
+                                child_run_id=child_terminal.run_id,
+                            )
                     else:
                         await self.fail_from_native_child_terminal(
                             run.subagent_run_id,
@@ -3771,6 +3807,114 @@ def _final_child_assistant_text(
             completed.append((item.end_sequence or 0, item.block.text))
     completed.sort(key=lambda item: item[0])
     return "\n".join(text for _, text in completed)
+
+
+def _recovered_child_terminal_batch(
+    *,
+    child_events: tuple[AgentEvent, ...],
+    start: RunStartEvent,
+    recovered: RunEndEvent,
+) -> tuple[AgentEvent, ...]:
+    """Build the same durable child terminal shape used by the live Agent path."""
+
+    if start.child_rollout_subaccount is None:
+        raise SubagentRuntimeError(
+            "dangling child repair requires a frozen child rollout subaccount"
+        )
+    store = LongHorizonStateStore(child_events)
+    chain = store.window_state(start.run_id)
+    if chain is None or chain.active_window_id is None:
+        raise SubagentRuntimeError(
+            "dangling child repair requires one active context window"
+        )
+    window = chain.windows[chain.active_window_id]
+    projection = store.projection_state(window.window_id)
+    if projection is None:
+        raise SubagentRuntimeError(
+            "dangling child repair requires the active window projection"
+        )
+    child_rollout = store.child_rollout_state(start.run_id)
+    if (
+        child_rollout is None
+        or child_rollout.subaccount != start.child_rollout_subaccount
+    ):
+        raise SubagentRuntimeError(
+            "dangling child repair lost its child rollout subaccount state"
+        )
+    source_through_sequence = max(
+        (event.sequence or 0 for event in child_events),
+        default=0,
+    )
+    event_fields = {
+        "run_id": start.run_id,
+        "turn_id": start.turn_id,
+        "reply_id": start.reply_id,
+        "created_at": recovered.created_at,
+        "metadata": dict(start.metadata),
+    }
+    window_close = ContextWindowClosedEvent(
+        id=window.stable_close_event_id,
+        **event_fields,
+        window_id=window.window_id,
+        window_generation=window.generation,
+        close_reason=ContextWindowCloseReason.RECOVERED_INTERRUPTED,
+        final_projection_generation=projection.projection_generation,
+        final_projection_state_fingerprint=projection.state_semantic_fingerprint,
+        source_through_sequence=source_through_sequence,
+        next_window_id=None,
+        compaction_terminal_event_id=None,
+    )
+    subaccount = start.child_rollout_subaccount
+    rollout_close = ChildRolloutSubaccountClosedEvent(
+        id=(
+            "child_rollout_subaccount_closed:"
+            f"{subaccount.subaccount_fingerprint}"
+        ),
+        **event_fields,
+        subaccount_fingerprint=subaccount.subaccount_fingerprint,
+        settlement_aggregate=child_settlement_aggregate(child_rollout),
+        run_end_event_id=recovered.id,
+    )
+    return (window_close, rollout_close, recovered)
+
+
+def _require_complete_child_terminal_batch(
+    *,
+    child_events: tuple[AgentEvent, ...],
+    start: RunStartEvent,
+    terminal: RunEndEvent,
+) -> None:
+    """Reject a legacy/partial child terminal instead of repairing around it."""
+
+    subaccount = start.child_rollout_subaccount
+    if subaccount is None:
+        raise SubagentRuntimeError(
+            "durable child terminal requires a frozen rollout subaccount"
+        )
+    window_closes = tuple(
+        event
+        for event in child_events
+        if isinstance(event, ContextWindowClosedEvent)
+        and event.run_id == start.run_id
+        and event.close_reason is not ContextWindowCloseReason.LLM_COMPACTION
+    )
+    rollout_closes = tuple(
+        event
+        for event in child_events
+        if isinstance(event, ChildRolloutSubaccountClosedEvent)
+        and event.run_id == start.run_id
+    )
+    if len(window_closes) != 1 or len(rollout_closes) != 1:
+        raise SubagentRuntimeError(
+            "child RunEnd requires one window close and one subaccount close"
+        )
+    rollout_close = rollout_closes[0]
+    if (
+        rollout_close.run_end_event_id != terminal.id
+        or rollout_close.subaccount_fingerprint
+        != subaccount.subaccount_fingerprint
+    ):
+        raise SubagentRuntimeError("child terminal batch attribution drifted")
 
 
 def _child_terminal_reference(
@@ -4141,18 +4285,6 @@ def _mcp_tool_names_from_profile(profile: SubagentCapabilityProfile) -> set[str]
         if isinstance(tool_names, list):
             names.update(str(item) for item in tool_names if isinstance(item, str))
     return names
-
-
-def _same_graph_semantics(
-    before: SubagentGraphState,
-    after: SubagentGraphState,
-) -> bool:
-    """Allow a CAS rebase only when non-graph events advanced the ledger."""
-
-    return replace(before, through_sequence=0) == replace(
-        after,
-        through_sequence=0,
-    )
 
 
 def _read_child_run_events(

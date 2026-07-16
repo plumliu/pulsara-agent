@@ -124,17 +124,21 @@ class SubagentRunEntryDriver:
                     child_run_id=state.run_id,
                 ) from exc
             if outcome.status == "none":
+                child_agent.runtime_session.transcript_projection_checkpoint_service.discard_prepared_run_seed(
+                    state.run_id
+                )
                 raise
             stored = outcome.committed_events
             publication_status = "failed_after_commit"
             original_error = exc
+        business = tuple(event for event in stored if event.id in {item.id for item in candidates})
         if (
-            len(stored) != 2
-            or not isinstance(stored[0], RunStartEvent)
-            or not isinstance(stored[1], ContextWindowOpenedEvent)
+            len(business) != 2
+            or not isinstance(business[0], RunStartEvent)
+            or not isinstance(business[1], ContextWindowOpenedEvent)
         ):
             raise RuntimeError("child RunStart commit returned an invalid batch")
-        run_start = stored[0]
+        run_start = business[0]
         if run_start.sequence is None:
             raise RuntimeError("child RunStart commit is missing sequence")
         committed = CommittedSubagentRunEntry(
@@ -144,12 +148,16 @@ class SubagentRunEntryDriver:
             publication_status=publication_status,
             subagent_run_id=entry.subagent_run_id,
         )
+        child_agent.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+            run_start
+        )
         install_run_working_set(
             state,
             committed,
             plan_snapshot=PlanWorkflowStateFact(
                 workflow_id=None,
                 active=False,
+                pending_entry_audit=False,
                 revision=0,
                 entered_event_id=None,
                 entered_event_sequence=None,

@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
 import json
+from time import monotonic
 
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
+    ContextCompactionCompletedEvent,
     ContextCompiledEvent,
     ContextProjectionRewritePageEvent,
+    ContextWindowCompactionCompletedEvent,
     ContextWindowClosedEvent,
     ContextWindowOpenedEvent,
     EventType,
@@ -70,7 +73,10 @@ from pulsara_agent.runtime.context_input.compiler import (
 )
 from pulsara_agent.runtime.context_input.transcript import (
     NormalizedContextTranscript,
-    project_context_transcript,
+)
+from pulsara_agent.runtime.context_input.stable_transcript import (
+    project_stable_context_transcript,
+    required_terminal_content_artifacts,
 )
 from pulsara_agent.runtime.context_input.candidate import (
     ContextCandidateCollectionInput,
@@ -96,6 +102,14 @@ from pulsara_agent.runtime.long_horizon.projection_reducer import (
 from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_candidate_from_state,
     fold_sparse_rollout_state,
+)
+from pulsara_agent.runtime.authority_materialization import (
+    build_default_authority_materialization_contract_bundle,
+    build_default_transcript_projection_materialization_contracts,
+    restore_transcript_projection_from_base,
+)
+from pulsara_agent.runtime.authority_materialization.contracts import (
+    materialize_transcript_sparse_read_proof,
 )
 
 
@@ -202,6 +216,184 @@ def load_context_input_manifest(
     return manifest
 
 
+def _validate_replayed_transcript_authority(
+    *,
+    manifest: ContextCompileInputManifestFact,
+    archive,
+    event_log: EventLog,
+    event_slice: ContextEventSlice,
+    named_slices: tuple[ContextEventSlice, ...],
+) -> None:
+    authority = manifest.transcript_authority
+    base = authority.projection_base
+    base_sequence = (
+        base.common.run_seed_reference.source_ledger_through_sequence
+        if base.base_kind == "run_seed"
+        else base.checkpoint_acceleration.checkpoint_candidate_ledger_through_sequence
+    )
+    contracts = build_default_authority_materialization_contract_bundle()
+    deadline = monotonic() + contracts.limits.operation_timeout_seconds
+    try:
+        delta = event_log.read_transcript_domain_delta(
+            after_sequence=base_sequence,
+            through_sequence=manifest.snapshot.identity.source_through_sequence,
+            max_events=contracts.limits.max_unreclaimable_ledger_events,
+            max_payload_bytes=(
+                contracts.limits.max_unreclaimable_charged_payload_bytes
+            ),
+            registry_contract_fingerprint=(
+                contracts.event_domain.contract.registry_contract_fingerprint
+            ),
+            deadline_monotonic=deadline,
+        )
+        proof = materialize_transcript_sparse_read_proof(
+            delta,
+            binding=contracts.event_domain,
+        )
+    except Exception as exc:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.LEDGER_UNTRUSTED,
+            "context_input_transcript_domain_proof_untrusted",
+            "transcript semantic delta cannot be proven from the ledger",
+        ) from exc
+    expected_refs = tuple(
+        (
+            item.runtime_session_id,
+            item.sequence,
+            item.event_id,
+            item.event_type,
+            item.payload_fingerprint,
+        )
+        for item in authority.transcript_domain_delta_refs
+    )
+    actual_refs = tuple(
+        (
+            item.runtime_session_id,
+            item.sequence,
+            item.event_id,
+            item.event_type,
+            item.payload_fingerprint,
+        )
+        for item in delta.semantic_events
+    )
+    source = authority.semantic_source
+    if (
+        proof != authority.domain_completeness_proof
+        or actual_refs != expected_refs
+        or source.semantic_source_event_count != delta.after.semantic_event_count
+        or source.semantic_source_accumulator != delta.after.semantic_accumulator
+    ):
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_input_transcript_authority_mismatch",
+            "ledger-derived transcript authority differs from the manifest",
+        )
+
+    all_slices = (event_slice, *named_slices)
+    supplied = {
+        (slice_.runtime_session_id, event.event_id): event
+        for slice_ in all_slices
+        for event in slice_.events
+    }
+    named_refs = tuple(
+        ref
+        for entry in authority.named_fact_selection.entries
+        for ref in entry.source_refs
+    )
+    local_ids = tuple(
+        sorted(
+            {
+                ref.event_id
+                for ref in named_refs
+                if ref.runtime_session_id
+                == manifest.snapshot.identity.runtime_session_id
+            }
+        )
+    )
+    try:
+        local_rows = event_log.read_raw_events_by_id(
+            local_ids,
+            deadline_monotonic=deadline,
+        )
+    except Exception as exc:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.LEDGER_UNTRUSTED,
+            "context_input_named_authority_untrusted",
+            "named-fact authority events cannot be read",
+        ) from exc
+    local = {row.event_id: row for row in local_rows}
+    for ref in named_refs:
+        if ref.runtime_session_id == manifest.snapshot.identity.runtime_session_id:
+            row = local.get(ref.event_id)
+            actual = (
+                row.sequence,
+                row.event_type,
+                row.payload_fingerprint,
+            ) if row is not None else None
+        else:
+            event = supplied.get((ref.runtime_session_id, ref.event_id))
+            actual = (
+                event.sequence,
+                event.event_type,
+                event.payload_fingerprint,
+            ) if event is not None else None
+        if actual != (ref.sequence, ref.event_type, ref.payload_fingerprint):
+            raise ContextInputReplayError(
+                ContextInputReplayStatus.CONTRACT_MISMATCH,
+                "context_input_named_authority_event_mismatch",
+                "named-fact authority event differs from the manifest",
+            )
+
+    artifact_refs = tuple(
+        ref
+        for entry in authority.named_fact_selection.entries
+        for ref in entry.source_artifact_refs
+    )
+    for ref in artifact_refs:
+        try:
+            info = archive.get_info(
+                ref.artifact_id,
+                session_id=manifest.snapshot.identity.runtime_session_id,
+            )
+            content = (
+                archive.get_text(
+                    ref.artifact_id,
+                    session_id=manifest.snapshot.identity.runtime_session_id,
+                ).encode("utf-8")
+                if info.media_type.startswith("text/")
+                or info.media_type in {"application/json", "application/xml"}
+                else archive.get_bytes(
+                    ref.artifact_id,
+                    session_id=manifest.snapshot.identity.runtime_session_id,
+                )
+            )
+        except Exception as exc:
+            raise ContextInputReplayError(
+                ContextInputReplayStatus.ARTIFACT_MISSING,
+                "context_input_named_authority_artifact_missing",
+                "named-fact authority artifact is unavailable",
+            ) from exc
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        metadata = info.metadata or {}
+        contract = metadata.get("artifact_contract_fingerprint")
+        if not isinstance(contract, str) or not contract.startswith("sha256:"):
+            contract = context_fingerprint(
+                "model-visible-named-fact-artifact-contract:v1",
+                {"media_type": info.media_type},
+            )
+        if (
+            ref.artifact_sha256 != digest
+            or ref.artifact_byte_count != len(content)
+            or ref.semantic_content_fingerprint != digest
+            or ref.artifact_contract_fingerprint != contract
+        ):
+            raise ContextInputReplayError(
+                ContextInputReplayStatus.CONTRACT_MISMATCH,
+                "context_input_named_authority_artifact_mismatch",
+                "named-fact authority artifact differs from the manifest",
+            )
+
+
 def replay_context_input(
     *,
     audit: ContextCompileInputAuditFact,
@@ -213,6 +405,13 @@ def replay_context_input(
     """Load and revalidate every event-safe component referenced by an audit."""
 
     manifest = load_context_input_manifest(audit=audit, archive=archive)
+    _validate_replayed_transcript_authority(
+        manifest=manifest,
+        archive=archive,
+        event_log=event_log,
+        event_slice=event_slice,
+        named_slices=named_slices,
+    )
     local_named_slices = tuple(
         item
         for item in named_slices
@@ -318,17 +517,78 @@ def replay_context_input(
                 "window compaction source document fingerprint differs from manifest",
             )
     try:
-        normalized = project_context_transcript(
-            snapshot=manifest.snapshot,
-            event_slice=authority_view,
+        authority_contracts = build_default_authority_materialization_contract_bundle()
+        restored_transcript = restore_transcript_projection_from_base(
+            event_log=event_log,
+            archive=archive,
+            runtime_session_id=audit.source_runtime_session_id,
+            requested_through_sequence=audit.source_through_sequence,
+            projection_base=manifest.transcript_authority.projection_base,
+            event_domain_binding=authority_contracts.event_domain,
+            materialization_contracts=(
+                build_default_transcript_projection_materialization_contracts(
+                    authority_contracts.limits
+                )
+            ),
+            limits=authority_contracts.limits,
+            deadline_monotonic=(
+                monotonic() + authority_contracts.limits.operation_timeout_seconds
+            ),
+        )
+        if (
+            restored_transcript.projection_base
+            != manifest.transcript_authority.projection_base
+            or restored_transcript.semantic_source
+            != manifest.transcript_authority.semantic_source
+            or restored_transcript.domain_completeness_proof
+            != manifest.transcript_authority.domain_completeness_proof
+        ):
+            raise ContextInputReplayError(
+                ContextInputReplayStatus.CONTRACT_MISMATCH,
+                "context_input_transcript_projection_base_mismatch",
+                "manifest-owned transcript projection base cannot be restored exactly",
+            )
+        stable_entries = restored_transcript.state_store.stable_entries()
+        terminal_content_texts = _hydrate_replay_terminal_content(
+            runtime_session_id=audit.source_runtime_session_id,
+            archive=archive,
+            projection_window=(
+                manifest.snapshot.authority_slice_plan.transcript_window
+            ),
+            stable_entries=stable_entries,
+            documents=restored_transcript.document_registry,
+        )
+        compaction_terminal = _read_replay_compaction_terminal(
+            event_log=event_log,
+            terminal_ref=(
+                manifest.snapshot.authority_slice_plan.transcript_window
+                .compaction_terminal_ref
+            ),
+        )
+        normalized = project_stable_context_transcript(
+            runtime_session_id=audit.source_runtime_session_id,
+            through_sequence=audit.source_through_sequence,
+            current_user_anchor=manifest.snapshot.current_user_message.message_id,
+            projection_window=(
+                manifest.snapshot.authority_slice_plan.transcript_window
+            ),
+            stable_entries=stable_entries,
+            documents=restored_transcript.document_registry,
+            hydrated_message_contents=(
+                restored_transcript.hydrated_message_contents
+            ),
+            terminal_content_text_by_artifact_id=terminal_content_texts,
             compaction_summary_text=summary_text,
+            compaction_terminal_event=compaction_terminal,
             window_compaction_source_document=source_document,
         )
+    except ContextInputReplayError:
+        raise
     except (ContextEventSliceError, ValueError) as exc:
         raise ContextInputReplayError(
             ContextInputReplayStatus.LEDGER_UNTRUSTED,
             "context_input_transcript_untrusted",
-            "context input transcript cannot be reconstructed from the ledger",
+            "context input transcript cannot be restored from its durable projection",
         ) from exc
     if normalized.transcript.transcript_fingerprint != manifest.transcript_fingerprint:
         raise ContextInputReplayError(
@@ -375,6 +635,73 @@ def replay_context_input(
         prepared_candidates=manifest.prepared_candidate_set,
         subagent_graph_acceleration=replay_acceleration,
     )
+
+
+def _hydrate_replay_terminal_content(
+    *,
+    runtime_session_id: str,
+    archive,
+    projection_window,
+    stable_entries,
+    documents,
+) -> dict[str, str]:
+    references = required_terminal_content_artifacts(
+        stable_entries=stable_entries,
+        projection_window=projection_window,
+        documents=documents,
+    )
+    hydrated: dict[str, str] = {}
+    for reference in references:
+        try:
+            text = archive.get_text(
+                reference.artifact_id,
+                session_id=runtime_session_id,
+            )
+        except Exception as exc:
+            raise ContextInputReplayError(
+                ContextInputReplayStatus.ARTIFACT_MISSING,
+                "context_terminal_projection_content_missing",
+                "terminal projection content artifact is unavailable",
+            ) from exc
+        previous = hydrated.get(reference.artifact_id)
+        if previous is not None and previous != text:
+            raise ContextInputReplayError(
+                ContextInputReplayStatus.CONTRACT_MISMATCH,
+                "context_terminal_projection_content_conflict",
+                "terminal projection content artifact identity is ambiguous",
+            )
+        hydrated[reference.artifact_id] = text
+    return hydrated
+
+
+def _read_replay_compaction_terminal(*, event_log: EventLog, terminal_ref):
+    if terminal_ref is None:
+        return None
+    rows = event_log.read_raw_events_by_id((terminal_ref.event_id,))
+    if len(rows) != 1:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.LEDGER_UNTRUSTED,
+            "context_compaction_terminal_missing",
+            "context compaction terminal event is unavailable",
+        )
+    raw = rows[0]
+    if raw.sequence != terminal_ref.sequence:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_compaction_terminal_identity_mismatch",
+            "context compaction terminal event identity differs from the manifest",
+        )
+    event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    if not isinstance(
+        event,
+        ContextCompactionCompletedEvent | ContextWindowCompactionCompletedEvent,
+    ):
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_compaction_terminal_type_mismatch",
+            "context compaction terminal event has the wrong schema",
+        )
+    return event
 
 
 def _validate_replayed_long_horizon_facts(
@@ -665,7 +992,21 @@ def _restore_replay_subagent_graph(
             "subagent_graph_run_contract_mismatch",
             "historical RunStart reducer contract differs from replay binding",
         )
-    policy = default_subagent_graph_checkpoint_policy()
+    from pulsara_agent.runtime.authority_materialization import (
+        build_default_authority_materialization_contract_bundle,
+    )
+
+    authority_limits = (
+        build_default_authority_materialization_contract_bundle().limits
+    )
+    policy = default_subagent_graph_checkpoint_policy(
+        max_unreclaimable_ledger_events=(
+            authority_limits.max_unreclaimable_ledger_events
+        ),
+        max_unreclaimable_charged_payload_bytes=(
+            authority_limits.max_unreclaimable_charged_payload_bytes
+        ),
+    )
     read = EventLogSubagentGraphCheckpointReadPort(
         event_log=event_log,
         archive=archive,
@@ -1085,7 +1426,19 @@ def replay_compiled_context(
         rendered_tool_results=rendered,
         prepared_rollups=prepared_rollups,
         section_candidates=inputs.prepared_candidates,
+        transcript_provider_projection=(
+            manifest.transcript_provider_projection
+        ),
     )
+    if (
+        compiled.model_visible_named_fact_semantic_selection
+        != manifest.transcript_authority.named_fact_selection.semantic_selection
+    ):
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_input_named_fact_semantics_mismatch",
+            "replayed named provider facts differ from manifest authority",
+        )
     expected_payload_fp = provider_neutral_payload_fingerprint(compiled.llm_context)
     expected_decisions_fp = canonical_render_decisions_fingerprint(
         compiled.tool_result_render_decision_facts

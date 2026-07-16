@@ -9,13 +9,34 @@ from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from threading import RLock, local
 from time import monotonic
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 from uuid import uuid4
 
+from pulsara_agent.primitives.authority_materialization import (
+    LedgerWriteAdmissionClass,
+)
 from pulsara_agent.runtime.blocking_executor import critical_ledger_executor
 
-
 T = TypeVar("T")
+
+
+class _WriteAdmissionCoordinator(Protocol):
+    def acquire_write_admission(
+        self,
+        *,
+        admission_class: LedgerWriteAdmissionClass,
+        checkpoint_id: str | None = None,
+        operation_owner_id: str | None = None,
+    ) -> Any | None: ...
+
+    def release_write_admission(self, token: Any | None) -> None: ...
+
+    def promote_write_admission(
+        self,
+        token: Any,
+        *,
+        operation_owner_ids: tuple[str, ...],
+    ) -> tuple[Any, ...]: ...
 
 
 class PendingRuntimeEventWriteError(RuntimeError):
@@ -44,6 +65,7 @@ class _OwnedRuntimeEventWrite:
     operation: Callable[[], Any]
     completion: Future[Any]
     deadline_monotonic: float
+    producer_admission: Any | None
 
 
 class RuntimeEventWriteService:
@@ -68,14 +90,40 @@ class RuntimeEventWriteService:
         self._active_operation_id: str | None = None
         self._worker_local = local()
         self._closed = False
+        self._admission_coordinator: _WriteAdmissionCoordinator | None = None
+
+    def bind_admission_coordinator(
+        self,
+        coordinator: _WriteAdmissionCoordinator,
+    ) -> None:
+        with self._lock:
+            if self._operations:
+                raise RuntimeError(
+                    "cannot bind checkpoint admission while writes are pending"
+                )
+            if (
+                self._admission_coordinator is not None
+                and self._admission_coordinator is not coordinator
+            ):
+                raise RuntimeError("runtime event-write admission is already bound")
+            self._admission_coordinator = coordinator
 
     async def execute(
         self,
         operation: Callable[[], T],
         *,
         deadline_monotonic: float | None = None,
+        admission_class: LedgerWriteAdmissionClass = LedgerWriteAdmissionClass.PRODUCER,
+        checkpoint_id: str | None = None,
+        operation_owner_id: str | None = None,
     ) -> T:
-        owned = self._enqueue(operation, deadline_monotonic=deadline_monotonic)
+        owned = self._enqueue(
+            operation,
+            deadline_monotonic=deadline_monotonic,
+            admission_class=admission_class,
+            checkpoint_id=checkpoint_id,
+            operation_owner_id=operation_owner_id,
+        )
         try:
             return await self._await_owned(owned)
         except asyncio.CancelledError as cancelled:
@@ -113,12 +161,21 @@ class RuntimeEventWriteService:
         operation: Callable[[], T],
         *,
         deadline_monotonic: float | None = None,
+        admission_class: LedgerWriteAdmissionClass = LedgerWriteAdmissionClass.PRODUCER,
+        checkpoint_id: str | None = None,
+        operation_owner_id: str | None = None,
     ) -> T:
         """Join the same FIFO from a tool worker or an owned writer callback."""
 
         if getattr(self._worker_local, "owner", None) is self:
             return operation()
-        owned = self._enqueue(operation, deadline_monotonic=deadline_monotonic)
+        owned = self._enqueue(
+            operation,
+            deadline_monotonic=deadline_monotonic,
+            admission_class=admission_class,
+            checkpoint_id=checkpoint_id,
+            operation_owner_id=operation_owner_id,
+        )
         remaining = max(0.0, owned.deadline_monotonic - monotonic())
         try:
             return owned.completion.result(timeout=remaining)
@@ -135,6 +192,9 @@ class RuntimeEventWriteService:
         operation: Callable[[], T],
         *,
         deadline_monotonic: float | None,
+        admission_class: LedgerWriteAdmissionClass,
+        checkpoint_id: str | None,
+        operation_owner_id: str | None,
     ) -> _OwnedRuntimeEventWrite:
         deadline = (
             monotonic() + self._operation_timeout_seconds
@@ -154,12 +214,29 @@ class RuntimeEventWriteService:
                 raise PendingRuntimeEventWriteError(
                     "max pending runtime event writes reached"
                 )
-            owned = _OwnedRuntimeEventWrite(
-                operation_id=f"runtime-event-write:{uuid4().hex}",
-                operation=operation,
-                completion=Future(),
-                deadline_monotonic=deadline,
+            producer_admission = (
+                None
+                if self._admission_coordinator is None
+                else self._admission_coordinator.acquire_write_admission(
+                    admission_class=admission_class,
+                    checkpoint_id=checkpoint_id,
+                    operation_owner_id=operation_owner_id,
+                )
             )
+            try:
+                owned = _OwnedRuntimeEventWrite(
+                    operation_id=f"runtime-event-write:{uuid4().hex}",
+                    operation=operation,
+                    completion=Future(),
+                    deadline_monotonic=deadline,
+                    producer_admission=producer_admission,
+                )
+            except BaseException:
+                if self._admission_coordinator is not None:
+                    self._admission_coordinator.release_write_admission(
+                        producer_admission
+                    )
+                raise
             self._operations[owned.operation_id] = owned
             self._queue.append(owned)
             self._start_next_locked()
@@ -199,6 +276,7 @@ class RuntimeEventWriteService:
             except ValueError:
                 return False
             self._operations.pop(owned.operation_id, None)
+            self._release_admission_locked(owned)
             owned.completion.cancel()
             return True
 
@@ -210,6 +288,7 @@ class RuntimeEventWriteService:
             if monotonic() < owned.deadline_monotonic:
                 break
             self._operations.pop(owned.operation_id, None)
+            self._release_admission_locked(owned)
             owned.completion.cancel()
         else:
             return
@@ -219,6 +298,7 @@ class RuntimeEventWriteService:
         except BaseException as exc:
             self._active_operation_id = None
             self._operations.pop(owned.operation_id, None)
+            self._release_admission_locked(owned)
             owned.completion.set_exception(exc)
             self._start_next_locked()
             return
@@ -231,6 +311,7 @@ class RuntimeEventWriteService:
     def _run_owned(self, owned: _OwnedRuntimeEventWrite) -> Any:
         self._worker_local.owner = self
         self._worker_local.deadline_monotonic = owned.deadline_monotonic
+        self._worker_local.owned_operation = owned
         try:
             if monotonic() >= owned.deadline_monotonic:
                 raise PendingRuntimeEventWriteError(
@@ -240,6 +321,38 @@ class RuntimeEventWriteService:
         finally:
             self._worker_local.owner = None
             self._worker_local.deadline_monotonic = None
+            self._worker_local.owned_operation = None
+
+    def promote_current_producer_admission(
+        self,
+        *,
+        operation_owner_ids: tuple[str, ...],
+    ) -> tuple[Any, ...]:
+        """Transfer the current writer token to long-lived operation owners."""
+
+        if self._admission_coordinator is None:
+            raise RuntimeError("runtime event writer has no admission coordinator")
+        owned = getattr(self._worker_local, "owned_operation", None)
+        if not isinstance(owned, _OwnedRuntimeEventWrite):
+            raise RuntimeError("operation admission promotion requires writer ownership")
+        token = owned.producer_admission
+        if token is None:
+            raise RuntimeError("current writer admission was already transferred")
+        promoted = self._admission_coordinator.promote_write_admission(
+            token,
+            operation_owner_ids=operation_owner_ids,
+        )
+        owned.producer_admission = None
+        return promoted
+
+    def _release_admission_locked(self, owned: _OwnedRuntimeEventWrite) -> None:
+        if self._admission_coordinator is None:
+            return
+        token = owned.producer_admission
+        if token is None:
+            return
+        owned.producer_admission = None
+        self._admission_coordinator.release_write_admission(token)
 
     def new_deadline_monotonic(self) -> float:
         """Allocate the one absolute deadline for a new FIFO attempt."""
@@ -271,6 +384,7 @@ class RuntimeEventWriteService:
             if owned is None or self._active_operation_id != operation_id:
                 return
             self._active_operation_id = None
+            self._release_admission_locked(owned)
             if error is None:
                 owned.completion.set_result(result)
             else:

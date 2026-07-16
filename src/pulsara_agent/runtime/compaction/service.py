@@ -106,6 +106,7 @@ _COMPACTION_TOOL_RESULT_CLIP_CHARS = 4_000
 _MAX_COMPACTION_SOURCE_EVENTS = 16_384
 _MAX_COMPACTION_SOURCE_BYTES = 16 * 1024 * 1024
 _MAX_COMPACTION_CHECKPOINT_CANDIDATES = 8
+_MAX_COMPACTION_BASELINE_CANDIDATES = 32
 _MAX_COMPACTION_LIFECYCLE_EVENTS = 16_384
 _MAX_COMPACTION_LIFECYCLE_BYTES = 8 * 1024 * 1024
 
@@ -556,6 +557,65 @@ class ContextCompactionService:
             is not None
         )
 
+    async def _auto_threshold_reached_from_visible_context(
+        self,
+        *,
+        target_model_target: ResolvedModelTarget,
+        model_visible_messages_before: list[Msg] | tuple[Msg, ...],
+        current_user_input_if_not_already_represented: str,
+        max_compactable_sequence: int | None,
+    ) -> bool | None:
+        """Check auto pressure before reading the raw compaction source."""
+
+        deadline = monotonic() + 30.0
+
+        def read_baselines():
+            return self.event_log.read_raw_events_by_type(
+                str(EventType.CONTEXT_COMPILED),
+                limit=_MAX_COMPACTION_BASELINE_CANDIDATES,
+                through_sequence=max_compactable_sequence,
+                deadline_monotonic=deadline,
+            )
+
+        io_service = getattr(self.runtime_session, "context_input_io_service", None)
+        if io_service is None:
+            rows = await asyncio.to_thread(read_baselines)
+        else:
+            rows = await io_service.execute(
+                operation_name="context-compaction-threshold-baseline-read",
+                operation=read_baselines,
+                deadline_monotonic=deadline,
+            )
+        basis = next(
+            (
+                event
+                for raw in rows
+                if isinstance(
+                    event := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY),
+                    ContextCompiledEvent,
+                )
+                and event.resolved_call.target.target_fingerprint
+                == target_model_target.fact.target_fingerprint
+            ),
+            None,
+        )
+        if basis is None:
+            return None
+        estimated_before = _estimate_transcript_messages(
+            model_visible_messages_before,
+            current_user_input=current_user_input_if_not_already_represented,
+            target_model_target=target_model_target,
+            previous_summary_text=None,
+        ) + basis.budget.non_transcript_baseline_tokens
+        threshold_tokens = max(
+            1,
+            math.floor(
+                target_model_target.fact.context_budget.input_budget_tokens
+                * self.policy.auto_trigger_ratio
+            ),
+        )
+        return estimated_before >= threshold_tokens
+
     async def compact(
         self,
         *,
@@ -585,6 +645,17 @@ class ContextCompactionService:
             and self._consecutive_failures >= self.policy.max_consecutive_failures
         ):
             return None
+        if trigger == "auto" and model_visible_messages_before is not None:
+            threshold_reached = await self._auto_threshold_reached_from_visible_context(
+                target_model_target=target_model_target,
+                model_visible_messages_before=model_visible_messages_before,
+                current_user_input_if_not_already_represented=(
+                    current_user_input_if_not_already_represented
+                ),
+                max_compactable_sequence=max_compactable_sequence,
+            )
+            if threshold_reached is False:
+                return None
 
         events = await self._read_bounded_source_events_async()
         if not events:

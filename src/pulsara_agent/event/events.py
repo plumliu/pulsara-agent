@@ -39,6 +39,35 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelTargetFact,
     sha256_fingerprint,
 )
+from pulsara_agent.primitives.transcript_projection import (
+    RunTranscriptSeedReferenceFact,
+    RunTranscriptSeedSemanticFact,
+    TranscriptProjectionScopeFact,
+)
+from pulsara_agent.primitives.authority_materialization import (
+    CheckpointConsumerCauseFact,
+    CheckpointDispatchBarrierFact,
+    ConsumerRetirementCauseFact,
+    LedgerMaterializationAccountGenesisFact,
+    LedgerMaterializationAccountStateFact,
+    LedgerMaterializationAccountTransitionFact,
+    LedgerMaterializationConsumerHorizonFact,
+    LedgerMaterializationConsumerRegistrationCauseFact,
+    LedgerMaterializationGenerationFact,
+    PhysicalOperationChargeAppliedFact,
+    PhysicalOperationReservationFact,
+    PhysicalOperationSettlementFact,
+    PhysicalOperationSuspensionTailFact,
+)
+from pulsara_agent.primitives.transcript_checkpoint import (
+    CheckpointCancellationReasonCode,
+    CheckpointCancellationSource,
+    CheckpointDispatchBarrierReleaseFact,
+    CheckpointFailureReasonCode,
+    CheckpointTerminalContractFact,
+    CheckpointTerminalDiagnosticFact,
+    TranscriptProjectionCheckpointCandidateFact,
+)
 from pulsara_agent.primitives.long_horizon import (
     ChildRolloutReservationPolicyFact,
     ChildRolloutSettlementAggregateFact,
@@ -109,6 +138,12 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultStateFact,
 )
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.primitives.terminal_projection import (
+    ModelCallTerminalProjectionEndReferenceFact,
+    TerminalProjectionReferenceFact,
+    ToolResultTerminalProjectionEndReferenceFact,
+)
+from pulsara_agent.primitives.frozen import StableEventIdentityFact
 from pulsara_agent.primitives.run_lifecycle import (
     FAILURE_STOP_REASONS,
     RunStopReason,
@@ -163,6 +198,9 @@ class EventType(StrEnum):
 
     MODEL_CALL_START = "MODEL_CALL_START"
     MODEL_CALL_END = "MODEL_CALL_END"
+    MODEL_CALL_TERMINAL_PROJECTION_COMMITTED = (
+        "MODEL_CALL_TERMINAL_PROJECTION_COMMITTED"
+    )
     MODEL_CALL_REJECTED = "MODEL_CALL_REJECTED"
     PROVIDER_MODEL_STREAM_ERROR = "PROVIDER_MODEL_STREAM_ERROR"
     MODEL_CALL_CONTROL_DISPOSITION_RESOLVED = (
@@ -173,6 +211,53 @@ class EventType(StrEnum):
     CAPABILITY_EXPOSURE_RESOLVED = "CAPABILITY_EXPOSURE_RESOLVED"
     RUN_INTERACTION_RESUME_BOUNDARY = "RUN_INTERACTION_RESUME_BOUNDARY"
     MCP_CAPABILITY_SNAPSHOT_INSTALLED = "MCP_CAPABILITY_SNAPSHOT_INSTALLED"
+
+    TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED"
+    )
+    LEDGER_MATERIALIZATION_ACCOUNT_GENESIS = (
+        "LEDGER_MATERIALIZATION_ACCOUNT_GENESIS"
+    )
+    LEDGER_MATERIALIZATION_CONSUMER_REGISTERED = (
+        "LEDGER_MATERIALIZATION_CONSUMER_REGISTERED"
+    )
+    LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED = (
+        "LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED"
+    )
+    LEDGER_MATERIALIZATION_CONSUMER_RETIRED = (
+        "LEDGER_MATERIALIZATION_CONSUMER_RETIRED"
+    )
+    LEDGER_MATERIALIZATION_GENERATION_ADVANCED = (
+        "LEDGER_MATERIALIZATION_GENERATION_ADVANCED"
+    )
+    PHYSICAL_OPERATION_RESERVATION_CREATED = (
+        "PHYSICAL_OPERATION_RESERVATION_CREATED"
+    )
+    PHYSICAL_OPERATION_CHARGE_APPLIED = "PHYSICAL_OPERATION_CHARGE_APPLIED"
+    PHYSICAL_OPERATION_RESERVATION_SUSPENDED = (
+        "PHYSICAL_OPERATION_RESERVATION_SUSPENDED"
+    )
+    PHYSICAL_OPERATION_RESERVATION_SETTLED = (
+        "PHYSICAL_OPERATION_RESERVATION_SETTLED"
+    )
+    CHECKPOINT_DISPATCH_BARRIER_INSTALLED = (
+        "CHECKPOINT_DISPATCH_BARRIER_INSTALLED"
+    )
+    CHECKPOINT_DISPATCH_BARRIER_RELEASED = (
+        "CHECKPOINT_DISPATCH_BARRIER_RELEASED"
+    )
 
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
     TEXT_BLOCK_DELTA = "TEXT_BLOCK_DELTA"
@@ -196,6 +281,9 @@ class EventType(StrEnum):
     TOOL_RESULT_TEXT_DELTA = "TOOL_RESULT_TEXT_DELTA"
     TOOL_RESULT_DATA_DELTA = "TOOL_RESULT_DATA_DELTA"
     TOOL_RESULT_END = "TOOL_RESULT_END"
+    TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED = (
+        "TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED"
+    )
     TOOL_EXECUTION_SUSPENDED = "TOOL_EXECUTION_SUSPENDED"
 
     REQUIRE_USER_CONFIRM = "REQUIRE_USER_CONFIRM"
@@ -315,6 +403,8 @@ class RunStartEvent(EventBase):
     mcp_installation_owner_runtime_session_id: str
     run_entry_kind: RunEntryKind
     current_user_message: CurrentUserMessageFact
+    run_transcript_seed_semantic: RunTranscriptSeedSemanticFact
+    run_transcript_seed_reference: RunTranscriptSeedReferenceFact
     terminal_run_end_event_id: str = Field(min_length=1)
     new_run_boundary: NewRunBoundaryFact | None
     subagent_run_entry: SubagentRunEntryFact | None
@@ -345,6 +435,21 @@ class RunStartEvent(EventBase):
             raise ValueError("host RunStart long-horizon account owner mismatch")
         if self.user_input_chars != len(self.current_user_message.text):
             raise ValueError("RunStartEvent user_input_chars mismatch")
+        if self.run_transcript_seed_reference.seed_semantic_fingerprint != (
+            self.run_transcript_seed_semantic.seed_semantic_fingerprint
+        ):
+            raise ValueError("RunStartEvent transcript seed identity mismatch")
+        if (
+            self.run_entry_kind is RunEntryKind.HOST
+            and self.run_transcript_seed_reference.source_runtime_session_id
+            != self.mcp_installation_owner_runtime_session_id
+        ):
+            raise ValueError("RunStartEvent transcript seed ledger mismatch")
+        if self.sequence is not None and (
+            self.run_transcript_seed_reference.source_ledger_through_sequence
+            >= self.sequence
+        ):
+            raise ValueError("RunStartEvent transcript seed must predate RunStart")
         created_at = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
         observed_at = datetime.fromisoformat(
             self.current_user_message.observed_at_utc.replace("Z", "+00:00")
@@ -1156,6 +1261,7 @@ class ModelCallEndEvent(EventBase):
     usage: ModelTokenUsageFact | None
     estimated_input_tokens: int = Field(ge=0)
     diagnostics: tuple[ModelCallDiagnosticFact, ...] = ()
+    terminal_projection: ModelCallTerminalProjectionEndReferenceFact
 
     @model_validator(mode="after")
     def _validate_usage(self) -> "ModelCallEndEvent":
@@ -1170,6 +1276,32 @@ class ModelCallEndEvent(EventBase):
         ):
             raise ValueError("completed/provider-error outcome requires dispatch")
         _validate_reported_model_id(self.reported_model_id)
+        semantic_join = self.terminal_projection.projection_reference.semantic_join
+        if (
+            semantic_join.projection_kind != "model_call"
+            or semantic_join.terminal_outcome != self.outcome
+        ):
+            raise ValueError("ModelCallEnd terminal projection outcome mismatch")
+        return self
+
+
+class ModelCallTerminalProjectionCommittedEvent(EventBase):
+    type: Literal[EventType.MODEL_CALL_TERMINAL_PROJECTION_COMMITTED] = (
+        EventType.MODEL_CALL_TERMINAL_PROJECTION_COMMITTED
+    )
+    resolved_model_call_id: str = Field(min_length=1)
+    model_call_start_event_identity: StableEventIdentityFact
+    projection_reference: TerminalProjectionReferenceFact
+
+    @model_validator(mode="after")
+    def _projection_identity(self) -> "ModelCallTerminalProjectionCommittedEvent":
+        if self.projection_reference.projection_kind != "model_call":
+            raise ValueError("model projection event requires model projection reference")
+        if (
+            self.model_call_start_event_identity.event_type
+            != EventType.MODEL_CALL_START.value
+        ):
+            raise ValueError("model projection source must be ModelCallStart")
         return self
 
 
@@ -1401,6 +1533,7 @@ class ToolResultEndEvent(EventBase):
     essential_result: ToolResultEssentialFact | None = None
     terminal_payload_timing: TerminalPayloadTimingFact | None = None
     rollup_semantics: ToolResultRollupSemanticsFact | None
+    terminal_projection: ToolResultTerminalProjectionEndReferenceFact
 
     @model_validator(mode="after")
     def _validate_tool_observation_timing(self) -> "ToolResultEndEvent":
@@ -1418,6 +1551,37 @@ class ToolResultEndEvent(EventBase):
             terminal_payload_timing=self.terminal_payload_timing,
             rollup_semantics=self.rollup_semantics,
         )
+        semantic_join = self.terminal_projection.projection_reference.semantic_join
+        if (
+            semantic_join.projection_kind != "tool_result"
+            or semantic_join.tool_call_id != self.tool_call_id
+            or semantic_join.result_state.value != self.state.value
+        ):
+            raise ValueError("ToolResultEnd terminal projection mismatch")
+        return self
+
+
+class ToolResultTerminalProjectionCommittedEvent(EventBase):
+    type: Literal[EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED] = (
+        EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED
+    )
+    tool_call_id: str = Field(min_length=1)
+    source_kind: Literal["tool_result_stream", "external_requirement"]
+    source_event_identity: StableEventIdentityFact
+    projection_reference: TerminalProjectionReferenceFact
+
+    @model_validator(mode="after")
+    def _projection_identity(self) -> "ToolResultTerminalProjectionCommittedEvent":
+        if self.projection_reference.projection_kind != "tool_result":
+            raise ValueError("tool projection event requires tool projection reference")
+        expected_event_type = {
+            "tool_result_stream": EventType.TOOL_RESULT_START.value,
+            "external_requirement": EventType.REQUIRE_EXTERNAL_EXECUTION.value,
+        }[self.source_kind]
+        if self.source_event_identity.event_type != expected_event_type:
+            raise ValueError("tool projection source event type mismatch")
+        if self.projection_reference.semantic_join.tool_call_id != self.tool_call_id:
+            raise ValueError("tool projection reference call identity mismatch")
         return self
 
 
@@ -1478,6 +1642,9 @@ class ExternalExecutionResultEvent(EventBase):
         EventType.EXTERNAL_EXECUTION_RESULT
     )
     external_results: tuple[ExternalToolResultIngressFact, ...]
+    terminal_projections: tuple[
+        ToolResultTerminalProjectionEndReferenceFact, ...
+    ]
 
     @model_validator(mode="after")
     def _validate_external_results(self) -> "ExternalExecutionResultEvent":
@@ -1494,6 +1661,14 @@ class ExternalExecutionResultEvent(EventBase):
             )
         if not result_ids:
             raise ValueError("ExternalExecutionResultEvent requires external results")
+        projection_ids = tuple(
+            item.projection_reference.semantic_join.tool_call_id
+            for item in self.terminal_projections
+        )
+        if projection_ids != tuple(result_ids):
+            raise ValueError(
+                "ExternalExecutionResultEvent terminal projections differ from results"
+            )
         return self
 
 
@@ -2851,6 +3026,254 @@ class SubagentGraphCheckpointCommittedEvent(EventBase):
         return self
 
 
+class TranscriptProjectionCheckpointIntentEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    scope: TranscriptProjectionScopeFact
+    source_ledger_materialization_generation: int = Field(ge=0)
+    source_consumer_horizon_revision: int = Field(ge=0)
+    frozen_ledger_through_sequence: int = Field(ge=0)
+    frozen_ledger_continuity_accumulator: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    maintenance_reservation_id: str = Field(min_length=1, max_length=128)
+    intent_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    terminal_contract: CheckpointTerminalContractFact
+
+    @model_validator(mode="after")
+    def _scope_identity(self) -> "TranscriptProjectionCheckpointIntentEvent":
+        if self.scope.run_id != self.run_id:
+            raise ValueError("checkpoint intent scope run mismatch")
+        return self
+
+
+class TranscriptProjectionCheckpointCommittedEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    checkpoint: TranscriptProjectionCheckpointCandidateFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _candidate_identity(
+        self,
+    ) -> "TranscriptProjectionCheckpointCommittedEvent":
+        if (
+            self.checkpoint.checkpoint_id != self.checkpoint_id
+            or self.checkpoint.candidate_fingerprint
+            != self.checkpoint_candidate_fingerprint
+            or self.checkpoint.scope.run_id != self.run_id
+        ):
+            raise ValueError("checkpoint committed candidate identity mismatch")
+        return self
+
+
+class TranscriptProjectionCheckpointFailedEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    stable_reason_code: CheckpointFailureReasonCode
+    diagnostics: tuple[CheckpointTerminalDiagnosticFact, ...] = Field(max_length=8)
+
+
+class TranscriptProjectionCheckpointCancelledEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    cancellation_source: CheckpointCancellationSource
+    stable_reason_code: CheckpointCancellationReasonCode
+
+
+class TranscriptProjectionCheckpointRecoveredInterruptedEvent(EventBase):
+    type: Literal[
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED
+    ] = EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    reopen_ledger_high_water: int = Field(ge=0)
+    stable_reason_code: Literal["checkpoint_recovered_interrupted"] = (
+        "checkpoint_recovered_interrupted"
+    )
+
+
+class LedgerMaterializationAccountGenesisEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_ACCOUNT_GENESIS] = (
+        EventType.LEDGER_MATERIALIZATION_ACCOUNT_GENESIS
+    )
+    genesis: LedgerMaterializationAccountGenesisFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state: LedgerMaterializationAccountStateFact
+
+    @model_validator(mode="after")
+    def _result_join(self) -> "LedgerMaterializationAccountGenesisEvent":
+        if (
+            self.genesis.runtime_session_id
+            != self.resulting_account_state.runtime_session_id
+            or self.transition.after_account_state_fingerprint
+            != self.resulting_account_state.account_state_fingerprint
+        ):
+            raise ValueError("ledger genesis resulting account mismatch")
+        return self
+
+
+class LedgerMaterializationConsumerRegisteredEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_CONSUMER_REGISTERED] = (
+        EventType.LEDGER_MATERIALIZATION_CONSUMER_REGISTERED
+    )
+    consumer: LedgerMaterializationConsumerHorizonFact
+    cause: LedgerMaterializationConsumerRegistrationCauseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class LedgerMaterializationConsumerHorizonAdvancedEvent(EventBase):
+    type: Literal[
+        EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED
+    ] = EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED
+    previous_horizon: LedgerMaterializationConsumerHorizonFact
+    resulting_horizon: LedgerMaterializationConsumerHorizonFact
+    cause: CheckpointConsumerCauseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def _horizon_identity(
+        self,
+    ) -> "LedgerMaterializationConsumerHorizonAdvancedEvent":
+        before = self.previous_horizon
+        after = self.resulting_horizon
+        if (
+            before.runtime_session_id != after.runtime_session_id
+            or before.consumer_kind != after.consumer_kind
+            or before.consumer_id != after.consumer_id
+            or after.through_sequence <= before.through_sequence
+        ):
+            raise ValueError("consumer horizon transition is invalid")
+        return self
+
+
+class LedgerMaterializationConsumerRetiredEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_CONSUMER_RETIRED] = (
+        EventType.LEDGER_MATERIALIZATION_CONSUMER_RETIRED
+    )
+    retired_horizon: LedgerMaterializationConsumerHorizonFact
+    cause: ConsumerRetirementCauseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class LedgerMaterializationGenerationAdvancedEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_GENERATION_ADVANCED] = (
+        EventType.LEDGER_MATERIALIZATION_GENERATION_ADVANCED
+    )
+    previous_generation: LedgerMaterializationGenerationFact
+    resulting_generation: LedgerMaterializationGenerationFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationReservationCreatedEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_RESERVATION_CREATED] = (
+        EventType.PHYSICAL_OPERATION_RESERVATION_CREATED
+    )
+    reservation: PhysicalOperationReservationFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationChargeAppliedEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_CHARGE_APPLIED] = (
+        EventType.PHYSICAL_OPERATION_CHARGE_APPLIED
+    )
+    charge: PhysicalOperationChargeAppliedFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationReservationSuspendedEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_RESERVATION_SUSPENDED] = (
+        EventType.PHYSICAL_OPERATION_RESERVATION_SUSPENDED
+    )
+    suspension: PhysicalOperationSuspensionTailFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationReservationSettledEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_RESERVATION_SETTLED] = (
+        EventType.PHYSICAL_OPERATION_RESERVATION_SETTLED
+    )
+    settlement: PhysicalOperationSettlementFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class CheckpointDispatchBarrierInstalledEvent(EventBase):
+    type: Literal[EventType.CHECKPOINT_DISPATCH_BARRIER_INSTALLED] = (
+        EventType.CHECKPOINT_DISPATCH_BARRIER_INSTALLED
+    )
+    barrier: CheckpointDispatchBarrierFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class CheckpointDispatchBarrierReleasedEvent(EventBase):
+    type: Literal[EventType.CHECKPOINT_DISPATCH_BARRIER_RELEASED] = (
+        EventType.CHECKPOINT_DISPATCH_BARRIER_RELEASED
+    )
+    release: CheckpointDispatchBarrierReleaseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
 class CustomEvent(EventBase):
     type: Literal[EventType.CUSTOM] = EventType.CUSTOM
     name: str
@@ -2882,6 +3305,7 @@ AgentEvent: TypeAlias = (
     | ContextCompiledEvent
     | CapabilityGateDecisionEvent
     | ModelCallStartEvent
+    | ModelCallTerminalProjectionCommittedEvent
     | ModelCallEndEvent
     | ProviderModelStreamErrorEvent
     | ModelCallControlDispositionResolvedEvent
@@ -2902,6 +3326,7 @@ AgentEvent: TypeAlias = (
     | ToolResultStartEvent
     | ToolResultTextDeltaEvent
     | ToolResultDataDeltaEvent
+    | ToolResultTerminalProjectionCommittedEvent
     | ToolResultEndEvent
     | ToolExecutionSuspendedEvent
     | RequireUserConfirmEvent
@@ -2952,5 +3377,21 @@ AgentEvent: TypeAlias = (
     | SubagentResultSubmittedEvent
     | SubagentResultConsumedEvent
     | SubagentGraphCheckpointCommittedEvent
+    | TranscriptProjectionCheckpointIntentEvent
+    | TranscriptProjectionCheckpointCommittedEvent
+    | TranscriptProjectionCheckpointFailedEvent
+    | TranscriptProjectionCheckpointCancelledEvent
+    | TranscriptProjectionCheckpointRecoveredInterruptedEvent
+    | LedgerMaterializationAccountGenesisEvent
+    | LedgerMaterializationConsumerRegisteredEvent
+    | LedgerMaterializationConsumerHorizonAdvancedEvent
+    | LedgerMaterializationConsumerRetiredEvent
+    | LedgerMaterializationGenerationAdvancedEvent
+    | PhysicalOperationReservationCreatedEvent
+    | PhysicalOperationChargeAppliedEvent
+    | PhysicalOperationReservationSuspendedEvent
+    | PhysicalOperationReservationSettledEvent
+    | CheckpointDispatchBarrierInstalledEvent
+    | CheckpointDispatchBarrierReleasedEvent
     | CustomEvent
 )

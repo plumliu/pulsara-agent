@@ -12,6 +12,7 @@ from pulsara_agent.event import (
     ContextWindowCompactionStartedEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
@@ -25,6 +26,9 @@ from pulsara_agent.event_log.serialization import (
     freeze_event_write_candidate,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.runtime.long_horizon.store import (
+    LongHorizonReducerApplyError,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.llm.execution import ModelStreamLiveSemanticCursor
@@ -35,6 +39,9 @@ if TYPE_CHECKING:
     )
     from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
     from pulsara_agent.runtime.state import LoopState
+    from pulsara_agent.primitives.authority_materialization import (
+        PhysicalOperationReservationFact,
+    )
 
 
 class ModelStreamCommitContractError(RuntimeError):
@@ -161,6 +168,7 @@ class RuntimeSessionModelStreamEventCommitPort:
     ) -> None:
         self._runtime_session = runtime_session
         self._state = state
+        self._physical_reservation: PhysicalOperationReservationFact | None = None
 
     @property
     def runtime_session(self) -> RuntimeSession:
@@ -169,6 +177,15 @@ class RuntimeSessionModelStreamEventCommitPort:
     @property
     def state(self) -> LoopState | None:
         return self._state
+
+    async def ensure_physical_headroom(self) -> None:
+        from pulsara_agent.primitives.authority_materialization import (
+            PhysicalOperationKind,
+        )
+
+        await self._runtime_session.ensure_physical_operation_headroom(
+            PhysicalOperationKind.MODEL_CALL
+        )
 
     async def commit_start(
         self,
@@ -252,15 +269,38 @@ class RuntimeSessionModelStreamEventCommitPort:
                         run_id=start.run_id,
                         account_id=reservation.account_id,
                         accounting_mode=guard.rollout_accounting_mode,
+                        source_sequence=reservation.source_sequence,
                         expected_fingerprint=(
                             guard.expected_rollout_account_state_fingerprint
                         ),
                     )
-                return self._commit_in_writer(candidates, events=events)
+                if (
+                    self._runtime_session.materialization_account_store.snapshot()
+                    is None
+                    and self._runtime_session.allow_unbootstrapped_test_events
+                ):
+                    return self._commit_in_writer(candidates, events=events)
+                from pulsara_agent.primitives.authority_materialization import (
+                    PhysicalOperationKind,
+                )
 
-        return await self._runtime_session.event_write_service.execute(
-            commit_start_in_writer
-        )
+                physical_reservation_id = (
+                    "model_physical:"
+                    + guard.resolved_model_call_id.removeprefix("sha256:")[-96:]
+                )
+                physical_reservation, result = (
+                    self._runtime_session.reserve_physical_operation_from_thread(
+                        events,
+                        operation_kind=PhysicalOperationKind.MODEL_CALL,
+                        reservation_id=physical_reservation_id,
+                        owner_id=guard.resolved_model_call_id,
+                        state=self._state,
+                    )
+                )
+                self._physical_reservation = physical_reservation
+                return self._confirmed_batch(candidates, result=result)
+
+        return await self._execute_owned_commit(commit_start_in_writer)
 
     async def commit_semantic(
         self,
@@ -303,13 +343,26 @@ class RuntimeSessionModelStreamEventCommitPort:
         def commit_semantic_in_writer() -> ConfirmedCommittedBatch:
             with self._runtime_session.write_coordinator.lock:
                 self._require_live_semantic_cursor(live_cursor, guard)
-                result = self._commit_in_writer(candidates, events=events)
-                live_cursor.advance_semantic(result.decode_owned())
-                return result
+                if self._physical_reservation is None and (
+                    self._runtime_session.materialization_account_store.snapshot()
+                    is None
+                    and self._runtime_session.allow_unbootstrapped_test_events
+                ):
+                    confirmed = self._commit_in_writer(candidates, events=events)
+                else:
+                    physical_reservation = self._require_physical_reservation(
+                        resolved_model_call_id=guard.resolved_model_call_id
+                    )
+                    result = self._runtime_session.charge_physical_operation_from_thread(
+                        events,
+                        reservation=physical_reservation,
+                        state=self._state,
+                    )
+                    confirmed = self._confirmed_batch(candidates, result=result)
+                live_cursor.advance_semantic(confirmed.decode_owned())
+                return confirmed
 
-        return await self._runtime_session.event_write_service.execute(
-            commit_semantic_in_writer
-        )
+        return await self._execute_owned_commit(commit_semantic_in_writer)
 
     async def commit_terminal(
         self,
@@ -319,15 +372,27 @@ class RuntimeSessionModelStreamEventCommitPort:
         live_cursor: ModelStreamLiveSemanticCursor,
     ) -> ConfirmedCommittedBatch:
         events = self._decode_candidates(candidates)
-        if not events or not isinstance(events[0], ModelCallEndEvent):
+        if (
+            len(events) < 2
+            or not isinstance(events[0], ModelCallTerminalProjectionCommittedEvent)
+            or not isinstance(events[1], ModelCallEndEvent)
+        ):
             raise ModelStreamCommitContractError(
-                "model terminal batch must begin with ModelCallEndEvent"
+                "model terminal batch must begin with projection then ModelCallEnd"
+            )
+        if sum(
+            isinstance(event, ModelCallTerminalProjectionCommittedEvent)
+            for event in events
+        ) != 1:
+            raise ModelStreamCommitContractError(
+                "model terminal batch requires exactly one projection event"
             )
         if sum(isinstance(event, ModelCallEndEvent) for event in events) != 1:
             raise ModelStreamCommitContractError(
                 "model terminal batch requires exactly one ModelCallEndEvent"
             )
         allowed = (
+            ModelCallTerminalProjectionCommittedEvent,
             ModelCallEndEvent,
             RolloutBudgetReservationSettledEvent,
             ReplyEndEvent,
@@ -340,7 +405,9 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "ReplyEndEvent must be the final terminal fact"
             )
-        model_end = events[0]
+        projection = events[0]
+        assert isinstance(projection, ModelCallTerminalProjectionCommittedEvent)
+        model_end = events[1]
         assert isinstance(model_end, ModelCallEndEvent)
         if (
             model_end.id != guard.stable_model_call_end_event_id
@@ -348,6 +415,21 @@ class RuntimeSessionModelStreamEventCommitPort:
         ):
             raise ModelStreamCommitContractError(
                 "model terminal end does not match its frozen commit guard"
+            )
+        end_projection = model_end.terminal_projection
+        if (
+            projection.resolved_model_call_id != guard.resolved_model_call_id
+            or projection.model_call_start_event_identity.event_id
+            != guard.model_call_start_event_id
+            or end_projection is None
+            or end_projection.projection_reference != projection.projection_reference
+            or end_projection.projection_committed_event_identity.event_id
+            != projection.id
+            or end_projection.projection_committed_event_identity.payload_fingerprint
+            != candidates[0].payload_fingerprint
+        ):
+            raise ModelStreamCommitContractError(
+                "model terminal projection/End reference join drifted"
             )
         settlements = tuple(
             event
@@ -406,13 +488,34 @@ class RuntimeSessionModelStreamEventCommitPort:
                 if accounted:
                     self._require_active_reservation(guard, run_id=model_end.run_id)
                 try:
-                    result = self._commit_in_writer(candidates, events=events)
+                    if self._physical_reservation is None and (
+                        self._runtime_session.materialization_account_store.snapshot()
+                        is None
+                        and self._runtime_session.allow_unbootstrapped_test_events
+                    ):
+                        result = self._commit_in_writer(candidates, events=events)
+                    else:
+                        physical_reservation = self._require_physical_reservation(
+                            resolved_model_call_id=guard.resolved_model_call_id
+                        )
+                        write_result = (
+                            self._runtime_session.settle_physical_operation_from_thread(
+                                events,
+                                reservation=physical_reservation,
+                                terminal_outcome=model_end.outcome,
+                                state=self._state,
+                            )
+                        )
+                        result = self._confirmed_batch(
+                            candidates, result=write_result
+                        )
                     committed_end = next(
                         event
                         for event in result.decode_owned()
                         if isinstance(event, ModelCallEndEvent)
                     )
                     live_cursor.mark_terminal(committed_end)
+                    self._physical_reservation = None
                     return result
                 except BaseException as exc:
                     from pulsara_agent.runtime.session import EventCommitError
@@ -423,9 +526,59 @@ class RuntimeSessionModelStreamEventCommitPort:
                         ) from exc
                     raise
 
-        return await self._runtime_session.event_write_service.execute(
-            commit_terminal_in_writer
+        return await self._execute_owned_commit(commit_terminal_in_writer)
+
+    async def _execute_owned_commit(self, operation):
+        """Recover a FULL physical write hidden behind caller cancellation."""
+
+        from pulsara_agent.primitives.authority_materialization import (
+            LedgerWriteAdmissionClass,
+            PhysicalOperationKind,
         )
+        from pulsara_agent.runtime.event_write_service import (
+            RuntimeEventWriteCancelled,
+        )
+
+        admission_kwargs = {}
+        if self._physical_reservation is not None:
+            admission_kwargs = {
+                "admission_class": LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
+                "operation_owner_id": (
+                    self._runtime_session.physical_operation_admission_owner_id(
+                        operation_kind=PhysicalOperationKind.MODEL_CALL,
+                        owner_id=self._physical_reservation.owner_id,
+                    )
+                ),
+            }
+        try:
+            return await self._runtime_session.event_write_service.execute(
+                operation,
+                **admission_kwargs,
+            )
+        except RuntimeEventWriteCancelled as cancelled:
+            result = cancelled.operation_result
+            if isinstance(result, ConfirmedCommittedBatch):
+                return result
+            raise
+
+    def _require_physical_reservation(
+        self,
+        *,
+        resolved_model_call_id: str,
+    ) -> PhysicalOperationReservationFact:
+        reservation = self._physical_reservation
+        if reservation is None:
+            raise ModelStreamCommitContractError(
+                "model stream has no active physical reservation"
+            )
+        if (
+            reservation.owner_kind.value != "model_call"
+            or reservation.owner_id != resolved_model_call_id
+        ):
+            raise ModelStreamCommitContractError(
+                "model stream physical reservation identity drifted"
+            )
+        return reservation
 
     def _commit_in_writer(
         self,
@@ -549,39 +702,44 @@ class RuntimeSessionModelStreamEventCommitPort:
         run_id: str,
         account_id: str,
         accounting_mode: RolloutAccountingMode,
+        source_sequence: int,
         expected_fingerprint: str | None,
     ) -> None:
-        from pulsara_agent.runtime.long_horizon.accounting import (
-            resolve_run_rollout_binding,
-        )
-
         if expected_fingerprint is None:
             raise ModelStreamCommitContractError(
                 "accounted model start requires an expected rollout state"
             )
-        if accounting_mode == "root_account":
-            state = self._runtime_session.long_horizon_state_store.rollout_state(
-                account_id
-            )
-            if state is None:
-                raise ModelStreamCommitContractError(
-                    "root-account start lacks its rollout reducer state"
+        try:
+            if accounting_mode == "root_account":
+                state = (
+                    self._runtime_session.long_horizon_state_store.rollout_state_at(
+                        account_id,
+                        through_sequence=source_sequence,
+                    )
                 )
-            actual = state.state_fingerprint
-        elif accounting_mode == "child_subaccount":
-            binding = resolve_run_rollout_binding(
-                self._runtime_session,
-                run_id=run_id,
-            )
-            if binding.child_state is None:
-                raise ModelStreamCommitContractError(
-                    "child-account start lacks a child rollout ledger"
+                if state is None:
+                    raise ModelStreamCommitContractError(
+                        "root-account start lacks its rollout reducer state"
+                    )
+                actual = state.state_fingerprint
+            elif accounting_mode == "child_subaccount":
+                state = self._runtime_session.long_horizon_state_store.child_rollout_state_at(
+                    run_id,
+                    through_sequence=source_sequence,
                 )
-            actual = binding.child_state.state_fingerprint
-        else:
+                if state is None:
+                    raise ModelStreamCommitContractError(
+                        "child-account start lacks a child rollout ledger"
+                    )
+                actual = state.state_fingerprint
+            else:
+                raise ModelStreamCommitContractError(
+                    "unaccounted model start cannot validate rollout state"
+                )
+        except LongHorizonReducerApplyError as exc:
             raise ModelStreamCommitContractError(
-                "unaccounted model start cannot validate rollout state"
-            )
+                "model start rollout account state changed after preparation"
+            ) from exc
         if actual != expected_fingerprint:
             raise ModelStreamCommitContractError(
                 "model start rollout account state changed after preparation"

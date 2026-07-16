@@ -8,10 +8,17 @@ from typing import Any, Iterable, Literal, TypeAlias
 from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, PlanModeEnteredEvent, PlanModeExitedEvent, PlanQuestionOption
+from pulsara_agent.primitives.run_boundary import PlanWorkflowStateFact
 from pulsara_agent.runtime.approval import PendingApproval
-from pulsara_agent.primitives.permission import PermissionMode, parse_permission_mode
+from pulsara_agent.primitives.permission import (
+    PermissionMode,
+    parse_permission_mode,
+    preset_permission_policy_fact,
+)
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy
-from pulsara_agent.runtime.permission_snapshot import validate_preset_policy_payload
+from pulsara_agent.runtime.permission_snapshot import (
+    validate_preset_policy_payload,
+)
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 PLAN_ENTRY_INSTRUCTION_NAME = "plan_entry_instruction"
 PLAN_ACTIVE_INSTRUCTION_NAME = "plan_active_instruction"
@@ -167,6 +174,70 @@ class PlanWorkflowState:
             "entry_turn_id": self.entry_turn_id,
             "entry_reply_id": self.entry_reply_id,
         }
+
+
+def plan_workflow_state_fact(
+    state: PlanWorkflowState,
+    *,
+    inactive_default_permission_mode: PermissionMode | str | None = None,
+) -> PlanWorkflowStateFact:
+    if state.active:
+        if state.pre_plan_permission_mode is None:
+            raise ValueError("active plan workflow is missing stored permission")
+        stored = preset_permission_policy_fact(state.pre_plan_permission_mode)
+        if state.pending_entry_audit:
+            return PlanWorkflowStateFact(
+                workflow_id=None,
+                active=True,
+                pending_entry_audit=True,
+                revision=state.revision,
+                entered_event_id=None,
+                entered_event_sequence=None,
+                entry_run_id=None,
+                entry_turn_id=None,
+                entry_reply_id=None,
+                stored_default_permission=stored,
+                accepted_plan_artifact_id=state.latest_accepted_plan_artifact_id,
+            )
+        required = (
+            state.entered_event_id,
+            state.entered_event_sequence,
+            state.entry_run_id,
+            state.entry_turn_id,
+            state.entry_reply_id,
+        )
+        if any(value is None for value in required):
+            raise ValueError("active plan workflow requires a durable entered event")
+        return PlanWorkflowStateFact(
+            workflow_id=f"plan_workflow:{state.entered_event_id}",
+            active=True,
+            pending_entry_audit=False,
+            revision=state.revision,
+            entered_event_id=state.entered_event_id,
+            entered_event_sequence=state.entered_event_sequence,
+            entry_run_id=state.entry_run_id,
+            entry_turn_id=state.entry_turn_id,
+            entry_reply_id=state.entry_reply_id,
+            stored_default_permission=stored,
+            accepted_plan_artifact_id=state.latest_accepted_plan_artifact_id,
+        )
+    if inactive_default_permission_mode is None:
+        raise ValueError("inactive plan workflow requires session default permission")
+    return PlanWorkflowStateFact(
+        workflow_id=None,
+        active=False,
+        pending_entry_audit=False,
+        revision=state.revision,
+        entered_event_id=None,
+        entered_event_sequence=None,
+        entry_run_id=None,
+        entry_turn_id=None,
+        entry_reply_id=None,
+        stored_default_permission=preset_permission_policy_fact(
+            inactive_default_permission_mode
+        ),
+        accepted_plan_artifact_id=state.latest_accepted_plan_artifact_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)

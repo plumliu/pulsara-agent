@@ -9,10 +9,16 @@ import pytest
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    persist_test_run_transcript_seed,
+    run_end_contract_fields,
+    run_start_permission_fields,
+)
 
 from pulsara_agent.event import (
     EventContext,
+    LedgerMaterializationAccountGenesisEvent,
+    LedgerMaterializationConsumerRegisteredEvent,
     RunEndEvent,
     RunStartEvent,
     SubagentMessageSentEvent,
@@ -25,6 +31,7 @@ from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog, dump_age
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
+from pulsara_agent.primitives.model_call import canonical_json_bytes, sha256_fingerprint
 from pulsara_agent.runtime import RuntimeSession
 from pulsara_agent.runtime.subagent import (
     PostgresEventLogLocator,
@@ -86,19 +93,33 @@ def _durable_runtime(tmp_path: Path):
 
 
 async def _start_parent_run(parent: RuntimeSession, context: EventContext) -> None:
-    await parent.write_event(
+    parent.event_log.ensure_runtime_session_owner()
+    seed = persist_test_run_transcript_seed(parent, run_id=context.run_id)
+    fields = run_start_permission_fields(
+        context.run_id,
+        user_input="delegate",
+        turn_id=context.turn_id,
+        reply_id=context.reply_id,
+        mcp_installation_owner_runtime_session_id=parent.runtime_session_id,
+    )
+    fields.update(
+        run_transcript_seed_semantic=seed.seed_semantic,
+        run_transcript_seed_reference=seed.seed_reference,
+    )
+    result = await parent.write_event(
         RunStartEvent(
             **context.event_fields(),
-            **run_start_permission_fields(
-                context.run_id,
-                user_input="delegate",
-                turn_id=context.turn_id,
-                reply_id=context.reply_id,
-            ),
+            **fields,
             user_input_chars=8,
             metadata={"user_input": "delegate"},
         )
     )
+    stored = next(
+        event
+        for event in result.committed_events
+        if isinstance(event, RunStartEvent)
+    )
+    parent.transcript_projection_checkpoint_service.adopt_committed_run_seed(stored)
 
 
 def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
@@ -152,8 +173,26 @@ def test_postgres_parent_graph_and_child_raw_events_use_distinct_sessions(
         ).iter()
         assert any(isinstance(event, SubagentRunStartedEvent) for event in parent_events)
         assert any(isinstance(event, SubagentMessageSentEvent) for event in parent_events)
-        assert not any(isinstance(event, RunStartEvent) and event.run_id.startswith("run:child:") for event in parent_events)
-        assert [type(event) for event in child_events] == [RunStartEvent, RunEndEvent]
+        assert not any(
+            isinstance(event, RunStartEvent) and event.run_id.startswith("run:child:")
+            for event in parent_events
+        )
+        assert sum(isinstance(event, RunStartEvent) for event in child_events) == 1
+        assert sum(isinstance(event, RunEndEvent) for event in child_events) == 1
+        assert (
+            sum(
+                isinstance(event, LedgerMaterializationAccountGenesisEvent)
+                for event in child_events
+            )
+            == 1
+        )
+        assert (
+            sum(
+                isinstance(event, LedgerMaterializationConsumerRegisteredEvent)
+                for event in child_events
+            )
+            == 2
+        )
         assert not any(isinstance(event, SubagentRunStartedEvent) for event in child_events)
     finally:
         _delete_sessions(
@@ -498,15 +537,34 @@ def test_postgres_old_subagent_started_payload_without_budget_is_rejected(
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
+                    select transcript_semantic_prefix_count,
+                           transcript_semantic_prefix_accumulator,
+                           ledger_payload_prefix_bytes
+                    from agent_events
+                    where session_id = %s
+                    order by sequence desc
+                    limit 1
+                    """,
+                    (parent.runtime_session_id,),
+                )
+                prefix = cursor.fetchone()
+                assert prefix is not None
+                cursor.execute(
+                    """
                         insert into agent_events (
                             id, session_id, run_id, turn_id, reply_id,
                             sequence, event_type, event_schema_version,
                             event_schema_fingerprint,
                             event_domain_contract_fingerprint,
+                            transcript_event_domain,
+                            transcript_semantic_prefix_count,
+                            transcript_semantic_prefix_accumulator,
+                            ledger_continuity_accumulator,
+                            ledger_payload_prefix_bytes,
                             created_at, payload
                         ) values (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s::timestamptz, %s
+                            %s, %s, %s, %s, %s, %s::timestamptz, %s
                         )
                     """,
                     (
@@ -520,6 +578,14 @@ def test_postgres_old_subagent_started_payload_without_budget_is_rejected(
                         schema.event_schema_version,
                         schema.event_schema_fingerprint,
                         schema.domain_contract_fingerprint,
+                        "non_transcript",
+                        prefix[0],
+                        prefix[1],
+                        sha256_fingerprint(
+                            "test-corrupt-ledger-continuity:v1",
+                            invalid_payload,
+                        ),
+                        prefix[2] + len(canonical_json_bytes(invalid_payload)),
                         valid.created_at,
                         Jsonb(invalid_payload),
                     ),

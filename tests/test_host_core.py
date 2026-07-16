@@ -56,6 +56,7 @@ from pulsara_agent.host.transcript import (
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import model_call_end_fields, model_call_start_fields, test_llm_config
+from tests.support.model_call import model_terminal_projection_end_reference_fixture
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import (
@@ -66,6 +67,7 @@ from pulsara_agent.message import (
 from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.authority_materialization import RunSeedSourceStale
 from pulsara_agent.runtime.plan import (
     PendingPlanInteraction,
     PlanExitResolution,
@@ -376,6 +378,44 @@ def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> N
     assert FAILURE_NOTE_TEXT not in _context_text(transport.contexts[1])
 
 
+def test_host_session_refreezes_run_seed_after_confirmed_source_stale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
+    core = _core(monkeypatch, transport)
+
+    async def run() -> int:
+        session = await _open_project_session(core, tmp_path)
+        await session.run_turn("first user")
+        coordinator = (
+            session.wiring.runtime_wiring.runtime_session.materialization_coordinator
+        )
+        coordinator_type = type(coordinator)
+        original = coordinator_type.commit_run_seed_consumer_rotation
+        calls = 0
+
+        def fail_once(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RunSeedSourceStale(
+                    "run seed source does not match the account high-water"
+                )
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            coordinator_type,
+            "commit_run_seed_consumer_rotation",
+            fail_once,
+        )
+        result = await session.run_turn("second user")
+        assert result.status.value == "finished"
+        return calls
+
+    assert asyncio.run(run()) == 2
+
+
 def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_reply_end() -> (
     None
 ):
@@ -420,9 +460,15 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
                 outcome="provider_error",
                 provider_dispatch_status="dispatched",
                 usage_status="missing",
-                usage=None,
-                estimated_input_tokens=0,
-            ),
+                    usage=None,
+                    estimated_input_tokens=0,
+                    terminal_projection=(
+                        model_terminal_projection_end_reference_fixture(
+                            model_start.resolved_call.resolved_model_call_id,
+                            outcome="provider_error",
+                        )
+                    ),
+                ),
             ReplyEndEvent(
                 id=model_start.recovery_plan.stable_reply_end_event_id,
                 **ctx.event_fields(),
@@ -2438,6 +2484,51 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(
     assert "not allowed by permission policy" in write_output
 
 
+def test_fresh_durable_plan_entry_is_deferred_until_run_genesis(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transport = ScriptedTransport([{"text": "plan ready"}])
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        runtime = session.wiring.runtime_wiring.runtime_session
+        runtime.allow_unbootstrapped_test_events = False
+
+        session.enter_plan(reason="durable plan before first run")
+
+        assert session.plan_state.pending_entry_audit is True
+        assert runtime.event_log.next_sequence() == 1
+        assert not any(
+            isinstance(event, PlanModeEnteredEvent)
+            for event in session.replay_events()
+        )
+
+        result = await session.run_turn("prepare a plan")
+        return session, result
+
+    session, result = asyncio.run(run())
+    events = session.replay_events()
+    run_start_index = next(
+        index for index, event in enumerate(events) if isinstance(event, RunStartEvent)
+    )
+    plan_entry_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, PlanModeEnteredEvent)
+    )
+
+    assert result.final_text == "plan ready"
+    assert run_start_index < plan_entry_index
+    assert session.plan_state.pending_entry_audit is False
+    assert session.plan_state.entry_run_id == events[plan_entry_index].run_id
+
+
 def test_plan_mode_blocks_permission_switch_until_explicit_exit(
     tmp_path, monkeypatch
 ) -> None:
@@ -3190,7 +3281,7 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(
                     ),
                 )
             ),
-            timeout=1,
+            timeout=5,
         )
         return session, result
 

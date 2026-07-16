@@ -13,6 +13,7 @@ RUNTIME_TRUTH_TABLES = (
     "runs",
     "turns",
     "agent_events",
+    "ledger_materialization_accounts",
     "tool_execution_records",
     "artifacts",
     "working_context_summaries",
@@ -63,6 +64,21 @@ CREATE TABLE IF NOT EXISTS agent_events (
     event_schema_version TEXT NOT NULL,
     event_schema_fingerprint TEXT NOT NULL,
     event_domain_contract_fingerprint TEXT NOT NULL,
+    transcript_event_domain TEXT NOT NULL CHECK (
+        transcript_event_domain IN (
+            'transcript_semantic',
+            'transcript_acceleration',
+            'non_transcript'
+        )
+    ),
+    transcript_semantic_prefix_count BIGINT NOT NULL CHECK (
+        transcript_semantic_prefix_count >= 0
+    ),
+    transcript_semantic_prefix_accumulator TEXT NOT NULL,
+    ledger_continuity_accumulator TEXT NOT NULL,
+    ledger_payload_prefix_bytes BIGINT NOT NULL CHECK (
+        ledger_payload_prefix_bytes >= 0
+    ),
     created_at TIMESTAMPTZ NOT NULL,
     payload JSONB NOT NULL,
     UNIQUE (session_id, sequence)
@@ -80,6 +96,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_type
 CREATE INDEX IF NOT EXISTS idx_agent_events_session_type_sequence
     ON agent_events(session_id, event_type, sequence);
 
+CREATE INDEX IF NOT EXISTS idx_agent_events_session_transcript_domain_sequence
+    ON agent_events(session_id, transcript_event_domain, sequence);
+
 CREATE INDEX IF NOT EXISTS idx_agent_events_session_model_call_sequence
     ON agent_events(
         session_id,
@@ -90,6 +109,20 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_session_model_call_sequence
         )),
         sequence
     );
+
+CREATE TABLE IF NOT EXISTS ledger_materialization_accounts (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    account_state_fingerprint TEXT NOT NULL,
+    ledger_materialization_generation BIGINT NOT NULL CHECK (
+        ledger_materialization_generation >= 0
+    ),
+    consumer_horizon_revision BIGINT NOT NULL CHECK (
+        consumer_horizon_revision >= 0
+    ),
+    ledger_through_sequence BIGINT NOT NULL CHECK (ledger_through_sequence >= 0),
+    state_payload JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,

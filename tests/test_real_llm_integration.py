@@ -18,7 +18,11 @@ from tests.support import (
 from tests.support.context_input import render_event_log_transcript
 import psycopg
 
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    persist_test_run_transcript_seed,
+    run_end_contract_fields,
+    run_start_permission_fields,
+)
 
 from pulsara_agent.event import (
     EventContext,
@@ -110,6 +114,13 @@ from pulsara_agent.runtime import (
 )
 from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex
+from pulsara_agent.runtime.long_horizon.reducer_contract import (
+    build_default_subagent_graph_reducer_contract,
+)
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    empty_projection_state_fingerprint,
+    prepare_root_long_horizon_run,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.settings import PulsaraSettings
@@ -135,6 +146,24 @@ def _run_error_diagnostics(events) -> list[dict]:
         for event in events
         if isinstance(event, RunErrorEvent)
     ]
+
+
+def _pending_candidates_for_session(
+    candidate_pool: PostgresCandidatePool,
+    runtime_session_id: str,
+) -> list[PooledMemoryCandidate]:
+    return [
+        candidate
+        for candidate in candidate_pool.list_pending()
+        if candidate.source_session_id == runtime_session_id
+    ]
+
+
+def _pending_candidate_count(
+    candidate_pool: PostgresCandidatePool,
+    runtime_session_id: str,
+) -> int:
+    return len(_pending_candidates_for_session(candidate_pool, runtime_session_id))
 
 
 def _trusted_terminal_policy() -> EffectivePermissionPolicy:
@@ -163,6 +192,79 @@ def _direct_real_runtime_session(
     )
 
 
+async def _bootstrap_direct_real_runtime_session(
+    runtime_session: RuntimeSession,
+    *,
+    model_target,
+    event_context: EventContext | None = None,
+    user_input: str = "",
+) -> EventContext:
+    context = event_context or EventContext(
+        run_id=f"run:direct-bootstrap:{uuid4().hex}",
+        turn_id=f"turn:direct-bootstrap:{uuid4().hex}",
+        reply_id=f"reply:direct-bootstrap:{uuid4().hex}",
+    )
+    run_start_event_id = f"run_start:{context.run_id}"
+    prepared = prepare_root_long_horizon_run(
+        runtime_session_id=runtime_session.runtime_session_id,
+        run_id=context.run_id,
+        run_start_event_id=run_start_event_id,
+        primary_target=model_target,
+        summarizer_target=model_target,
+        graph_reducer_contract=build_default_subagent_graph_reducer_contract(),
+        source_through_sequence_at_open=0,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    seed = persist_test_run_transcript_seed(runtime_session, run_id=context.run_id)
+    fields = run_start_permission_fields(
+        context.run_id,
+        user_input=user_input,
+        turn_id=context.turn_id,
+        reply_id=context.reply_id,
+        mcp_installation_owner_runtime_session_id=(
+            runtime_session.runtime_session_id
+        ),
+        model_target=model_target,
+    )
+    fields.update(
+        long_horizon=prepared.contract,
+        run_transcript_seed_semantic=seed.seed_semantic,
+        run_transcript_seed_reference=seed.seed_reference,
+    )
+    run_start = RunStartEvent(
+        id=run_start_event_id,
+        **context.event_fields(),
+        **fields,
+        user_input_chars=len(user_input),
+    )
+    account = prepared.root_account
+    assert account is not None
+    stored = await runtime_session.emit_many(
+        (
+            run_start,
+            ContextWindowOpenedEvent(
+                id=prepared.contract.initial_window_open_event_id,
+                **context.event_fields(),
+                window=prepared.initial_window,
+                opening_batch_id=prepared.opening_batch_id,
+            ),
+            RolloutBudgetAccountOpenedEvent(
+                id=f"rollout_budget_account_opened:{account.account_id}",
+                **context.event_fields(),
+                account=account,
+            ),
+        )
+    )
+    committed_start = next(
+        event for event in stored if isinstance(event, RunStartEvent)
+    )
+    runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+        committed_start
+    )
+    return context
+
+
 def test_real_flash_model_emits_replayable_agent_events():
     if os.getenv("PULSARA_RUN_REAL_LLM") != "1":
         pytest.skip(
@@ -176,7 +278,10 @@ def test_real_flash_model_emits_replayable_agent_events():
     assert "ModelCallStartEvent" in result["event_type_names"]
     assert "TextBlockDeltaEvent" in result["event_type_names"]
     assert "ModelCallEndEvent" in result["event_type_names"]
-    assert result["event_type_names"][-1] == "ModelCallEndEvent"
+    assert result["event_type_names"][-1] == "PhysicalOperationReservationSettledEvent"
+    assert result["event_type_names"].index("ModelCallEndEvent") < len(
+        result["event_type_names"]
+    ) - 1
     assert "PULSARA_OK" in result["text"]
     assert result["replayed_text"]
     assert "PULSARA_OK" in result["replayed_text"]
@@ -214,7 +319,10 @@ def test_real_flash_model_accepts_message_level_system_item():
     assert result["event_type_names"][0] == "ModelCallStartEvent"
     assert "ModelCallStartEvent" in result["event_type_names"]
     assert "ModelCallEndEvent" in result["event_type_names"]
-    assert result["event_type_names"][-1] == "ModelCallEndEvent"
+    assert result["event_type_names"][-1] == "PhysicalOperationReservationSettledEvent"
+    assert result["event_type_names"].index("ModelCallEndEvent") < len(
+        result["event_type_names"]
+    ) - 1
     assert "PULSARA_SYSTEM_MSG_OK" in result["text"]
     assert "PULSARA_SYSTEM_MSG_OK" in result["replayed_text"]
 
@@ -1017,7 +1125,13 @@ def test_real_llm_trajectory_suite_covers_narrow_memory_tools(tmp_path):
     assert any(trajectory["tool_call_count"] >= 3 for trajectory in trajectories)
     multi_tool = trajectories[4]
     assert multi_tool["event_type_names"][0] == "RunStartEvent"
-    assert multi_tool["event_type_names"][-1] == "RunEndEvent"
+    assert (
+        multi_tool["event_type_names"][-1]
+        == "PhysicalOperationReservationSettledEvent"
+    )
+    assert multi_tool["event_type_names"].index("RunEndEvent") < len(
+        multi_tool["event_type_names"]
+    ) - 1
     assert multi_tool["tool_names"].count("read_file") >= 2
     assert "search_files" in multi_tool["tool_names"]
     tool_result_text = "\n".join(multi_tool["tool_result_summaries"])
@@ -1432,6 +1546,10 @@ async def _run_real_flash_smoke() -> dict:
         target = runtime.resolve_target(
             role=ModelRole.FLASH,
             requested_options=LLMOptions(),
+        )
+        await _bootstrap_direct_real_runtime_session(
+            runtime_session,
+            model_target=target.fact,
         )
         call = runtime.resolve_call(
             target=target,
@@ -4210,8 +4328,9 @@ async def _run_real_agent_scope_assignment_case(tmp_path: Path, case: dict) -> d
                 args.get("scope") for args in memory_arguments if isinstance(args, dict)
             ],
             "memory_arguments": memory_arguments,
-            "candidate_pool_pending": len(
-                wiring.runtime_wiring.candidate_pool.list_pending()
+            "candidate_pool_pending": _pending_candidate_count(
+                wiring.runtime_wiring.candidate_pool,
+                wiring.runtime_wiring.runtime_session.runtime_session_id,
             ),
             "expected_workspace_scope": workspace_scope_value,
         }
@@ -4417,8 +4536,9 @@ async def _run_real_agent_transient_scope_discipline_smoke(tmp_path: Path) -> di
             "final_text": result.final_text.strip(),
             "errors": errors,
             "memory_tool_names": memory_tool_names,
-            "candidate_pool_pending": len(
-                wiring.runtime_wiring.candidate_pool.list_pending()
+            "candidate_pool_pending": _pending_candidate_count(
+                wiring.runtime_wiring.candidate_pool,
+                wiring.runtime_wiring.runtime_session.runtime_session_id,
             ),
             "memory_node_count": sum(
                 len(
@@ -5015,7 +5135,10 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
         tool_result_events = [
             event for event in events if isinstance(event, ToolResultStartEvent)
         ]
-        pending_before_governance = wiring.runtime_wiring.candidate_pool.list_pending()
+        pending_before_governance = _pending_candidates_for_session(
+            wiring.runtime_wiring.candidate_pool,
+            runtime_session.runtime_session_id,
+        )
         governance_results = (
             wiring.runtime_wiring.memory_governance_executor.submit_pending_as_is(
                 governance_batch_id=governance_batch_id
@@ -5061,8 +5184,9 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
             "postgres_event_count": len(events),
             "target_memory_node_count": target_memory_node_count,
             "candidate_pool_pending_before_governance": len(pending_before_governance),
-            "candidate_pool_pending_after_governance": len(
-                wiring.runtime_wiring.candidate_pool.list_pending()
+            "candidate_pool_pending_after_governance": _pending_candidate_count(
+                wiring.runtime_wiring.candidate_pool,
+                runtime_session.runtime_session_id,
             ),
             "memory_node_count": sum(
                 len(
@@ -5146,6 +5270,10 @@ async def _collect_real_events(
 
     try:
         target = runtime.resolve_target(role=role, requested_options=options)
+        await _bootstrap_direct_real_runtime_session(
+            runtime_session,
+            model_target=target.fact,
+        )
         call = runtime.resolve_call(
             target=target,
             purpose=ModelCallPurpose.MEMORY_REFLECTION,
@@ -5171,7 +5299,10 @@ async def _collect_real_events(
         assert any(isinstance(event, ModelCallStartEvent) for event in events)
         assert any(isinstance(event, ModelCallEndEvent) for event in events) or errors
         assert isinstance(events[0], ModelCallStartEvent)
-        assert isinstance(events[-1], ModelCallEndEvent) or errors
+        if not errors:
+            event_type_names = [type(event).__name__ for event in events]
+            assert event_type_names[-1] == "PhysicalOperationReservationSettledEvent"
+            assert event_type_names.index("ModelCallEndEvent") < len(event_type_names) - 1
         return {
             "events": events,
             "model_result": model_result,
@@ -5208,8 +5339,9 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
         gate=MemoryWriteGate(),
         graph_id=graph_id,
     )
+    llm_runtime = build_llm_runtime(settings.llm)
     engine = MemoryReflectionEngine(
-        llm_runtime=build_llm_runtime(settings.llm),
+        llm_runtime=llm_runtime,
         candidate_pool=candidate_pool,
         graph=graph,
         graph_id=graph_id,
@@ -5229,14 +5361,11 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
         seed_context = EventContext(
             run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
         )
-        event_log.extend(
-            [
-                TextBlockDeltaEvent(
-                    **seed_context.event_fields(),
-                    block_id="text:seed",
-                    delta=seed_text,
-                )
-            ]
+        await _bootstrap_direct_real_runtime_session(
+            runtime_session,
+            model_target=llm_runtime.resolve_target(role=ModelRole.FLASH).fact,
+            event_context=seed_context,
+            user_input=seed_text,
         )
         events = await engine.reflect(
             state=state,
@@ -5252,11 +5381,17 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
             ],
             safe_point="on_session_end",
         )
-        pending_after_reflection = len(candidate_pool.list_pending())
+        pending_after_reflection = _pending_candidate_count(
+            candidate_pool,
+            runtime_session_id,
+        )
         governance = MemoryGovernanceExecutor(
             candidate_pool=candidate_pool,
             memory_write_service=MemoryWriteService(ledger=ledger),
             event_log=event_log,
+            event_commit_port=lambda events: runtime_session.write_events_from_thread(
+                events
+            ).committed_events,
             graph=graph,
             graph_id=graph_id,
             runtime_session_id=state.session_id,
@@ -5303,8 +5438,9 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
                 type(event).__name__ for event in governance_events
             ],
             "candidate_pool_pending_after_reflection": pending_after_reflection,
-            "candidate_pool_pending_after_governance": len(
-                candidate_pool.list_pending()
+            "candidate_pool_pending_after_governance": _pending_candidate_count(
+                candidate_pool,
+                runtime_session_id,
             ),
             "memory_result_types": [event.memory_type for event in memory_results],
             "memory_statuses": [event.status.value for event in memory_results],
@@ -5423,14 +5559,14 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
         gate=MemoryWriteGate(),
         graph_id=graph_id,
     )
+    llm_runtime = build_llm_runtime(settings.llm)
     governance_batch_id = f"governance:real-governance:{uuid4().hex}"
     try:
-        event_log.append(
-            TextBlockDeltaEvent(
-                **event_context.event_fields(),
-                block_id="text:seed",
-                delta="The user prefers concise summaries.",
-            )
+        await _bootstrap_direct_real_runtime_session(
+            runtime_session,
+            model_target=llm_runtime.resolve_target(role=ModelRole.FLASH).fact,
+            event_context=event_context,
+            user_input="The user prefers concise summaries.",
         )
         candidate_pool.append_candidate(
             PooledMemoryCandidate(
@@ -5454,6 +5590,9 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
             candidate_pool=candidate_pool,
             memory_write_service=MemoryWriteService(ledger=ledger),
             event_log=event_log,
+            event_commit_port=lambda events: runtime_session.write_events_from_thread(
+                events
+            ).committed_events,
             graph=graph,
             graph_id=graph_id,
             runtime_session_id=runtime_session_id,
@@ -5465,7 +5604,7 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
             ),
         )
         engine = MemoryGovernanceEngine(
-            llm_runtime=build_llm_runtime(settings.llm),
+            llm_runtime=llm_runtime,
             executor=executor,
             options=MemoryGovernanceOptions(llm_options=LLMOptions()),
             runtime_session=runtime_session,
@@ -5506,8 +5645,9 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
             "governance_event_type_names": [
                 type(event).__name__ for event in governance_events
             ],
-            "candidate_pool_pending_after_governance": len(
-                candidate_pool.list_pending()
+            "candidate_pool_pending_after_governance": _pending_candidate_count(
+                candidate_pool,
+                runtime_session_id,
             ),
             "memory_result_types": [event.memory_type for event in memory_results],
             "memory_statuses": [event.status.value for event in memory_results],
@@ -5586,14 +5726,16 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
         event_log=event_log,
         runtime_session_id=runtime_session_id,
     )
-    event_log.append(
-        TextBlockDeltaEvent(
-            **source_ctx.event_fields(), block_id="text:seed", delta=user_quote
-        )
-    )
+    llm_runtime = build_llm_runtime(settings.llm)
     candidate_pool = PostgresCandidatePool(dsn=dsn)
     now = utc_now()
     try:
+        await _bootstrap_direct_real_runtime_session(
+            runtime_session,
+            model_target=llm_runtime.resolve_target(role=ModelRole.FLASH).fact,
+            event_context=source_ctx,
+            user_input=user_quote,
+        )
         graph.put_jsonld(
             Preference(
                 id=old_id,
@@ -5639,6 +5781,9 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
                 )
             ),
             event_log=event_log,
+            event_commit_port=lambda events: runtime_session.write_events_from_thread(
+                events
+            ).committed_events,
             graph=graph,
             graph_id=graph_id,
             runtime_session_id=runtime_session_id,
@@ -5651,7 +5796,7 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             ),
         )
         engine = MemoryGovernanceEngine(
-            llm_runtime=build_llm_runtime(settings.llm),
+            llm_runtime=llm_runtime,
             executor=executor,
             options=MemoryGovernanceOptions(llm_options=LLMOptions()),
             relatedness_service=GovernanceRelatednessService(

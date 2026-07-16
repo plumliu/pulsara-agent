@@ -555,6 +555,12 @@ class ProviderModelStreamErrorCode(StrEnum):
     PROVIDER_TIMEOUT = "provider_timeout"
     CONTENT_FILTERED = "content_filtered"
     TRANSPORT_PROTOCOL_ERROR = "transport_protocol_error"
+    TRANSPORT_SOURCE_ITEM_LIMIT_EXCEEDED = (
+        "transport_source_item_limit_exceeded"
+    )
+    TRANSPORT_SOURCE_PAYLOAD_LIMIT_EXCEEDED = (
+        "transport_source_payload_limit_exceeded"
+    )
     UNKNOWN_PROVIDER_ERROR = "unknown_provider_error"
 
 

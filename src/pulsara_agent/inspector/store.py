@@ -10,6 +10,9 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.event import AgentEvent
 from pulsara_agent.event_log import PostgresEventLog
+from pulsara_agent.primitives.authority_materialization import (
+    LedgerMaterializationAccountStateFact,
+)
 
 
 @dataclass(slots=True)
@@ -95,6 +98,23 @@ class PostgresInspectorStore:
             (session_id,),
         )
         return {row["event_type"]: row["count"] for row in rows}
+
+    def materialization_account(
+        self, session_id: str
+    ) -> LedgerMaterializationAccountStateFact | None:
+        row = self._fetchone(
+            """
+            select state_payload
+            from ledger_materialization_accounts
+            where session_id = %s
+            """,
+            (session_id,),
+        )
+        if row is None:
+            return None
+        return LedgerMaterializationAccountStateFact.model_validate(
+            row["state_payload"]
+        )
 
     def tool_result_artifacts_for_run(self, run_id: str) -> list[dict[str, Any]]:
         return self._fetchall(

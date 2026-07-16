@@ -617,6 +617,9 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
         candidate_pool=pool,
         memory_write_service=service,
         event_log=runtime_session.event_log,
+        event_commit_port=lambda events: runtime_session.write_events_from_thread(
+            events
+        ).committed_events,
         graph=graph,
         runtime_session_id=runtime_session.runtime_session_id,
         memory_write_uow_factory=fake_memory_uow_factory(

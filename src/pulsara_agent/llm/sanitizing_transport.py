@@ -53,6 +53,11 @@ from pulsara_agent.primitives.model_call import (
     ProviderSanitizedErrorFact,
     sha256_fingerprint,
 )
+from pulsara_agent.primitives.authority_materialization import (
+    MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL,
+    MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
+)
+from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 class ProviderTransportPhysicalCompletionStatus(StrEnum):
@@ -186,7 +191,15 @@ def sanitize_provider_failure(
         truncated = len(text) > DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars
         text = text[: DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars]
         hint = (code_hint or "").casefold()
-        if "auth" in hint or "401" in hint:
+        if hint == "transport_source_item_limit_exceeded":
+            stable_code = (
+                ProviderModelStreamErrorCode.TRANSPORT_SOURCE_ITEM_LIMIT_EXCEEDED
+            )
+        elif hint == "transport_source_payload_limit_exceeded":
+            stable_code = (
+                ProviderModelStreamErrorCode.TRANSPORT_SOURCE_PAYLOAD_LIMIT_EXCEEDED
+            )
+        elif "auth" in hint or "401" in hint:
             stable_code = ProviderModelStreamErrorCode.AUTHENTICATION_FAILED
         elif "permission" in hint or "403" in hint:
             stable_code = ProviderModelStreamErrorCode.PERMISSION_DENIED
@@ -278,6 +291,8 @@ class SanitizingProviderTransportExecution:
             else SanitizingProviderTransportState.OPEN
         )
         self.next_transport_sequence_index = 0
+        self._accepted_source_item_count = 0
+        self._accepted_source_payload_bytes = 0
         self._usage: TransportUsageReport | None = None
         self._pending_error = prefailed_error
         self._collect_usage_while_draining_error = False
@@ -383,7 +398,34 @@ class SanitizingProviderTransportExecution:
                 continue
             try:
                 self._validate_semantic_event(item)
-                return self._draft_from_event(item)
+                draft = self._draft_from_event(item, advance_cursor=False)
+                payload_bytes = len(
+                    canonical_json_bytes(draft.model_dump(mode="json"))
+                )
+                if (
+                    self._accepted_source_item_count + 1
+                    > MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL
+                ):
+                    self._pending_error = sanitize_provider_failure(
+                        message="Provider stream exceeded the source-item circuit breaker.",
+                        code_hint="transport_source_item_limit_exceeded",
+                    )
+                    self.state = SanitizingProviderTransportState.ERROR_DRAFT_PENDING
+                    return await self.read_next()
+                if (
+                    self._accepted_source_payload_bytes + payload_bytes
+                    > MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL
+                ):
+                    self._pending_error = sanitize_provider_failure(
+                        message="Provider stream exceeded the sanitized-byte circuit breaker.",
+                        code_hint="transport_source_payload_limit_exceeded",
+                    )
+                    self.state = SanitizingProviderTransportState.ERROR_DRAFT_PENDING
+                    return await self.read_next()
+                self._accepted_source_item_count += 1
+                self._accepted_source_payload_bytes += payload_bytes
+                self.next_transport_sequence_index += 1
+                return draft
             except BaseException:
                 self._pending_error = sanitize_provider_failure(
                     message="Provider emitted an unsupported semantic event.",
@@ -392,7 +434,12 @@ class SanitizingProviderTransportExecution:
                 self.state = SanitizingProviderTransportState.ERROR_DRAFT_PENDING
                 return await self.read_next()
 
-    def _draft_from_event(self, event: AgentEvent):
+    def _draft_from_event(
+        self,
+        event: AgentEvent,
+        *,
+        advance_cursor: bool = True,
+    ):
         index = self.next_transport_sequence_index
         mapping: tuple[tuple[type[AgentEvent], type[Any], dict[str, Any]], ...] = (
             (TextBlockStartEvent, ProviderTextBlockStartDraft, {"block_id": getattr(event, "block_id", "")}),
@@ -415,7 +462,8 @@ class SanitizingProviderTransportExecution:
                     transport_sequence_index=index,
                     **payload,
                 )
-                self.next_transport_sequence_index += 1
+                if advance_cursor:
+                    self.next_transport_sequence_index += 1
                 return draft
         raise TypeError(type(event).__name__)
 

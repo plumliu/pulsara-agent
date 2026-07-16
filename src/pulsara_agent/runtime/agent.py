@@ -33,6 +33,7 @@ from pulsara_agent.primitives.capability import (
     CapabilityExecutionSurfaceIdentityFact,
     build_capability_resolve_basis,
 )
+from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
 from pulsara_agent.event import (
     AgentEvent,
     CapabilityExposureResolvedEvent,
@@ -80,7 +81,10 @@ from pulsara_agent.event_log import EventLog, InMemoryEventLog, PostgresEventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
-from pulsara_agent.llm.control import RunModelCallControlOwner
+from pulsara_agent.llm.control import (
+    ModelCallControlResolutionError,
+    RunModelCallControlOwner,
+)
 from pulsara_agent.llm.errors import (
     ModelContextIdentityMismatch,
     ModelInputBudgetExceeded,
@@ -177,6 +181,9 @@ from pulsara_agent.runtime.context_input.manifest import (
     build_context_input_manifest_candidate,
     build_long_horizon_context_attribution,
 )
+from pulsara_agent.runtime.context_input.transcript_authority import (
+    prepare_transcript_projection_input,
+)
 from pulsara_agent.runtime.context_input.render import (
     apply_tool_observation_projection,
     render_prepared_tool_result_units,
@@ -245,6 +252,7 @@ from pulsara_agent.runtime.plan import (
     PlanQuestionResolution,
     PlanWorkflowState,
     normalize_plan_question_options,
+    plan_workflow_state_fact,
 )
 from pulsara_agent.runtime.mcp.types import (
     MAX_MCP_INPUT_REQUIRED_ROUNDS,
@@ -314,6 +322,7 @@ from pulsara_agent.runtime.tool_execution import (
     RuntimeSessionToolExecutionEventCommitPort,
     build_tool_result_terminal_event,
 )
+from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
 from pulsara_agent.runtime.long_horizon.run_contract import (
     build_child_rollout_subaccount,
     prepare_child_long_horizon_run,
@@ -1903,8 +1912,9 @@ class AgentRuntime:
                 ],
             )
             return
-        await subagent_runtime.fail(
+        await subagent_runtime.fail_from_native_child_terminal(
             run.subagent_run_id,
+            child_run_id=result.state.run_id,
             reason_code=f"subagent_{result.status.value}",
             reason_message=(
                 f"Child agent ended with status {result.status.value} without a usable result."
@@ -2419,7 +2429,7 @@ class AgentRuntime:
         ] = "permission_denied",
         reason_code: str | None = None,
         tool_observation_timing_seed: dict[str, Any] | None = None,
-    ) -> list[AgentEvent]:
+    ) -> list[AgentEvent | ToolResultEndCandidate]:
         exposure = self._require_capability_exposure(state)
         descriptor = exposure.descriptors_by_name.get(tool_call_name)
         low_state = ToolResultStateFact(result_state.value)
@@ -2701,7 +2711,7 @@ class AgentRuntime:
                 terminal_event=next(
                     event
                     for event in terminal_candidates
-                    if isinstance(event, ToolResultEndEvent)
+                    if isinstance(event, (ToolResultEndEvent, ToolResultEndCandidate))
                 ),
                 reservation=rollout_reservation,
             )
@@ -2719,6 +2729,11 @@ class AgentRuntime:
             self._mark_mcp_terminal_commit_attempt(state, call.id)
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         if rollout_reservation is not None:
+            write_candidates = (
+                await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                    write_candidates
+                )
+            )
             terminal_registry.freeze_terminal(
                 run_id=state.run_id,
                 reservation=rollout_reservation,
@@ -2730,7 +2745,11 @@ class AgentRuntime:
                     runtime_session=self.runtime_session,
                     state=state,
                 ).commit_terminal_batch_and_settlement(
-                    terminal_candidates=(gate_event, *terminal_candidates),
+                    terminal_candidates=tuple(
+                        event
+                        for event in write_candidates
+                        if event.id != settlement.id
+                    ),
                     settlement_candidate=settlement,
                     expected_reservation_fingerprint=(
                         rollout_reservation.semantic_fingerprint
@@ -2829,6 +2848,10 @@ class AgentRuntime:
             ),
             state=state,
         )
+        plan_state = self._plan_state(state)
+        plan_state.apply_durable_event(event)
+        if state.run_working_set is not None:
+            state.run_working_set.plan_snapshot = plan_workflow_state_fact(plan_state)
         state.scratchpad["plan_entry_audit_emitted"] = True
         yield event
 
@@ -2954,7 +2977,7 @@ class AgentRuntime:
                                 "Parent rollout finalization requires its reserved "
                                 "model-call capacity."
                             ),
-                            cancelled_by="rollout_coordinator",
+                            cancelled_by="runtime",
                             drain_timeout_seconds=max(
                                 0.0, min(0.5, deadline - loop.time())
                             ),
@@ -3042,6 +3065,11 @@ class AgentRuntime:
             )()
             working_set = self._require_run_working_set(state)
             window_policy = working_set.long_horizon_contract.window_policy
+            await self.runtime_session.transcript_projection_checkpoint_service.checkpoint_if_needed(
+                context=self._event_context(state),
+                run_seed_semantic=working_set.run_transcript_seed_semantic,
+                run_seed_reference=working_set.run_transcript_seed_reference,
+            )
             compiled_context = None
             compile_attempt_index = 0
             context_retry_index = 0
@@ -3529,10 +3557,46 @@ class AgentRuntime:
                             if projection_unreachable is not None
                             else None
                         )
+                        prepared_transcript_projection = (
+                            prepare_transcript_projection_input(
+                                evidence=(
+                                    prepared_context_input.transcript_projection_evidence
+                                ),
+                                normalized=(
+                                    prepared_context_input.normalized_transcript
+                                ),
+                                provider_projection=(
+                                    final_compiled_context.prepared_transcript_provider_projection
+                                ),
+                                semantic_selection=(
+                                    final_compiled_context.model_visible_named_fact_semantic_selection
+                                ),
+                                prepared_candidates=(
+                                    prepared_context_input.prepared_candidates
+                                ),
+                                prepared_artifacts=(
+                                    prepared_context_input.prepared_named_fact_artifacts
+                                ),
+                                fallback_source_ref=(
+                                    snapshot_fact.run_entry.run_start
+                                ),
+                                authority_events=(
+                                    *tuple(
+                                        prepared_context_input.authority_slice.events
+                                    ),
+                                    *tuple(
+                                        event
+                                        for event_slice in prepared_context_input.named_slices
+                                        for event in event_slice.events
+                                    ),
+                                    *prepared_context_input.exact_named_authority_events,
+                                ),
+                            )
+                        )
                         input_manifest = build_context_input_manifest(
                             snapshot=snapshot_fact,
-                            transcript=(
-                                prepared_context_input.normalized_transcript.transcript
+                            prepared_transcript_projection=(
+                                prepared_transcript_projection
                             ),
                             prepared_tool_results=(
                                 prepared_context_input.prepared_tool_results
@@ -4125,6 +4189,11 @@ class AgentRuntime:
                     ),
                     state=state,
                 )
+            except ModelCallControlResolutionError:
+                # The completed provider result remains owned by its stable
+                # disposition candidate.  A later model call or RunEnd would
+                # cross that unresolved control fact, so fail closed here.
+                raise
             except Exception as exc:
                 event = await self.runtime_session.emit(
                     RunErrorEvent(
@@ -6029,7 +6098,9 @@ class AgentRuntime:
             )
         )
         terminal_event = next(
-            event for event in candidates if isinstance(event, ToolResultEndEvent)
+            event
+            for event in candidates
+            if isinstance(event, (ToolResultEndEvent, ToolResultEndCandidate))
         )
         settlement = (
             self._tool_rollout_settlement_event(
@@ -6051,6 +6122,11 @@ class AgentRuntime:
             self._mark_mcp_terminal_commit_attempt(state, tool_call_id)
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         if rollout_reservation is not None:
+            write_candidates = (
+                await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                    write_candidates
+                )
+            )
             terminal_registry.freeze_terminal(
                 run_id=state.run_id,
                 reservation=rollout_reservation,
@@ -6067,7 +6143,11 @@ class AgentRuntime:
                     runtime_session=self.runtime_session,
                     state=state,
                 ).commit_terminal_batch_and_settlement(
-                    terminal_candidates=candidates,
+                    terminal_candidates=tuple(
+                        event
+                        for event in write_candidates
+                        if event.id != settlement.id
+                    ),
                     settlement_candidate=settlement,
                     expected_reservation_fingerprint=(
                         rollout_reservation.semantic_fingerprint
@@ -6246,7 +6326,7 @@ class AgentRuntime:
         self,
         state: LoopState,
         *,
-        terminal_event: ToolResultEndEvent,
+        terminal_event: ToolResultEndEvent | ToolResultEndCandidate,
         reservation: RolloutReservationFact,
     ) -> RolloutBudgetReservationSettledEvent:
         if (
@@ -6556,53 +6636,91 @@ class AgentRuntime:
         parsed_calls: list[ToolCall],
     ) -> AsyncIterator[AgentEvent]:
         exposure = self._require_capability_exposure(state)
-        for batch in _tool_batches(parsed_calls, self.tool_executor, exposure=exposure):
-            (
-                stored_admissions,
-                executable_batch,
-                reservations,
-            ) = await self._commit_tool_admissions(
-                state,
-                batch,
-                exposure=exposure,
-            )
-            for event in stored_admissions:
-                yield event
-            batch_events: list[AgentEvent] = [
-                event
-                for event in stored_admissions
-                if isinstance(
-                    event,
-                    (
-                        ToolResultStartEvent,
-                        ToolResultTextDeltaEvent,
-                        ToolResultDataDeltaEvent,
-                        ToolResultEndEvent,
-                    ),
+        for logical_batch in _tool_batches(
+            parsed_calls,
+            self.tool_executor,
+            exposure=exposure,
+        ):
+            remaining = list(logical_batch)
+            while remaining:
+                capacity = self.runtime_session.physical_dispatch_capacity(
+                    PhysicalOperationKind.TOOL_CALL
                 )
-            ]
-            if executable_batch:
-                async for event in self._stream_tool_batch_events(
+                if capacity <= 0:
+                    await self.runtime_session.ensure_physical_operation_headroom(
+                        PhysicalOperationKind.TOOL_CALL
+                    )
+                    capacity = self.runtime_session.physical_dispatch_capacity(
+                        PhysicalOperationKind.TOOL_CALL
+                    )
+                if capacity <= 0:
+                    raise RuntimeError(
+                        "tool execution is blocked by physical ledger headroom"
+                    )
+                batch = remaining[:capacity]
+                del remaining[:capacity]
+                async for event in self._stream_physically_admitted_tool_batch(
                     state,
-                    executable_batch,
-                    batch_events,
+                    batch,
                     exposure=exposure,
-                    reservations=reservations,
                 ):
                     yield event
-            if state.status is LoopStatus.WAITING_USER:
-                return
-            for call in batch:
-                result_block = _tool_result_from_event_slice(batch_events, call.id)
-                _remember_tool_result_event_span(state, batch_events, call.id)
-                state.tool_results.append(result_block)
-                state.messages.append(
-                    _tool_result_message_from_events(
-                        batch_events, call.name, result_block
-                    )
+                if state.status is LoopStatus.WAITING_USER:
+                    return
+
+    async def _stream_physically_admitted_tool_batch(
+        self,
+        state: LoopState,
+        batch: list[ToolCall],
+        *,
+        exposure: CapabilityExposurePlan,
+    ) -> AsyncIterator[AgentEvent]:
+        (
+            stored_admissions,
+            executable_batch,
+            reservations,
+        ) = await self._commit_tool_admissions(
+            state,
+            batch,
+            exposure=exposure,
+        )
+        for event in stored_admissions:
+            yield event
+        batch_events: list[AgentEvent] = [
+            event
+            for event in stored_admissions
+            if isinstance(
+                event,
+                (
+                    ToolResultStartEvent,
+                    ToolResultTextDeltaEvent,
+                    ToolResultDataDeltaEvent,
+                    ToolResultEndEvent,
+                ),
+            )
+        ]
+        if executable_batch:
+            async for event in self._stream_tool_batch_events(
+                state,
+                executable_batch,
+                batch_events,
+                exposure=exposure,
+                reservations=reservations,
+            ):
+                yield event
+        if state.status is LoopStatus.WAITING_USER:
+            return
+        for call in batch:
+            result_block = _tool_result_from_event_slice(batch_events, call.id)
+            _remember_tool_result_event_span(state, batch_events, call.id)
+            state.tool_results.append(result_block)
+            state.messages.append(
+                _tool_result_message_from_events(
+                    batch_events, call.name, result_block
                 )
-                if call.id in reservations:
-                    state.tool_call_count += 1
+            )
+            if call.id in reservations:
+                state.tool_call_count += 1
 
     async def _commit_tool_admissions(
         self,
@@ -6850,7 +6968,7 @@ class AgentRuntime:
         self,
         state: LoopState,
         *,
-        terminal_event: ToolResultEndEvent,
+        terminal_event: ToolResultEndCandidate,
         reservation: RolloutReservationFact,
     ) -> tuple[AgentEvent, ...]:
         settlement = self._tool_rollout_settlement_event(
@@ -6858,7 +6976,11 @@ class AgentRuntime:
             terminal_event=terminal_event,
             reservation=reservation,
         )
-        candidates = (terminal_event, settlement)
+        candidates = (
+            await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                (terminal_event, settlement)
+            )
+        )
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         terminal_registry.freeze_terminal(
             run_id=state.run_id,
@@ -6869,8 +6991,10 @@ class AgentRuntime:
             result = await RuntimeSessionToolExecutionEventCommitPort(
                 runtime_session=self.runtime_session,
                 state=state,
-            ).commit_terminal_and_settlement(
-                terminal_candidate=terminal_event,
+            ).commit_terminal_batch_and_settlement(
+                terminal_candidates=tuple(
+                    event for event in candidates if event.id != settlement.id
+                ),
                 settlement_candidate=settlement,
                 expected_reservation_fingerprint=reservation.semantic_fingerprint,
             )
@@ -6886,7 +7010,14 @@ class AgentRuntime:
                 run_id=state.run_id,
                 reservation=reservation,
             )
-            raise RuntimeError("tool terminal committed without a healthy reducer fold")
+            reducer_details = "; ".join(
+                f"{item.reducer_id}: {item.error_type}: {item.message}"
+                for item in result.reducer_errors
+            )
+            raise RuntimeError(
+                "tool terminal committed without a healthy reducer fold"
+                + (f" ({reducer_details})" if reducer_details else "")
+            )
         terminal_registry.complete_terminal(
             run_id=state.run_id,
             reservation=reservation,

@@ -146,6 +146,25 @@ class LongHorizonStateStore:
                 return self._closed_child_rollout_states.get(run_id)
             return replace(state, through_sequence=self._through_sequence)
 
+    def child_rollout_state_at(self, run_id: str, *, through_sequence: int):
+        """Freeze child accounting at an already observed ledger high-water."""
+
+        with self._lock:
+            if through_sequence > self._through_sequence:
+                raise LongHorizonReducerApplyError(
+                    "requested child rollout snapshot exceeds reducer high-water"
+                )
+            state = self._child_rollout_states.get(run_id)
+            if state is None:
+                state = self._closed_child_rollout_states.get(run_id)
+            if state is None:
+                return None
+            if state.through_sequence > through_sequence:
+                raise LongHorizonReducerApplyError(
+                    "requested child rollout snapshot precedes a semantic update"
+                )
+            return replace(state, through_sequence=through_sequence)
+
     def rollout_account(self, account_id: str) -> RolloutBudgetAccountFact | None:
         with self._lock:
             account = self._rollout_accounts.get(account_id)

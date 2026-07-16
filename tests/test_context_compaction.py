@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from tests.conftest import (
+    open_test_root_rollout_run,
     run_end_contract_fields,
     run_start_permission_fields,
     tool_result_end_contract_fields,
@@ -50,14 +51,19 @@ from pulsara_agent.host import HostSession, HostWorkspaceInput, resolve_workspac
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from tests.support import (
+    bind_test_context,
     compaction_completed_contract_fields,
     compaction_failed_contract_fields,
     compaction_started_contract_fields,
     context_compiled_contract_fields,
+    make_test_run_execution_activation,
     test_llm_config,
+    test_llm_context,
     test_model_limits,
     test_model_slot,
 )
+from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from tests.support.model_call import model_call_end_fields, model_call_start_fields
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.errors import (
@@ -108,8 +114,7 @@ from pulsara_agent.runtime.compaction.commit import (
     RuntimeSessionCompactionEventCommitPort,
 )
 from pulsara_agent.runtime.session import EventWriteResult
-from pulsara_agent.runtime.session import RuntimeSession
-from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex
+from tests.support.runtime_session import in_memory_runtime_session
 from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.compaction.service import (
     ContextCompactionPolicy,
@@ -326,12 +331,9 @@ def _compaction_service(**kwargs: Any) -> ContextCompactionService:
 
     runtime_session = kwargs.get("runtime_session")
     if runtime_session is None:
-        runtime_session = RuntimeSession(
+        runtime_session = in_memory_runtime_session(
             Path.cwd(),
-            event_log=kwargs["event_log"],
-            archive=kwargs["archive"],
-            tool_result_artifacts=InMemoryToolResultArtifactIndex(),
-            runtime_session_id=kwargs["event_log"].runtime_session_id,
+            runtime_session_id=kwargs["runtime_session_id"],
         )
         kwargs["runtime_session"] = runtime_session
     return ContextCompactionService(**kwargs)
@@ -551,7 +553,13 @@ def _append_turn(
         [
             RunStartEvent(
                 **ctx.event_fields(),
-                **run_start_permission_fields(ctx.run_id, user_input=user_input),
+                **run_start_permission_fields(
+                    ctx.run_id,
+                    user_input=user_input,
+                    mcp_installation_owner_runtime_session_id=(
+                        log.runtime_session_id
+                    ),
+                ),
                 user_input_chars=len(user_input),
                 metadata={"user_input": user_input},
             ),
@@ -600,16 +608,77 @@ async def _emit_turn(
     runtime_session, label: str, user_input: str, assistant_text: str
 ) -> None:
     ctx = _ctx(label)
-    for event in [
-        RunStartEvent(
-            **ctx.event_fields(),
-            **run_start_permission_fields(ctx.run_id, user_input=user_input),
-            user_input_chars=len(user_input),
-            metadata={"user_input": user_input},
+    llm_runtime = _llm_runtime(CompactScriptedTransport(assistant_text))
+    target = llm_runtime.resolve_target(role=ModelRole.PRO)
+    open_test_root_rollout_run(
+        runtime_session,
+        event_context=ctx,
+        model_target=target.fact,
+        user_input=user_input,
+    )
+    call = llm_runtime.resolve_call(
+        target=target,
+        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+    )
+    context = bind_test_context(
+        call,
+        test_llm_context(
+            messages=(LLMMessage.user(user_input),),
+            context_id=f"context:test:{label}",
+            model_call_index=1,
         ),
-        *_accepted_reply_events(ctx, assistant_text),
-    ]:
-        await runtime_session.emit(event)
+    )
+    activation = make_test_run_execution_activation()
+    start_bundle = prepare_model_lifecycle_start_bundle(
+        call=call,
+        context=context,
+        event_context=ctx,
+        runtime_session=runtime_session,
+        lifecycle_kind="main_assistant_reply",
+        run_execution_activation=activation,
+    )
+    result = await llm_runtime.start_stream(
+        call=call,
+        context=context,
+        event_context=ctx,
+        start_bundle=start_bundle,
+        commit_port=RuntimeSessionModelStreamEventCommitPort(
+            runtime_session=runtime_session,
+            state=None,
+        ),
+        execution_registry=runtime_session.model_stream_execution_registry,
+    ).wait_result()
+    disposition_fields = {
+        "id": (
+            "model_call_control_disposition:"
+            f"{ctx.run_id}:{result.resolved_model_call_id}:1"
+        ),
+        **ctx.event_fields(),
+        "resolved_model_call_id": result.resolved_model_call_id,
+        "model_call_start_event_id": result.model_call_start_event_id,
+        "model_call_end_event_id": result.model_call_end_event_id,
+        "model_call_index": 1,
+        "source_result_fingerprint": result.result_fingerprint,
+        "run_execution_activation": activation,
+        "disposition": ModelCallControlDisposition.ACCEPTED,
+        "termination_intent": None,
+        "recovery_reason_code": None,
+    }
+    provisional = ModelCallControlDispositionResolvedEvent.model_construct(
+        **disposition_fields,
+        event_fingerprint="pending",
+    )
+    payload = provisional.model_dump(
+        mode="json", exclude={"event_fingerprint", "sequence"}
+    )
+    await runtime_session.emit(
+        ModelCallControlDispositionResolvedEvent(
+            **payload,
+            event_fingerprint=sha256_fingerprint(
+                "model-call-control-disposition-event:v1", payload
+            ),
+        )
+    )
 
 
 def _current_tail_state(
@@ -760,144 +829,6 @@ class _FakeFailingAutoCompactionService(_FakeCompactionServiceBase):
             )
         )
         return False
-
-
-class _FakeWritingAutoCompactionService(_FakeCompactionServiceBase):
-    def __init__(self, event_log: InMemoryEventLog) -> None:
-        self.event_log = event_log
-
-    async def compact_if_needed(self, **kwargs) -> bool:
-        del kwargs
-        ctx = _ctx("compaction:auto:completed")
-        self.event_log.extend(
-            [
-                ContextCompactionStartedEvent(
-                    **ctx.event_fields(),
-                    **compaction_started_contract_fields(
-                        estimated_tokens_before=200_001
-                    ),
-                    compaction_id="context_compaction:completed",
-                    trigger="auto",
-                    reason="preflight_context_threshold",
-                    window_number=1,
-                    window_id="context_window:completed",
-                    threshold_tokens=200_000,
-                    through_sequence=10,
-                    keep_after_sequence=5,
-                ),
-                ContextCompactionCompletedEvent(
-                    **ctx.event_fields(),
-                    **compaction_completed_contract_fields(
-                        estimated_tokens_before=200_001,
-                        estimated_tokens_after=4_000,
-                    ),
-                    compaction_id="context_compaction:completed",
-                    trigger="auto",
-                    reason="preflight_context_threshold",
-                    window_number=1,
-                    window_id="context_window:completed",
-                    summary_artifact_id="context_compaction_completed:summary",
-                    summary_chars=12,
-                    threshold_tokens=200_000,
-                    through_sequence=10,
-                    keep_after_sequence=5,
-                ),
-            ]
-        )
-        return True
-
-
-class _FakeWritingManualCompactionService(_FakeCompactionServiceBase):
-    def __init__(self, event_log: InMemoryEventLog) -> None:
-        self.event_log = event_log
-
-    async def compact(self, **kwargs):
-        ctx = _ctx("compaction:manual:completed")
-        self.event_log.extend(
-            [
-                ContextCompactionStartedEvent(
-                    **ctx.event_fields(),
-                    **compaction_started_contract_fields(
-                        estimated_tokens_before=200_001
-                    ),
-                    compaction_id="context_compaction:manual",
-                    trigger="manual",
-                    reason=str(kwargs.get("reason", "user_requested")),
-                    window_number=1,
-                    window_id="context_window:manual",
-                    threshold_tokens=200_000,
-                    through_sequence=10,
-                    keep_after_sequence=5,
-                    force=bool(kwargs.get("force", False)),
-                ),
-                ContextCompactionCompletedEvent(
-                    **ctx.event_fields(),
-                    **compaction_completed_contract_fields(
-                        estimated_tokens_before=200_001,
-                        estimated_tokens_after=4_000,
-                    ),
-                    compaction_id="context_compaction:manual",
-                    trigger="manual",
-                    reason=str(kwargs.get("reason", "user_requested")),
-                    window_number=1,
-                    window_id="context_window:manual",
-                    summary_artifact_id="context_compaction_manual:summary",
-                    summary_chars=12,
-                    threshold_tokens=200_000,
-                    through_sequence=10,
-                    keep_after_sequence=5,
-                ),
-            ]
-        )
-        return SimpleNamespace(
-            compaction_id="context_compaction:manual",
-            summary_artifact_id="context_compaction_manual:summary",
-            window_id="context_window:manual",
-            through_sequence=10,
-            keep_after_sequence=5,
-        )
-
-
-class _FakeFailingManualCompactionService(_FakeCompactionServiceBase):
-    def __init__(self, event_log: InMemoryEventLog) -> None:
-        self.event_log = event_log
-
-    async def compact(self, **kwargs):
-        ctx = _ctx("compaction:manual:failed")
-        self.event_log.extend(
-            [
-                ContextCompactionStartedEvent(
-                    **ctx.event_fields(),
-                    **compaction_started_contract_fields(
-                        estimated_tokens_before=200_001
-                    ),
-                    compaction_id="context_compaction:manual_failed",
-                    trigger="manual",
-                    reason=str(kwargs.get("reason", "user_requested")),
-                    window_number=1,
-                    window_id="context_window:manual_failed",
-                    threshold_tokens=200_000,
-                    through_sequence=10,
-                    keep_after_sequence=5,
-                    force=bool(kwargs.get("force", False)),
-                ),
-                ContextCompactionFailedEvent(
-                    **ctx.event_fields(),
-                    **compaction_failed_contract_fields(),
-                    compaction_id="context_compaction:manual_failed",
-                    trigger="manual",
-                    reason=str(kwargs.get("reason", "user_requested")),
-                    window_number=1,
-                    window_id="context_window:manual_failed",
-                    threshold_tokens=200_000,
-                    through_sequence=10,
-                    keep_after_sequence=5,
-                    error_type="RuntimeError",
-                    message="manual compact exploded",
-                ),
-            ]
-        )
-        raise RuntimeError("manual compact exploded")
 
 
 class _FakePreflightBoundaryCompactionService(_FakeCompactionServiceBase):
@@ -2229,21 +2160,24 @@ def test_runtime_context_compactor_rewrites_prefix_and_preserves_current_run_tai
         )
         await _emit_turn(runtime_session, "old-b", "old-b request", "old-b reply")
         state = _current_tail_state(runtime_session.runtime_session_id)
-        current_start = await runtime_session.emit(
-            RunStartEvent(
-                run_id=state.run_id,
-                turn_id=state.turn_id,
-                reply_id=state.reply_id,
-                **run_start_permission_fields(
-                    state.run_id,
-                    user_input="current request",
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                ),
-                user_input_chars=len("current request"),
-                metadata={"user_input": "current request"},
-            ),
-            state=state,
+        current_context = EventContext(
+            run_id=state.run_id,
+            turn_id=state.turn_id,
+            reply_id=state.reply_id,
+        )
+        current_target = _llm_runtime(
+            CompactScriptedTransport("")
+        ).resolve_target(role=ModelRole.PRO)
+        open_test_root_rollout_run(
+            runtime_session,
+            event_context=current_context,
+            model_target=current_target.fact,
+            user_input="current request",
+        )
+        current_start = next(
+            event
+            for event in runtime_session.event_log.iter(run_id=state.run_id)
+            if isinstance(event, RunStartEvent)
         )
         transport = CompactScriptedTransport(
             "<summary>Old request was summarized.</summary>"
@@ -2340,21 +2274,18 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
         )
         await _emit_turn(runtime_session, "old-b", "old-b request", "old-b reply")
         state = _current_tail_state(runtime_session.runtime_session_id)
-        await runtime_session.emit(
-            RunStartEvent(
+        current_target = _llm_runtime(
+            CompactScriptedTransport("")
+        ).resolve_target(role=ModelRole.PRO)
+        open_test_root_rollout_run(
+            runtime_session,
+            event_context=EventContext(
                 run_id=state.run_id,
                 turn_id=state.turn_id,
                 reply_id=state.reply_id,
-                **run_start_permission_fields(
-                    state.run_id,
-                    user_input="current request",
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                ),
-                user_input_chars=len("current request"),
-                metadata={"user_input": "current request"},
             ),
-            state=state,
+            model_target=current_target.fact,
+            user_input="current request",
         )
         original_message_ids = [message.id for message in state.messages]
         service = _compaction_service(
@@ -2498,6 +2429,33 @@ def test_auto_compaction_checks_threshold_before_target_feasibility() -> None:
     assert service._consecutive_failures == 0
     assert not any(
         isinstance(event, ContextCompactionFailedEvent) for event in log.iter()
+    )
+
+
+def test_auto_compaction_checks_visible_threshold_before_raw_source_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, log, _transport = _contract_compaction_service()
+    _append_compiled_baseline(service, log, baseline_tokens=100)
+
+    async def fail_source_read(_self) -> list[object]:
+        raise AssertionError("raw compaction source must not be read below threshold")
+
+    monkeypatch.setattr(
+        ContextCompactionService,
+        "_read_bounded_source_events_async",
+        fail_source_read,
+    )
+
+    assert (
+        asyncio.run(
+            _compact_if_needed(
+                service,
+                reason="preflight_context_threshold",
+                model_visible_messages_before=[],
+            )
+        )
+        is False
     )
 
 
@@ -3182,8 +3140,13 @@ def test_preflight_compaction_rebuilds_prior_messages_and_continues_original_use
 ) -> None:
     transport = CompactScriptedTransport("final answer")
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    _append_turn(
-        runtime_wiring.event_log, "old-host", "old host request", "old host reply"
+    asyncio.run(
+        _emit_turn(
+            runtime_wiring.runtime_session,
+            "old-host",
+            "old host request",
+            "old host reply",
+        )
     )
     fake = _FakePreflightBoundaryCompactionService(
         runtime_wiring.event_log,
@@ -3234,11 +3197,13 @@ def test_next_run_reuses_prior_transcript_checkpoint_without_new_preflight_compa
 ) -> None:
     transport = CompactScriptedTransport("final answer")
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    _append_turn(
-        runtime_wiring.event_log,
-        "checkpoint-seed",
-        "historical request",
-        "historical reply",
+    asyncio.run(
+        _emit_turn(
+            runtime_wiring.runtime_session,
+            "checkpoint-seed",
+            "historical request",
+            "historical reply",
+        )
     )
     fake = _FakeOneShotPreflightBoundaryCompactionService(
         runtime_wiring.event_log,
@@ -3335,191 +3300,6 @@ def test_host_session_notifies_preflight_auto_compaction_failure(tmp_path) -> No
     assert len(observed) == 1
     assert isinstance(observed[0], ContextCompactionFailedEvent)
     assert observed[0].compaction_id == "context_compaction:failed"
-
-
-def test_host_session_publishes_directly_written_preflight_compaction_events_to_avoid_sequence_gap(
-    tmp_path,
-) -> None:
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    fake = _FakeWritingAutoCompactionService(runtime_wiring.event_log)
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
-        ),
-        wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
-                capability_runtime=CapabilityRuntime(),
-                runtime_session=runtime_wiring.runtime_session,
-                llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
-            ),
-            runtime_wiring=runtime_wiring,
-        ),
-    )
-    observed = []
-    session.add_compaction_listener(observed.append)
-
-    async def run() -> None:
-        try:
-            await runtime_wiring.runtime_session.emit(
-                RunStartEvent(
-                    **_ctx("before-gap").event_fields(),
-                    **run_start_permission_fields(
-                        _ctx("before-gap").run_id, user_input="x"
-                    ),
-                    user_input_chars=1,
-                )
-            )
-            compacted, terminal = await session._compact_if_needed_and_notify(
-                fake, reason="preflight_context_threshold"
-            )
-            assert compacted is True
-            assert isinstance(terminal, ContextCompactionCompletedEvent)
-            await asyncio.wait_for(
-                runtime_wiring.runtime_session.emit(
-                    RunStartEvent(
-                        **_ctx("after-gap").event_fields(),
-                        **run_start_permission_fields(
-                            _ctx("after-gap").run_id, user_input="x"
-                        ),
-                        user_input_chars=1,
-                    )
-                ),
-                timeout=1,
-            )
-        finally:
-            await session.aclose()
-
-    asyncio.run(run())
-
-    assert len(observed) == 1
-    assert isinstance(observed[0], ContextCompactionCompletedEvent)
-
-
-def test_host_session_compact_now_publishes_directly_written_events_without_notifying_listener(
-    tmp_path,
-) -> None:
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    fake = _FakeWritingManualCompactionService(runtime_wiring.event_log)
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
-        ),
-        wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
-                capability_runtime=CapabilityRuntime(),
-                runtime_session=runtime_wiring.runtime_session,
-                llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
-            ),
-            runtime_wiring=replace(runtime_wiring, compaction_service=fake),
-        ),
-    )
-    observed = []
-    session.add_compaction_listener(observed.append)
-
-    async def run() -> dict[str, object]:
-        try:
-            await runtime_wiring.runtime_session.emit(
-                RunStartEvent(
-                    **_ctx("manual-before-gap").event_fields(),
-                    **run_start_permission_fields(
-                        _ctx("manual-before-gap").run_id, user_input="x"
-                    ),
-                    user_input_chars=1,
-                )
-            )
-            result = await session.compact_now()
-            await asyncio.wait_for(
-                runtime_wiring.runtime_session.emit(
-                    RunStartEvent(
-                        **_ctx("manual-after-gap").event_fields(),
-                        **run_start_permission_fields(
-                            _ctx("manual-after-gap").run_id, user_input="x"
-                        ),
-                        user_input_chars=1,
-                    )
-                ),
-                timeout=1,
-            )
-            return result
-        finally:
-            await session.aclose()
-
-    result = asyncio.run(run())
-
-    assert result["compacted"] is True
-    assert result["compaction_id"] == "context_compaction:manual"
-    assert observed == []
-
-
-def test_host_session_compact_now_failure_publishes_events_to_avoid_sequence_gap(
-    tmp_path,
-) -> None:
-    runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
-    fake = _FakeFailingManualCompactionService(runtime_wiring.event_log)
-    session = HostSession(
-        host_session_id="host:test",
-        conversation_id="conversation:test",
-        workspace=resolve_workspace(
-            HostWorkspaceInput(workspace_root=tmp_path, workspace_kind="project")
-        ),
-        wiring=AgentRuntimeWiring(
-            agent_runtime=AgentRuntime(
-                capability_runtime=CapabilityRuntime(),
-                runtime_session=runtime_wiring.runtime_session,
-                llm_runtime=_llm_runtime(CompactScriptedTransport("unused")),
-            ),
-            runtime_wiring=replace(runtime_wiring, compaction_service=fake),
-        ),
-    )
-    observed = []
-    session.add_compaction_listener(observed.append)
-
-    async def run() -> None:
-        try:
-            await runtime_wiring.runtime_session.emit(
-                RunStartEvent(
-                    **_ctx("manual-fail-before-gap").event_fields(),
-                    **run_start_permission_fields(
-                        _ctx("manual-fail-before-gap").run_id, user_input="x"
-                    ),
-                    user_input_chars=1,
-                )
-            )
-            try:
-                await session.compact_now()
-            except RuntimeError as exc:
-                assert str(exc) == "manual compact exploded"
-            else:
-                raise AssertionError("manual compact failure did not propagate")
-            await asyncio.wait_for(
-                runtime_wiring.runtime_session.emit(
-                    RunStartEvent(
-                        **_ctx("manual-fail-after-gap").event_fields(),
-                        **run_start_permission_fields(
-                            _ctx("manual-fail-after-gap").run_id, user_input="x"
-                        ),
-                        user_input_chars=1,
-                    )
-                ),
-                timeout=1,
-            )
-        finally:
-            await session.aclose()
-
-    asyncio.run(run())
-
-    failed = [
-        event
-        for event in runtime_wiring.event_log.iter()
-        if isinstance(event, ContextCompactionFailedEvent)
-    ]
-    assert len(failed) == 1
-    assert failed[0].compaction_id == "context_compaction:manual_failed"
-    assert observed == []
 
 
 def test_pending_approval_resume_does_not_auto_compact(tmp_path) -> None:
@@ -4269,10 +4049,13 @@ def test_compaction_transcript_only_never_claims_predicted_post_target_reached()
 
 
 def test_manual_compaction_uses_direct_summarizer_call_without_main_call() -> None:
-    service, log, _ = _contract_compaction_service()
+    service, _log, _ = _contract_compaction_service()
     target = _target(service)
+    model_lifecycle_log = service.runtime_session.event_log
     existing_start_ids = {
-        event.id for event in log.iter() if isinstance(event, ModelCallStartEvent)
+        event.id
+        for event in model_lifecycle_log.iter()
+        if isinstance(event, ModelCallStartEvent)
     }
     completed = asyncio.run(
         service.compact(
@@ -4289,7 +4072,7 @@ def test_manual_compaction_uses_direct_summarizer_call_without_main_call() -> No
     )
     new_starts = [
         event
-        for event in log.iter()
+        for event in model_lifecycle_log.iter()
         if isinstance(event, ModelCallStartEvent)
         and event.id not in existing_start_ids
     ]

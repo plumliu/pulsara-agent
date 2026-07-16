@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from typing import Any, Iterable
+
+from pydantic import ValidationError
 
 from pulsara_agent.event import (
     AgentEvent,
@@ -26,6 +29,10 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallRejectedEvent,
     ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
+    PhysicalOperationReservationCreatedEvent,
+    PhysicalOperationReservationSettledEvent,
+    PhysicalOperationReservationSuspendedEvent,
     ProjectionReadyEvent,
     ReplyStartEvent,
     RolloutBudgetAccountOpenedEvent,
@@ -36,6 +43,11 @@ from pulsara_agent.event import (
     RunStartEvent,
     SubagentGraphCheckpointCommittedEvent,
     SubagentRunCompletedEvent,
+    ToolResultTerminalProjectionCommittedEvent,
+    TranscriptProjectionCheckpointCancelledEvent,
+    TranscriptProjectionCheckpointCommittedEvent,
+    TranscriptProjectionCheckpointFailedEvent,
+    TranscriptProjectionCheckpointRecoveredInterruptedEvent,
 )
 from pulsara_agent.event_log import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -75,6 +87,13 @@ from pulsara_agent.runtime.context_input.event_slice import (
     FrozenStoredEvent,
 )
 from pulsara_agent.primitives._context_base import context_fingerprint
+from pulsara_agent.primitives.transcript_projection import (
+    RunTranscriptSeedArtifactFact,
+)
+from pulsara_agent.primitives.terminal_projection import (
+    ModelTerminalProjectionPayloadFact,
+    TerminalProjectionDocumentFact,
+)
 from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_candidate,
     derive_rollout_status_shadow,
@@ -89,6 +108,7 @@ _REQUIRED_TABLES = (
     "runs",
     "turns",
     "agent_events",
+    "ledger_materialization_accounts",
     "artifacts",
     "tool_result_artifacts",
     "working_context_summaries",
@@ -152,6 +172,12 @@ class InspectorService:
             context_compilations=context_compilations["contexts"],
         )
         diagnostics.extend(long_horizon["diagnostics"])
+        authority_materialization = _authority_materialization_projection(
+            events,
+            account=self.store.materialization_account(session_id),
+            store=self.store,
+        )
+        diagnostics.extend(authority_materialization["diagnostics"])
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -181,6 +207,19 @@ class InspectorService:
             ),
             "rollout_status_shadows": rollout_status["shadows"],
             "long_horizon_runs": long_horizon["runs"],
+            "authority_materialization": authority_materialization,
+            "transcript_projection": authority_materialization[
+                "transcript_projection"
+            ],
+            "terminal_projections": authority_materialization[
+                "terminal_projections"
+            ],
+            "checkpoint_accelerations": authority_materialization[
+                "checkpoint_accelerations"
+            ],
+            "ledger_materialization_account": authority_materialization[
+                "ledger_materialization_account"
+            ],
             "mcp_installations": _mcp_installation_events_projection(events),
             "run_boundaries": boundary_projections,
             "events": _event_summaries(
@@ -676,6 +715,7 @@ def _run_boundary_projection(
         None,
     )
     current_user = run_start.current_user_message
+    transcript_seed = _run_transcript_seed_projection(run_start, store)
 
     continuation_events = sorted(
         (
@@ -777,6 +817,7 @@ def _run_boundary_projection(
             "current_user_message_id": current_user.message_id,
             "current_user_chars": len(current_user.text),
             "current_user_content_sha256": current_user.content_sha256,
+            "transcript_seed": transcript_seed,
             "source_through_sequence": boundary.transcript.source_through_sequence,
             "preflight_compaction": (
                 {
@@ -906,6 +947,7 @@ def _run_boundary_projection(
         ),
         "current_user_message_id": current_user.message_id,
         "current_user_content_sha256": current_user.content_sha256,
+        "transcript_seed": transcript_seed,
         "exposure_owner_kind": (
             initial_exposure.exposure.owner.owner_kind
             if initial_exposure is not None
@@ -940,6 +982,428 @@ def _run_boundary_projection(
         "child_run_entry": child_projection,
         "diagnostics": diagnostics,
     }
+
+
+def _run_transcript_seed_projection(
+    run_start: RunStartEvent,
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    semantic = run_start.run_transcript_seed_semantic
+    source = semantic.prior_semantic_source
+    stable = semantic.prior_stable_semantic_state
+    reference = run_start.run_transcript_seed_reference
+    source_state_joined = (
+        source.semantic_source_event_count == stable.semantic_source_event_count
+        and source.semantic_source_accumulator == stable.semantic_source_accumulator
+        and source.resulting_state_fingerprint == stable.state_semantic_fingerprint
+        and semantic.normalized_prior_transcript_fingerprint
+        == stable.normalized_transcript_fingerprint
+    )
+    artifact_row = store.artifact(reference.seed_artifact_id)
+    restore_outcome = "artifact_missing"
+    root_manifest_contract_fingerprint = None
+    total_entry_count = None
+    if artifact_row is not None:
+        try:
+            text = artifact_row["text_body"]
+            if not isinstance(text, str):
+                raise ValueError("run transcript seed artifact is not text")
+            payload = text.encode("utf-8")
+            artifact = RunTranscriptSeedArtifactFact.model_validate_json(payload)
+            if (
+                len(payload) != reference.seed_artifact_bytes
+                or f"sha256:{sha256(payload).hexdigest()}"
+                != reference.seed_artifact_sha256
+                or artifact.seed_semantic != semantic
+                or artifact.artifact_contract_fingerprint
+                != reference.seed_artifact_contract_fingerprint
+                or artifact.root_manifest.materialization_fingerprint
+                != reference.root_materialization_fingerprint
+            ):
+                raise ValueError("run transcript seed artifact identity drifted")
+            root_manifest_contract_fingerprint = (
+                artifact.root_manifest.root_manifest_contract_fingerprint
+            )
+            total_entry_count = artifact.root_manifest.total_entry_count
+            restore_outcome = "exact"
+        except (TypeError, ValueError):
+            restore_outcome = "contract_mismatch"
+    return {
+        "seed_semantic_fingerprint": semantic.seed_semantic_fingerprint,
+        "normalized_prior_transcript_fingerprint": (
+            semantic.normalized_prior_transcript_fingerprint
+        ),
+        "semantic_source": {
+            "reducer_id": source.reducer_id,
+            "reducer_version": source.reducer_version,
+            "reducer_contract_fingerprint": source.reducer_contract_fingerprint,
+            "event_count": source.semantic_source_event_count,
+            "accumulator": source.semantic_source_accumulator,
+            "resulting_state_fingerprint": source.resulting_state_fingerprint,
+        },
+        "stable_state_fingerprint": stable.state_semantic_fingerprint,
+        "prior_source_state_join_outcome": (
+            "matched" if source_state_joined else "mismatch"
+        ),
+        "root_manifest_contract_fingerprint": (
+            root_manifest_contract_fingerprint
+        ),
+        "total_entry_count": total_entry_count,
+        "restore_outcome": restore_outcome,
+        "materialization": {
+            "seed_artifact_id": reference.seed_artifact_id,
+            "seed_artifact_sha256": reference.seed_artifact_sha256,
+            "seed_artifact_bytes": reference.seed_artifact_bytes,
+            "root_materialization_fingerprint": (
+                reference.root_materialization_fingerprint
+            ),
+            "artifact_contract_fingerprint": (
+                reference.seed_artifact_contract_fingerprint
+            ),
+        },
+        "source_ledger": {
+            "runtime_session_id": reference.source_runtime_session_id,
+            "through_sequence": reference.source_ledger_through_sequence,
+            "continuity_accumulator": (
+                reference.source_ledger_continuity_accumulator
+            ),
+            "checkpoint_id": reference.source_checkpoint_id,
+        },
+        "reference_fingerprint": reference.reference_fingerprint,
+    }
+
+
+def _authority_materialization_projection(
+    events: Iterable[AgentEvent],
+    *,
+    account,
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    ordered = tuple(sorted(events, key=lambda item: item.sequence or 0))
+    run_starts = tuple(
+        item for item in ordered if isinstance(item, RunStartEvent)
+    )
+    projection_events = tuple(
+        item
+        for item in ordered
+        if isinstance(
+            item,
+            (
+                ModelCallTerminalProjectionCommittedEvent,
+                ToolResultTerminalProjectionCommittedEvent,
+            ),
+        )
+    )
+    checkpoint_events = tuple(
+        item
+        for item in ordered
+        if isinstance(item, TranscriptProjectionCheckpointCommittedEvent)
+    )
+    checkpoint_terminals = {
+        item.checkpoint_id: item
+        for item in ordered
+        if isinstance(
+            item,
+            (
+                TranscriptProjectionCheckpointFailedEvent,
+                TranscriptProjectionCheckpointCancelledEvent,
+                TranscriptProjectionCheckpointRecoveredInterruptedEvent,
+            ),
+        )
+    }
+    latest_source = (
+        checkpoint_events[-1].checkpoint.semantic_source
+        if checkpoint_events
+        else run_starts[-1].run_transcript_seed_semantic.prior_semantic_source
+        if run_starts
+        else None
+    )
+    transcript_projection = (
+        None
+        if latest_source is None
+        else {
+            "reducer_id": latest_source.reducer_id,
+            "reducer_version": latest_source.reducer_version,
+            "reducer_contract_fingerprint": (
+                latest_source.reducer_contract_fingerprint
+            ),
+            "transcript_semantic_domain_contract_fingerprint": (
+                latest_source.transcript_semantic_domain_contract_fingerprint
+            ),
+            "semantic_source_event_count": (
+                latest_source.semantic_source_event_count
+            ),
+            "semantic_source_accumulator": (
+                latest_source.semantic_source_accumulator
+            ),
+            "state_fingerprint": latest_source.resulting_state_fingerprint,
+            "source_kind": "checkpoint" if checkpoint_events else "run_seed",
+        }
+    )
+    terminal_projections = [
+        _terminal_projection_event_projection(item, store=store)
+        for item in projection_events
+    ]
+    checkpoints = []
+    for item in checkpoint_events:
+        candidate = item.checkpoint
+        materialization = candidate.materialization
+        terminal = checkpoint_terminals.get(item.checkpoint_id)
+        checkpoints.append(
+            {
+                "checkpoint_id": item.checkpoint_id,
+                "checkpoint_intent_event_id": (
+                    item.checkpoint_intent_event_identity.event_id
+                ),
+                "checkpoint_committed_event_id": item.id,
+                "checkpoint_committed_event_sequence": item.sequence,
+                "checkpoint_terminal_outcome": (
+                    str(terminal.type) if terminal is not None else "committed"
+                ),
+                "checkpoint_terminal_event_id": (
+                    terminal.id if terminal is not None else item.id
+                ),
+                "checkpoint_candidate_fingerprint": (
+                    item.checkpoint_candidate_fingerprint
+                ),
+                "root_kind": materialization.root_kind,
+                "checkpoint_artifact_id": (
+                    materialization.root_manifest_ref.root_artifact_id
+                ),
+                "checkpoint_artifact_bytes": (
+                    materialization.root_manifest_ref.root_byte_count
+                ),
+                "ledger_materialization_generation": (
+                    candidate.source_ledger_materialization_generation
+                ),
+                "materialization_consumer_id": (
+                    candidate.materialization_consumer_id
+                ),
+                "previous_checkpoint_id": candidate.previous_checkpoint_id,
+                "root_manifest_contract_fingerprint": (
+                    materialization.root_manifest_ref.root_manifest_contract_fingerprint
+                ),
+                "tree_contract_fingerprint": (
+                    materialization.tree_contract_fingerprint
+                ),
+                "tree_height": getattr(materialization, "tree_height", 0),
+                "total_entry_count": materialization.total_entry_count,
+                "restore_outcome": "not_hydrated",
+                "candidate_ledger_through_sequence": (
+                    candidate.candidate_ledger_through_sequence
+                ),
+                "candidate_ledger_continuity_accumulator": (
+                    candidate.candidate_ledger_continuity_accumulator
+                ),
+                "semantic_source": candidate.semantic_source.model_dump(mode="json"),
+                "stable_state": candidate.stable_semantic_state.model_dump(
+                    mode="json"
+                ),
+                "terminal": (
+                    terminal.model_dump(mode="json")
+                    if terminal is not None
+                    else None
+                ),
+            }
+        )
+    diagnostics: list[dict[str, Any]] = []
+    if ordered and account is None:
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "ledger_materialization_account_missing",
+                "message": (
+                    "Non-empty hard-cut ledger has no materialization account; "
+                    "reset the database."
+                ),
+            }
+        )
+    account_projection = None
+    authority_pressure = None
+    if account is not None:
+        generation = account.generation
+        account_projection = {
+            "runtime_session_id": account.runtime_session_id,
+            "ledger_materialization_generation": (
+                generation.ledger_materialization_generation
+            ),
+            "consumer_horizon_revision": generation.consumer_horizon_revision,
+            "reclaimable_through_sequence": (
+                generation.reclaimable_through_sequence
+            ),
+            "consumer_horizons": [
+                item.model_dump(mode="json") for item in generation.consumer_horizons
+            ],
+            "ledger_through_sequence": account.ledger_through_sequence,
+            "ledger_charged_payload_bytes_through": (
+                account.ledger_charged_payload_bytes_through
+            ),
+            "active_checkpoint_barrier": (
+                account.active_checkpoint_barrier.model_dump(mode="json")
+                if account.active_checkpoint_barrier is not None
+                else None
+            ),
+            "active_reservations": [
+                item.model_dump(mode="json") for item in account.active_reservations
+            ],
+            "latest_transition_event_ids": list(
+                account.latest_transition_event_ids
+            ),
+            "reconciliation_required": account.reconciliation_required,
+            "reconciliation_reason_code": account.reconciliation_reason_code,
+            "account_state_fingerprint": account.account_state_fingerprint,
+            "projection_row_verified": "schema_valid_not_full_folded",
+        }
+        authority_pressure = {
+            "ledger_materialization_generation": (
+                generation.ledger_materialization_generation
+            ),
+            "reclaimable_through_sequence": (
+                generation.reclaimable_through_sequence
+            ),
+            "consumer_horizons": [
+                item.model_dump(mode="json") for item in generation.consumer_horizons
+            ],
+            "events_since_reclaimable_horizon": (
+                account.used_since_reclaimable_events
+            ),
+            "charged_payload_bytes_since_reclaimable_horizon": (
+                account.used_since_reclaimable_payload_bytes
+            ),
+            "active_reservation_count": len(account.active_reservations),
+            "active_remaining_reserved_events": sum(
+                item.remaining_events for item in account.active_reservations
+            ),
+            "active_remaining_reserved_bytes": sum(
+                item.remaining_payload_bytes for item in account.active_reservations
+            ),
+            "historical_hard_limits": None,
+            "current_config_not_recomputed": True,
+        }
+    return {
+        "transcript_projection": transcript_projection,
+        "terminal_projections": terminal_projections,
+        "checkpoint_accelerations": checkpoints,
+        "ledger_materialization_account": account_projection,
+        "authority_pressure": authority_pressure,
+        "reservation_lifecycle": _physical_reservation_lifecycle(ordered),
+        "diagnostics": diagnostics,
+    }
+
+
+def _terminal_projection_event_projection(
+    event,
+    *,
+    store: PostgresInspectorStore,
+) -> dict[str, Any]:
+    reference = event.projection_reference
+    join = reference.semantic_join
+    projection = {
+        "projection_kind": reference.projection_kind,
+        "semantic_identity_fingerprint": join.semantic_fingerprint,
+        "document_fact_fingerprint": reference.document_fact_fingerprint,
+        "reference_fingerprint": reference.reference_fingerprint,
+        "document_artifact_id": reference.document_artifact_id,
+        "document_byte_count": reference.document_byte_count,
+        "committed_event_id": event.id,
+        "committed_event_sequence": event.sequence,
+        "semantic_join": join.model_dump(mode="json"),
+        "restore_outcome": "artifact_missing",
+        "completed_block_count": None,
+        "interrupted_block_count": None,
+        "projection_order_verified": None,
+    }
+    artifact = store.artifact(reference.document_artifact_id)
+    if artifact is not None:
+        try:
+            text = artifact["text_body"]
+            if not isinstance(text, str):
+                raise ValueError("terminal projection artifact is not text")
+            payload = text.encode("utf-8")
+            document = TerminalProjectionDocumentFact.model_validate_json(payload)
+            if (
+                len(payload) != reference.document_byte_count
+                or f"sha256:{sha256(payload).hexdigest()}" != reference.document_sha256
+                or document.fact_fingerprint != reference.document_fact_fingerprint
+                or document.semantic_identity.semantic_fingerprint
+                != join.semantic_fingerprint
+            ):
+                raise ValueError("terminal projection artifact identity drifted")
+            projection["restore_outcome"] = "exact"
+            projection["projection_order_verified"] = True
+            if isinstance(document.payload, ModelTerminalProjectionPayloadFact):
+                statuses = tuple(
+                    getattr(
+                        item.semantic_identity,
+                        "completion_status",
+                        "completed",
+                    )
+                    for item in document.payload.items
+                )
+                projection["completed_block_count"] = statuses.count("completed")
+                projection["interrupted_block_count"] = statuses.count(
+                    "interrupted"
+                )
+            else:
+                projection["completed_block_count"] = 1
+                projection["interrupted_block_count"] = 0
+        except (KeyError, TypeError, ValueError, ValidationError):
+            projection["restore_outcome"] = "contract_mismatch"
+            projection["projection_order_verified"] = False
+    if isinstance(event, ModelCallTerminalProjectionCommittedEvent):
+        projection["resolved_model_call_id"] = event.resolved_model_call_id
+        projection["source_event_id"] = (
+            event.model_call_start_event_identity.event_id
+        )
+    else:
+        projection["tool_call_id"] = event.tool_call_id
+        projection["source_kind"] = event.source_kind
+        projection["source_event_id"] = event.source_event_identity.event_id
+    return projection
+
+
+def _physical_reservation_lifecycle(
+    events: tuple[AgentEvent, ...],
+) -> list[dict[str, Any]]:
+    lifecycle = []
+    for event in events:
+        if isinstance(event, PhysicalOperationReservationCreatedEvent):
+            lifecycle.append(
+                {
+                    "event_id": event.id,
+                    "sequence": event.sequence,
+                    "status": "active",
+                    "reservation": event.reservation.model_dump(mode="json"),
+                    "resulting_account_state_fingerprint": (
+                        event.resulting_account_state_fingerprint
+                    ),
+                }
+            )
+        elif isinstance(event, PhysicalOperationReservationSuspendedEvent):
+            lifecycle.append(
+                {
+                    "event_id": event.id,
+                    "sequence": event.sequence,
+                    "status": "suspended_tail",
+                    "suspension": event.suspension.model_dump(mode="json"),
+                    "resulting_account_state_fingerprint": (
+                        event.resulting_account_state_fingerprint
+                    ),
+                }
+            )
+        elif isinstance(event, PhysicalOperationReservationSettledEvent):
+            lifecycle.append(
+                {
+                    "event_id": event.id,
+                    "sequence": event.sequence,
+                    "status": "settled",
+                    "settlement": event.settlement.model_dump(mode="json"),
+                    "resulting_account_state_fingerprint": (
+                        event.resulting_account_state_fingerprint
+                    ),
+                }
+            )
+    return lifecycle
 
 
 def _subagent_graph_projection(
@@ -1941,6 +2405,10 @@ def _context_input_replay_projection(
         }
 
     snapshot = replayed.manifest.snapshot
+    transcript_provider_projection = (
+        replayed.manifest.transcript_provider_projection
+    )
+    transcript_authority = replayed.manifest.transcript_authority
     units = replayed.normalized_transcript.tool_result_units
     candidates = replayed.prepared_candidates
     profile_counts: dict[str, int] = {}
@@ -2058,6 +2526,69 @@ def _context_input_replay_projection(
             "transcript_window": window.model_dump(mode="json"),
             "resolved_model_call_id": snapshot.resolved_model_call.resolved_model_call_id,
             "target_fingerprint": snapshot.resolved_model_call.target.target_fingerprint,
+        },
+        "invocation_provider_projection": {
+            "context_id": transcript_provider_projection.context_id,
+            "model_call_index": transcript_provider_projection.model_call_index,
+            "compile_attempt_index": (
+                transcript_provider_projection.compile_attempt_index
+            ),
+            "stable_normalized_transcript_fingerprint": (
+                transcript_provider_projection.semantic_identity.stable_normalized_transcript_fingerprint
+            ),
+            "provider_projection_semantic_fingerprint": (
+                transcript_provider_projection.semantic_identity.semantic_fingerprint
+            ),
+            "rendering_contract": (
+                transcript_provider_projection.rendering_contract.model_dump(
+                    mode="json"
+                )
+            ),
+            "section_count": len(transcript_provider_projection.sections),
+            "rendered_timing_header_count": sum(
+                item.semantic_identity.timing_semantic.rendered_timing_header
+                is not None
+                for item in transcript_provider_projection.sections
+            ),
+            "section_timing_semantics": [
+                item.semantic_identity.timing_semantic.model_dump(mode="json")
+                for item in transcript_provider_projection.sections
+            ],
+            "lowered_provider_messages_fingerprint": (
+                transcript_provider_projection.semantic_identity.lowered_provider_messages_fingerprint
+            ),
+            "stable_root_unchanged": (
+                transcript_provider_projection.semantic_identity.stable_normalized_transcript_fingerprint
+                == transcript_authority.final_normalized_transcript_fingerprint
+            ),
+        },
+        "transcript_authority": {
+            "provider_semantic_identity": (
+                transcript_authority.provider_semantic_identity.model_dump(
+                    mode="json"
+                )
+            ),
+            "semantic_source": transcript_authority.semantic_source.model_dump(
+                mode="json"
+            ),
+            "projection_base_kind": transcript_authority.projection_base.base_kind,
+            "projection_base_semantic_identity": (
+                transcript_authority.projection_base.common.semantic_identity.model_dump(
+                    mode="json"
+                )
+            ),
+            "final_normalized_transcript_fingerprint": (
+                transcript_authority.final_normalized_transcript_fingerprint
+            ),
+            "domain_completeness_proof": (
+                transcript_authority.domain_completeness_proof.model_dump(
+                    mode="json"
+                )
+            ),
+            "named_fact_selection": (
+                transcript_authority.named_fact_selection.model_dump(mode="json")
+            ),
+            "fact_fingerprint": transcript_authority.fact_fingerprint,
         },
         "transcript": {
             "fingerprint": replayed.normalized_transcript.transcript.transcript_fingerprint,

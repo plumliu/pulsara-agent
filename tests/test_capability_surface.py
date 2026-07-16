@@ -6,7 +6,10 @@ from typing import AsyncIterator
 
 import pytest
 
-from tests.conftest import run_start_permission_fields
+from tests.conftest import (
+    persist_test_run_transcript_seed,
+    run_start_permission_fields,
+)
 from tests.support.runtime_session import in_memory_runtime_session
 
 from pulsara_agent.capability import (
@@ -51,11 +54,7 @@ from pulsara_agent.event import (
     ContextWindowOpenedEvent,
     EventContext,
     ModelCallControlDispositionResolvedEvent,
-    ModelCallEndEvent,
-    ModelCallStartEvent,
     PlanModeEnteredEvent,
-    ReplyEndEvent,
-    ReplyStartEvent,
     RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
     TextBlockDeltaEvent,
@@ -68,14 +67,23 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.llm import LLMRuntime
 from pulsara_agent.llm.control import RunModelCallControlOwner
-from tests.support import run_agent_task, test_llm_config
+from tests.support import (
+    bind_test_context,
+    make_test_run_execution_activation,
+    run_agent_task,
+    test_llm_config,
+    test_llm_context,
+)
+from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
+from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.primitives.model_call import (
     ModelCallControlDisposition,
+    ModelCallPurpose,
     sha256_fingerprint,
 )
-from tests.support.model_call import model_call_end_fields, model_call_start_fields
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.message import ToolCallBlock, ToolCallState, ToolResultState
 from pulsara_agent.runtime import (
@@ -1485,7 +1493,25 @@ def test_agent_runtime_call_local_unknown_tool_does_not_block_valid_sibling(
 def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
     tmp_path,
 ) -> None:
-    transport = _ScriptedTransport([{"text": "done"}])
+    transport = _ScriptedTransport(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call:write",
+                        "name": "write_file",
+                        "arguments": json.dumps(
+                            {
+                                "path": "review_tmp.txt",
+                                "content": "should not be written",
+                            }
+                        ),
+                    }
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
     agent = AgentRuntime(
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=_llm_runtime(transport),
@@ -1534,6 +1560,14 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
         initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
     )
     run_start_fields["long_horizon"] = prepared_long_horizon.contract
+    prepared_seed = persist_test_run_transcript_seed(
+        agent.runtime_session,
+        run_id=state.run_id,
+    )
+    run_start_fields.update(
+        run_transcript_seed_semantic=prepared_seed.seed_semantic,
+        run_transcript_seed_reference=prepared_seed.seed_reference,
+    )
     state.scratchpad["terminal_run_end_event_id"] = run_start_fields[
         "terminal_run_end_event_id"
     ]
@@ -1580,34 +1614,60 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
         assert stored_start.sequence is not None
         boundary = stored_start.new_run_boundary
         assert boundary is not None
+        agent.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+            stored_start
+        )
         event_context = EventContext(
             run_id=state.run_id,
             turn_id=state.turn_id,
             reply_id=state.reply_id,
         )
-        model_start = ModelCallStartEvent(
-            **event_context.event_fields(),
-            **model_call_start_fields(),
+        activation = make_test_run_execution_activation()
+        call = agent.llm_runtime.resolve_call(
+            target=state.run_model_target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
         )
-        model_end = ModelCallEndEvent(
-            id=model_start.recovery_plan.stable_model_call_end_event_id,
-            **event_context.event_fields(),
-            **model_call_end_fields(resolved_call=model_start.resolved_call),
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("original request"),),
+                context_id="context:test:approval-missing-descriptor",
+                model_call_index=1,
+            ),
         )
+        start_bundle = prepare_model_lifecycle_start_bundle(
+            call=call,
+            context=context,
+            event_context=event_context,
+            runtime_session=agent.runtime_session,
+            lifecycle_kind="main_assistant_reply",
+            run_execution_activation=activation,
+        )
+        model_result = await agent.llm_runtime.start_stream(
+            call=call,
+            context=context,
+            event_context=event_context,
+            start_bundle=start_bundle,
+            commit_port=RuntimeSessionModelStreamEventCommitPort(
+                runtime_session=agent.runtime_session,
+                state=state,
+            ),
+            execution_registry=(
+                agent.runtime_session.model_stream_execution_registry
+            ),
+        ).wait_result()
         disposition_fields = {
             "id": (
                 "model_call_control_disposition:"
-                f"{state.run_id}:{model_start.resolved_call.resolved_model_call_id}:1"
+                f"{state.run_id}:{model_result.resolved_model_call_id}:1"
             ),
             **event_context.event_fields(),
-            "resolved_model_call_id": model_start.resolved_call.resolved_model_call_id,
-            "model_call_start_event_id": model_start.id,
-            "model_call_end_event_id": model_end.id,
+            "resolved_model_call_id": model_result.resolved_model_call_id,
+            "model_call_start_event_id": model_result.model_call_start_event_id,
+            "model_call_end_event_id": model_result.model_call_end_event_id,
             "model_call_index": 1,
-            "source_result_fingerprint": "sha256:" + "e" * 64,
-            "run_execution_activation": (
-                model_start.recovery_plan.run_execution_activation
-            ),
+            "source_result_fingerprint": model_result.result_fingerprint,
+            "run_execution_activation": activation,
             "disposition": ModelCallControlDisposition.ACCEPTED,
             "termination_intent": None,
             "recovery_reason_code": None,
@@ -1627,46 +1687,8 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
                 "model-call-control-disposition-event:v1", disposition_payload
             ),
         )
-        await agent.runtime_session.emit_many(
-            (
-                ReplyStartEvent(
-                    id=model_start.recovery_plan.reply_start_event_id,
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    name="assistant",
-                ),
-                model_start,
-                ToolCallStartEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    tool_call_id="call:write",
-                    tool_call_name="write_file",
-                ),
-                ToolCallDeltaEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    tool_call_id="call:write",
-                    delta=state.pending_tool_calls[0].input,
-                ),
-                ToolCallEndEvent(
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    tool_call_id="call:write",
-                ),
-                model_end,
-                ReplyEndEvent(
-                    id=model_start.recovery_plan.stable_reply_end_event_id,
-                    run_id=state.run_id,
-                    turn_id=state.turn_id,
-                    reply_id=state.reply_id,
-                    model_terminal_outcome="completed",
-                ),
-                disposition,
-            ),
+        await agent.runtime_session.emit(
+            disposition,
             state=state,
         )
         state.run_working_set = RunWorkingSet(
@@ -1674,10 +1696,17 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             run_start_sequence=stored_start.sequence,
             run_model_target=state.run_model_target,
             long_horizon_contract=stored_start.long_horizon,
+            run_transcript_seed_semantic=(
+                stored_start.run_transcript_seed_semantic
+            ),
+            run_transcript_seed_reference=(
+                stored_start.run_transcript_seed_reference
+            ),
             permission_snapshot=state.permission_snapshot,
             plan_snapshot=PlanWorkflowStateFact(
                 workflow_id=None,
                 active=False,
+                pending_entry_audit=False,
                 revision=0,
                 entered_event_id=None,
                 entered_event_sequence=None,
@@ -1711,8 +1740,6 @@ def test_agent_runtime_approval_resume_fails_closed_without_descriptor(
             latest_committed_resume_boundary=None,
             latest_committed_resume_boundary_ref=None,
         )
-        activation = model_start.recovery_plan.run_execution_activation
-        assert activation is not None
         state.run_working_set.run_execution_activation = activation
         state.run_working_set.process_segment_id = "run_segment:test:approval-resume"
         state.run_working_set.model_call_control_owner = RunModelCallControlOwner(

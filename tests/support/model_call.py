@@ -35,6 +35,12 @@ from pulsara_agent.primitives.run_boundary import (
     ModelStreamRecoveryPlanFact,
     RunExecutionActivationFact,
 )
+from pulsara_agent.primitives.frozen import StableEventIdentityFact, build_frozen_fact
+from pulsara_agent.primitives.terminal_projection import (
+    ModelCallTerminalProjectionEndReferenceFact,
+    ModelTerminalProjectionSemanticJoinFact,
+    TerminalProjectionReferenceFact,
+)
 
 
 def compaction_completed_contract_fields(
@@ -318,7 +324,69 @@ def model_call_end_fields(
         "estimated_input_tokens": (
             input_tokens if estimated_input_tokens is None else estimated_input_tokens
         ),
+        "terminal_projection": model_terminal_projection_end_reference_fixture(
+            call.resolved_model_call_id,
+            outcome="completed",
+        ),
     }
+
+
+def model_terminal_projection_end_reference_fixture(
+    resolved_model_call_id: str,
+    *,
+    outcome: str,
+    item_count: int = 0,
+) -> ModelCallTerminalProjectionEndReferenceFact:
+    semantic_fingerprint = sha256_fingerprint(
+        "test-model-projection-semantic:v1",
+        (resolved_model_call_id, outcome, item_count),
+    )
+    semantic_join = ModelTerminalProjectionSemanticJoinFact(
+        schema_version="model_terminal_projection_semantic_join.v1",
+        projection_kind="model_call",
+        terminal_outcome=outcome,
+        projection_item_count=item_count,
+        semantic_fingerprint=semantic_fingerprint,
+    )
+    reference = build_frozen_fact(
+        TerminalProjectionReferenceFact,
+        schema_version="terminal_projection_reference.v2",
+        projection_kind="model_call",
+        semantic_join=semantic_join,
+        document_fact_fingerprint=sha256_fingerprint(
+            "test-model-projection-document:v1",
+            (resolved_model_call_id, outcome, item_count),
+        ),
+        document_artifact_id=f"test-terminal-projection:model:{resolved_model_call_id}",
+        document_sha256=sha256_fingerprint(
+            "test-model-projection-bytes:v1",
+            (resolved_model_call_id, outcome, item_count),
+        ),
+        document_byte_count=1,
+        document_contract_fingerprint=sha256_fingerprint(
+            "test-terminal-projection-contract:v1", "model"
+        ),
+    )
+    committed_identity = build_frozen_fact(
+        StableEventIdentityFact,
+        schema_version="stable_event_identity.v2",
+        runtime_session_id="runtime:test",
+        event_id=f"test-model-projection-committed:{resolved_model_call_id}",
+        event_type="MODEL_CALL_TERMINAL_PROJECTION_COMMITTED",
+        event_schema_version="1",
+        event_schema_fingerprint=sha256_fingerprint(
+            "test-event-schema:v1", "model-projection"
+        ),
+        payload_fingerprint=sha256_fingerprint(
+            "test-event-payload:v1", (resolved_model_call_id, outcome, item_count)
+        ),
+    )
+    return build_frozen_fact(
+        ModelCallTerminalProjectionEndReferenceFact,
+        schema_version="model_call_terminal_projection_end_ref.v2",
+        projection_committed_event_identity=committed_identity,
+        projection_reference=reference,
+    )
 
 
 async def run_agent_task(agent, user_input: str, **kwargs):
@@ -480,6 +548,9 @@ async def _commit_test_host_run_entry(agent, user_input: str, kwargs: dict):
         publication_status="completed",
         boundary_id=draft.run_start_event.new_run_boundary.identity.boundary_id,
         committed_audit_event_ids=tuple(event.id for event in stored[3:]),
+    )
+    agent.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+        run_start
     )
     install_run_working_set(
         state,
@@ -660,6 +731,7 @@ def _prepare_test_host_run_entry(agent, user_input: str, kwargs: dict) -> None:
             "host_run_boundary_plan": PlanWorkflowStateFact(
                 workflow_id=None,
                 active=False,
+                pending_entry_audit=False,
                 revision=0,
                 entered_event_id=None,
                 entered_event_sequence=None,

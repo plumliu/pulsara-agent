@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+from functools import lru_cache
 from uuid import uuid4
 
 import pytest
@@ -63,6 +64,121 @@ from pulsara_agent.runtime.long_horizon.run_contract import (
     prepare_child_long_horizon_run,
     prepare_root_long_horizon_run,
 )
+from pulsara_agent.event_log.transcript_prefix import (
+    EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+    EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
+)
+from pulsara_agent.primitives.authority_materialization import (
+    TranscriptProjectionStableSemanticStateFact,
+)
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.frozen import StableEventIdentityFact
+from pulsara_agent.primitives.terminal_projection import (
+    ModelCallTerminalProjectionEndReferenceFact,
+    ModelTerminalProjectionSemanticJoinFact,
+    TerminalProjectionReferenceFact,
+    ToolResultTerminalProjectionEndReferenceFact,
+    ToolTerminalProjectionSemanticJoinFact,
+)
+from pulsara_agent.runtime.authority_materialization import (
+    build_default_authority_materialization_contract_bundle,
+    build_default_transcript_projection_materialization_contracts,
+    prepare_run_transcript_seed,
+)
+from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
+    TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
+)
+from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
+
+
+@lru_cache(maxsize=64)
+def _empty_run_transcript_seed_fields(
+    runtime_session_id: str,
+    source_through_sequence: int,
+) -> dict[str, object]:
+    authority = build_default_authority_materialization_contract_bundle()
+    stable = build_frozen_fact(
+        TranscriptProjectionStableSemanticStateFact,
+        schema_version="transcript_projection_stable_semantic_state.v1",
+        semantic_source_event_count=0,
+        semantic_source_accumulator=EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
+        normalized_transcript_fingerprint=context_fingerprint(
+            "normalized-transcript-semantic:v1", ()
+        ),
+    )
+    seed = prepare_run_transcript_seed(
+        runtime_session_id=runtime_session_id,
+        stable_state=stable,
+        stable_entries=(),
+        ledger_through_sequence=source_through_sequence,
+        ledger_continuity_accumulator=EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+        reducer_id="pulsara.transcript-projection",
+        reducer_version="1",
+        reducer_contract_fingerprint=(
+            TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
+        ),
+        transcript_semantic_domain_contract_fingerprint=(
+            authority.event_domain.contract.registry_contract_fingerprint
+        ),
+        contracts=build_default_transcript_projection_materialization_contracts(
+            authority.limits
+        ),
+    )
+    return {
+        "run_transcript_seed_semantic": seed.seed_semantic,
+        "run_transcript_seed_reference": seed.seed_reference,
+    }
+
+
+def persist_test_run_transcript_seed(runtime_session, *, run_id: str):
+    """Persist and register the production-shaped seed for a test RunStart."""
+
+    from time import monotonic
+
+    from pulsara_agent.runtime.authority_materialization import (
+        persist_prepared_run_transcript_seed,
+        prepare_authority_artifact_write_reservation,
+    )
+
+    projection = runtime_session.transcript_projection_state_store.snapshot()
+    prepared = prepare_run_transcript_seed(
+        runtime_session_id=runtime_session.runtime_session_id,
+        stable_state=projection.stable_semantic_state,
+        stable_entries=(
+            runtime_session.transcript_projection_state_store.stable_entries()
+        ),
+        ledger_through_sequence=projection.ledger_through_sequence,
+        ledger_continuity_accumulator=projection.ledger_continuity_accumulator,
+        reducer_id="pulsara.transcript-projection",
+        reducer_version="1",
+        reducer_contract_fingerprint=(
+            TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
+        ),
+        transcript_semantic_domain_contract_fingerprint=(
+            runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
+        ),
+        contracts=runtime_session.transcript_projection_materialization_contracts,
+    )
+    deadline = monotonic() + 30.0
+    persist_prepared_run_transcript_seed(
+        prepared,
+        write_reservation=prepare_authority_artifact_write_reservation(
+            operation_id=f"run-seed:{run_id}",
+            owner_kind="run_seed_materialization",
+            artifacts=prepared.artifacts,
+            limits=runtime_session.authority_materialization_contracts.limits,
+            absolute_deadline_monotonic=deadline,
+        ),
+        limits=runtime_session.authority_materialization_contracts.limits,
+        archive=runtime_session.archive,
+        runtime_session_id=runtime_session.runtime_session_id,
+        deadline_monotonic=deadline,
+    )
+    runtime_session.transcript_projection_checkpoint_service.prepare_run_seed_artifacts(
+        run_id=run_id,
+        artifact_ids=frozenset(item.artifact_id for item in prepared.artifacts),
+    )
+    return prepared
 
 
 def tool_result_end_contract_fields(
@@ -95,7 +211,182 @@ def tool_result_end_contract_fields(
         "essential_result": semantics.essential_result,
         "terminal_payload_timing": semantics.terminal_payload_timing,
         "rollup_semantics": semantics.rollup_semantics,
+        "terminal_projection": tool_terminal_projection_end_reference(
+            tool_call_id,
+            tool_name=tool_name,
+            state=parsed_state,
+        ),
     }
+
+
+def tool_terminal_projection_end_reference(
+    tool_call_id: str,
+    *,
+    tool_name: str,
+    state: ToolResultState,
+) -> ToolResultTerminalProjectionEndReferenceFact:
+    semantic = build_frozen_fact(
+        ToolTerminalProjectionSemanticJoinFact,
+        schema_version="tool_terminal_projection_semantic_join.v1",
+        projection_kind="tool_result",
+        tool_call_id=tool_call_id,
+        model_tool_name=tool_name,
+        result_state=ToolResultStateFact(state.value),
+        semantic_fingerprint=context_fingerprint(
+            "test-tool-projection-semantic:v1",
+            (tool_call_id, tool_name, state.value),
+        ),
+    )
+    reference = build_frozen_fact(
+        TerminalProjectionReferenceFact,
+        schema_version="terminal_projection_reference.v2",
+        projection_kind="tool_result",
+        semantic_join=semantic,
+        document_fact_fingerprint=context_fingerprint(
+            "test-tool-projection-document:v1", (tool_call_id, state.value)
+        ),
+        document_artifact_id=f"test-terminal-projection:tool:{tool_call_id}",
+        document_sha256=context_fingerprint(
+            "test-tool-projection-bytes:v1", (tool_call_id, state.value)
+        ),
+        document_byte_count=1,
+        document_contract_fingerprint=context_fingerprint(
+            "test-terminal-projection-contract:v1", "tool"
+        ),
+    )
+    committed_identity = build_frozen_fact(
+        StableEventIdentityFact,
+        schema_version="stable_event_identity.v2",
+        runtime_session_id="runtime:test",
+        event_id=f"test-tool-projection-committed:{tool_call_id}",
+        event_type="TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED",
+        event_schema_version="1",
+        event_schema_fingerprint=context_fingerprint(
+            "test-event-schema:v1", "tool-projection"
+        ),
+        payload_fingerprint=context_fingerprint(
+            "test-event-payload:v1", (tool_call_id, state.value)
+        ),
+    )
+    return build_frozen_fact(
+        ToolResultTerminalProjectionEndReferenceFact,
+        schema_version="tool_result_terminal_projection_end_ref.v2",
+        projection_committed_event_identity=committed_identity,
+        projection_reference=reference,
+    )
+
+
+def tool_result_end_candidate(
+    *,
+    event_id: str,
+    run_id: str,
+    turn_id: str,
+    reply_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    state: ToolResultState = ToolResultState.SUCCESS,
+    created_at: str = "2026-01-01T00:00:00Z",
+) -> ToolResultEndCandidate:
+    fields = tool_result_end_contract_fields(
+        tool_call_id,
+        tool_name=tool_name,
+        state=state,
+        observed_at_utc=created_at,
+    )
+    semantics = ToolResultExecutionSemanticsFact(
+        render_profile=fields["render_profile"],
+        result_state=ToolResultStateFact(state.value),
+        essential_capture_policy=fields["essential_capture_policy"],
+        essential_result=fields["essential_result"],
+        terminal_payload_timing=fields["terminal_payload_timing"],
+        rollup_semantics=fields["rollup_semantics"],
+    )
+    return ToolResultEndCandidate(
+        id=event_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        reply_id=reply_id,
+        created_at=created_at,
+        metadata={},
+        tool_call_id=tool_call_id,
+        state=state,
+        artifacts=(),
+        observation_timing=fields["observation_timing"],
+        execution_semantics=semantics,
+    )
+
+
+def external_terminal_projection_references(
+    ingresses: tuple[ExternalToolResultIngressFact, ...],
+) -> tuple[ToolResultTerminalProjectionEndReferenceFact, ...]:
+    return tuple(
+        tool_terminal_projection_end_reference(
+            item.result_block.tool_call_id,
+            tool_name=item.result_block.model_tool_name,
+            state=ToolResultState(item.result_block.result_state.value),
+        )
+        for item in ingresses
+    )
+
+
+def model_terminal_projection_end_reference(
+    resolved_model_call_id: str,
+    *,
+    outcome: str = "completed",
+    item_count: int = 0,
+) -> ModelCallTerminalProjectionEndReferenceFact:
+    semantic = build_frozen_fact(
+        ModelTerminalProjectionSemanticJoinFact,
+        schema_version="model_terminal_projection_semantic_join.v1",
+        projection_kind="model_call",
+        terminal_outcome=outcome,
+        projection_item_count=item_count,
+        semantic_fingerprint=context_fingerprint(
+            "test-model-projection-semantic:v1",
+            (resolved_model_call_id, outcome, item_count),
+        ),
+    )
+    reference = build_frozen_fact(
+        TerminalProjectionReferenceFact,
+        schema_version="terminal_projection_reference.v2",
+        projection_kind="model_call",
+        semantic_join=semantic,
+        document_fact_fingerprint=context_fingerprint(
+            "test-model-projection-document:v1",
+            (resolved_model_call_id, outcome, item_count),
+        ),
+        document_artifact_id=(
+            f"test-terminal-projection:model:{resolved_model_call_id}"
+        ),
+        document_sha256=context_fingerprint(
+            "test-model-projection-bytes:v1",
+            (resolved_model_call_id, outcome, item_count),
+        ),
+        document_byte_count=1,
+        document_contract_fingerprint=context_fingerprint(
+            "test-terminal-projection-contract:v1", "model"
+        ),
+    )
+    committed_identity = build_frozen_fact(
+        StableEventIdentityFact,
+        schema_version="stable_event_identity.v2",
+        runtime_session_id="runtime:test",
+        event_id=f"test-model-projection-committed:{resolved_model_call_id}",
+        event_type="MODEL_CALL_TERMINAL_PROJECTION_COMMITTED",
+        event_schema_version="1",
+        event_schema_fingerprint=context_fingerprint(
+            "test-event-schema:v1", "model-projection"
+        ),
+        payload_fingerprint=context_fingerprint(
+            "test-event-payload:v1", (resolved_model_call_id, outcome, item_count)
+        ),
+    )
+    return build_frozen_fact(
+        ModelCallTerminalProjectionEndReferenceFact,
+        schema_version="model_call_terminal_projection_end_ref.v2",
+        projection_committed_event_identity=committed_identity,
+        projection_reference=reference,
+    )
 
 
 def external_tool_call_requirement_fact(
@@ -283,6 +574,10 @@ def run_start_permission_fields(
         "mcp_installation_id": mcp_installation_id,
         "mcp_installation_owner_runtime_session_id": runtime_session_id,
         "current_user_message": current_user,
+        **_empty_run_transcript_seed_fields(
+            runtime_session_id,
+            transcript_source_through_sequence,
+        ),
         "terminal_run_end_event_id": test_run_end_event_id(run_id),
     }
     if source == "child_profile":
@@ -443,6 +738,7 @@ def open_test_root_rollout_run(
     *,
     event_context,
     model_target,
+    user_input: str = "",
 ) -> None:
     """Commit the production-shaped root run facts used by main-call tests."""
 
@@ -458,7 +754,6 @@ def open_test_root_rollout_run(
         empty_projection_state_fingerprint,
         prepare_root_long_horizon_run,
     )
-
     if any(
         isinstance(event, RunStartEvent)
         for event in runtime_session.event_log.iter(run_id=event_context.run_id)
@@ -476,9 +771,13 @@ def open_test_root_rollout_run(
         initial_projection_unit_count=0,
         initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
     )
+    prepared_seed = persist_test_run_transcript_seed(
+        runtime_session,
+        run_id=event_context.run_id,
+    )
     fields = run_start_permission_fields(
         event_context.run_id,
-        user_input="",
+        user_input=user_input,
         turn_id=event_context.turn_id,
         reply_id=event_context.reply_id,
         mcp_installation_owner_runtime_session_id=(
@@ -486,12 +785,16 @@ def open_test_root_rollout_run(
         ),
         model_target=model_target,
     )
-    fields["long_horizon"] = prepared.contract
+    fields.update(
+        long_horizon=prepared.contract,
+        run_transcript_seed_semantic=prepared_seed.seed_semantic,
+        run_transcript_seed_reference=prepared_seed.seed_reference,
+    )
     run_start = RunStartEvent(
         id=run_start_event_id,
         **event_context.event_fields(),
         **fields,
-        user_input_chars=0,
+        user_input_chars=len(user_input),
     )
     window_open = ContextWindowOpenedEvent(
         id=prepared.contract.initial_window_open_event_id,
@@ -512,6 +815,170 @@ def open_test_root_rollout_run(
     )
     result.require_reduced(
         f"long_horizon:{runtime_session.runtime_session_id}"
+    )
+    stored_run_start = next(
+        event
+        for event in result.committed_events
+        if isinstance(event, RunStartEvent)
+    )
+    runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+        stored_run_start
+    )
+
+
+async def emit_test_accepted_model_reply(
+    runtime_session,
+    *,
+    event_context,
+    assistant_text: str,
+    user_input: str = "timeline test",
+) -> None:
+    """Emit one production-shaped accepted assistant reply for integration tests."""
+
+    from pulsara_agent.event import (
+        ContextWindowOpenedEvent,
+        RolloutBudgetAccountOpenedEvent,
+        RunStartEvent,
+    )
+    from pulsara_agent.llm import LLMRuntime, ModelRole
+    from pulsara_agent.llm.adapters.mock import MockTransport
+    from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
+    from pulsara_agent.llm.control import RunModelCallControlOwner
+    from pulsara_agent.llm.input import LLMMessage
+    from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
+    from pulsara_agent.llm.registry import LLMTransportRegistry
+    from pulsara_agent.primitives.model_call import ModelCallPurpose
+    from pulsara_agent.runtime.state import LoopState
+    from tests.support import (
+        bind_test_context,
+        make_test_run_execution_activation,
+        test_llm_config,
+        test_llm_context,
+    )
+
+    registry = LLMTransportRegistry()
+    registry.register(MockTransport(text=assistant_text))
+    llm_runtime = LLMRuntime(
+        config=test_llm_config(
+            api_key="test-key",
+            base_url="https://example.invalid/v1",
+            pro_model="test-pro",
+            flash_model="test-flash",
+            api="mock",
+        ),
+        registry=registry,
+    )
+    runtime_session.event_log.ensure_runtime_session_owner()
+    target = llm_runtime.resolve_target(role=ModelRole.FLASH)
+    run_start_id = f"run_start:test:{event_context.run_id}"
+    fields = run_start_permission_fields(
+        event_context.run_id,
+        user_input=user_input,
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
+        mcp_installation_owner_runtime_session_id=runtime_session.runtime_session_id,
+        model_target=target.fact,
+    )
+    long_horizon = prepare_root_long_horizon_run(
+        runtime_session_id=runtime_session.runtime_session_id,
+        run_id=event_context.run_id,
+        run_start_event_id=run_start_id,
+        primary_target=target.fact,
+        summarizer_target=target.fact,
+        graph_reducer_contract=fields["subagent_graph_reducer_contract"],
+        source_through_sequence_at_open=0,
+        initial_projection_unit_count=0,
+        initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+    )
+    seed = persist_test_run_transcript_seed(
+        runtime_session,
+        run_id=event_context.run_id,
+    )
+    fields.update(
+        long_horizon=long_horizon.contract,
+        run_transcript_seed_semantic=seed.seed_semantic,
+        run_transcript_seed_reference=seed.seed_reference,
+    )
+    committed = await runtime_session.write_events(
+        (
+            RunStartEvent(
+                id=run_start_id,
+                **event_context.event_fields(),
+                **fields,
+                user_input_chars=len(user_input),
+            ),
+            ContextWindowOpenedEvent(
+                id=long_horizon.contract.initial_window_open_event_id,
+                **event_context.event_fields(),
+                window=long_horizon.initial_window,
+                opening_batch_id=long_horizon.opening_batch_id,
+            ),
+            RolloutBudgetAccountOpenedEvent(
+                **event_context.event_fields(),
+                account=long_horizon.root_account,
+            ),
+        )
+    )
+    stored_start = next(
+        event
+        for event in committed.committed_events
+        if isinstance(event, RunStartEvent)
+    )
+    runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+        stored_start
+    )
+
+    call = llm_runtime.resolve_call(
+        target=target,
+        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+    )
+    context = bind_test_context(
+        call,
+        test_llm_context(
+            messages=(LLMMessage.user(user_input),),
+            context_id=f"context:{event_context.run_id}",
+            model_call_index=1,
+        ),
+    )
+    activation = make_test_run_execution_activation()
+    start_bundle = prepare_model_lifecycle_start_bundle(
+        call=call,
+        context=context,
+        event_context=event_context,
+        runtime_session=runtime_session,
+        lifecycle_kind="main_assistant_reply",
+        run_execution_activation=activation,
+    )
+    state = LoopState(
+        session_id=runtime_session.runtime_session_id,
+        run_id=event_context.run_id,
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
+    )
+    handle = llm_runtime.start_stream(
+        call=call,
+        context=context,
+        event_context=event_context,
+        start_bundle=start_bundle,
+        commit_port=RuntimeSessionModelStreamEventCommitPort(
+            runtime_session=runtime_session,
+            state=state,
+        ),
+        execution_registry=runtime_session.model_stream_execution_registry,
+    )
+    result = await handle.wait_result()
+    owner = RunModelCallControlOwner(
+        run_id=event_context.run_id,
+        activation=activation,
+        segment_id=f"segment:{event_context.run_id}:1",
+        segment_generation=activation.segment_generation,
+    )
+    await owner.resolve_completed_call(
+        result=result,
+        model_call_index=1,
+        event_context=event_context,
+        runtime_session=runtime_session,
+        state=state,
     )
 
 

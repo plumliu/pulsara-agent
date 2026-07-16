@@ -21,6 +21,7 @@ from pulsara_agent.event import (
     RunStartEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog
+from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.llm.recovery import ModelStreamRecoveryService
 from pulsara_agent.llm.control_recovery import (
     ModelCallControlDispositionRecoveryService,
@@ -33,6 +34,9 @@ from pulsara_agent.primitives.run_lifecycle import (
 from pulsara_agent.runtime.recovery import AbortKind
 from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
 from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
+from pulsara_agent.runtime.authority_materialization import (
+    commit_quiescent_accounted_batch,
+)
 from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
 
 
@@ -73,14 +77,17 @@ def repair_dangling_runs_for_resume(
         runtime_session_id=runtime_session_id,
         workspace_root=workspace_root,
     )
+    archive = PostgresArtifactStore(dsn)
     model_recovery = ModelStreamRecoveryService(
-        event_log=log
+        event_log=log,
+        archive=archive,
     ).repair_incomplete_model_streams()
     recovered_model_call_ids = tuple(
         item.resolved_model_call_id for item in model_recovery.repaired
     )
     control_recovery = ModelCallControlDispositionRecoveryService(
-        event_log=log
+        event_log=log,
+        archive=archive,
     ).repair_missing_dispositions()
     recovered_model_control_call_ids = tuple(
         item.resolved_model_call_id for item in control_recovery.recovered
@@ -201,7 +208,11 @@ def repair_dangling_runs_for_resume(
             abort_kind=AbortKind.HOST_TEARDOWN.value,
             metadata=metadata,
         )
-        stored = tuple(log.extend((window_close, account_close, run_end)))
+        stored = commit_quiescent_accounted_batch(
+            event_log=log,
+            business_events=(window_close, account_close, run_end),
+            owner_scope="dangling-run-recovery",
+        )
         state_store.apply_committed(stored)
         repaired.append(run_id)
 

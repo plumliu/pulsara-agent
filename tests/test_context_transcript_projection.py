@@ -65,7 +65,11 @@ from tests.conftest import (
     run_start_permission_fields,
     tool_result_end_contract_fields,
 )
-from tests.support.model_call import model_call_end_fields, model_call_start_fields
+from tests.support.model_call import (
+    model_call_end_fields,
+    model_call_start_fields,
+    model_terminal_projection_end_reference_fixture,
+)
 
 
 def _projection_fixture(
@@ -129,6 +133,12 @@ def _projection_fixture(
     )
     model_end_payload = model_call_end_fields(resolved_call=model_start.resolved_call)
     model_end_payload["outcome"] = model_outcome
+    model_end_payload["terminal_projection"] = (
+        model_terminal_projection_end_reference_fixture(
+            model_start.resolved_call.resolved_model_call_id,
+            outcome=model_outcome,
+        )
+    )
     model_end = ModelCallEndEvent(
         id=model_start.recovery_plan.stable_model_call_end_event_id,
         **ctx.event_fields(),

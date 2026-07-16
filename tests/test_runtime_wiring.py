@@ -1,11 +1,13 @@
 import asyncio
+from threading import Event, Timer
+from time import monotonic
 import urllib.parse
 from uuid import uuid4
 
 import psycopg
 import pytest
 
-from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext, TextBlockDeltaEvent
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.llm import ModelRole
 from tests.support import test_llm_config
@@ -36,6 +38,8 @@ from pulsara_agent.capability import (
     LocalSkillCapabilityProvider,
 )
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from tests.conftest import emit_test_accepted_model_reply, open_test_root_rollout_run
+from tests.support.model_call import test_resolved_target_fact
 from tests.support.settings import compatibility_storage_config
 from pulsara_agent.retrieval.runtime import RetrievalRuntimeResources
 from pulsara_agent.memory.canonical.mutation_outbox import CanonicalMutationSurface
@@ -117,7 +121,15 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
     )
 
     async def run() -> None:
-        await runtime.emit(
+        open_test_root_rollout_run(
+            runtime,
+            event_context=source_ctx,
+            model_target=test_resolved_target_fact(),
+        )
+        runtime._adopt_unbootstrapped_in_memory_account_for_test(  # noqa: SLF001
+            incoming_run_id=source_ctx.run_id
+        )
+        source = await runtime.emit(
             TextBlockDeltaEvent(
                 **source_ctx.event_fields(), block_id="text:1", delta="bind"
             )
@@ -129,7 +141,13 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
             ),
             governance_batch_id=f"governance:test:{uuid4().hex}",
         )
-        assert [event.sequence for event in result.events] == [2, 3]
+        governance_sequences = tuple(event.sequence for event in result.events)
+        assert all(sequence is not None for sequence in governance_sequences)
+        assert governance_sequences == tuple(
+            range(governance_sequences[0], governance_sequences[0] + 2)  # type: ignore[arg-type]
+        )
+        assert source.sequence is not None
+        assert governance_sequences[0] > source.sequence  # type: ignore[operator]
 
         final = await asyncio.wait_for(
             runtime.emit(
@@ -139,7 +157,85 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
             ),
             timeout=0.5,
         )
-        assert final.sequence == 4
+        assert final.sequence is not None
+        assert final.sequence > governance_sequences[-1]  # type: ignore[operator]
+        durable_account = runtime.event_log.read_materialization_account_state()
+        assert durable_account is not None
+        assert durable_account.ledger_through_sequence == (
+            runtime.event_log.next_sequence() - 1
+        )
+        assert runtime.materialization_account_store.snapshot() == durable_account
+
+    asyncio.run(run())
+
+
+def test_governance_apply_runs_off_host_event_loop(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.warns(DeprecationWarning, match="compatibility/test-only"):
+        wiring = build_in_memory_runtime_wiring(
+            tmp_path,
+            runtime_session_id=f"runtime:test:{uuid4().hex}",
+        )
+    executor = wiring.memory_governance_executor
+    candidate = wiring.candidate_pool.append_candidate(
+        PooledMemoryCandidate(
+            payload=ValidCandidatePayload(
+                candidate=PreferenceCandidate(
+                    candidate_id=f"candidate:test:{uuid4().hex}",
+                    statement="The user prefers non-blocking governance.",
+                    scope="ctx:user",
+                    source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
+                    verification_status=memory.VerificationStatus.USER_CONFIRMED,
+                )
+            ),
+            origin=CandidateOrigin.REFLECTION,
+            source_session_id=wiring.runtime_session.runtime_session_id,
+            source_run_id="run:test:governance-worker",
+            source_turn_id="turn:test:governance-worker",
+            source_reply_id="reply:test:governance-worker",
+        )
+    )
+    started = Event()
+    release = Event()
+    executor_type = type(executor)
+    original_apply = executor_type.apply_decision
+
+    def blocking_apply(self, decision, **kwargs):
+        started.set()
+        release.wait(timeout=2.0)
+        return original_apply(self, decision, **kwargs)
+
+    monkeypatch.setattr(executor_type, "apply_decision", blocking_apply)
+
+    async def run() -> None:
+        fallback_release = Timer(0.5, release.set)
+        fallback_release.daemon = True
+        fallback_release.start()
+        before = monotonic()
+        task = asyncio.create_task(
+            executor.apply_decision_async(
+                SubmitAsIsDecision(
+                    target_entry_id=candidate.entry_id,
+                    reason="Verify auxiliary ownership.",
+                )
+            )
+        )
+        try:
+            for _ in range(50):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.002)
+            assert started.is_set()
+            await asyncio.sleep(0)
+            assert monotonic() - before < 0.25
+            release.set()
+            result = await task
+            assert result.events
+        finally:
+            release.set()
+            fallback_release.cancel()
 
     asyncio.run(run())
 
@@ -392,7 +488,9 @@ def test_durable_runtime_wiring_uses_postgres_graph_event_log_and_artifacts(
         summary = summarize_run_timeline(timeline)
 
         assert wiring.graph_id == graph_id
-        assert [event.sequence for event in events] == [1, 2]
+        sequences = [event.sequence for event in events]
+        assert sequences == list(range(1, len(sequences) + 1))
+        assert len(sequences) > 2
         assert len(records) == 1
         assert records[0][rt.SOURCE_RUN.name] == ctx.run_id
         assert records[0][rt.SOURCE_SESSION.name] == runtime_session_id
@@ -537,7 +635,9 @@ def test_agent_runtime_wiring_uses_durable_runtime_wiring(tmp_path) -> None:
             "memory_related" not in wiring.agent_runtime.tool_executor.registry.names()
         )
         assert "memory_get" in wiring.agent_runtime.tool_executor.registry.names()
-        assert [event.sequence for event in events] == [1, 2]
+        sequences = [event.sequence for event in events]
+        assert sequences == list(range(1, len(sequences) + 1))
+        assert len(sequences) > 2
         assert len(records) == 1
         assert records[0][rt.SOURCE_SESSION.name] == runtime_session_id
         assert records[0][rt.STATUS.name] == "completed"
@@ -557,10 +657,11 @@ def test_agent_runtime_wiring_uses_durable_runtime_wiring(tmp_path) -> None:
 
 
 async def _emit_timeline_events(runtime_session, ctx: EventContext, text: str) -> None:
-    await runtime_session.emit(
-        TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta=text)
+    await emit_test_accepted_model_reply(
+        runtime_session,
+        event_context=ctx,
+        assistant_text=text,
     )
-    await runtime_session.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
 
 def _event_context(label: str) -> EventContext:

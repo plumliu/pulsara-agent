@@ -13,6 +13,7 @@ from pulsara_agent.capability.exposure import CapabilityExposurePlan
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     ContextCompactionCompletedEvent,
+    ContextWindowCompactionCompletedEvent,
     EventType,
     ProjectionFailedEvent,
     ProjectionReadyEvent,
@@ -86,14 +87,22 @@ from pulsara_agent.runtime.context_input.snapshot import (
     finalize_context_authority_slice_plan,
 )
 from pulsara_agent.runtime.context_input.transcript import (
-    ContextTranscriptProjectionAuthority,
     NormalizedContextTranscript,
-    TranscriptProjectionIdentity,
     ToolResultPairingError,
-    project_context_transcript,
+)
+from pulsara_agent.runtime.context_input.stable_transcript import (
+    project_stable_context_transcript,
+    required_terminal_content_artifacts,
+)
+from pulsara_agent.runtime.context_input.transcript_authority import (
+    PreparedNamedFactArtifact,
+    prepare_named_fact_artifact,
 )
 from pulsara_agent.runtime.context_input.render import (
     prepare_tool_result_render_input,
+)
+from pulsara_agent.runtime.authority_materialization.checkpoint_service import (
+    PreparedTranscriptProjectionEvidence,
 )
 from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_candidate_from_state,
@@ -113,9 +122,12 @@ class PreparedLiveContextSnapshot:
     snapshot_build_input: ContextSnapshotBuildInput
     authority_slice: ContextEventSlice | ContextEventAuthorityView
     named_slices: tuple[ContextEventSlice, ...]
+    exact_named_authority_events: tuple[FrozenStoredEvent, ...]
     normalized_transcript: NormalizedContextTranscript
     prepared_tool_results: PreparedToolResultRenderInput
     prepared_candidates: PreparedContextCandidateSet
+    transcript_projection_evidence: PreparedTranscriptProjectionEvidence
+    prepared_named_fact_artifacts: tuple[PreparedNamedFactArtifact, ...]
     candidate_cache_writes: tuple[ContextLifecycleCacheWriteCandidate, ...]
     active_window: ContextWindowFact
     projection_state: ContextWindowProjectionState
@@ -127,6 +139,7 @@ class PreparedLiveTranscriptProjection:
     authority_slice: ContextEventSlice | ContextEventAuthorityView
     normalized_transcript: NormalizedContextTranscript
     prepared_tool_results: PreparedToolResultRenderInput
+    transcript_projection_evidence: PreparedTranscriptProjectionEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +169,7 @@ _MAX_LIVE_AUTHORITY_PAYLOAD_BYTES = 16 * 1024 * 1024
 _MAX_LIVE_SPARSE_AUTHORITY_EVENTS = 4_096
 _MAX_LIVE_SPARSE_AUTHORITY_PAYLOAD_BYTES = 4 * 1024 * 1024
 
-_COMPACTED_WINDOW_SPARSE_EVENT_TYPES = (
+_LIVE_RUN_SPARSE_EVENT_TYPES = (
     EventType.RUN_START.value,
     EventType.RUN_INTERACTION_RESUME_BOUNDARY.value,
     EventType.CAPABILITY_EXPOSURE_RESOLVED.value,
@@ -168,9 +181,14 @@ _COMPACTED_WINDOW_SPARSE_EVENT_TYPES = (
     EventType.ROLLOUT_BUDGET_RESERVATION_CREATED.value,
     EventType.ROLLOUT_BUDGET_RESERVATION_SETTLED.value,
     EventType.ROLLOUT_PHASE_TRANSITIONED.value,
+    EventType.CONTEXT_COMPACTION_COMPLETED.value,
+    EventType.CONTEXT_WINDOW_OPENED.value,
+    EventType.CONTEXT_WINDOW_CLOSED.value,
+    EventType.CONTEXT_WINDOW_COMPACTION_STARTED.value,
+    EventType.CONTEXT_WINDOW_COMPACTION_COMPLETED.value,
 )
 
-_COMPACTED_WINDOW_SESSION_SPARSE_EVENT_TYPES = (
+_LIVE_SESSION_SPARSE_EVENT_TYPES = (
     EventType.PLAN_MODE_ENTERED.value,
     EventType.PLAN_EXIT_RESOLVED.value,
 )
@@ -729,11 +747,14 @@ def collect_live_context_inputs(
             else 0
         ),
     )
-    authority_slice = (
-        event_slice.primary_slice
-        if isinstance(event_slice, ContextEventAuthorityView)
-        else event_slice.subslice(from_sequence=authority_plan.authority_from_sequence)
-    )
+    if isinstance(event_slice, ContextEventAuthorityView):
+        authority_slice = event_slice.primary_slice
+    elif authority_plan.authority_from_sequence < event_slice.from_sequence:
+        authority_slice = event_slice
+    else:
+        authority_slice = event_slice.subslice(
+            from_sequence=authority_plan.authority_from_sequence
+        )
     if identity.source_through_sequence != authority_slice.through_sequence:
         raise ContextEventSliceError("context identity high-water mismatch")
     return ContextSnapshotBuildInput(
@@ -1223,10 +1244,49 @@ async def prepare_live_context_snapshot(
             runtime_session=runtime_session,
             transcript_window=build_input.authority_slice_plan.transcript_window,
         )
-        normalized = project_context_transcript(
-            snapshot=build_input,
-            event_slice=authority_slice,
+        projection_evidence = await (
+            runtime_session.transcript_projection_checkpoint_service
+            .prepare_projection_evidence(
+                requested_through_sequence=full_slice.through_sequence
+            )
+        )
+        stable_entries = projection_evidence.stable_entries
+        terminal_content_refs = required_terminal_content_artifacts(
+            stable_entries=stable_entries,
+            projection_window=build_input.authority_slice_plan.transcript_window,
+            documents=projection_evidence.document_registry,
+        )
+        terminal_content_texts = await _read_terminal_content_artifacts(
+            runtime_session=runtime_session,
+            references=terminal_content_refs,
+        )
+        terminal_ref = build_input.authority_slice_plan.transcript_window.compaction_terminal_ref
+        compaction_terminal = None
+        if terminal_ref is not None:
+            compaction_terminal = authority_slice.event_by_id(
+                terminal_ref.event_id
+            ).decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            if not isinstance(
+                compaction_terminal,
+                ContextCompactionCompletedEvent
+                | ContextWindowCompactionCompletedEvent,
+            ):
+                raise ContextEventSliceError(
+                    "transcript compaction terminal has wrong event type"
+                )
+        normalized = project_stable_context_transcript(
+            runtime_session_id=runtime_session.runtime_session_id,
+            through_sequence=full_slice.through_sequence,
+            current_user_anchor=start.current_user_message.message_id,
+            projection_window=build_input.authority_slice_plan.transcript_window,
+            stable_entries=stable_entries,
+            documents=projection_evidence.document_registry,
+            hydrated_message_contents=(
+                projection_evidence.hydrated_message_contents
+            ),
+            terminal_content_text_by_artifact_id=terminal_content_texts,
             compaction_summary_text=summary_text,
+            compaction_terminal_event=compaction_terminal,
             window_compaction_source_document=window_source_document,
         )
         assert progress.component_fingerprints is not None
@@ -1267,6 +1327,10 @@ async def prepare_live_context_snapshot(
         progress.component_fingerprints["prepared_candidate_set"] = (
             prepared_candidates.prepared.candidate_set_fingerprint
         )
+        prepared_named_fact_artifacts = await _prepare_named_fact_artifacts(
+            runtime_session=runtime_session,
+            prepared_candidates=prepared_candidates.prepared,
+        )
     return PreparedLiveContextSnapshot(
         invocation=bind_context_draft(
             build_input=build_input,
@@ -1276,9 +1340,12 @@ async def prepare_live_context_snapshot(
         snapshot_build_input=build_input,
         authority_slice=authority_slice,
         named_slices=named_slices,
+        exact_named_authority_events=subagent_authority_events,
         normalized_transcript=normalized,
         prepared_tool_results=prepared_tool_results,
         prepared_candidates=prepared_candidates.prepared,
+        transcript_projection_evidence=projection_evidence,
+        prepared_named_fact_artifacts=prepared_named_fact_artifacts,
         candidate_cache_writes=prepared_candidates.cache_writes,
         active_window=active_window,
         projection_state=projection_state,
@@ -1338,28 +1405,52 @@ async def prepare_live_transcript_projection(
         ),
     )
     authority_slice = full_slice
-    authority = ContextTranscriptProjectionAuthority(
-        identity=TranscriptProjectionIdentity(
-            runtime_session_id=runtime_session.runtime_session_id
-        ),
-        run_entry=run_entry,
-        current_user_message=start.current_user_message,
-        authority_slice_plan=authority_plan,
-        primary_event_range=authority_read.primary_slice.to_range_fact(),
-        named_event_ranges=(
-            authority_read.view.named_range_facts()
-            if isinstance(authority_read.view, ContextEventAuthorityView)
-            else ()
-        ),
-    )
     summary_text, window_source_document = await _read_compaction_inputs(
         runtime_session=runtime_session,
         transcript_window=authority_plan.transcript_window,
     )
-    normalized = project_context_transcript(
-        snapshot=authority,
-        event_slice=authority_slice,
+    projection_evidence = await (
+        runtime_session.transcript_projection_checkpoint_service
+        .prepare_projection_evidence(
+            requested_through_sequence=full_slice.through_sequence
+        )
+    )
+    stable_entries = projection_evidence.stable_entries
+    terminal_content_refs = required_terminal_content_artifacts(
+        stable_entries=stable_entries,
+        projection_window=authority_plan.transcript_window,
+        documents=projection_evidence.document_registry,
+    )
+    terminal_content_texts = await _read_terminal_content_artifacts(
+        runtime_session=runtime_session,
+        references=terminal_content_refs,
+    )
+    terminal_ref = authority_plan.transcript_window.compaction_terminal_ref
+    compaction_terminal = None
+    if terminal_ref is not None:
+        compaction_terminal = authority_slice.event_by_id(
+            terminal_ref.event_id
+        ).decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+        if not isinstance(
+            compaction_terminal,
+            ContextCompactionCompletedEvent | ContextWindowCompactionCompletedEvent,
+        ):
+            raise ContextEventSliceError(
+                "transcript compaction terminal has wrong event type"
+            )
+    normalized = project_stable_context_transcript(
+        runtime_session_id=runtime_session.runtime_session_id,
+        through_sequence=full_slice.through_sequence,
+        current_user_anchor=start.current_user_message.message_id,
+        projection_window=authority_plan.transcript_window,
+        stable_entries=stable_entries,
+        documents=projection_evidence.document_registry,
+        hydrated_message_contents=(
+            projection_evidence.hydrated_message_contents
+        ),
+        terminal_content_text_by_artifact_id=terminal_content_texts,
         compaction_summary_text=summary_text,
+        compaction_terminal_event=compaction_terminal,
         window_compaction_source_document=window_source_document,
     )
     prepared = prepare_tool_result_render_input(
@@ -1372,6 +1463,68 @@ async def prepare_live_transcript_projection(
         authority_slice=authority_slice,
         normalized_transcript=normalized,
         prepared_tool_results=prepared,
+        transcript_projection_evidence=projection_evidence,
+    )
+
+
+async def _prepare_named_fact_artifacts(
+    *,
+    runtime_session: RuntimeSession,
+    prepared_candidates: PreparedContextCandidateSet,
+) -> tuple[PreparedNamedFactArtifact, ...]:
+    artifact_ids = tuple(
+        sorted(
+            {
+                artifact_id
+                for entry in prepared_candidates.entries
+                for artifact_id in entry.candidate.source_artifact_ids
+            }
+        )
+    )
+    if not artifact_ids:
+        return ()
+    deadline = monotonic() + 30.0
+
+    def read() -> tuple[PreparedNamedFactArtifact, ...]:
+        prepared: list[PreparedNamedFactArtifact] = []
+        total_bytes = 0
+        for artifact_id in artifact_ids:
+            record = runtime_session.archive.get_info(
+                artifact_id,
+                session_id=runtime_session.runtime_session_id,
+                deadline_monotonic=deadline,
+            )
+            if record.media_type.startswith("text/") or record.media_type in {
+                "application/json",
+                "application/xml",
+            }:
+                canonical_bytes = runtime_session.archive.get_text(
+                    artifact_id,
+                    session_id=runtime_session.runtime_session_id,
+                    deadline_monotonic=deadline,
+                ).encode("utf-8")
+            else:
+                canonical_bytes = runtime_session.archive.get_bytes(
+                    artifact_id,
+                    session_id=runtime_session.runtime_session_id,
+                )
+            total_bytes += len(canonical_bytes)
+            if total_bytes > _MAX_LIVE_SPARSE_AUTHORITY_PAYLOAD_BYTES:
+                raise ContextEventSliceError(
+                    "named-fact artifact authority exceeds bounded preparation bytes"
+                )
+            prepared.append(
+                prepare_named_fact_artifact(
+                    record=record,
+                    canonical_bytes=canonical_bytes,
+                )
+            )
+        return tuple(prepared)
+
+    return await runtime_session.context_input_io_service.execute(
+        operation_name="context-named-fact-artifact-read",
+        operation=read,
+        deadline_monotonic=deadline,
     )
 
 
@@ -1416,6 +1569,45 @@ async def _read_compaction_inputs(
     return summary_text, source_document
 
 
+async def _read_terminal_content_artifacts(
+    *,
+    runtime_session: RuntimeSession,
+    references,
+) -> dict[str, str]:
+    if not references:
+        return {}
+    deadline = monotonic() + 30.0
+
+    def read() -> dict[str, str]:
+        prepared: dict[str, str] = {}
+        for reference in references:
+            info = runtime_session.archive.get_info(
+                reference.artifact_id,
+                session_id=runtime_session.runtime_session_id,
+                deadline_monotonic=deadline,
+            )
+            if (
+                info.digest != reference.artifact_sha256
+                or info.size_bytes != reference.artifact_bytes
+                or info.media_type != reference.media_type
+            ):
+                raise ContextEventSliceError(
+                    "terminal content artifact identity drifted"
+                )
+            prepared[reference.artifact_id] = runtime_session.archive.get_text(
+                reference.artifact_id,
+                session_id=runtime_session.runtime_session_id,
+                deadline_monotonic=deadline,
+            )
+        return prepared
+
+    return await runtime_session.context_input_io_service.execute(
+        operation_name="terminal-projection-content-read",
+        operation=read,
+        deadline_monotonic=deadline,
+    )
+
+
 async def _read_live_primary_event_slice(
     *,
     runtime_session: RuntimeSession,
@@ -1427,6 +1619,10 @@ async def _read_live_primary_event_slice(
         raise ContextEventSliceError(
             "event ledger requires reconciliation before context read"
         )
+    projection_delta_minimum_sequence = await (
+        runtime_session.transcript_projection_checkpoint_service
+        .projection_delta_minimum_sequence()
+    )
     deadline = monotonic() + 30.0
 
     def read() -> _LiveAuthorityRead:
@@ -1450,7 +1646,11 @@ async def _read_live_primary_event_slice(
             or start.sequence != working_set.run_start_sequence
         ):
             raise ContextEventSliceError("live snapshot RunStart identity drifted")
-        minimum_sequence = start.sequence
+        minimum_sequence = projection_delta_minimum_sequence
+        if minimum_sequence < 1:
+            raise ContextEventSliceError(
+                "transcript projection delta minimum sequence is invalid"
+            )
         compacted_window = False
         compacted_source_through: int | None = None
         window_state = runtime_session.long_horizon_state_store.window_state(
@@ -1477,7 +1677,7 @@ async def _read_live_primary_event_slice(
                     raise ContextEventSliceError(
                         "compacted window has no bounded post-compaction delta"
                     )
-                minimum_sequence = source_through + 1
+                minimum_sequence = max(minimum_sequence, source_through + 1)
                 compacted_window = True
                 compacted_source_through = source_through
         boundary = start.new_run_boundary
@@ -1488,9 +1688,7 @@ async def _read_live_primary_event_slice(
             and boundary.transcript.source_through_sequence > 0
         ):
             terminal_id = boundary.transcript.checkpoint_terminal_event_id
-            if terminal_id is None:
-                minimum_sequence = 1
-            else:
+            if terminal_id is not None:
                 checkpoint_terminal_id = terminal_id
                 keep_after = boundary.transcript.checkpoint_keep_after_sequence
                 terminal_sequence = boundary.transcript.checkpoint_terminal_sequence
@@ -1498,14 +1696,6 @@ async def _read_live_primary_event_slice(
                     raise ContextEventSliceError(
                         "transcript checkpoint boundary is incomplete"
                     )
-                retained_from = keep_after + 1
-                candidates = [start.sequence, terminal_sequence]
-                if retained_from <= boundary.transcript.source_through_sequence:
-                    candidates.append(retained_from)
-                minimum_sequence = min(item for item in candidates if item > 0)
-        entered_sequence = working_set.plan_snapshot.entered_event_sequence
-        if entered_sequence is not None and not compacted_window:
-            minimum_sequence = min(minimum_sequence, entered_sequence)
         cache_key = (
             runtime_session.runtime_session_id,
             working_set.run_start_event_id,
@@ -1546,12 +1736,8 @@ async def _read_live_primary_event_slice(
                 cached.through_sequence + 1 if cached is not None else minimum_sequence
             ),
             run_id=start.run_id,
-            run_sparse_event_types=(
-                _COMPACTED_WINDOW_SPARSE_EVENT_TYPES if compacted_window else ()
-            ),
-            session_sparse_event_types=(
-                _COMPACTED_WINDOW_SESSION_SPARSE_EVENT_TYPES if compacted_window else ()
-            ),
+            run_sparse_event_types=_LIVE_RUN_SPARSE_EVENT_TYPES,
+            session_sparse_event_types=_LIVE_SESSION_SPARSE_EVENT_TYPES,
             exact_event_ids=tuple(sorted(exact_ids)),
             primary_bounds=RawEventSelectionBounds(
                 max_events=max(1, remaining_events),
@@ -1645,26 +1831,25 @@ async def _read_live_primary_event_slice(
                 raise ContextEventSliceError(
                     "transcript checkpoint basis drifted from RunStart"
                 )
-        if compacted_window:
-            sparse_by_id = {
-                item.event_id: item
-                for item in (
-                    *bundle.run_sparse_events,
-                    *bundle.session_sparse_events,
-                    *bundle.exact_events,
-                )
-            }
-            frozen = tuple(
-                FrozenStoredEvent.from_raw_envelope(item)
-                for item in sorted(
-                    sparse_by_id.values(), key=lambda item: item.sequence
-                )
-                if item.sequence < authority_slice.from_sequence
+        sparse_by_id = {
+            item.event_id: item
+            for item in (
+                *bundle.run_sparse_events,
+                *bundle.session_sparse_events,
+                *bundle.exact_events,
             )
-            local_named_slices = _contiguous_exact_slices(
-                runtime_session_id=runtime_session.runtime_session_id,
-                events=frozen,
+        }
+        frozen = tuple(
+            FrozenStoredEvent.from_raw_envelope(item)
+            for item in sorted(
+                sparse_by_id.values(), key=lambda item: item.sequence
             )
+            if item.sequence < authority_slice.from_sequence
+        )
+        local_named_slices = _contiguous_exact_slices(
+            runtime_session_id=runtime_session.runtime_session_id,
+            events=frozen,
+        )
         return _LiveAuthorityRead(
             primary_slice=authority_slice,
             local_named_slices=local_named_slices,

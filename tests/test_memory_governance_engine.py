@@ -675,6 +675,7 @@ def _executor(
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id="runtime:test",
         memory_write_uow_factory=fake_memory_uow_factory(

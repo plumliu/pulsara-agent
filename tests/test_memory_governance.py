@@ -27,6 +27,10 @@ from pulsara_agent.memory import (
 )
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, WriteFailedOutcome, WriteSucceededOutcome
 from pulsara_agent.memory.governance.dedupe import already_exists
+from pulsara_agent.memory.governance.event_outbox import (
+    GovernanceEventOutboxDispatcher,
+    PostgresGovernanceEventOutboxStore,
+)
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -39,10 +43,12 @@ def test_governance_executor_requires_explicit_uow_factory() -> None:
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
     service = _service_on(graph)
+    event_log = InMemoryEventLog()
     common = {
         "candidate_pool": pool,
         "memory_write_service": service,
-        "event_log": InMemoryEventLog(),
+        "event_log": event_log,
+        "event_commit_port": event_log.extend,
         "graph": graph,
         "runtime_session_id": "runtime:test",
     }
@@ -386,8 +392,14 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
             candidate_pool=pool,
             memory_write_service=_service_on(graph),
             event_log=log,
+            event_commit_port=log.extend,
             graph=graph,
             runtime_session_id=runtime_session_id,
+            event_outbox_dispatcher=_postgres_governance_event_dispatcher(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                event_commit_port=log.extend,
+            ),
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
@@ -408,20 +420,31 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
 
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         governance_candidates = [
-            candidate for candidate in pool.list_candidates() if candidate.origin is CandidateOrigin.GOVERNANCE
+            candidate
+            for candidate in pool.list_candidates()
+            if candidate.origin is CandidateOrigin.GOVERNANCE
+            and candidate.source_session_id == runtime_session_id
         ]
         assert len(governance_candidates) == 1
         assert governance_candidates[0].source_session_id == runtime_session_id
         assert governance_candidates[0].source_run_id == f"run:governance/{batch_id}"
         assert governance_candidates[0].source_turn_id == f"turn:governance/{batch_id}"
         assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
-        assert pool.list_pending() == []
+        assert [
+            candidate
+            for candidate in pool.list_pending()
+            if candidate.source_session_id == runtime_session_id
+        ] == []
     finally:
         with _connect_or_skip(dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("delete from memory_write_outbox where governance_batch_id = %s", (batch_id,))
                 cursor.execute(
                     "delete from memory_governance_decisions where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute(
+                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
                     (batch_id,),
                 )
                 cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
@@ -465,8 +488,14 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
+            event_outbox_dispatcher=_postgres_governance_event_dispatcher(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                event_commit_port=log.extend,
+            ),
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
@@ -528,6 +557,10 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
                     "delete from memory_governance_decisions where governance_batch_id = %s",
                     (batch_id,),
                 )
+                cursor.execute(
+                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
                 cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
                 cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
                 cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
@@ -568,8 +601,14 @@ def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
+            event_outbox_dispatcher=_postgres_governance_event_dispatcher(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                event_commit_port=log.extend,
+            ),
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
                 dsn=dsn,
                 runtime_session_id=runtime_session_id,
@@ -602,6 +641,10 @@ def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_
             with connection.cursor() as cursor:
                 cursor.execute(
                     "delete from memory_governance_decisions where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute(
+                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
                     (batch_id,),
                 )
                 cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
@@ -645,6 +688,135 @@ def test_postgres_uow_dedupe_sees_uncommitted_same_transaction_node(tmp_path) ->
                 cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
 
 
+def test_postgres_governance_event_outbox_retries_after_memory_uow_commit(
+    tmp_path,
+) -> None:
+    dsn = StorageConfig.from_env().postgres_dsn
+    _connect_or_skip(dsn).close()
+    runtime_session_id = f"runtime:test:{uuid4().hex}"
+    graph_id = f"graph:test/{uuid4().hex}"
+    batch_id = f"governance:test:event-outbox:{uuid4().hex}"
+    source_ctx = EventContext(
+        run_id=f"run:source:{uuid4().hex}",
+        turn_id=f"turn:source:{uuid4().hex}",
+        reply_id=f"reply:source:{uuid4().hex}",
+    )
+    log = PostgresEventLog(
+        dsn=dsn,
+        runtime_session_id=runtime_session_id,
+        workspace_root=tmp_path,
+    )
+    pool = PostgresCandidatePool(dsn=dsn)
+    attempts = 0
+
+    def fail_once_then_commit(events):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("synthetic ledger outage after memory commit")
+        return log.extend(events)
+
+    try:
+        log.append(
+            TextBlockDeltaEvent(
+                **source_ctx.event_fields(),
+                block_id="text:seed",
+                delta="seed",
+            )
+        )
+        candidate = pool.append_candidate(
+            PooledMemoryCandidate(
+                payload=ValidCandidatePayload(
+                    candidate=_preference(f"candidate:event-outbox:{uuid4().hex}")
+                ),
+                origin=CandidateOrigin.MAIN_AGENT_TOOL,
+                source_session_id=runtime_session_id,
+                source_run_id=source_ctx.run_id,
+                source_turn_id=source_ctx.turn_id,
+                source_reply_id=source_ctx.reply_id,
+            )
+        )
+        dispatcher = _postgres_governance_event_dispatcher(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+            event_commit_port=fail_once_then_commit,
+        )
+        executor = MemoryGovernanceExecutor(
+            candidate_pool=pool,
+            memory_write_service=_service_on(InMemoryGraphStore()),
+            event_log=log,
+            event_commit_port=fail_once_then_commit,
+            event_outbox_dispatcher=dispatcher,
+            graph=InMemoryGraphStore(),
+            runtime_session_id=runtime_session_id,
+            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
+                graph_id=graph_id,
+                workspace_root=tmp_path,
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="synthetic ledger outage"):
+            executor.apply_decision(
+                SubmitAsIsDecision(
+                    target_entry_id=candidate.entry_id,
+                    reason="Exercise durable event handoff.",
+                ),
+                governance_batch_id=batch_id,
+            )
+
+        assert [
+            item
+            for item in pool.list_pending()
+            if item.source_session_id == runtime_session_id
+        ] == []
+        assert not log.iter(run_id=f"run:governance/{batch_id}")
+        with _connect_or_skip(dsn) as connection:
+            decision_count = connection.execute(
+                "select count(*) from memory_governance_decisions where governance_batch_id = %s",
+                (batch_id,),
+            ).fetchone()
+            outbox_status = connection.execute(
+                "select status from memory_governance_event_outbox where governance_batch_id = %s",
+                (batch_id,),
+            ).fetchone()
+        assert decision_count == (1,)
+        assert outbox_status == ("pending",)
+
+        committed = executor.flush_pending_event_outbox()
+
+        assert len(committed) == 2
+        assert len(log.iter(run_id=f"run:governance/{batch_id}")) == 2
+        with _connect_or_skip(dsn) as connection:
+            outbox_status = connection.execute(
+                "select status from memory_governance_event_outbox where governance_batch_id = %s",
+                (batch_id,),
+            ).fetchone()
+        assert outbox_status == ("applied",)
+        assert executor.event_dispatch_retry_required is False
+    finally:
+        with _connect_or_skip(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "delete from memory_write_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute(
+                    "delete from memory_governance_event_outbox where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute(
+                    "delete from memory_governance_decisions where governance_batch_id = %s",
+                    (batch_id,),
+                )
+                cursor.execute("delete from graph_documents where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_nodes where graph_id = %s", (graph_id,))
+                cursor.execute("delete from memory_relations where graph_id = %s", (graph_id,))
+                cursor.execute("delete from sessions where id = %s", (runtime_session_id,))
+
+
 def _executor(
     *,
     pool: InMemoryCandidatePool,
@@ -657,6 +829,7 @@ def _executor(
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id="runtime:test",
         memory_write_uow_factory=fake_memory_uow_factory(
@@ -665,6 +838,21 @@ def _executor(
             memory_write_service=service,
         ),
         allowed_write_scopes=allowed_write_scopes,
+    )
+
+
+def _postgres_governance_event_dispatcher(
+    *,
+    dsn: str,
+    runtime_session_id: str,
+    event_commit_port,
+) -> GovernanceEventOutboxDispatcher:
+    return GovernanceEventOutboxDispatcher(
+        store=PostgresGovernanceEventOutboxStore(
+            dsn=dsn,
+            runtime_session_id=runtime_session_id,
+        ),
+        event_commit_port=event_commit_port,
     )
 
 

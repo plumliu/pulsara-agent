@@ -21,6 +21,7 @@ from tests.support import (
     test_model_slot,
 )
 from tests.support.runtime_session import in_memory_runtime_session
+from tests.support.model_call import model_terminal_projection_end_reference_fixture
 from tests.conftest import open_test_root_rollout_run, run_start_permission_fields
 
 from pulsara_agent.event import (
@@ -29,6 +30,7 @@ from pulsara_agent.event import (
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
     ModelCallRejectedEvent,
     ProviderModelStreamErrorEvent,
     ReplyEndEvent,
@@ -1006,6 +1008,10 @@ def _end_event(call, *, outcome: str = "completed") -> ModelCallEndEvent:
         usage_status="missing",
         usage=None,
         estimated_input_tokens=1,
+        terminal_projection=model_terminal_projection_end_reference_fixture(
+            call.fact.resolved_model_call_id,
+            outcome=outcome,
+        ),
     )
 
 
@@ -1174,8 +1180,9 @@ def test_provider_run_error_precedes_model_end_and_reply_end() -> None:
     runtime, transport, call, context = _call_and_context()
     transport.items = (run_error,)
     events = asyncio.run(_collect_runtime(runtime, call=call, context=context))
-    assert [type(event) for event in events[-4:]] == [
+    assert [type(event) for event in events[-5:]] == [
         ProviderModelStreamErrorEvent,
+        ModelCallTerminalProjectionCommittedEvent,
         ModelCallEndEvent,
         RolloutBudgetReservationSettledEvent,
         ReplyEndEvent,
@@ -1276,6 +1283,10 @@ def test_model_call_end_identity_is_required() -> None:
             usage_status="missing",
             usage=None,
             estimated_input_tokens=1,
+            terminal_projection=model_terminal_projection_end_reference_fixture(
+                "missing-model-call-id",
+                outcome="completed",
+            ),
         )
 
 
@@ -1291,6 +1302,10 @@ def test_model_call_end_reported_model_identity_is_required() -> None:
             usage_status="missing",
             usage=None,
             estimated_input_tokens=1,
+            terminal_projection=model_terminal_projection_end_reference_fixture(
+                call.fact.resolved_model_call_id,
+                outcome="completed",
+            ),
         )
 
 
@@ -1307,6 +1322,10 @@ def test_model_call_end_reported_usage_requires_fact() -> None:
             usage_status="reported",
             usage=None,
             estimated_input_tokens=1,
+            terminal_projection=model_terminal_projection_end_reference_fixture(
+                call.fact.resolved_model_call_id,
+                outcome="completed",
+            ),
         )
 
 
@@ -1323,6 +1342,10 @@ def test_model_call_end_missing_usage_requires_null() -> None:
             usage_status="missing",
             usage=ModelTokenUsageFact(input_tokens=1, output_tokens=1, total_tokens=2),
             estimated_input_tokens=1,
+            terminal_projection=model_terminal_projection_end_reference_fixture(
+                call.fact.resolved_model_call_id,
+                outcome="completed",
+            ),
         )
 
 

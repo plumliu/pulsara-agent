@@ -115,6 +115,16 @@ class MemoryGovernanceEngine:
         limit: int | None = None,
     ) -> MemoryGovernanceRunResult:
         batch_id = governance_batch_id or new_governance_batch_id()
+        try:
+            await self.executor.flush_pending_event_outbox_async()
+        except Exception as exc:
+            return MemoryGovernanceRunResult(
+                governance_batch_id=batch_id,
+                decisions=[],
+                applied=[],
+                error_type=type(exc).__name__,
+                error_message="pending governance events could not reach the runtime ledger",
+            )
         pending = [
             candidate
             for candidate in self.executor.candidate_pool.list_pending()
@@ -215,7 +225,7 @@ class MemoryGovernanceEngine:
         try:
             for decision in output.decisions:
                 applied.append(
-                    self.executor.apply_decision(
+                    await self.executor.apply_decision_async(
                         decision,
                         governance_batch_id=batch_id,
                         relatedness_context=execution_context,

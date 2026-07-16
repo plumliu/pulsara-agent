@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     CustomEvent,
@@ -149,10 +147,10 @@ def test_exact_recurrence_in_exploration_is_optional_and_uses_shadow_algorithm()
 
 
 def test_trailing_status_lowers_after_current_run_tail_as_runtime_observation() -> None:
-    segmented = SimpleNamespace(
-        prior_history_messages=(LLMMessage.user("prior"),),
-        current_user_messages=(LLMMessage.user("current user"),),
-        current_run_tail_messages=(LLMMessage.assistant("current run tail"),),
+    transcript_messages = (
+        LLMMessage.user("prior"),
+        LLMMessage.user("current user"),
+        LLMMessage.assistant("current run tail"),
     )
     sections = (
         _section("transcript:prior_history", "history"),
@@ -165,7 +163,10 @@ def test_trailing_status_lowers_after_current_run_tail_as_runtime_observation() 
         ),
     )
 
-    messages, scopes = _lower_messages(segmented, sections=sections)
+    messages, scopes = _lower_messages(
+        transcript_messages=transcript_messages,
+        sections=sections,
+    )
 
     assert tuple(message.role for message in messages) == (
         MessageRole.USER,

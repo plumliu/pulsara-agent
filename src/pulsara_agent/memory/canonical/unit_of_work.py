@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
+from collections.abc import Sequence
 from typing import Any, Protocol, Self
 
 import psycopg
@@ -15,7 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
-from pulsara_agent.event import EventContext
+from pulsara_agent.event import AgentEvent, EventContext
 from pulsara_agent.event.candidates import CandidatePayload
 from pulsara_agent.graph import DEFAULT_GRAPH_ID, GraphStore
 from pulsara_agent.graph.postgres import PostgresGraphStore
@@ -31,6 +32,11 @@ from pulsara_agent.memory.candidates.pool import (
 from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.lifecycle import MemoryLifecycle
 from pulsara_agent.memory.canonical.mutation_outbox import MutationOutboxWriter
+from pulsara_agent.memory.governance.event_outbox import (
+    EphemeralGovernanceEventOutboxRepository,
+    GovernanceEventDispatchTicket,
+    GovernanceEventOutboxRepository,
+)
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
 from pulsara_agent.memory.canonical.write_service import MemoryWriteService
@@ -56,12 +62,23 @@ class GovernanceOutboxRepository(Protocol):
     ) -> str | None: ...
 
 
+class GovernanceRuntimeEventOutboxRepository(Protocol):
+    def append_batch(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        governance_batch_id: str,
+        decision_id: str,
+    ) -> GovernanceEventDispatchTicket: ...
+
+
 class GovernanceWriteUnitOfWork(Protocol):
     """Structural contract required by the single governance executor path."""
 
     graph: GraphStore
     decisions: GovernanceDecisionRepository
     outbox: GovernanceOutboxRepository
+    runtime_events: GovernanceRuntimeEventOutboxRepository
     lifecycle: MemoryLifecycle
     memory_write_service: MemoryWriteService
 
@@ -95,6 +112,7 @@ class MemoryWriteUnitOfWork:
     graph: PostgresGraphStore = field(init=False)
     decisions: "CandidateDecisionRepository" = field(init=False)
     outbox: "OutboxRepository" = field(init=False)
+    runtime_events: GovernanceEventOutboxRepository = field(init=False)
     lifecycle: MemoryLifecycle = field(init=False)
     memory_write_service: MemoryWriteService = field(init=False)
 
@@ -111,6 +129,10 @@ class MemoryWriteUnitOfWork:
         )
         self.decisions = CandidateDecisionRepository(self.connection)
         self.outbox = OutboxRepository(self.connection)
+        self.runtime_events = GovernanceEventOutboxRepository(
+            self.connection,
+            runtime_session_id=self.runtime_session_id,
+        )
         self.lifecycle = MemoryLifecycle(graph=self.graph, mutable=self.graph)
         ledger = ExecutionEvidenceLedger(
             graph=self.graph,
@@ -236,13 +258,18 @@ class InMemoryMemoryWriteUnitOfWork:
     candidate_pool: CandidatePool
     memory_write_service: MemoryWriteService
     graph_id: str | None = None
+    runtime_session_id: str = "runtime:in-memory-governance"
     decisions: _PoolDecisionRepository = field(init=False)
     outbox: _NoopOutboxRepository = field(init=False)
+    runtime_events: EphemeralGovernanceEventOutboxRepository = field(init=False)
     lifecycle: MemoryLifecycle = field(init=False)
 
     def __post_init__(self) -> None:
         self.decisions = _PoolDecisionRepository(self.candidate_pool)
         self.outbox = _NoopOutboxRepository()
+        self.runtime_events = EphemeralGovernanceEventOutboxRepository(
+            runtime_session_id=self.runtime_session_id
+        )
         self.lifecycle = MemoryLifecycle(graph=self.graph, mutable=self.graph)
 
     def __enter__(self) -> "InMemoryMemoryWriteUnitOfWork":

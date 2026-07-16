@@ -27,6 +27,7 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.long_horizon import PreparedObservationRollupUnit
+from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.tool_result import ToolResultRenderDecisionFact
 from pulsara_agent.runtime.context_engine.types import (
     CompiledContext,
@@ -47,6 +48,15 @@ from pulsara_agent.runtime.context_input.candidate import (
 )
 from pulsara_agent.runtime.context_input.snapshot import ContextFactSnapshot
 from pulsara_agent.runtime.context_input.snapshot import ContextFactSnapshotDraft
+from pulsara_agent.runtime.context_input.provider_projection import (
+    materialize_transcript_provider_projection,
+    prepare_transcript_provider_projection,
+)
+from pulsara_agent.primitives.transcript_projection import (
+    ModelVisibleNamedFactSemanticIdentityFact,
+    ModelVisibleNamedFactSemanticSelectionFact,
+    TranscriptProviderProjectionFact,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +74,7 @@ def compile_context_from_facts(
     rendered_tool_results: PreparedToolResultRenderOutput,
     prepared_rollups: tuple[PreparedObservationRollupUnit, ...],
     section_candidates: PreparedContextCandidateSet,
+    transcript_provider_projection: TranscriptProviderProjectionFact | None = None,
 ) -> CompiledContext:
     """Lower one already-prepared immutable aggregate into ``LLMContext``."""
 
@@ -97,28 +108,49 @@ def compile_context_from_facts(
             candidate=entry.candidate,
         )
 
-    sections = sorted(
+    candidate_sections = sorted(
         (
             _candidate_section(entry.candidate, entry.lifecycle.status, estimator)
             for entry in section_candidates.entries
         ),
         key=lambda section: (section.priority, section.id),
     )
-    sections.extend(
-        _transcript_sections(
-            lowered_transcript,
-            transcript=transcript,
+    transcript_sections = _transcript_sections(
+        lowered_transcript,
+        transcript=transcript,
+        snapshot=snapshot,
+        estimator=estimator,
+    )
+    prepared_provider_projection = (
+        prepare_transcript_provider_projection(
             snapshot=snapshot,
+            transcript=transcript,
+            prior_history_messages=lowered_transcript.prior_history_messages,
+            current_user_messages=lowered_transcript.current_user_messages,
+            current_run_tail_messages=lowered_transcript.current_run_tail_messages,
+            sections=transcript_sections,
+            estimator=estimator,
+        )
+        if transcript_provider_projection is None
+        else materialize_transcript_provider_projection(
+            snapshot=snapshot,
+            projection_fact=transcript_provider_projection,
+            transcript=transcript,
+            prior_history_messages=lowered_transcript.prior_history_messages,
+            current_user_messages=lowered_transcript.current_user_messages,
+            current_run_tail_messages=lowered_transcript.current_run_tail_messages,
+            sections=transcript_sections,
             estimator=estimator,
         )
     )
     sections = list(
-        _apply_timing_overlay(
+        _apply_non_transcript_timing_overlay(
             snapshot=snapshot,
-            sections=tuple(sections),
+            sections=tuple(candidate_sections),
             estimator=estimator,
         )
     )
+    sections.extend(prepared_provider_projection.rendered_transcript_sections)
     tools, tool_units = _compile_tools(facts)
     target = call.target
     if tools and not target.fact.supports_tools:
@@ -139,7 +171,12 @@ def compile_context_from_facts(
         estimator=estimator,
     )
     system_prompt = _system_prompt(sections)
-    messages, scopes = _lower_messages(lowered_transcript, sections=sections)
+    messages, scopes = _lower_messages(
+        transcript_messages=(
+            prepared_provider_projection.lowered_provider_messages
+        ),
+        sections=sections,
+    )
     llm_context = LLMContext(
         messages=messages,
         tools=tools,
@@ -168,6 +205,10 @@ def compile_context_from_facts(
         )
     )
     compiled_sections = tuple(_compiled_section(section) for section in sections)
+    named_fact_semantic_selection = _model_visible_named_fact_semantic_selection(
+        sections=sections,
+        candidates=section_candidates,
+    )
     sections_tokens = sum(
         section.estimated_tokens
         for section in compiled_sections
@@ -275,12 +316,97 @@ def compile_context_from_facts(
         resolved_model_call=call.fact,
         final_token_estimate=estimate,
         message_budget_scopes=scopes,
+        prepared_transcript_provider_projection=prepared_provider_projection,
+        model_visible_named_fact_semantic_selection=(
+            named_fact_semantic_selection
+        ),
         tool_result_render_decisions=(
             rendered_tool_results.tool_result_render_decisions
         ),
         tool_result_budget_report=dict(rendered_tool_results.tool_result_budget_report),
         tool_result_render_decision_facts=(rendered_tool_results.canonical_decisions),
         tool_result_render_operational_facts=(rendered_tool_results.operational_facts),
+    )
+
+
+def _model_visible_named_fact_semantic_selection(
+    *,
+    sections: tuple[AllocatedContextSection, ...],
+    candidates: PreparedContextCandidateSet,
+) -> ModelVisibleNamedFactSemanticSelectionFact:
+    candidates_by_id = {
+        entry.candidate.source_instance_id: entry.candidate
+        for entry in candidates.entries
+    }
+    if len(candidates_by_id) != len(candidates.entries):
+        raise ValueError("named context candidate source IDs are not unique")
+    channel_order = {
+        "system": 0,
+        "leading_user": 1,
+        "handoff_hint": 2,
+        "tool_context": 3,
+        "current_user": 4,
+        "current_run_tail": 5,
+        "history": 6,
+    }
+    selected = sorted(
+        (
+            section
+            for section in sections
+            if section.included
+            and section.metadata.get("lowering_kind") != "transcript"
+        ),
+        key=lambda item: (
+            channel_order.get(item.channel, 99),
+            item.priority,
+            item.id,
+        ),
+    )
+    identities: list[ModelVisibleNamedFactSemanticIdentityFact] = []
+    for section in selected:
+        try:
+            candidate = candidates_by_id[section.id]
+        except KeyError as exc:
+            raise ValueError(
+                "included named context section has no prepared candidate"
+            ) from exc
+        rendered_text = _render_section_text_with_timing(section)
+        payload_fingerprint = context_fingerprint(
+            "model-visible-named-fact-payload:v1",
+            {
+                "candidate_semantic_fingerprint": candidate.semantic_fingerprint,
+                "rendered_text": rendered_text,
+                "render_mode": section.render_mode,
+                "channel": section.channel,
+                "lowering_kind": section.metadata.get("lowering_kind"),
+            },
+        )
+        lowering_contract_fingerprint = context_fingerprint(
+            "model-visible-named-fact-lowering-contract:v1",
+            {
+                "channel": section.channel,
+                "lowering_kind": section.metadata.get("lowering_kind"),
+                "envelope_contract": "pulsara-named-context-envelope:v1",
+            },
+        )
+        identities.append(
+            build_frozen_fact(
+                ModelVisibleNamedFactSemanticIdentityFact,
+                schema_version="model_visible_named_fact_semantic_identity.v1",
+                source_kind=candidate.source_kind,
+                semantic_key=candidate.source_instance_id,
+                semantic_payload_fingerprint=payload_fingerprint,
+                lowering_contract_fingerprint=lowering_contract_fingerprint,
+            )
+        )
+    return build_frozen_fact(
+        ModelVisibleNamedFactSemanticSelectionFact,
+        schema_version="model_visible_named_fact_semantic_selection.v1",
+        selection_contract_fingerprint=context_fingerprint(
+            "model-visible-named-fact-selection-contract:v1",
+            "provider-order+included-only+exact-rendered-body",
+        ),
+        selected_items=tuple(identities),
     )
 
 
@@ -537,7 +663,7 @@ def _candidate_section(
     )
 
 
-def _apply_timing_overlay(
+def _apply_non_transcript_timing_overlay(
     *,
     snapshot,
     sections: tuple[AllocatedContextSection, ...],
@@ -545,6 +671,10 @@ def _apply_timing_overlay(
 ) -> tuple[AllocatedContextSection, ...]:
     overlaid: list[AllocatedContextSection] = []
     for section in sections:
+        if section.metadata.get("lowering_kind") == "transcript":
+            raise ValueError(
+                "transcript invocation timing belongs to the provider projection"
+            )
         source = ContextSourceTimingFact.model_validate(
             section.metadata.get("source_timing")
         )
@@ -1045,7 +1175,11 @@ def _system_prompt(sections: tuple[AllocatedContextSection, ...]) -> str:
     )
 
 
-def _lower_messages(segmented, *, sections: tuple[AllocatedContextSection, ...]):
+def _lower_messages(
+    *,
+    transcript_messages: tuple[LLMMessage, ...],
+    sections: tuple[AllocatedContextSection, ...],
+):
     leading = tuple(
         sorted(
             (
@@ -1076,15 +1210,8 @@ def _lower_messages(segmented, *, sections: tuple[AllocatedContextSection, ...])
             )
         )
         scopes.append("non_transcript")
-    for section_id, values in (
-        ("transcript:prior_history", segmented.prior_history_messages),
-        ("transcript:current_user", segmented.current_user_messages),
-        ("transcript:current_run_tail", segmented.current_run_tail_messages),
-    ):
-        section = next((item for item in sections if item.id == section_id), None)
-        if section is not None and section.included and values is not None:
-            messages.extend(values)
-            scopes.extend("transcript" for _ in values)
+    messages.extend(transcript_messages)
+    scopes.extend("transcript" for _ in transcript_messages)
     trailing = tuple(
         sorted(
             (

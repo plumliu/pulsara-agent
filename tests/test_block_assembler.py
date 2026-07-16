@@ -33,6 +33,7 @@ from pulsara_agent.message.assembler import (
     completed_tool_result_from_events,
 )
 from tests.conftest import (
+    external_terminal_projection_references,
     external_tool_result_ingress_fact,
     tool_result_end_contract_fields,
 )
@@ -359,9 +360,11 @@ def test_block_assembler_external_execution_result_completes_tool_result_blocks(
         state=ToolResultState.SUCCESS,
     )
 
+    ingress = external_tool_result_ingress_fact(result)
     external_result = ExternalExecutionResultEvent(
         **CTX.event_fields(),
-        external_results=(external_tool_result_ingress_fact(result),),
+        external_results=(ingress,),
+        terminal_projections=external_terminal_projection_references((ingress,)),
         sequence=10,
     )
     update = assembler.append(external_result)

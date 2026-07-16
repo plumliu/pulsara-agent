@@ -303,7 +303,7 @@ V1 明确不做：
 
 ### 2.1 ModelProfile 的 limits 可空
 
-当前 [llm/models.py](src/pulsara_agent/llm/models.py) 中：
+当前 [llm/models.py](../src/pulsara_agent/llm/models.py) 中：
 
 ~~~python
 context_window: int | None = None
@@ -320,7 +320,7 @@ max_output_tokens: int | None = None
 
 ### 2.2 LLMConfig 根本不解析 limits
 
-当前 [llm/config.py](src/pulsara_agent/llm/config.py) 的 LLMConfig.from_env() 只解析：
+当前 [llm/config.py](../src/pulsara_agent/llm/config.py) 的 LLMConfig.from_env() 只解析：
 
 - API key；
 - base URL；
@@ -372,7 +372,7 @@ severity 是 warning。
 
 ### 2.5 AgentRuntime 的 pressure/failed fact 再次写死
 
-当前 [runtime/agent.py](src/pulsara_agent/runtime/agent.py) 在 ContextBudgetExceeded 分支构造 pressure/failed ContextCompiledEvent 时再次写：
+当前 [runtime/agent.py](../src/pulsara_agent/runtime/agent.py) 在 ContextBudgetExceeded 分支构造 pressure/failed ContextCompiledEvent 时再次写：
 
 - context_window_tokens=256000；
 - reserved_output_tokens=8000。
@@ -381,7 +381,7 @@ severity 是 warning。
 
 ### 2.6 LLMRuntime 二次解析模型
 
-当前 [llm/runtime.py](src/pulsara_agent/llm/runtime.py) 的 stream() 接收 role/options，然后：
+当前 [llm/runtime.py](../src/pulsara_agent/llm/runtime.py) 的 stream() 接收 role/options，然后：
 
 ~~~text
 config.model_for(role)
@@ -426,7 +426,7 @@ compiler 不持有这个结果。两层没有结构保证使用同一：
 
 ### 2.9 Compaction 使用另一套静态预算
 
-当前 [runtime/compaction/service.py](src/pulsara_agent/runtime/compaction/service.py) 的 ContextCompactionPolicy 含：
+当前 [runtime/compaction/service.py](../src/pulsara_agent/runtime/compaction/service.py) 的 ContextCompactionPolicy 含：
 
 - context_window_tokens=256000；
 - auto_threshold_tokens=200000；
