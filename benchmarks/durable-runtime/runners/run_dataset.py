@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
@@ -36,8 +37,13 @@ from dataset_contract import (  # noqa: E402
     recompute_case_contract_fingerprint,
     select_case_kind,
 )
+from context_journal import (  # noqa: E402
+    ContextResultJournal,
+    ContextSuiteJournal,
+)
 from network_guard import external_network_guard  # noqa: E402
 from postgres_sandbox import PostgresTemplateDatabaseSandbox  # noqa: E402
+from progress import BenchmarkProgressReporter  # noqa: E402
 from result_contract import (  # noqa: E402
     BenchmarkEnvironmentFact,
     BenchmarkCaseAggregateFact,
@@ -86,6 +92,15 @@ _EXECUTABLE_CONTEXT_SCENARIO_IDS = frozenset(
     }
 )
 _DEFAULT_CONTEXT_SCENARIO_ID = "long-plan-prefix-growth"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextBenchmarkRunResult:
+    scenario_id: str
+    output_path: Path
+    summary_path: Path
+    summary: BenchmarkRunSummaryFact
+    wall_seconds: float
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -249,6 +264,72 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="context sample JSONL output path",
     )
+    context_benchmark.add_argument(
+        "--progress-log",
+        type=Path,
+        default=None,
+        help="optional operational progress JSONL path",
+    )
+    context_benchmark.add_argument(
+        "--replace-incomplete",
+        action="store_true",
+        help="delete stale in-progress files for this output before rerunning",
+    )
+
+    context_suite = subparsers.add_parser(
+        "benchmark-context-suite",
+        help="run all deterministic context scenarios serially",
+    )
+    context_suite.set_defaults(
+        group="context",
+        scenario=[],
+        case_kind="production_valid",
+    )
+    context_suite.add_argument(
+        "--scenario",
+        action="append",
+        default=[],
+        help="optional scenario subset; repeatable; defaults to all six",
+    )
+    context_suite.add_argument(
+        "--postgres-dsn",
+        default=os.getenv("PULSARA_POSTGRES_DSN", ""),
+        help="loopback/Unix-socket PostgreSQL DSN",
+    )
+    context_suite.add_argument(
+        "--postgres-admin-dsn",
+        default=os.getenv("PULSARA_BENCHMARK_POSTGRES_ADMIN_DSN", ""),
+        help="local CREATEDB-capable DSN used only for clone/drop",
+    )
+    context_suite.add_argument(
+        "--template-database",
+        default=None,
+        help="clean schema database cloned before every sample",
+    )
+    context_suite.add_argument(
+        "--diagnostic-warmup-iterations",
+        type=_non_negative_integer,
+        default=None,
+        help="override warmups; suite results are not production eligible",
+    )
+    context_suite.add_argument(
+        "--diagnostic-measured-iterations",
+        type=_positive_integer,
+        default=None,
+        help="override samples; suite results are not production eligible",
+    )
+    context_suite.add_argument(
+        "--output-directory",
+        type=Path,
+        required=True,
+        help="repository-external directory for scenario results and journals",
+    )
+    context_suite.add_argument(
+        "--progress-log",
+        type=Path,
+        default=None,
+        help="operational progress JSONL; defaults inside output directory",
+    )
     return parser
 
 
@@ -260,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         selected_scenario_ids = frozenset(args.scenario)
         if args.command == "benchmark-context" and not selected_scenario_ids:
             selected_scenario_ids = frozenset({_DEFAULT_CONTEXT_SCENARIO_ID})
+        if args.command == "benchmark-context-suite" and not selected_scenario_ids:
+            selected_scenario_ids = _EXECUTABLE_CONTEXT_SCENARIO_IDS
         scenarios = manifest.select(
             group=args.group,
             scenario_ids=selected_scenario_ids,
@@ -333,9 +416,28 @@ def main(argv: list[str] | None = None) -> int:
                     args.diagnostic_measured_iterations
                 ),
                 output=args.output,
+                progress_log=args.progress_log,
+                replace_incomplete=args.replace_incomplete,
             )
             return 0
-    except DatasetContractError as error:
+        if args.command == "benchmark-context-suite":
+            _run_context_suite(
+                manifest=manifest,
+                cases=cases,
+                postgres_dsn=args.postgres_dsn,
+                postgres_admin_dsn=args.postgres_admin_dsn,
+                template_database=args.template_database,
+                diagnostic_warmup_iterations=(
+                    args.diagnostic_warmup_iterations
+                ),
+                diagnostic_measured_iterations=(
+                    args.diagnostic_measured_iterations
+                ),
+                output_directory=args.output_directory,
+                progress_log=args.progress_log,
+            )
+            return 0
+    except (DatasetContractError, FileExistsError) as error:
         parser.error(str(error))
     raise AssertionError("unreachable command")
 
@@ -716,6 +818,143 @@ def _run_writer_benchmark(
     print("status=valid")
 
 
+def _run_context_suite(
+    *,
+    manifest,
+    cases: tuple[ResolvedBenchmarkCase, ...],
+    postgres_dsn: str,
+    postgres_admin_dsn: str,
+    template_database: str | None,
+    diagnostic_warmup_iterations: int | None,
+    diagnostic_measured_iterations: int | None,
+    output_directory: Path,
+    progress_log: Path | None,
+) -> None:
+    if not postgres_dsn.strip():
+        raise DatasetContractError(
+            "benchmark-context-suite requires --postgres-dsn or "
+            "PULSARA_POSTGRES_DSN"
+        )
+    if not cases:
+        raise DatasetContractError("benchmark-context-suite selected no cases")
+    scenario_ids = tuple(sorted({case.scenario_id for case in cases}))
+    if not set(scenario_ids) <= _EXECUTABLE_CONTEXT_SCENARIO_IDS:
+        raise DatasetContractError(
+            "context suite includes a scenario without a production adapter"
+        )
+    formal_run = (
+        diagnostic_warmup_iterations is None
+        and diagnostic_measured_iterations is None
+    )
+    if formal_run and set(scenario_ids) != _EXECUTABLE_CONTEXT_SCENARIO_IDS:
+        raise DatasetContractError(
+            "formal context suite must include all executable scenarios"
+        )
+    environment = capture_benchmark_environment(
+        repo_root=REPO_ROOT,
+        runner_build_fingerprint=_runner_build_fingerprint(),
+        postgres_dsn=postgres_dsn,
+    )
+    if formal_run and environment.git.dirty:
+        raise DatasetContractError(
+            "formal context suite requires a clean Git worktree"
+        )
+    output_root = _repository_external_output_directory(output_directory)
+    if output_root.exists() and any(output_root.iterdir()):
+        raise FileExistsError(
+            f"context suite output directory is not empty: {output_root}"
+        )
+    output_root.mkdir(parents=True, exist_ok=True)
+    actual_progress_log = (
+        progress_log.expanduser().resolve()
+        if progress_log is not None
+        else output_root / "context-suite-progress.jsonl"
+    )
+    _require_repository_external_path(actual_progress_log)
+    grouped = {
+        scenario_id: tuple(
+            case for case in cases if case.scenario_id == scenario_id
+        )
+        for scenario_id in scenario_ids
+    }
+    total_trajectories = sum(
+        _context_trajectory_count(
+            scenario_cases,
+            diagnostic_warmup_iterations=diagnostic_warmup_iterations,
+            diagnostic_measured_iterations=diagnostic_measured_iterations,
+        )
+        for scenario_cases in grouped.values()
+    )
+    reporter = BenchmarkProgressReporter(
+        total_trajectories=total_trajectories,
+        jsonl_path=actual_progress_log,
+    )
+    suite_journal = ContextSuiteJournal(
+        output_directory=output_root,
+        dataset_id=manifest.dataset_id,
+        manifest_contract_fingerprint=(
+            manifest.manifest_contract_fingerprint
+        ),
+        git_commit=environment.git.commit,
+        expected_scenario_ids=scenario_ids,
+        total_trajectories=total_trajectories,
+    )
+    started = perf_counter()
+    try:
+        for scenario_id in scenario_ids:
+            output_path = (
+                output_root
+                / f"{scenario_id}-{environment.git.commit[:8]}.jsonl"
+            )
+            result = _run_context_benchmark(
+                manifest=manifest,
+                cases=grouped[scenario_id],
+                postgres_dsn=postgres_dsn,
+                postgres_admin_dsn=postgres_admin_dsn,
+                template_database=template_database,
+                diagnostic_warmup_iterations=(
+                    diagnostic_warmup_iterations
+                ),
+                diagnostic_measured_iterations=(
+                    diagnostic_measured_iterations
+                ),
+                output=output_path,
+                progress_log=None,
+                replace_incomplete=False,
+                progress_reporter=reporter,
+            )
+            suite_journal.scenario_completed(
+                scenario_id=scenario_id,
+                output_file=result.output_path.name,
+                summary_file=result.summary_path.name,
+                summary_file_sha256=(
+                    f"sha256:{sha256(result.summary_path.read_bytes()).hexdigest()}"
+                ),
+                benchmark_run_id=result.summary.benchmark_run_id,
+                sample_count=result.summary.sample_count,
+                raw_sample_vector_sha256=(
+                    result.summary.raw_sample_vector_sha256
+                ),
+                measurement_contract_adhered=(
+                    result.summary.measurement_contract_adhered
+                ),
+                production_acceptance_passed=(
+                    result.summary.production_acceptance_passed
+                ),
+            )
+        suite_journal.finalize()
+    except BaseException as error:
+        suite_journal.mark_failed(error)
+        raise
+    print(f"scenario_count={len(scenario_ids)}")
+    print(f"total_trajectories={total_trajectories}")
+    print(f"wall_seconds={perf_counter() - started:.6f}")
+    print(f"output_directory={output_root}")
+    print(f"progress_log={actual_progress_log}")
+    print(f"suite_summary={suite_journal.summary_path}")
+    print("status=valid")
+
+
 def _run_context_benchmark(
     *,
     manifest,
@@ -726,7 +965,10 @@ def _run_context_benchmark(
     diagnostic_warmup_iterations: int | None,
     diagnostic_measured_iterations: int | None,
     output: Path,
-) -> None:
+    progress_log: Path | None,
+    replace_incomplete: bool,
+    progress_reporter: BenchmarkProgressReporter | None = None,
+) -> ContextBenchmarkRunResult:
     if not postgres_dsn.strip():
         raise DatasetContractError(
             "benchmark-context requires --postgres-dsn or PULSARA_POSTGRES_DSN"
@@ -812,128 +1054,144 @@ def _run_context_benchmark(
         runner_build_fingerprint=_runner_build_fingerprint(),
         postgres_dsn=postgres_dsn,
     )
+    owns_reporter = progress_reporter is None
+    reporter = progress_reporter or BenchmarkProgressReporter(
+        total_trajectories=(warmups + measured) * len(cases),
+        jsonl_path=progress_log,
+    )
+    journal = ContextResultJournal(
+        output_path=output_path,
+        benchmark_run_id=benchmark_run_id,
+        scenario_id=scenario_id,
+        expected_rows=measured * len(cases),
+        git_commit=environment.git.commit,
+        replace_incomplete=replace_incomplete,
+    )
     sample_rows: list[ContextBenchmarkSampleResultFact] = []
     sample_ordinal = 0
     database_ordinal = 0
     started = perf_counter()
-    with external_network_guard(), tempfile.TemporaryDirectory(
-        prefix="pulsara-durable-context-"
-    ) as workspace:
-        workspace_root = Path(workspace)
-        for phase, iteration_count in (
-            ("warmup", warmups),
-            ("measured", measured),
-        ):
-            for matrix_iteration in range(iteration_count):
-                for case in _rotated_cases(cases, matrix_iteration):
-                    sandbox = PostgresTemplateDatabaseSandbox(
-                        application_dsn=postgres_dsn,
-                        admin_dsn=admin_dsn,
-                        template_database=template,
-                        benchmark_run_id=benchmark_run_id,
-                        case_contract_fingerprint=(
-                            case.case_contract_fingerprint
-                        ),
-                        iteration=database_ordinal,
-                    )
-                    database_ordinal += 1
-                    with sandbox as iteration_database:
-                        try:
-                            observation = asyncio.run(
-                                run_context_preparation_sample(
-                                    scenario=scenario,
-                                    execution_case=(
-                                        case.execution_case
-                                        if isinstance(
-                                            scenario,
-                                            CheckpointRebaseRestartScenario,
-                                        )
-                                        else None
-                                    ),
-                                    mode=case.mode,
-                                    dsn=iteration_database.dsn,
-                                    workspace_root=workspace_root,
-                                    sample_identity=(
-                                        f"{benchmark_run_id}:{phase}:"
-                                        f"{matrix_iteration}:{case.case_key}"
-                                    ),
-                                )
-                            )
-                        finally:
-                            from pulsara_agent.event_log.postgres_pool import (
-                                close_postgres_event_pool,
-                            )
-
-                            close_postgres_event_pool(iteration_database.dsn)
-                    if phase == "warmup":
-                        continue
-                    semantic_grade = _grade_context_observation(
-                        case=case,
-                        observation=observation,
-                    )
-                    sample_rows.append(
-                        _context_sample_result(
-                            benchmark_run_id=benchmark_run_id,
-                            case=case,
-                            observation=observation,
-                            semantic_grade=semantic_grade,
-                            sample_ordinal=sample_ordinal,
+    try:
+        with external_network_guard(), tempfile.TemporaryDirectory(
+            prefix="pulsara-durable-context-"
+        ) as workspace:
+            workspace_root = Path(workspace)
+            for phase, iteration_count in (
+                ("warmup", warmups),
+                ("measured", measured),
+            ):
+                for matrix_iteration in range(iteration_count):
+                    for case in _rotated_cases(cases, matrix_iteration):
+                        token = reporter.start(
+                            scenario_id=scenario_id,
+                            case_id=case.case_key,
+                            mode=case.mode,
+                            phase=phase,
                             matrix_iteration=matrix_iteration,
-                            configured_warmup_iterations=(
-                                configured_warmups
-                            ),
-                            configured_measured_iterations=(
-                                configured_measured
-                            ),
-                            measurement_contract_adhered=(
-                                measurement_contract_adhered
-                            ),
-                            environment=environment,
                         )
-                    )
-                    sample_ordinal += 1
-    encoded_rows = b"".join(
-        (
-            json.dumps(
-                row.model_dump(mode="json"),
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n"
-        ).encode("utf-8")
-        for row in sample_rows
-    )
-    output_path.write_bytes(encoded_rows)
-    summary = BenchmarkRunSummaryFact(
-        schema_version="pulsara.durable-runtime.run-summary.v1",
-        benchmark_run_id=benchmark_run_id,
-        dataset_id=manifest.dataset_id,
-        manifest_contract_fingerprint=(
-            manifest.manifest_contract_fingerprint
-        ),
-        scenario_id=scenario_id,
-        case_contract_fingerprints=tuple(
-            case.case_contract_fingerprint for case in cases
-        ),
-        sample_count=len(sample_rows),
-        raw_sample_vector_sha256=(
-            f"sha256:{sha256(encoded_rows).hexdigest()}"
-        ),
-        percentile_contract="nearest_rank_v1",
-        case_aggregates=_aggregate_context_samples(sample_rows),
-        measurement_contract_adhered=measurement_contract_adhered,
-        production_acceptance_passed=(
-            measurement_contract_adhered
-            and all(row.production_acceptance_eligible for row in sample_rows)
-        ),
-        counterfactual_samples_excluded=True,
-        environment=environment,
-    )
-    summary_path = output_path.with_suffix(output_path.suffix + ".summary.json")
-    summary_path.write_text(
-        json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2),
-        encoding="utf-8",
-    )
+                        try:
+                            sandbox = PostgresTemplateDatabaseSandbox(
+                                application_dsn=postgres_dsn,
+                                admin_dsn=admin_dsn,
+                                template_database=template,
+                                benchmark_run_id=benchmark_run_id,
+                                case_contract_fingerprint=(
+                                    case.case_contract_fingerprint
+                                ),
+                                iteration=database_ordinal,
+                            )
+                            database_ordinal += 1
+                            with sandbox as iteration_database:
+                                try:
+                                    observation = asyncio.run(
+                                        run_context_preparation_sample(
+                                            scenario=scenario,
+                                            execution_case=(
+                                                case.execution_case
+                                                if isinstance(
+                                                    scenario,
+                                                    CheckpointRebaseRestartScenario,
+                                                )
+                                                else None
+                                            ),
+                                            mode=case.mode,
+                                            dsn=iteration_database.dsn,
+                                            workspace_root=workspace_root,
+                                            sample_identity=(
+                                                f"{benchmark_run_id}:{phase}:"
+                                                f"{matrix_iteration}:"
+                                                f"{case.case_key}"
+                                            ),
+                                        )
+                                    )
+                                finally:
+                                    from pulsara_agent.event_log.postgres_pool import (
+                                        close_postgres_event_pool,
+                                    )
+
+                                    close_postgres_event_pool(
+                                        iteration_database.dsn
+                                    )
+                            if phase == "measured":
+                                semantic_grade = _grade_context_observation(
+                                    case=case,
+                                    observation=observation,
+                                )
+                                row = _context_sample_result(
+                                    benchmark_run_id=benchmark_run_id,
+                                    case=case,
+                                    observation=observation,
+                                    semantic_grade=semantic_grade,
+                                    sample_ordinal=sample_ordinal,
+                                    matrix_iteration=matrix_iteration,
+                                    configured_warmup_iterations=(
+                                        configured_warmups
+                                    ),
+                                    configured_measured_iterations=(
+                                        configured_measured
+                                    ),
+                                    measurement_contract_adhered=(
+                                        measurement_contract_adhered
+                                    ),
+                                    environment=environment,
+                                )
+                                journal.append(row.model_dump(mode="json"))
+                                sample_rows.append(row)
+                                sample_ordinal += 1
+                            reporter.passed(token)
+                        except BaseException as error:
+                            reporter.failed(token, error)
+                            raise
+        summary = BenchmarkRunSummaryFact(
+            schema_version="pulsara.durable-runtime.run-summary.v1",
+            benchmark_run_id=benchmark_run_id,
+            dataset_id=manifest.dataset_id,
+            manifest_contract_fingerprint=(
+                manifest.manifest_contract_fingerprint
+            ),
+            scenario_id=scenario_id,
+            case_contract_fingerprints=tuple(
+                case.case_contract_fingerprint for case in cases
+            ),
+            sample_count=len(sample_rows),
+            raw_sample_vector_sha256=journal.raw_sample_vector_sha256,
+            percentile_contract="nearest_rank_v1",
+            case_aggregates=_aggregate_context_samples(sample_rows),
+            measurement_contract_adhered=measurement_contract_adhered,
+            production_acceptance_passed=(
+                measurement_contract_adhered
+                and all(
+                    row.production_acceptance_eligible for row in sample_rows
+                )
+            ),
+            counterfactual_samples_excluded=True,
+            environment=environment,
+        )
+        journal.finalize(summary.model_dump(mode="json"))
+    except BaseException as error:
+        journal.mark_failed(error)
+        raise
+    wall_seconds = perf_counter() - started
     print(f"benchmark_run_id={benchmark_run_id}")
     print(f"scenario_id={scenario_id}")
     print(f"modes={len(cases)}")
@@ -941,10 +1199,59 @@ def _run_context_benchmark(
     print(f"measured_iterations={measured}")
     print(f"sample_rows={len(sample_rows)}")
     print(f"measurement_contract_adhered={measurement_contract_adhered}")
-    print(f"wall_seconds={perf_counter() - started:.6f}")
-    print(f"output={output_path}")
-    print(f"summary={summary_path}")
+    print(f"wall_seconds={wall_seconds:.6f}")
+    print(f"output={journal.output_path}")
+    print(f"summary={journal.summary_path}")
+    if owns_reporter and progress_log is not None:
+        print(f"progress_log={progress_log.expanduser().resolve()}")
     print("status=valid")
+    return ContextBenchmarkRunResult(
+        scenario_id=scenario_id,
+        output_path=journal.output_path,
+        summary_path=journal.summary_path,
+        summary=summary,
+        wall_seconds=wall_seconds,
+    )
+
+
+def _context_trajectory_count(
+    cases: tuple[ResolvedBenchmarkCase, ...],
+    *,
+    diagnostic_warmup_iterations: int | None,
+    diagnostic_measured_iterations: int | None,
+) -> int:
+    if not cases:
+        raise DatasetContractError("context trajectory count requires cases")
+    configured_warmups = cases[0].warmup_iterations
+    configured_measured = cases[0].measured_iterations
+    warmups = (
+        configured_warmups
+        if diagnostic_warmup_iterations is None
+        else diagnostic_warmup_iterations
+    )
+    measured = (
+        configured_measured
+        if diagnostic_measured_iterations is None
+        else diagnostic_measured_iterations
+    )
+    return (warmups + measured) * len(cases)
+
+
+def _repository_external_output_directory(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    _require_repository_external_path(resolved)
+    return resolved
+
+
+def _require_repository_external_path(path: Path) -> None:
+    resolved = path.expanduser().resolve()
+    try:
+        resolved.relative_to(REPO_ROOT)
+    except ValueError:
+        return
+    raise DatasetContractError(
+        "context suite outputs must remain outside the Git worktree"
+    )
 
 
 def _context_sample_result(

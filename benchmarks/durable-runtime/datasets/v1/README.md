@@ -168,6 +168,48 @@ uv run python benchmarks/durable-runtime/runners/run_dataset.py \
   --output .benchmarks/incremental-context-diagnostic.jsonl
 ```
 
+Long context runs emit one bounded `START`, `PASS`, or `FAIL` progress record
+per trajectory. Human-readable progress goes to stderr. `--progress-log`
+optionally records the same operational facts as JSONL. Progress records are
+outside the measured context timers and never enter EventLog, manifest,
+provider payload, or production acceptance identity.
+
+Every measured row is fsync-appended to:
+
+```text
+<output-stem>.inprogress.jsonl
+```
+
+The runner atomically updates a sibling progress manifest after each accepted
+row. The final JSONL and summary are published only after the expected measured
+row count and raw-vector hash both match. A failed run retains the in-progress
+row journal and failure manifest for inspection, but neither can pass
+production acceptance. Formal baselines do not resume from that journal;
+reruns use a new output path or an explicit `--replace-incomplete`.
+
+Run all six context scenario families serially with:
+
+```bash
+uv run python benchmarks/durable-runtime/runners/run_dataset.py \
+  benchmark-context-suite \
+  --template-database pulsara \
+  --output-directory /tmp/pulsara-context-baseline-$(git rev-parse --short HEAD)
+```
+
+The suite coordinator:
+
+- requires an output directory outside the Git worktree;
+- captures and checks the clean Git identity before creating result files;
+- runs all 14 mode/case combinations and 322 trajectories serially;
+- writes `context-suite-progress.jsonl`;
+- keeps one crash journal per scenario;
+- publishes `context-suite.summary.json` only after every scenario completes.
+
+Repository-external output is required because writing the first scenario into
+the repository would make later scenario environments report `git.dirty=true`.
+After the complete suite validates, its directory can be moved into
+`benchmarks/durable-runtime/baselines/` and committed.
+
 Parallel functional smoke runs may share one PostgreSQL server, but final
 latency baselines must run serially or use one
 PostgreSQL instance per worker. Separate databases in one server still share

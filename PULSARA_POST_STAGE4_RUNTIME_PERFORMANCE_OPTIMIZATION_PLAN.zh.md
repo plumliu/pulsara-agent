@@ -811,6 +811,26 @@ uv run python benchmarks/durable-runtime/runners/run_dataset.py \
 - `logical_semantic_batch_count`与`logical_model_commit_count`是commit-port调用数，不冒充物理transaction数；
 - `postgres_cluster_wal_lsn_delta_bytes`只作diagnostic，不进入acceptance。
 
+长时间context baseline必须使用trajectory级operational progress：
+
+- 每条trajectory只在计时区间外写一条`START`与一条`PASS`或`FAIL`；
+- progress只进入stderr和可选外部JSONL，不进入EventLog、manifest、provider payload或semantic fingerprint；
+- 日志保存scenario、mode、phase、iteration、累计进度、trajectory wall与ETA；
+- failure只保存稳定异常类型与bounded reason code，不写raw exception正文。
+
+每个measured context sample通过grader后必须立即fsync到
+`<output-stem>.inprogress.jsonl`，并原子更新progress manifest。只有expected row count、连续sample ordinal和raw-vector hash全部通过后，
+才能将journal原子rename为最终JSONL并发布summary。失败journal只供检查，不授权正式baseline自动resume。
+
+六个context scenario使用串行`benchmark-context-suite`统一编排：
+
+- 默认覆盖14个mode/case、322条trajectory；
+- suite output directory必须位于Git worktree之外；
+- 正式运行在创建输出前检查`git.dirty=false`；
+- 每个scenario拥有独立结果journal，suite拥有独立progress log与suite journal；
+- 全部scenario完成后才发布`context-suite.summary.json`；
+- 完成后再将整个suite目录移动到仓库baseline目录并单独提交。
+
 2026-07-16的单次diagnostic wiring结果不是正式baseline，但证明adapter已走通真实：
 
 ```text

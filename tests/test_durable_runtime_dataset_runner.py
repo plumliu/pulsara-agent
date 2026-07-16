@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from io import StringIO
 from pathlib import Path
 import subprocess
 import sys
@@ -349,6 +350,23 @@ def test_context_benchmark_command_is_serial_and_mode_selectable() -> None:
     assert "--mode" in completed.stdout
     assert "--diagnostic-warmup-iterations" in completed.stdout
     assert "--diagnostic-measured-iterations" in completed.stdout
+    assert "--progress-log" in completed.stdout
+    assert "--replace-incomplete" in completed.stdout
+    assert "--jobs" not in completed.stdout
+
+
+def test_context_suite_command_is_serial_and_repository_external() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(RUNNER), "benchmark-context-suite", "--help"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--output-directory" in completed.stdout
+    assert "--progress-log" in completed.stdout
+    assert "--replace-incomplete" not in completed.stdout
     assert "--jobs" not in completed.stdout
 
 
@@ -368,6 +386,222 @@ def test_all_context_scenarios_have_production_adapters() -> None:
     }
 
     assert context_ids == set(_EXECUTABLE_CONTEXT_SCENARIO_IDS)
+
+
+def test_context_suite_contract_expands_to_322_trajectories() -> None:
+    sys.path.insert(0, str(RUNNER.parent))
+    from dataset_contract import (  # noqa: PLC0415
+        expand_benchmark_cases,
+        load_dataset_manifest,
+        select_case_kind,
+    )
+    from run_dataset import (  # noqa: PLC0415
+        DEFAULT_MANIFEST,
+        _context_trajectory_count,
+    )
+
+    manifest = load_dataset_manifest(DEFAULT_MANIFEST)
+    scenarios = manifest.select(
+        group="context",
+        scenario_ids=frozenset(),
+    )
+    cases = select_case_kind(
+        expand_benchmark_cases(manifest, scenarios),
+        case_kind="production_valid",
+    )
+
+    assert _context_trajectory_count(
+        cases,
+        diagnostic_warmup_iterations=None,
+        diagnostic_measured_iterations=None,
+    ) == 322
+
+
+def test_context_progress_reporter_emits_bounded_text_and_jsonl(
+    tmp_path: Path,
+) -> None:
+    sys.path.insert(0, str(RUNNER.parent))
+    from progress import BenchmarkProgressReporter  # noqa: PLC0415
+
+    class Clock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = Clock()
+    stream = StringIO()
+    log_path = tmp_path / "progress.jsonl"
+    reporter = BenchmarkProgressReporter(
+        total_trajectories=2,
+        text_stream=stream,
+        jsonl_path=log_path,
+        clock=clock,
+    )
+    token = reporter.start(
+        scenario_id="scenario",
+        case_id="scenario:default:steady_state",
+        mode="steady_state",
+        phase="measured",
+        matrix_iteration=0,
+    )
+    clock.value = 5.0
+    reporter.passed(token)
+    failed = reporter.start(
+        scenario_id="scenario",
+        case_id="scenario:default:process_cold",
+        mode="process_cold",
+        phase="measured",
+        matrix_iteration=0,
+    )
+    clock.value = 7.0
+    reporter.failed(failed, RuntimeError("must not enter progress output"))
+
+    rows = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["event_kind"] for row in rows] == [
+        "trajectory_started",
+        "trajectory_passed",
+        "trajectory_started",
+        "trajectory_failed",
+    ]
+    assert rows[1]["trajectory_wall_seconds"] == 5.0
+    assert rows[1]["eta_seconds"] == 5.0
+    assert rows[-1]["error_type"] == "RuntimeError"
+    assert rows[-1]["reason_code"] == "benchmark_trajectory_failed"
+    assert "must not enter progress output" not in stream.getvalue()
+    assert "[context-baseline] PASS 1/2" in stream.getvalue()
+
+
+def test_context_result_journal_publishes_only_complete_rows(
+    tmp_path: Path,
+) -> None:
+    sys.path.insert(0, str(RUNNER.parent))
+    from context_journal import ContextResultJournal  # noqa: PLC0415
+
+    output = tmp_path / "scenario.jsonl"
+    journal = ContextResultJournal(
+        output_path=output,
+        benchmark_run_id="benchmark:test",
+        scenario_id="scenario",
+        expected_rows=2,
+        git_commit="commit:test",
+    )
+    journal.append({"sample_ordinal": 0, "value": "first"})
+    journal.append({"sample_ordinal": 1, "value": "second"})
+
+    assert output.exists() is False
+    assert journal.inprogress_path.exists()
+    progress = json.loads(journal.progress_path.read_text(encoding="utf-8"))
+    assert progress["status"] == "in_progress"
+    assert progress["completed_rows"] == 2
+
+    journal.finalize(
+        {
+            "raw_sample_vector_sha256": journal.raw_sample_vector_sha256,
+            "sample_count": 2,
+        }
+    )
+
+    assert output.exists()
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 2
+    assert journal.summary_path.exists()
+    assert journal.inprogress_path.exists() is False
+    assert journal.progress_path.exists() is False
+
+
+def test_context_result_journal_failure_remains_inspectable(
+    tmp_path: Path,
+) -> None:
+    sys.path.insert(0, str(RUNNER.parent))
+    from context_journal import ContextResultJournal  # noqa: PLC0415
+
+    output = tmp_path / "scenario.jsonl"
+    journal = ContextResultJournal(
+        output_path=output,
+        benchmark_run_id="benchmark:test",
+        scenario_id="scenario",
+        expected_rows=2,
+        git_commit="commit:test",
+    )
+    journal.append({"sample_ordinal": 0, "value": "first"})
+    journal.mark_failed(RuntimeError("raw error is not persisted"))
+
+    progress = json.loads(journal.progress_path.read_text(encoding="utf-8"))
+    assert output.exists() is False
+    assert journal.inprogress_path.exists()
+    assert progress["status"] == "failed"
+    assert progress["completed_rows"] == 1
+    assert progress["error_type"] == "RuntimeError"
+    assert progress["reason_code"] == "context_benchmark_failed"
+    assert "raw error" not in journal.progress_path.read_text(encoding="utf-8")
+
+
+def test_context_suite_journal_publishes_after_all_scenarios(
+    tmp_path: Path,
+) -> None:
+    sys.path.insert(0, str(RUNNER.parent))
+    from context_journal import ContextSuiteJournal  # noqa: PLC0415
+
+    journal = ContextSuiteJournal(
+        output_directory=tmp_path,
+        dataset_id="dataset:test",
+        manifest_contract_fingerprint="sha256:manifest",
+        git_commit="commit:test",
+        expected_scenario_ids=("first", "second"),
+        total_trajectories=4,
+    )
+    journal.scenario_completed(
+        scenario_id="first",
+        output_file="first.jsonl",
+        summary_file="first.summary.json",
+        summary_file_sha256="sha256:first-summary",
+        benchmark_run_id="benchmark:first",
+        sample_count=2,
+        raw_sample_vector_sha256="sha256:first-vector",
+        measurement_contract_adhered=True,
+        production_acceptance_passed=True,
+    )
+    assert journal.summary_path.exists() is False
+    journal.scenario_completed(
+        scenario_id="second",
+        output_file="second.jsonl",
+        summary_file="second.summary.json",
+        summary_file_sha256="sha256:second-summary",
+        benchmark_run_id="benchmark:second",
+        sample_count=2,
+        raw_sample_vector_sha256="sha256:second-vector",
+        measurement_contract_adhered=True,
+        production_acceptance_passed=True,
+    )
+    journal.finalize()
+
+    payload = json.loads(journal.summary_path.read_text(encoding="utf-8"))
+    assert journal.inprogress_path.exists() is False
+    assert payload["status"] == "completed"
+    assert payload["production_acceptance_passed"] is True
+    assert [item["scenario_id"] for item in payload["completed_scenarios"]] == [
+        "first",
+        "second",
+    ]
+
+
+def test_context_suite_output_must_remain_outside_repository(
+    tmp_path: Path,
+) -> None:
+    sys.path.insert(0, str(RUNNER.parent))
+    from dataset_contract import DatasetContractError  # noqa: PLC0415
+    from run_dataset import (  # noqa: PLC0415
+        _repository_external_output_directory,
+    )
+
+    with pytest.raises(DatasetContractError, match="outside the Git worktree"):
+        _repository_external_output_directory(
+            REPO_ROOT / "benchmarks" / "durable-runtime" / "baselines"
+        )
+    assert _repository_external_output_directory(tmp_path) == tmp_path.resolve()
 
 
 def test_writer_metric_aggregate_uses_nearest_rank_p95() -> None:
