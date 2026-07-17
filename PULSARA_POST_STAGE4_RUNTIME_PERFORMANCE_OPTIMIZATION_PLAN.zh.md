@@ -565,6 +565,12 @@ ContextSource collector、source registry或旧source ownership中间结果。
 
 ### 3.7 P2：Durable semantic delta coalescing
 
+> 2026-07-18 权威迁移：正式 deterministic `batch-16` baseline证明 `8192` source items即使达到约`99.6%` batch利用率，仍会形成`8717`条ledger events和median `20.907s` semantic commit-port wait；后续分析又确认provider delta不是token或Pulsara semantic fact的稳定边界。因此本节原先“必须先实施或否决write-behind才考虑coalescing”的顺序已被新实施规格取代：
+>
+> `PULSARA_MODEL_STREAM_DELTA_SEGMENT_COALESCING_HARD_CUT_IMPLEMENTATION.zh.md`
+>
+> 新顺序为“SEG0A先切断adapter到AgentEvent的输入协议，SEG0B冻结pure Coordinator/arbiter/segment合同，SEG1一次切换四类durable segment并重置数据库，SEG2/SEG3重测后再决定write-behind”。以下段落保留为原始决策背景，不再作为当前实施顺序真源。
+
 只有在完成：
 
 1. deterministic profiling；
@@ -2051,29 +2057,25 @@ Stage 4.5只有同时满足以下条件才完成。
 
 ## 12. 最终建议
 
+> 2026-07-18 更新：`PULSARA_MODEL_STREAM_DELTA_SEGMENT_COALESCING_HARD_CUT_IMPLEMENTATION.zh.md`已经成为model-stream writer下一步唯一实施规格。Cursor保留，但segment先消除producer fragmentation；write-behind改为segment完成后的条件分支。
+
 下一步建议暂停扩大Stage 5改动面，先实施：
 
 ```text
-DISP0 disposition persistent-NONE live retry/drain
+已完成的correctness/baseline/Cursor工作
     ->
-PERF0 deterministic typed profiling
+SEG0A adapter-private raw DTO
+    -> SEG0B pure Coordinator/arbiter/segment contracts
+    -> SEG1 durable segment hard cut + DB reset
     ->
-PERF1A semantic batching + structural grouping
-    ->
-PERF1B writer/PostgreSQL fixed-cost reduction
-    ->
-PERF1R re-measure gate
+SEG2 deterministic writer + SEG3 real dogfood re-measure
     + justified: PERF1C one-inflight write-behind
     + not justified: skip PERF1C
     ->
-PERF2A verified transcript projection cursor
-    ->
-PERF2B verified artifact hydration
-    ->
-PERF3 Stage-4-owned prepared reuse
+Stage 5 ContextSource Ownership
 ```
 
-`PERF1C`是条件分支，不是默认必做步骤。若PERF1A/PERF1B已经把durable critical path压低到目标范围，直接跳到PERF2A。
+`PERF1C`仍是条件分支，不是默认必做步骤。Segment hard cut如果已经把durable critical path压低到目标范围，直接跳过write-behind并回到Stage 5。
 
 最终如果：
 
