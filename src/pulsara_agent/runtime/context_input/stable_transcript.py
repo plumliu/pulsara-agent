@@ -67,8 +67,8 @@ from pulsara_agent.primitives.transcript_projection import (
     TranscriptToolPairLeafEntryFact,
     TranscriptToolResultLeafEntryFact,
 )
-from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
-    TranscriptProjectionDocumentRegistry,
+from pulsara_agent.runtime.authority_materialization.evidence_cursor import (
+    TranscriptProjectionDocumentResolver,
 )
 from pulsara_agent.runtime.context_input.transcript import (
     NormalizedContextTranscript,
@@ -87,7 +87,7 @@ def project_stable_context_transcript(
     current_user_anchor: str,
     projection_window: TranscriptProjectionWindowFact,
     stable_entries: tuple[TranscriptProjectionLeafEntryFact, ...],
-    documents: TranscriptProjectionDocumentRegistry,
+    documents: TranscriptProjectionDocumentResolver,
     hydrated_message_contents: tuple[NormalizedMessageContentArtifactFact, ...] = (),
     terminal_content_text_by_artifact_id: Mapping[str, str] | None = None,
     compaction_summary_text: str | None = None,
@@ -419,7 +419,7 @@ def required_terminal_content_artifacts(
     *,
     stable_entries: tuple[TranscriptProjectionLeafEntryFact, ...],
     projection_window: TranscriptProjectionWindowFact,
-    documents: TranscriptProjectionDocumentRegistry,
+    documents: TranscriptProjectionDocumentResolver,
 ) -> tuple[TerminalArtifactContentReferenceFact, ...]:
     """Return the exact content artifacts needed by the selected projection."""
 
@@ -500,7 +500,7 @@ def _message_from_entry(
     *,
     current_user_anchor: str,
     current_run_id: str,
-    documents: TranscriptProjectionDocumentRegistry,
+    documents: TranscriptProjectionDocumentResolver,
     hydrated_message_contents: Mapping[str, NormalizedMessageContentArtifactFact],
     terminal_content_texts: Mapping[str, str],
 ) -> TranscriptMessageFact:

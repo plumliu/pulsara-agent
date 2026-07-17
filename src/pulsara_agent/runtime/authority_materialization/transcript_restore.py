@@ -38,6 +38,8 @@ from pulsara_agent.primitives.authority_materialization import (
 )
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.event_log.protocol import RawStoredEventEnvelope
+from pulsara_agent.event_log.protocol import RawTranscriptDomainPrefixFact
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.runtime.authority_materialization.checkpoint import (
     TRANSCRIPT_CHECKPOINT_BUILD_CONTRACT_FINGERPRINT,
 )
@@ -52,6 +54,13 @@ from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
     TranscriptProjectionStateStore,
     projection_references,
     stable_entry_projection_references,
+)
+from pulsara_agent.runtime.authority_materialization.evidence_cursor import (
+    CheckpointCursorBaseIdentity,
+    RunSeedCursorBaseIdentity,
+    TranscriptProjectionCursorBaseIdentity,
+    ValidatedCursorSnapshotFactory,
+    raw_prefix_fingerprint,
 )
 from pulsara_agent.runtime.authority_materialization.transcript_tree import (
     TranscriptProjectionMaterializationContracts,
@@ -81,6 +90,11 @@ class RestoredTranscriptProjection:
     domain_completeness_proof: TranscriptDomainSparseReadProofFact
     semantic_delta_events: tuple[RawStoredEventEnvelope, ...]
     active_run_start: RunStartEvent | None
+    anchor_carrier_event: (
+        RunStartEvent | TranscriptProjectionCheckpointCommittedEvent | None
+    )
+    delta_before: RawTranscriptDomainPrefixFact
+    delta_after: RawTranscriptDomainPrefixFact
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +290,9 @@ def _restore_transcript_projection_locked(
         domain_completeness_proof=(restored_delta.domain_completeness_proof),
         semantic_delta_events=restored_delta.semantic_delta_events,
         active_run_start=run_start,
+        anchor_carrier_event=checkpoint or run_start,
+        delta_before=restored_delta.delta.before,
+        delta_after=restored_delta.delta.after,
     )
 
 
@@ -286,6 +303,7 @@ def restore_transcript_projection_from_base(
     runtime_session_id: str,
     requested_through_sequence: int,
     projection_base: TranscriptProjectionBaseFact,
+    frozen_anchor_identity: TranscriptProjectionCursorBaseIdentity | None = None,
     event_domain_binding: TranscriptEventDomainRegistryBinding,
     materialization_contracts: TranscriptProjectionMaterializationContracts,
     limits: AuthorityMaterializationLimits,
@@ -309,6 +327,7 @@ def restore_transcript_projection_from_base(
             runtime_session_id=runtime_session_id,
             requested_through_sequence=requested_through_sequence,
             projection_base=projection_base,
+            frozen_anchor_identity=frozen_anchor_identity,
             event_domain_binding=event_domain_binding,
             materialization_contracts=materialization_contracts,
             limits=limits,
@@ -323,6 +342,7 @@ def _restore_transcript_projection_from_base_locked(
     runtime_session_id: str,
     requested_through_sequence: int,
     projection_base: TranscriptProjectionBaseFact,
+    frozen_anchor_identity: TranscriptProjectionCursorBaseIdentity | None,
     event_domain_binding: TranscriptEventDomainRegistryBinding,
     materialization_contracts: TranscriptProjectionMaterializationContracts,
     limits: AuthorityMaterializationLimits,
@@ -351,6 +371,14 @@ def _restore_transcript_projection_from_base_locked(
         raise ValueError("transcript projection seed contract is unsupported")
 
     if isinstance(projection_base, RunSeedProjectionBaseFact):
+        anchor_carrier_event = _load_frozen_run_seed_carrier(
+            event_log=event_log,
+            runtime_session_id=runtime_session_id,
+            requested_through_sequence=requested_through_sequence,
+            projection_base=projection_base,
+            frozen_anchor_identity=frozen_anchor_identity,
+            deadline_monotonic=deadline,
+        )
         hydrated = hydrate_run_transcript_seed(
             archive=archive,
             runtime_session_id=runtime_session_id,
@@ -394,6 +422,14 @@ def _restore_transcript_projection_from_base_locked(
             != acceleration.build_contract_fingerprint
         ):
             raise ValueError("manifest transcript checkpoint candidate drifted")
+        anchor_carrier_event = event
+        _validate_frozen_checkpoint_carrier(
+            runtime_session_id=runtime_session_id,
+            requested_through_sequence=requested_through_sequence,
+            projection_base=projection_base,
+            event=event,
+            frozen_anchor_identity=frozen_anchor_identity,
+        )
         hydrated = hydrate_transcript_projection_materialization(
             archive=archive,
             runtime_session_id=runtime_session_id,
@@ -426,11 +462,17 @@ def _restore_transcript_projection_from_base_locked(
         requested_through_sequence=requested_through_sequence,
         event_domain_binding=event_domain_binding,
         limits=limits,
-        deadline_monotonic=deadline_monotonic,
+        deadline_monotonic=deadline,
         base_sequence=base_sequence,
         base_continuity=base_continuity,
         stable_state=stable_state,
         stable_entries=stable_entries,
+    )
+    _validate_frozen_anchor_base_prefix(
+        frozen_anchor_identity=frozen_anchor_identity,
+        runtime_session_id=runtime_session_id,
+        base_prefix=restored_delta.delta.before,
+        event_domain_registry_contract_fingerprint=domain_fingerprint,
     )
     return RestoredTranscriptProjection(
         base_kind=base_kind,
@@ -445,8 +487,156 @@ def _restore_transcript_projection_from_base_locked(
         semantic_source=restored_delta.semantic_source,
         domain_completeness_proof=(restored_delta.domain_completeness_proof),
         semantic_delta_events=restored_delta.semantic_delta_events,
-        active_run_start=None,
+        active_run_start=(
+            anchor_carrier_event
+            if isinstance(anchor_carrier_event, RunStartEvent)
+            else None
+        ),
+        anchor_carrier_event=anchor_carrier_event,
+        delta_before=restored_delta.delta.before,
+        delta_after=restored_delta.delta.after,
     )
+
+
+def _load_frozen_run_seed_carrier(
+    *,
+    event_log: EventLog,
+    runtime_session_id: str,
+    requested_through_sequence: int,
+    projection_base: RunSeedProjectionBaseFact,
+    frozen_anchor_identity: TranscriptProjectionCursorBaseIdentity | None,
+    deadline_monotonic: float,
+) -> RunStartEvent | None:
+    if frozen_anchor_identity is None:
+        return None
+    ValidatedCursorSnapshotFactory.validate_base_identity(frozen_anchor_identity)
+    if not isinstance(frozen_anchor_identity, RunSeedCursorBaseIdentity):
+        raise ValueError("run-seed restore received a checkpoint anchor identity")
+    common = projection_base.common
+    carrier = frozen_anchor_identity.anchor_carrier
+    if (
+        frozen_anchor_identity.runtime_session_id != runtime_session_id
+        or carrier.carrier_kind != "run_start"
+        or frozen_anchor_identity.anchor_available_from_sequence
+        != carrier.committed_sequence
+        or carrier.committed_sequence > requested_through_sequence
+        or frozen_anchor_identity.run_seed_semantic_fingerprint
+        != common.run_seed_semantic.seed_semantic_fingerprint
+        or frozen_anchor_identity.run_seed_reference_fingerprint
+        != common.run_seed_reference.reference_fingerprint
+        or frozen_anchor_identity.stable_state_semantic_fingerprint
+        != common.stable_semantic_state.state_semantic_fingerprint
+        or frozen_anchor_identity.base_ledger_through_sequence
+        != common.run_seed_reference.source_ledger_through_sequence
+        or frozen_anchor_identity.base_ledger_continuity_accumulator
+        != common.run_seed_reference.source_ledger_continuity_accumulator
+    ):
+        raise ValueError("frozen run-seed anchor identity drifted")
+    rows = event_log.read_raw_events_by_id(
+        (carrier.stable_event_identity.event_id,),
+        deadline_monotonic=deadline_monotonic,
+    )
+    if len(rows) != 1:
+        raise ValueError("frozen RunStart anchor carrier is unavailable")
+    raw = rows[0]
+    event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+    if (
+        not isinstance(event, RunStartEvent)
+        or raw.sequence != carrier.committed_sequence
+        or event.sequence != carrier.committed_sequence
+        or event.run_transcript_seed_semantic != common.run_seed_semantic
+        or event.run_transcript_seed_reference != common.run_seed_reference
+        or stable_event_identity(event, runtime_session_id=runtime_session_id)
+        != carrier.stable_event_identity
+    ):
+        raise ValueError("frozen RunStart anchor carrier identity drifted")
+    return event
+
+
+def _validate_frozen_checkpoint_carrier(
+    *,
+    runtime_session_id: str,
+    requested_through_sequence: int,
+    projection_base: CheckpointProjectionBaseFact,
+    event: TranscriptProjectionCheckpointCommittedEvent,
+    frozen_anchor_identity: TranscriptProjectionCursorBaseIdentity | None,
+) -> None:
+    if frozen_anchor_identity is None:
+        return
+    ValidatedCursorSnapshotFactory.validate_base_identity(frozen_anchor_identity)
+    if not isinstance(frozen_anchor_identity, CheckpointCursorBaseIdentity):
+        raise ValueError("checkpoint restore received a run-seed anchor identity")
+    common = projection_base.common
+    acceleration = projection_base.checkpoint_acceleration
+    materialization = projection_base.checkpoint_materialization
+    carrier = frozen_anchor_identity.anchor_carrier
+    if (
+        frozen_anchor_identity.runtime_session_id != runtime_session_id
+        or carrier.carrier_kind != "transcript_checkpoint_committed"
+        or frozen_anchor_identity.anchor_available_from_sequence
+        != carrier.committed_sequence
+        or carrier.committed_sequence > requested_through_sequence
+        or frozen_anchor_identity.checkpoint_id != acceleration.checkpoint_id
+        or frozen_anchor_identity.checkpoint_committed_event_id != event.id
+        or frozen_anchor_identity.checkpoint_committed_event_sequence
+        != event.sequence
+        or frozen_anchor_identity.checkpoint_candidate_fingerprint
+        != event.checkpoint_candidate_fingerprint
+        or frozen_anchor_identity.checkpoint_candidate_ledger_through_sequence
+        != acceleration.checkpoint_candidate_ledger_through_sequence
+        or frozen_anchor_identity.checkpoint_candidate_ledger_continuity_accumulator
+        != acceleration.checkpoint_candidate_ledger_continuity_accumulator
+        or frozen_anchor_identity.checkpoint_materialization_fingerprint
+        != materialization.materialization_fingerprint
+        or frozen_anchor_identity.previous_checkpoint_id
+        != acceleration.previous_checkpoint_id
+        or frozen_anchor_identity.ledger_materialization_generation
+        != acceleration.ledger_materialization_generation
+        or frozen_anchor_identity.consumer_horizon_revision
+        != acceleration.consumer_horizon_revision
+        or frozen_anchor_identity.checkpoint_build_contract_fingerprint
+        != acceleration.build_contract_fingerprint
+        or frozen_anchor_identity.run_seed_semantic_fingerprint
+        != common.run_seed_semantic.seed_semantic_fingerprint
+        or frozen_anchor_identity.run_seed_reference_fingerprint
+        != common.run_seed_reference.reference_fingerprint
+        or frozen_anchor_identity.stable_state_semantic_fingerprint
+        != common.stable_semantic_state.state_semantic_fingerprint
+        or frozen_anchor_identity.base_ledger_through_sequence
+        != acceleration.checkpoint_candidate_ledger_through_sequence
+        or frozen_anchor_identity.base_ledger_continuity_accumulator
+        != acceleration.checkpoint_candidate_ledger_continuity_accumulator
+        or carrier.stable_event_identity.event_id != event.id
+        or carrier.committed_sequence != event.sequence
+        or stable_event_identity(event, runtime_session_id=runtime_session_id)
+        != carrier.stable_event_identity
+    ):
+        raise ValueError("frozen checkpoint anchor carrier identity drifted")
+
+
+def _validate_frozen_anchor_base_prefix(
+    *,
+    frozen_anchor_identity: TranscriptProjectionCursorBaseIdentity | None,
+    runtime_session_id: str,
+    base_prefix: RawTranscriptDomainPrefixFact,
+    event_domain_registry_contract_fingerprint: str,
+) -> None:
+    if frozen_anchor_identity is None:
+        return
+    if (
+        frozen_anchor_identity.runtime_session_id != runtime_session_id
+        or frozen_anchor_identity.base_ledger_through_sequence
+        != base_prefix.through_sequence
+        or frozen_anchor_identity.base_ledger_continuity_accumulator
+        != base_prefix.ledger_continuity_accumulator
+        or frozen_anchor_identity.canonical_base_prefix_fingerprint
+        != raw_prefix_fingerprint(base_prefix)
+        or frozen_anchor_identity.event_domain_registry_contract_fingerprint
+        != event_domain_registry_contract_fingerprint
+        or frozen_anchor_identity.reducer_contract_fingerprint
+        != TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
+    ):
+        raise ValueError("frozen transcript anchor base prefix drifted")
 
 
 def _restore_projection_delta(

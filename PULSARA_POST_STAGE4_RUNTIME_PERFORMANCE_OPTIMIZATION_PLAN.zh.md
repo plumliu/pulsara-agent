@@ -329,7 +329,7 @@ stable entries/document/artifact的重复hydration与projection
 - projection cursor与context cache只能保存canonical reducer的可验证加速结果；
 - cursor/cache identity必须绑定base identity、through sequence、contract fingerprint与semantic accumulator；
 - cursor必须保存构造当前durable authority所需的完整delta identities，不能只保存prefix accumulator；
-- mismatch时丢弃cursor/cache并fail closed或执行现有exact restore；
+- cursor/cache-local mismatch先丢弃加速状态并执行现有exact restore；只有canonical restore/reducer仍不一致才fail closed；
 - schedule、hit/miss不得进入provider semantic fingerprint；
 - exact replay不得依赖process-local cursor/cache存在。
 
@@ -760,9 +760,11 @@ durable seconds / 1,000 stored events
 logical semantic batches / 1,000 semantic source items
 events and canonical bytes / logical semantic batch
 bookkeeping events / business events
-context evidence bytes read / new transcript-domain bytes
+context evidence logical bytes <= fixed prefix overhead + new semantic stored-envelope bytes
 context prepare seconds / model step
 ```
+
+Empty semantic delta单独要求semantic envelope rows/bytes为0且只承担bounded prefix-query overhead；不得计算bytes/0比例。
 
 #### 4.5.1 Durable Runtime Dataset V1 接线状态
 
@@ -1360,6 +1362,12 @@ Commit矩阵：
 
 ## 6. PERF2：Verified Transcript Projection Cursor
 
+> 详细实施规格：
+> `PULSARA_CONTEXT_EVIDENCE_CURSOR_PERFORMANCE_OPTIMIZATION_IMPLEMENTATION.zh.md`
+>
+> 本节保留阶段目标与性能口径；Cursor DTO、owner、same-high-water/delta-extension算法、anchor CAS、fallback、测试与
+> Definition of Done 以详细实施规格为唯一权威。
+
 ### 6.1 当前重复工作
 
 当前`prepare_projection_evidence(requested_through_sequence=H)`会：
@@ -1455,20 +1463,21 @@ Cursor至少包含：
 
 ```text
 runtime_session_id
-projection_base_identity
-projection_base_fingerprint
+stable projection anchor identity
+anchor carrier stable identity + available-from sequence
+current projection base fact
 event_domain_registry_contract_fingerprint
 reducer_contract_fingerprint
 verified_through_sequence
 prefix_semantic_event_count
 prefix_semantic_accumulator
 prefix_ledger_continuity_accumulator
-delta_identity_chunk_vector
+semantic_envelope_chunk_vector
 stable_state_fingerprint
 cursor_fingerprint
 ```
 
-`delta_identity_chunk_vector`保存完整、按canonical顺序排列的semantic delta identities；它是process-local、immutable、
+`semantic_envelope_chunk_vector`保存完整、按canonical顺序排列的semantic delta envelopes；它是process-local、immutable、
 structurally-shared persistent data structure，不是新的durable artifact或authority。
 
 每个identity至少保存：
@@ -1487,7 +1496,7 @@ envelope_fingerprint
 它必须足以原样重建当前`transcript_domain_delta_refs`与prepared semantic-envelope fingerprint序列，不能只保存event ID或单一prefix
 accumulator。
 
-Cursor不得复制：
+Cursor不得成为以下对象的第二owner：
 
 - stable transcript entries；
 - terminal projection documents；
@@ -1496,51 +1505,57 @@ Cursor不得复制：
 - manifest payload。
 
 这些仍由既有`TranscriptProjectionStateStore`与document/artifact registry拥有。Cursor只证明durable prefix并保存构造完整authority
-所必需的delta identities。
+所必需的canonical envelope chunks；V1保留完整`RawStoredEventEnvelope`，以保持现有authority/proof/manifest schema逐字段不变。
 
 Cursor key不得只使用`run_id`或`window_id`。
 
-### 6.4 Committed reducer seam 与原子快照
+Run seed与checkpoint anchor必须绑定完整committed carrier identity和`anchor_available_from_sequence`；checkpoint还绑定candidate fingerprint。
+`base_sequence <= requested H`不代表anchor已durable可用，future carrier不得回答过去high-water。
 
-每次canonical event batch `FULL` 且committed reducer成功后，通过同一seam增量推进：
+Cursor绑定完整event-domain registry fingerprint。Stage 5纯ContextSource/candidate改造不要求Cursor schema迁移。若Stage 5新增event或改变registry，
+Cursor本身仍无需迁移，但旧durable seed/checkpoint与current registry不兼容，不能靠discard + exact restore跨越。本项目开发期明确关闭旧session并reset
+PostgreSQL；未来如需保留ledger，另立registry/schema migration hard cut。Cursor guard不得反向禁止合理event演进。
+
+### 6.4 唯一 reducer 与原子 evidence snapshot
+
+`TranscriptProjectionStateStore`继续是唯一 committed transcript reducer。Cursor不得跟随每个 committed batch私自fold第二份stable/live
+state；它只在context evidence准备时，以已经由EventLog证明的delta与live reducer的exact high-water snapshot做join。
+
+State store新增单锁`evidence_snapshot()`，一次冻结：
 
 ```text
-TranscriptProjectionStateStore
-    +
-VerifiedTranscriptProjectionCursor
+live assembly state
+stable entries
+stable entries required terminal projection refs
 ```
 
-二者必须：
+不允许先读Cursor、再从不同high-water分别读取`state_store.snapshot()`与`stable_entries()`。Cursor advance使用anchor generation CAS；
+checkpoint/run-seed adoption可以使在途candidate失效，但不等待Cursor I/O。
 
-- 使用同一canonical high-water；
-- 在同一session-owned lock或单一composite state owner下推进；
-- 对外提供同一版本的atomic snapshot；
-- 不允许先读cursor、再从另一个时刻读取stable state；
-- reducer failure、sequence gap或contract mismatch时同时停止推进并fail closed。
+Anchor linearization使用独立同步`threading.RLock`，原子覆盖generation、carrier-bound anchor、Cursor、reachable artifacts、latest checkpoint与
+active context；现有async lock只保护checkpoint owner lifecycle。
 
-非transcript event只推进ledger continuity/high-water，不向delta identity vector追加元素。
+Factory首次构造执行完整vector/proof深验；production same-H与delta extension只执行private construction guard、outer root fingerprint、active
+anchor/contract/reducer high-water的`O(1)` fast validation。完整event-ID fingerprint与authority refs合并为一次必要的prefix traversal，不能为cache
+validation额外再遍历old chunks。
 
-### 6.5 PostgreSQL exact prefix API
+### 6.5 复用现有 bounded sparse read
 
-PostgreSQL每条event row已经保存prefix semantic count、semantic accumulator与ledger continuity accumulator。新增：
+不新增same-high-water PostgreSQL round trip。Cursor首次由startup/exact restore证明；ledger append-only且live reducer仍位于同一H时，same-H可直接
+复用。
+
+增量路径继续调用现有：
 
 ```python
-def read_transcript_prefix_fact_at_sequence(
-    runtime_session_id: str,
-    sequence: int,
-) -> TranscriptPrefixFact: ...
+read_transcript_domain_delta(
+    after_sequence=cursor.verified_through_sequence,
+    through_sequence=requested_through_sequence,
+    ...,
+)
 ```
 
-该API按exact sequence执行O(1) indexed read，不扫描prefix。它必须返回并验证：
-
-```text
-runtime_session_id
-through_sequence
-semantic_event_count
-semantic_accumulator
-ledger_continuity_accumulator
-event row identity/schema attribution
-```
+新增proof composition helper只接受factory签发的`ValidatedCursorUseToken`，不得平行接收base/proof/vector。它只historical-decode新delta；为保持
+现有durable proof schema，完整event-ID fingerprint与最终authority refs仍是`O(active prefix)`，但必须共享同一次traversal。
 
 ### 6.6 增量扩展
 
@@ -1552,7 +1567,8 @@ event row identity/schema attribution
 cursor.verified_through_sequence == Hnew
 ```
 
-读取`Hnew`的durable prefix fact，与cursor及stable state snapshot精确比较；一致后直接使用cursor中的完整delta identities组装authority。
+若live reducer的单锁evidence snapshot也精确位于`Hnew`，不执行PostgreSQL read；直接比较Cursor prefix、semantic source与reducer snapshot，
+再使用Cursor中的完整canonical envelope chunks组装authority。
 
 #### Cursor incremental hit
 
@@ -1570,10 +1586,9 @@ cursor.verified_through_sequence < Hnew
 
 - delta.before与cursor prefix count/accumulator完全一致；
 - delta ledger continuity before与cursor continuity一致；
-- reducer从cursor对应的stable state增量apply后得到delta.after；
-- final state与RuntimeSession committed reducer snapshot一致；
-- durable prefix fact at `Hnew`与delta.after一致；
-- 新delta identities追加到chunk vector，不重建旧chunk；
+- delta.after count/accumulator/continuity与RuntimeSession committed reducer snapshot一致；
+- 新delta envelopes追加到chunk vector，不重建旧chunk；
+- 只深验new chunks，从authenticated persistent vector root组合next root；
 - named terminal document refs可按exact IDs补充hydrate。
 
 #### Cursor落后、倒退与base mismatch
@@ -1582,24 +1597,45 @@ cursor.verified_through_sequence < Hnew
 
 - run seed改变；
 - checkpoint/rebase改变；
-- active window generation改变；
 - event-domain/reducer contract改变；
 - semantic accumulator不连续；
 - cursor payload损坏；
 - requested high-water倒退。
 
-Cursor不得猜测或静默修补。若canonical restore本身无法证明连续性，则fail closed。
+CAS失败后不能只比较new base sequence。新anchor的committed carrier sequence必须`<= requested H`；否则必须使用historical one-shot restore，
+防止未来RunStart/checkpoint carrier回答过去high-water。
+
+上述均为cursor-local mismatch：先discard并执行exact restore，不直接latch。只有canonical restore本身无法证明连续性，或canonical reducer仍不一致，
+才fail closed。
+
+若mismatch来自durable event/schema registry变化，old seed/checkpoint exact restore也必须拒绝；Stage 5按开发期hard cut执行DB reset，不能把它降级成
+普通Cursor miss。
 
 ### 6.7 Boundedness与复杂度口径
 
 Cursor owner必须：
 
-- 只保存active/recent bounded projection bases；
+- 只保存单个active bounded projection base；
 - chunk具有固定最大identity count与byte bound；
 - 通过immutable chunk结构共享旧prefix；
-- base/window/reducer contract变化时明确retire旧cursor；
+- run-seed/checkpoint base或registry/reducer contract变化时明确retire旧cursor；
 - close时可直接丢弃；
 - cursor eviction不影响replay或checkpointability。
+
+此外新增全进程唯一`CursorResidentBudgetManager`，默认限制：
+
+```text
+max resident charge bytes = 512 MiB
+max resident chunks       = 4,096
+max resident cursors      = 64
+```
+
+发布Cursor前必须resident admission。超限时按zero-borrow LRU淘汰，无法admit则继续返回本次canonical exact evidence但不缓存；不得fail closed、
+latch ledger或触发compaction。RuntimeSession/child/detached session不得各自创建budget manager。Charge覆盖payload、所有envelope identity UTF-8 bytes与
+conservative object reserves；详细算法以Cursor实施规格为准。
+
+Composition-root doctor必须证明default process budget至少可admit一个single-ledger maximal legal Cursor；physical limit或支持的Python runtime变化时
+重新校准resident charge fixture。
 
 V1只承诺：
 
@@ -1679,10 +1715,12 @@ normalized transcript
 - Long Plan的
   `transcript-projection-evidence-read` median从约19s下降至少70%；
 - Long Plan `context prepare / model step` median低于0.75s；
-- cursor hit/exact restore生成相同完整delta identities与Context Input Manifest fingerprint；
+- 同一frozen base的cursor/exact restore生成严格相同proof/delta identities、materialization-equivalent stable content与相同Context Input Manifest fingerprint；
 - cursor与stable state必须在同一high-water原子快照；
 - 删除cursor后exact replay结果不变；
-- corruption、contract drift、high-water rollback均fail closed；
+- cursor-local corruption、contract drift、high-water rollback均discard并exact restore；canonical restore失败才fail closed；
+- process resident budget始终有界，admission reject/eviction不改变canonical结果；
+- normal hit不深验old chunks，full-ID fingerprint与authority refs只有一次prefix traversal；
 - context evidence read bytes接近`O(new delta + newly referenced artifacts)`，不再接近`O(base..H)`。
 - 不把最终authority DTO构建或manifest serialization误报为`O(new delta)`。
 
@@ -1844,11 +1882,17 @@ Stage 4.5不做：
 ### PERF2A：Verified transcript projection cursor
 
 - cursor DTO与session owner；
-- structurally-shared chunked delta identity vector；
-- cursor与stable state同high-water原子推进/快照；
-- PostgreSQL exact-sequence prefix fact API；
+- run-seed/checkpoint carrier identity、available-from sequence与checkpoint candidate fingerprint；
+- 唯一validated factory：首次完整深验，normal use执行O(1) fast validation；
+- proof composition只接受factory签发的validated token；
+- structurally-shared chunked semantic envelope vector；
+- process-owned resident bytes/chunks/cursors budget、lease与LRU eviction；
+- cursor与stable state同high-water原子join/快照；
+- same-high-water零数据库读取与现有bounded sparse delta复用；
 - new-delta extension；
-- checkpoint/rebase/window invalidation；
+- run-seed/checkpoint/rebase/contract invalidation；
+- Stage 5 registry变化使用DB reset或独立migration，不由Cursor跨越；
+- frozen-base restore与inline/artifact materialization-equivalence；
 - exact restore fallback与negative tests。
 
 ### PERF2B：Verified artifact hydration cache
@@ -1913,7 +1957,7 @@ Stage 4.5不做：
 - provider terminal必须等待confirmed semantic prefix；
 - batch size改变不影响terminal projection；
 - batch schedule改变不影响control disposition；
-- cursor hit/exact restore产生相同snapshot/manifest/provider payload；
+- 同一frozen base的cursor/exact restore产生严格相同proof/delta、materialization-equivalent stable content及相同manifest/provider payload；
 - artifact cache hit/miss产生相同normalized content；
 - provider projection static cache不复用旧invocation timing；
 - manifest canonical representation复用不跳过untrusted replay validation。
@@ -1935,9 +1979,9 @@ Stage 4.5不做：
 - conditional pipeline caller detach不取消worker；
 - Host close不得越过conditional pipeline或provider physical owner；
 - cursor corrupted自动discard，canonical restore成功；
-- cursor accumulator mismatch fail closed；
-- cursor/stable-state high-water mismatch fail closed；
-- cache artifact digest mismatch fail closed；
+- cursor accumulator mismatch先discard并exact restore；canonical accumulator mismatch才fail closed；
+- cursor/stable-state high-water mismatch先discard并exact restore；canonical reducer mismatch才fail closed；
+- cache artifact digest mismatch先evict并read-confirm；canonical artifact digest mismatch才fail closed；
 - connection断线重连不重复event；
 - queue deadline、caller cancellation与Host close保持原语义；
 - benchmark metrics sink失败不影响runtime。

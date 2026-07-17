@@ -69,6 +69,11 @@ from pulsara_agent.runtime.recovery import (
     HOST_TEARDOWN_NOTE_TEXT,
     INTERRUPTED_NOTE_TEXT,
 )
+from pulsara_agent.runtime.authority_materialization.evidence_cursor import (
+    TranscriptProjectionReducerEvidenceSnapshot,
+    VerifiedTranscriptProjectionDocumentView,
+    VerifiedTranscriptProjectionDocumentViewEntry,
+)
 
 
 TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT = context_fingerprint(
@@ -137,6 +142,55 @@ class TranscriptProjectionDocumentRegistry:
         with self._lock:
             return reference.reference_fingerprint in self._documents
 
+    def freeze_references(
+        self,
+        references: tuple[TerminalProjectionReferenceFact, ...],
+    ) -> VerifiedTranscriptProjectionDocumentView:
+        """Freeze one exact immutable subset for a provider-visible preparation."""
+
+        by_fingerprint: dict[str, TerminalProjectionReferenceFact] = {}
+        with self._lock:
+            for reference in references:
+                existing = by_fingerprint.get(reference.reference_fingerprint)
+                if existing is not None and existing != reference:
+                    raise ValueError("terminal projection frozen-view reference conflict")
+                by_fingerprint[reference.reference_fingerprint] = reference
+            entries: list[VerifiedTranscriptProjectionDocumentViewEntry] = []
+            for fingerprint in sorted(by_fingerprint):
+                reference = by_fingerprint[fingerprint]
+                try:
+                    document = self._documents[fingerprint]
+                except KeyError as exc:
+                    raise ValueError(
+                        "terminal projection document was not prepared before freeze"
+                    ) from exc
+                _validate_document_reference(reference, document)
+                entries.append(
+                    VerifiedTranscriptProjectionDocumentViewEntry(
+                        reference=reference,
+                        document=document,
+                    )
+                )
+        frozen_entries = tuple(entries)
+        return VerifiedTranscriptProjectionDocumentView(
+            entries=frozen_entries,
+            reference_fingerprints=tuple(
+                item.reference.reference_fingerprint for item in frozen_entries
+            ),
+            view_fingerprint=context_fingerprint(
+                "verified-transcript-projection-document-view:v1",
+                {
+                    "ordered_entries": tuple(
+                        (
+                            item.reference.reference_fingerprint,
+                            item.document.fact_fingerprint,
+                        )
+                        for item in frozen_entries
+                    )
+                },
+            ),
+        )
+
 
 class TranscriptProjectionStateStore:
     """Pure incremental reducer with an explicit hydrated-document input port."""
@@ -164,6 +218,39 @@ class TranscriptProjectionStateStore:
     def stable_entries(self) -> tuple[TranscriptProjectionLeafEntryFact, ...]:
         with self._lock:
             return tuple(self._stable_entries)
+
+    def evidence_snapshot(self) -> TranscriptProjectionReducerEvidenceSnapshot:
+        """Freeze live state, stable entries and required documents under one lock."""
+
+        with self._lock:
+            live_state = self._snapshot_unlocked()
+            stable_entries = tuple(self._stable_entries)
+            references: list[TerminalProjectionReferenceFact] = []
+            seen: set[str] = set()
+            for reference in stable_entry_projection_references(stable_entries):
+                if reference.reference_fingerprint in seen:
+                    continue
+                seen.add(reference.reference_fingerprint)
+                references.append(reference)
+            required_references = tuple(references)
+            return TranscriptProjectionReducerEvidenceSnapshot(
+                live_state=live_state,
+                stable_entries=stable_entries,
+                required_projection_references=required_references,
+                snapshot_fingerprint=context_fingerprint(
+                    "transcript-projection-reducer-evidence-snapshot:v1",
+                    {
+                        "live_assembly_fingerprint": live_state.assembly_fingerprint,
+                        "ordered_stable_entry_fact_fingerprints": tuple(
+                            entry.fact_fingerprint for entry in stable_entries
+                        ),
+                        "ordered_required_projection_reference_fingerprints": tuple(
+                            reference.reference_fingerprint
+                            for reference in required_references
+                        ),
+                    },
+                ),
+            )
 
     def unresolved_completed_call_ids(self, run_id: str) -> tuple[str, ...]:
         """Return completed projections that still lack their durable disposition."""
@@ -1017,6 +1104,7 @@ def stable_entry_projection_references(
 __all__ = [
     "TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT",
     "TranscriptProjectionDocumentRegistry",
+    "TranscriptProjectionReducerEvidenceSnapshot",
     "TranscriptProjectionStateStore",
     "projection_references",
     "stable_entry_projection_references",
