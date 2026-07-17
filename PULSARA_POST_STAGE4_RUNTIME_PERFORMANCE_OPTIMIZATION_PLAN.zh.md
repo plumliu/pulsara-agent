@@ -824,7 +824,7 @@ uv run python benchmarks/durable-runtime/runners/run_dataset.py \
 
 六个context scenario使用串行`benchmark-context-suite`统一编排：
 
-- 默认覆盖14个mode/case、322条trajectory；
+- 默认覆盖14个mode/case、340条trajectory；各scenario保留自己的warmup/measured contract，不得用统一`14 × 23`替代真实展开；
 - suite output directory必须位于Git worktree之外；
 - 正式运行在创建输出前检查`git.dirty=false`；
 - 每个scenario拥有独立结果journal，suite拥有独立progress log与suite journal；
@@ -850,6 +850,126 @@ LLMRuntime
 | batch-16 | 514 | 26.616s | 23.020s | 8717 | 33,748,896 |
 
 三组结果的ordered semantic content与terminal projection semantic identity完全一致；每组physical settlement分别通过自身余额闭合验证，且materialization account high-water与ledger high-water一致。physical charged/bookkeeping成本允许随batch schedule变化，并作为解释性metric输出。该结果只用于证明fixture/grader有辨识力，并支持“先优化batching/固定commit成本”的优先级；正式决策仍以完整20–50次baseline为准。
+
+#### 4.5.2 正式 Writer Baseline（2026-07-16）
+
+正式production-valid writer baseline位于：
+
+```text
+benchmarks/durable-runtime/baselines/v1/
+├── model-semantic-batch-16-a2ae6726.jsonl
+└── model-semantic-batch-16-a2ae6726.jsonl.summary.json
+```
+
+环境与验收身份：
+
+```text
+Git commit                  a2ae672691818ea7fe8f164f90e83df842154e73
+Git dirty                   false
+PostgreSQL                  17.9 (Homebrew)
+Python                      CPython 3.12.12 / arm64
+warmup / measured           5 / 30
+measurement contract        adhered
+production acceptance       passed
+```
+
+同一`8192`个sanitized semantic source items、唯一production-valid `batch-16`的正式结果为：
+
+| metric | median | p95 nearest-rank | min | max |
+|---|---:|---:|---:|---:|
+| average semantic batch size | 15.942 events | 15.942 | 15.880 | 15.942 |
+| logical semantic batch count | 514 | 515 | 514 | 516 |
+| logical model commit count | 516 | 517 | 516 | 518 |
+| ledger event delta | 8,717 | 8,718 | 8,717 | 8,719 |
+| ledger events / 1,000 source items | 1,063.827 | 1,063.949 | 1,063.827 | 1,064.071 |
+| model stream wall | 24.248s | 69.482s | 19.084s | 99.337s |
+| semantic commit-port wall | 20.907s | 65.010s | 16.497s | 93.175s |
+| writer seconds / 1,000 source items | 2.552s | 7.934s | 2.013s | 11.371s |
+
+必须从该baseline冻结以下判断：
+
+1. **当前deterministic workload已经把16-event production hard bound基本填满。**
+   `15.942 / 16`约为`99.6%`利用率。对这类连续stream，仅调整`25ms`age或让producer“更耐心等待”不会显著减少logical semantic batch count；`514`已经接近当前event-count contract下的理论下界。
+2. **writer仍位于同步model-stream critical path。**
+   median semantic commit-port wall约占median model-stream wall的`86%`。该比例只说明caller等待完整commit port的墙钟成本，不能拆成纯PostgreSQL、account CAS、reducer或publication比例。
+3. **尾部抖动是真实且很大，但现有baseline不能归因。**
+   commit-port p95约为median的`3.1×`，最大值约为`4.5×`。在PERF0分段指标完成前，禁止把该尾部简单归因于WAL、连接、锁、clone database或Python调度中的任一项。
+4. **该结果不授权提高production hard bound或coalesce durable facts。**
+   若要让logical batch数下降至少`40%`，必须明确改变source event fragmentation、production hard limit或durable event schema；这些都不是“低风险参数调优”。writer-side多个logical batches合并为一次physical transaction可以降低数据库固定成本，但不会改变本表中的logical count，且需要独立physical-operation指标证明。
+5. **PERF1A的主要真实轨迹收益仍需由provider interarrival profile决定。**
+   本fixture证明full-batch路径的固定成本和正确性，不代表真实provider stream总能形成full batch。只有真实stream显示大量underfilled batch时，adaptive age/structural grouping才可能显著减少logical commits。
+
+因此，该正式baseline支持的优先级不是“先盲目增大batch”，而是：
+
+```text
+PERF0 writer内部固定成本分段
+    ->
+PERF1A 只优化真实underfilled/structural flush
+    ->
+PERF1B PostgreSQL/account固定成本
+    ->
+重新测量后再决定是否需要writer-side micro-coalescing或PERF1C
+```
+
+#### 4.5.3 正式 Context Suite Baseline（2026-07-17）
+
+完整正式context baseline位于：
+
+```text
+benchmarks/durable-runtime/baselines/v1/context-suite-7e9a484d/
+```
+
+它绑定clean Git commit `7e9a484d8f2e52545e0c9ae76d5083b24d5c723c`，串行执行：
+
+```text
+14 mode/case
+340 total trajectories
+300 measured samples
+6 / 6 scenario production acceptance passed
+0 failed trajectory
+total suite wall ≈ 12,612s（约3小时30分钟）
+```
+
+各场景`context_prepare_total_wall_seconds`是**一条完整trajectory内多个compile point的累计值**，不得误读为单次compile latency：
+
+| scenario | process-cold median / p95 | steady median / p95 | steady improvement |
+|---|---:|---:|---:|
+| artifact-heavy-tools | 13.846s / 14.477s | 12.474s / 12.637s | 9.9% |
+| incremental-active-window | 35.212s / 35.455s | 24.698s / 24.913s | 29.9% |
+| long-plan-prefix-growth | 21.311s / 21.522s | 14.551s / 14.743s | 31.7% |
+| single-long-compaction | 2.642s / 2.699s | 1.979s / 2.065s | 25.1% |
+| subagent-two-children | 11.190s / 11.269s | 8.070s / 8.195s | 27.9% |
+
+额外的checkpoint与artifact模式结果为：
+
+| case | total median | p95 | 解释 |
+|---|---:|---:|---|
+| checkpoint preferred hit | 4.117s | 4.211s | 正常checkpoint恢复路径 |
+| checkpoint process-cold/no-cache | 4.108s | 4.233s | 与preferred hit近似，差异落在噪声内 |
+| checkpoint preferred missing/rebase | 7.079s | 7.187s | 比preferred hit高约71.9%，rebase是明确固定成本 |
+| artifact verified-cache warm | 12.254s | 12.663s | 仅比普通steady-state再快约1.8% |
+
+必须从该baseline冻结以下判断：
+
+1. **pure compiler不是Stage 4.5的主要瓶颈。**
+   各case的`pure_context_compile_total_wall_seconds` median仅为`0.015s–0.215s`，约占累计context preparation的`0.2%–1.7%`。不得用AST lowering、DTO构造或pure allocation微优化替代authority/evidence I/O治理。
+2. **session-owned增量状态已经有效，但仍未消除重复preparation成本。**
+   steady-state在长前缀、active window、compaction和subagent场景中比process-cold快约`25%–32%`；这证明现有cache/store有价值，同时也说明steady-state仍保留可观的数据库/evidence成本。
+3. **PERF2A应先于PERF2B。**
+   verified artifact cache相对普通steady-state仅额外改善约`1.8%`；而`incremental-active-window`与`long-plan-prefix-growth`在steady-state仍累计消耗`24.698s`与`14.551s`。首要目标仍是verified projection cursor和new-delta evidence read，artifact hydration cache是后续增益。
+4. **rebase应保持bounded且可观测，但不是普通热路径优化的替代目标。**
+   missing/rebase比preferred hit高约`71.9%`，但p95仅比median高约`1.5%`，说明算法稳定而成本明确。除非production profile证明rebase频繁发生，否则不应优先牺牲checkpoint correctness换取该冷路径加速。
+5. **这份context baseline具有良好的重复性。**
+   14个case的p95通常只比median高`0.7%–4.6%`。它适合作为优化前后end-to-end acceptance基线，和writer baseline的高尾部形成鲜明对照。
+6. **当前suite不能单独归因evidence、artifact、PostgreSQL与CPU份额。**
+   它记录trajectory aggregate、per-point mean/max和pure compile total，但不记录每个substage分段。`transcript-projection-evidence-read`下降比例仍必须由PERF0 typed metrics证明，不能仅从end-to-end改善反推。
+
+与PERF2目标的直接关系：
+
+- `long-plan-prefix-growth` steady-state `context_prepare_mean_wall_seconds` median为约`0.766s / model step`；
+- `incremental-active-window` steady-state对应约`0.772s / model step`；
+- 两者都略高于本规格冻结的`< 0.75s`目标，因此目标仍有辨识力，但优化不得以放宽authority、replay或manifest invariant换取；
+- 优化后必须复用相同scenario/case fingerprint纪律重新跑完整suite，逐case比较raw sample vector、median、p95与semantic grader。
 
 ### 4.6 PERF0完成条件
 
@@ -1080,10 +1200,12 @@ no structural/terminal boundary
 在不改变source item数量、durable event数量和semantic fingerprint的前提下：
 
 - terminal/control/tool execution仍只消费FULL committed semantic prefix；
-- deterministic stream fixture的`logical semantic batches / 1,000 source items`至少下降40%；
+- production-valid saturated `batch-16` fixture保持average batch utilization约`99%`，logical semantic batch median不得高于正式baseline `514`，p95不得高于`515`；
+- PERF0必须另行冻结带真实interarrival/structural boundary的underfilled deterministic stream fixture；只有该fixture的baseline确认存在可合并空隙时，其`logical semantic batches / 1,000 source items`才要求至少下降40%；
 - Long Plan `durable writer waits / model call`至少下降40%；
-- Long compaction `logical semantic batches / 1,000 source items`至少下降40%；
+- Long compaction只有在PERF0证明semantic batch显著underfilled时，才要求`logical semantic batches / 1,000 source items`至少下降40%；否则改用physical writer operations、commit-port wall与durable exclusive作为验收指标；
 - deterministic PostgreSQL fixture的writer p95 queue wait与commit p95不恶化；
+- saturated `batch-16`的`semantic_commit_port_wall_seconds` median/p95必须低于正式baseline `20.907s / 65.010s`；PERF1R在看到分段数据后冻结最小改善幅度，禁止用provider stream随机波动代替writer改善；
 - first-item与UI semantic latency不超过contract上界；
 - cancellation/recovery/UNKNOWN测试保持全绿；
 - dogfood durable exclusive三次median应显著下降，但不以provider随机变快作为通过依据。
@@ -1863,7 +1985,8 @@ Stage 4.5只有同时满足以下条件才完成。
 - deterministic provider/PostgreSQL/long-ledger fixture各运行20–50次；
 - 三条dogfood各3次并报告median/range；
 - durable writer fixed-cost有分段证据；
-- logical semantic batches / 1,000 source items至少下降40%；
+- saturated `batch-16`保持logical count不回归，并降低commit-port median/p95；
+- 只有PERF0确认underfilled的deterministic/real-stream fixture，才要求logical semantic batches / 1,000 source items至少下降40%；
 - transcript evidence read median至少下降70%；
 - Long Plan context prepare / model step median低于0.75s；
 - provider first-item与UI streaming latency不越过冻结contract；
@@ -1913,7 +2036,8 @@ PERF3 Stage-4-owned prepared reuse
 ```text
 durable exclusive << provider exclusive
 context prepare / model step < 0.75s
-logical semantic batches / 1,000 source items达到冻结目标
+saturated batch-16 logical count不回归
+underfilled stream logical batches / 1,000 source items达到PERF1R冻结目标
 cursor database read/decode接近O(new delta)
 ```
 
