@@ -468,6 +468,7 @@ def _view(
         do_not_apply_when=None,
         created_at=now,
         updated_at=now,
+        node_revision=1,
         evidence_ids=(),
         outgoing=(),
         incoming=(),

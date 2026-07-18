@@ -1,0 +1,64 @@
+{
+  "schema_version": "pulsara.durable-runtime.writer-scenario.v1",
+  "scenario_id": "model-semantic-batch-matrix",
+  "seed": 451001,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "One completed 8192-delta model call coalesced by the production segment-v1 policy.",
+  "generator_contract": {
+    "generator_id": "pulsara.writer.model-semantic-batch",
+    "generator_version": "2"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.writer.model-semantic-equivalence",
+    "grader_version": "2",
+    "assertion_ids": [
+      "ordered_semantic_content_equal",
+      "terminal_projection_equal",
+      "physical_settlement_valid",
+      "accounted_writer_path_only",
+      "segment_layout_within_contract",
+      "durable_cost_acceptance"
+    ]
+  },
+  "workload": {
+    "runtime_sessions": 1,
+    "runs_per_session": 1,
+    "model_calls_per_run": 1,
+    "model_stream": {
+      "blocks": [
+        {
+          "kind": "text",
+          "block_count": 1,
+          "delta_events_per_block": 8192,
+          "characters_per_delta": 16
+        }
+      ],
+      "terminal_outcome": "completed",
+      "usage_status": "missing"
+    }
+  },
+  "execution_matrix": [
+    {
+      "case_id": "segment-v1",
+      "case_kind": "production_valid",
+      "max_business_events_per_commit": 16
+    }
+  ],
+  "production_baseline_case_id": "segment-v1",
+  "semantic_reference_case_id": "segment-v1",
+  "measurement": {
+    "warmup_iterations": 5,
+    "measured_iterations": 30,
+    "reset_mode": "fresh_runtime_session_per_iteration"
+  },
+  "invariants": [
+    "the production case produces four content-target text segments absent age pressure and no more than eight under the one-second durable age bound",
+    "the production case emits at most eight semantic commits and sixty-four total ledger events",
+    "the terminal projection preserves the complete ordered source content",
+    "every case closes its physical reservation with exact balance",
+    "no case bypasses RuntimeEventWriteService or the materialization account"
+  ]
+}

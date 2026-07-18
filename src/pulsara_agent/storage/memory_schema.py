@@ -8,6 +8,7 @@ MEMORY_SUBSTRATE_TABLES = (
     "memory_nodes",
     "memory_relations",
     "memory_write_outbox",
+    "memory_governance_event_outbox",
     "memory_search_index",
     "memory_vector_index",
     "recall_traces",
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
     do_not_apply_when TEXT,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
+    node_revision BIGINT NOT NULL DEFAULT 1 CHECK (node_revision >= 1),
     stale_after TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,
     fts TSVECTOR,
@@ -71,6 +73,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_nodes_status
 
 CREATE INDEX IF NOT EXISTS idx_memory_nodes_updated_at
     ON memory_nodes(graph_id, updated_at);
+
+ALTER TABLE memory_nodes
+    ADD COLUMN IF NOT EXISTS node_revision BIGINT NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS memory_vector_index (
     graph_id TEXT NOT NULL,
@@ -163,6 +168,27 @@ CREATE INDEX IF NOT EXISTS idx_memory_write_outbox_status
 
 CREATE INDEX IF NOT EXISTS idx_memory_write_outbox_sequence
     ON memory_write_outbox(sequence_key, created_at, outbox_id);
+
+CREATE TABLE IF NOT EXISTS memory_governance_event_outbox (
+    outbox_id TEXT PRIMARY KEY,
+    runtime_session_id TEXT NOT NULL,
+    governance_batch_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    event_ids JSONB NOT NULL,
+    events_payload JSONB NOT NULL,
+    payload_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    claim_token TEXT,
+    claimed_until TIMESTAMPTZ,
+    last_error_code TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    applied_at TIMESTAMPTZ,
+    UNIQUE (runtime_session_id, governance_batch_id, decision_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_governance_event_outbox_pending
+    ON memory_governance_event_outbox(runtime_session_id, status, created_at);
 
 CREATE TABLE IF NOT EXISTS memory_search_index (
     graph_id TEXT NOT NULL,

@@ -25,6 +25,7 @@ from pulsara_agent.runtime.publisher import (
     RuntimePublishedEvent,
 )
 from pulsara_agent.runtime.state import LoopState
+from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
 from pulsara_agent.primitives.tool_result import ToolResultExecutionSemanticsFact
 from pulsara_agent.primitives.tool_result import ToolResultStateFact
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
@@ -71,7 +72,7 @@ def build_tool_result_error_events(
     ]
     | None = None,
     existing_start: ToolResultStartEvent | None = None,
-) -> list[AgentEvent]:
+) -> list[AgentEvent | ToolResultEndCandidate]:
     if semantics is not None and semantics_factory is not None:
         raise ValueError("tool result semantics and factory are mutually exclusive")
     if existing_start is not None:
@@ -109,18 +110,18 @@ def build_tool_result_error_events(
         else semantics
         or build_unknown_result_semantics(result_state=ToolResultStateFact(state.value))
     )
-    end = ToolResultEndEvent(
+    end = ToolResultEndCandidate(
         id=f"tool_result_end:{event_context.run_id}:{tool_call_id}",
-        **event_context.event_fields(),
+        run_id=event_context.run_id,
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
         created_at=end_created_at,
+        metadata={},
         tool_call_id=tool_call_id,
         state=state,
+        artifacts=(),
         observation_timing=timing,
-        render_profile=actual_semantics.render_profile,
-        essential_capture_policy=actual_semantics.essential_capture_policy,
-        essential_result=actual_semantics.essential_result,
-        terminal_payload_timing=actual_semantics.terminal_payload_timing,
-        rollup_semantics=actual_semantics.rollup_semantics,
+        execution_semantics=actual_semantics,
     )
     return [*(() if existing_start is not None else (start,)), text, end]
 

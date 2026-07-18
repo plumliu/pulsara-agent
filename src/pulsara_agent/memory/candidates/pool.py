@@ -20,6 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pulsara_agent.event.candidates import CandidatePayload, MemoryCandidate
 from pulsara_agent.event.events import utc_now
+from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.governance_evidence import (
+    CandidateQuotedEvidenceLocatorFact,
+)
 from pulsara_agent.ontology import memory
 
 
@@ -42,6 +46,7 @@ class PooledMemoryCandidate(BaseModel):
     source_reply_id: str
     source_tool_call_id: str | None = None
     user_quote: str | None = None
+    quoted_evidence_locator: CandidateQuotedEvidenceLocatorFact | None = None
     source_event_id: str | None = None
     source_artifact_id: str | None = None
     intent_fingerprint: str | None = None
@@ -54,8 +59,10 @@ class CandidatePoolProposal(BaseModel):
 
     payload: CandidatePayload
     origin: CandidateOrigin
+    entry_id: str | None = None
     source_tool_call_id: str | None = None
     user_quote: str | None = None
+    quoted_evidence_locator: CandidateQuotedEvidenceLocatorFact | None = None
     source_event_id: str | None = None
     source_artifact_id: str | None = None
     intent_fingerprint: str | None = None
@@ -63,6 +70,7 @@ class CandidatePoolProposal(BaseModel):
 
     def to_pooled(self, *, source_session_id: str, source_run_id: str, source_turn_id: str, source_reply_id: str) -> PooledMemoryCandidate:
         return PooledMemoryCandidate(
+            **({"entry_id": self.entry_id} if self.entry_id is not None else {}),
             payload=self.payload,
             origin=self.origin,
             source_session_id=source_session_id,
@@ -71,6 +79,7 @@ class CandidatePoolProposal(BaseModel):
             source_reply_id=source_reply_id,
             source_tool_call_id=self.source_tool_call_id,
             user_quote=self.user_quote,
+            quoted_evidence_locator=self.quoted_evidence_locator,
             source_event_id=self.source_event_id,
             source_artifact_id=self.source_artifact_id,
             intent_fingerprint=self.intent_fingerprint,
@@ -186,6 +195,12 @@ class MemoryGovernanceDecisionRecord(BaseModel):
 
     decision_id: str = Field(default_factory=lambda: f"decision:{uuid4().hex}")
     governance_batch_id: str
+    batch_input_fingerprint: str
+    batch_input_reference_fingerprint: str
+    governance_model_call_id: str
+    decision_index: int = Field(ge=0, le=31)
+    requested_decision_payload_fingerprint: str
+    decision_payload_fingerprint: str
     decision: GovernanceDecision
     write_outcome: GovernanceWriteOutcome
     created_at: str = Field(default_factory=utc_now)
@@ -200,6 +215,15 @@ class CandidatePool(Protocol):
 
     def list_pending(self, *, limit: int | None = None) -> list[PooledMemoryCandidate]: ...
 
+    def evidence_rejection_event_id(self, entry_id: str) -> str | None: ...
+
+    def mark_evidence_rejected(
+        self,
+        *,
+        entry_id: str,
+        rejection_event_id: str,
+    ) -> None: ...
+
     def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord: ...
 
     def list_decisions(self) -> list[MemoryGovernanceDecisionRecord]: ...
@@ -209,6 +233,7 @@ class CandidatePool(Protocol):
 class InMemoryCandidatePool:
     _candidates: dict[str, PooledMemoryCandidate] = field(default_factory=dict)
     _decisions: list[MemoryGovernanceDecisionRecord] = field(default_factory=list)
+    _evidence_rejections: dict[str, str] = field(default_factory=dict)
 
     def append_candidate(self, candidate: PooledMemoryCandidate) -> PooledMemoryCandidate:
         if candidate.entry_id in self._candidates:
@@ -230,11 +255,31 @@ class InMemoryCandidatePool:
         pending = [
             candidate.model_copy(deep=True)
             for candidate in self._candidates.values()
-            if candidate.entry_id not in terminal and candidate.origin != CandidateOrigin.GOVERNANCE
+            if candidate.entry_id not in terminal
+            and candidate.entry_id not in self._evidence_rejections
+            and candidate.origin != CandidateOrigin.GOVERNANCE
         ]
         if limit is not None:
             return pending[:limit]
         return pending
+
+    def evidence_rejection_event_id(self, entry_id: str) -> str | None:
+        if entry_id not in self._candidates:
+            raise KeyError(entry_id)
+        return self._evidence_rejections.get(entry_id)
+
+    def mark_evidence_rejected(
+        self,
+        *,
+        entry_id: str,
+        rejection_event_id: str,
+    ) -> None:
+        if entry_id not in self._candidates:
+            raise KeyError(entry_id)
+        existing = self._evidence_rejections.get(entry_id)
+        if existing is not None and existing != rejection_event_id:
+            raise ValueError("candidate evidence rejection identity conflict")
+        self._evidence_rejections[entry_id] = rejection_event_id
 
     def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
         if any(existing.decision_id == record.decision_id for existing in self._decisions):
@@ -274,13 +319,14 @@ class PostgresCandidatePool:
                         source_reply_id,
                         source_tool_call_id,
                         user_quote,
+                        quoted_evidence_locator,
                         source_event_id,
                         source_artifact_id,
                         intent_fingerprint,
                         metadata,
                         created_at
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                     """,
                     (
                         candidate.entry_id,
@@ -292,6 +338,11 @@ class PostgresCandidatePool:
                         candidate.source_reply_id,
                         candidate.source_tool_call_id,
                         candidate.user_quote,
+                        Jsonb(
+                            candidate.quoted_evidence_locator.model_dump(mode="json")
+                            if candidate.quoted_evidence_locator is not None
+                            else None
+                        ),
                         candidate.source_event_id,
                         candidate.source_artifact_id,
                         candidate.intent_fingerprint,
@@ -315,7 +366,7 @@ class PostgresCandidatePool:
                 row = cursor.fetchone()
         if row is None:
             raise KeyError(entry_id)
-        return _candidate_from_row(row)
+        return candidate_from_storage_row(row)
 
     def list_candidates(self) -> list[PooledMemoryCandidate]:
         with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
@@ -327,19 +378,65 @@ class PostgresCandidatePool:
                     order by created_at asc, entry_id asc
                     """
                 )
-                return [_candidate_from_row(row) for row in cursor.fetchall()]
+                return [candidate_from_storage_row(row) for row in cursor.fetchall()]
 
     def list_pending(self, *, limit: int | None = None) -> list[PooledMemoryCandidate]:
         decisions = self.list_decisions()
         terminal = _terminal_entry_ids(decisions)
+        rejected = self._evidence_rejected_entry_ids()
         pending = [
             candidate
             for candidate in self.list_candidates()
-            if candidate.entry_id not in terminal and candidate.origin != CandidateOrigin.GOVERNANCE
+            if candidate.entry_id not in terminal
+            and candidate.entry_id not in rejected
+            and candidate.origin != CandidateOrigin.GOVERNANCE
         ]
         if limit is not None:
             return pending[:limit]
         return pending
+
+    def evidence_rejection_event_id(self, entry_id: str) -> str | None:
+        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select evidence_rejection_event_id
+                    from memory_candidates
+                    where entry_id = %s
+                    """,
+                    (entry_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise KeyError(entry_id)
+        value = row["evidence_rejection_event_id"]
+        return str(value) if value is not None else None
+
+    def _evidence_rejected_entry_ids(self) -> set[str]:
+        with psycopg.connect(self.dsn, row_factory=dict_row) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select entry_id
+                    from memory_candidates
+                    where evidence_rejection_event_id is not null
+                    """
+                )
+                return {str(row["entry_id"]) for row in cursor.fetchall()}
+
+    def mark_evidence_rejected(
+        self,
+        *,
+        entry_id: str,
+        rejection_event_id: str,
+    ) -> None:
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                _mark_candidate_evidence_rejected_with_cursor(
+                    cursor,
+                    entry_id=entry_id,
+                    rejection_event_id=rejection_event_id,
+                )
 
     def append_decision(self, record: MemoryGovernanceDecisionRecord) -> MemoryGovernanceDecisionRecord:
         candidate_ids = {candidate.entry_id for candidate in self.list_candidates()}
@@ -351,15 +448,27 @@ class PostgresCandidatePool:
                     insert into memory_governance_decisions (
                         decision_id,
                         governance_batch_id,
+                        batch_input_fingerprint,
+                        batch_input_reference_fingerprint,
+                        governance_model_call_id,
+                        decision_index,
+                        requested_decision_payload_fingerprint,
+                        decision_payload_fingerprint,
                         decision,
                         write_outcome,
                         created_at
                     )
-                    values (%s, %s, %s, %s, %s::timestamptz)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                     """,
                     (
                         record.decision_id,
                         record.governance_batch_id,
+                        record.batch_input_fingerprint,
+                        record.batch_input_reference_fingerprint,
+                        record.governance_model_call_id,
+                        record.decision_index,
+                        record.requested_decision_payload_fingerprint,
+                        record.decision_payload_fingerprint,
                         Jsonb(_decision_adapter.dump_python(record.decision, mode="json")),
                         Jsonb(_outcome_adapter.dump_python(record.write_outcome, mode="json")),
                         record.created_at,
@@ -377,7 +486,7 @@ class PostgresCandidatePool:
                     order by created_at asc, decision_id asc
                     """
                 )
-                return [_decision_from_row(row) for row in cursor.fetchall()]
+                return [decision_from_storage_row(row) for row in cursor.fetchall()]
 
 
 def governance_batch_context(governance_batch_id: str):
@@ -398,6 +507,24 @@ def decision_target_entry_ids(decision: GovernanceDecision) -> tuple[str, ...]:
     if isinstance(decision, SkipDecision | MergeAndSubmitDecision):
         return decision.target_entry_ids
     return (decision.target_entry_id,)
+
+
+def pooled_candidate_row_fingerprint(candidate: PooledMemoryCandidate) -> str:
+    """Fingerprint one immutable candidate-row snapshot for durable claims."""
+
+    return context_fingerprint(
+        "memory-candidate-row:v1",
+        candidate.model_dump(mode="json"),
+    )
+
+
+def candidate_payload_fingerprint(payload: CandidatePayload) -> str:
+    """Canonical semantic identity shared by producer outbox and governance."""
+
+    return context_fingerprint(
+        "memory-candidate-payload:v1",
+        _payload_adapter.dump_python(payload, mode="json"),
+    )
 
 
 def _terminal_entry_ids(decisions: Sequence[MemoryGovernanceDecisionRecord]) -> set[str]:
@@ -422,7 +549,7 @@ def _validate_decision_targets(
         raise KeyError(f"governance decision references missing candidate entries: {missing}")
 
 
-def _candidate_from_row(row: dict[str, Any]) -> PooledMemoryCandidate:
+def candidate_from_storage_row(row: dict[str, Any]) -> PooledMemoryCandidate:
     created_at = row["created_at"]
     return PooledMemoryCandidate(
         entry_id=row["entry_id"],
@@ -434,6 +561,13 @@ def _candidate_from_row(row: dict[str, Any]) -> PooledMemoryCandidate:
         source_reply_id=row["source_reply_id"],
         source_tool_call_id=row["source_tool_call_id"],
         user_quote=row["user_quote"],
+        quoted_evidence_locator=(
+            CandidateQuotedEvidenceLocatorFact.model_validate(
+                row["quoted_evidence_locator"]
+            )
+            if row.get("quoted_evidence_locator") is not None
+            else None
+        ),
         source_event_id=row.get("source_event_id"),
         source_artifact_id=row.get("source_artifact_id"),
         intent_fingerprint=row.get("intent_fingerprint"),
@@ -442,15 +576,47 @@ def _candidate_from_row(row: dict[str, Any]) -> PooledMemoryCandidate:
     )
 
 
-def _decision_from_row(row: dict[str, Any]) -> MemoryGovernanceDecisionRecord:
+def decision_from_storage_row(row: dict[str, Any]) -> MemoryGovernanceDecisionRecord:
     created_at = row["created_at"]
     return MemoryGovernanceDecisionRecord(
         decision_id=row["decision_id"],
         governance_batch_id=row["governance_batch_id"],
+        batch_input_fingerprint=row["batch_input_fingerprint"],
+        batch_input_reference_fingerprint=row[
+            "batch_input_reference_fingerprint"
+        ],
+        governance_model_call_id=row["governance_model_call_id"],
+        decision_index=row["decision_index"],
+        requested_decision_payload_fingerprint=row[
+            "requested_decision_payload_fingerprint"
+        ],
+        decision_payload_fingerprint=row["decision_payload_fingerprint"],
         decision=_decision_adapter.validate_python(row["decision"]),
         write_outcome=_outcome_adapter.validate_python(row["write_outcome"]),
         created_at=created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
     )
+
+
+def _mark_candidate_evidence_rejected_with_cursor(
+    cursor,
+    *,
+    entry_id: str,
+    rejection_event_id: str,
+) -> None:
+    cursor.execute(
+        """
+        update memory_candidates
+        set evidence_rejection_event_id = %s
+        where entry_id = %s
+          and (
+              evidence_rejection_event_id is null
+              or evidence_rejection_event_id = %s
+          )
+        """,
+        (rejection_event_id, entry_id, rejection_event_id),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("candidate evidence rejection identity conflict")
 
 
 _payload_adapter = TypeAdapter(CandidatePayload)
@@ -469,9 +635,11 @@ CREATE TABLE IF NOT EXISTS memory_candidates (
     source_reply_id TEXT NOT NULL,
     source_tool_call_id TEXT,
     user_quote TEXT,
+    quoted_evidence_locator JSONB,
     source_event_id TEXT,
     source_artifact_id TEXT,
     intent_fingerprint TEXT,
+    evidence_rejection_event_id TEXT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -488,6 +656,12 @@ ALTER TABLE memory_candidates
 ALTER TABLE memory_candidates
     ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+ALTER TABLE memory_candidates
+    ADD COLUMN IF NOT EXISTS quoted_evidence_locator JSONB;
+
+ALTER TABLE memory_candidates
+    ADD COLUMN IF NOT EXISTS evidence_rejection_event_id TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_memory_candidates_source_run
     ON memory_candidates(source_run_id, created_at);
 
@@ -501,11 +675,33 @@ CREATE INDEX IF NOT EXISTS idx_memory_candidates_session_origin_fingerprint
 CREATE TABLE IF NOT EXISTS memory_governance_decisions (
     decision_id TEXT PRIMARY KEY,
     governance_batch_id TEXT NOT NULL,
+    batch_input_fingerprint TEXT NOT NULL,
+    batch_input_reference_fingerprint TEXT NOT NULL,
+    governance_model_call_id TEXT NOT NULL,
+    decision_index INTEGER NOT NULL,
+    requested_decision_payload_fingerprint TEXT NOT NULL,
+    decision_payload_fingerprint TEXT NOT NULL,
     decision JSONB NOT NULL,
     write_outcome JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE memory_governance_decisions
+    ADD COLUMN IF NOT EXISTS batch_input_fingerprint TEXT NOT NULL;
+ALTER TABLE memory_governance_decisions
+    ADD COLUMN IF NOT EXISTS batch_input_reference_fingerprint TEXT NOT NULL;
+ALTER TABLE memory_governance_decisions
+    ADD COLUMN IF NOT EXISTS governance_model_call_id TEXT NOT NULL;
+ALTER TABLE memory_governance_decisions
+    ADD COLUMN IF NOT EXISTS decision_index INTEGER NOT NULL;
+ALTER TABLE memory_governance_decisions
+    ADD COLUMN IF NOT EXISTS requested_decision_payload_fingerprint TEXT NOT NULL;
+ALTER TABLE memory_governance_decisions
+    ADD COLUMN IF NOT EXISTS decision_payload_fingerprint TEXT NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_memory_governance_decisions_batch
     ON memory_governance_decisions(governance_batch_id, created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_governance_decisions_input_index
+    ON memory_governance_decisions(batch_input_fingerprint, decision_index);
 """.strip()

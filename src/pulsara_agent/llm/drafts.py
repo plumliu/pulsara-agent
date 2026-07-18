@@ -7,6 +7,7 @@ versioned union before LLMRuntime can observe it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,69 +43,69 @@ class ProviderSemanticDraftBase(BaseModel):
 
 class ProviderTextBlockStartDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["text_block_start"] = "text_block_start"
-    block_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
 
 
 class ProviderTextBlockDeltaDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["text_block_delta"] = "text_block_delta"
-    block_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
     delta: str = Field(min_length=1)
 
 
 class ProviderTextBlockEndDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["text_block_end"] = "text_block_end"
-    block_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
 
 
 class ProviderThinkingBlockStartDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["thinking_block_start"] = "thinking_block_start"
-    block_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
 
 
 class ProviderThinkingBlockDeltaDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["thinking_block_delta"] = "thinking_block_delta"
-    block_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
     delta: str = Field(min_length=1)
 
 
 class ProviderThinkingBlockEndDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["thinking_block_end"] = "thinking_block_end"
-    block_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
 
 
 class ProviderDataBlockStartDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["data_block_start"] = "data_block_start"
-    block_id: str = Field(min_length=1)
-    media_type: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
+    media_type: str = Field(min_length=1, max_length=256)
 
 
 class ProviderDataBlockDeltaDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["data_block_delta"] = "data_block_delta"
-    block_id: str = Field(min_length=1)
-    media_type: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
+    media_type: str = Field(min_length=1, max_length=256)
     data: str = Field(min_length=1)
 
 
 class ProviderDataBlockEndDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["data_block_end"] = "data_block_end"
-    block_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1, max_length=128)
 
 
 class ProviderToolCallStartDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["tool_call_start"] = "tool_call_start"
-    tool_call_id: str = Field(min_length=1)
-    tool_call_name: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    tool_call_name: str = Field(min_length=1, max_length=256)
 
 
 class ProviderToolCallDeltaDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["tool_call_delta"] = "tool_call_delta"
-    tool_call_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1, max_length=128)
     delta: str = Field(min_length=1)
 
 
 class ProviderToolCallEndDraft(ProviderSemanticDraftBase):
     draft_kind: Literal["tool_call_end"] = "tool_call_end"
-    tool_call_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1, max_length=128)
 
 
 class ProviderErrorDraft(ProviderSemanticDraftBase):
@@ -133,14 +134,15 @@ ProviderTransportSemanticDraft: TypeAlias = Annotated[
 class ProviderTransportTerminalDraft(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["provider_transport_terminal_draft.v1"] = (
-        "provider_transport_terminal_draft.v1"
+    schema_version: Literal["provider_transport_terminal_draft.v2"] = (
+        "provider_transport_terminal_draft.v2"
     )
     outcome: Literal["completed", "provider_error"]
     usage: ModelTokenUsageFact | None
     usage_status: Literal["reported", "missing"]
     reported_model_id: str | None
     semantic_item_count: int = Field(ge=0)
+    semantic_source_accumulator: str = Field(min_length=1)
     terminal_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -148,7 +150,7 @@ class ProviderTransportTerminalDraft(BaseModel):
         if (self.usage_status == "reported") != (self.usage is not None):
             raise ValueError("provider terminal usage status/payload mismatch")
         expected = sha256_fingerprint(
-            "provider-transport-terminal-draft:v1",
+            "provider-transport-terminal-draft:v2",
             self.model_dump(mode="json", exclude={"terminal_fingerprint"}),
         )
         if self.terminal_fingerprint != expected:
@@ -156,8 +158,22 @@ class ProviderTransportTerminalDraft(BaseModel):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class SanitizedProviderSemanticEnvelope:
+    """One validated provider item awaiting coordinator adoption."""
+
+    envelope_id: str
+    draft: ProviderTransportSemanticDraft
+    proposed_transport_sequence_index: int
+    source_accumulator_before: str
+    source_accumulator_after: str
+    accepted_at_monotonic_ns: int
+    adapter_source_payload_bytes: int
+    counts_as_adapter_source_item: bool
+
+
 ProviderTransportStreamItem: TypeAlias = (
-    ProviderTransportSemanticDraft | ProviderTransportTerminalDraft
+    SanitizedProviderSemanticEnvelope | ProviderTransportTerminalDraft
 )
 
 
@@ -182,7 +198,7 @@ def build_terminal_draft(**payload: object) -> ProviderTransportTerminalDraft:
         mode="json", exclude={"terminal_fingerprint"}
     )
     fingerprint = sha256_fingerprint(
-        "provider-transport-terminal-draft:v1",
+        "provider-transport-terminal-draft:v2",
         canonical,
     )
     return ProviderTransportTerminalDraft(
@@ -209,6 +225,7 @@ __all__ = [
     "ProviderTransportSemanticDraft",
     "ProviderTransportStreamItem",
     "ProviderTransportTerminalDraft",
+    "SanitizedProviderSemanticEnvelope",
     "build_semantic_draft",
     "build_terminal_draft",
 ]

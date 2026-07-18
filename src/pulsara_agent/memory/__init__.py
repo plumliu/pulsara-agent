@@ -35,7 +35,6 @@ from pulsara_agent.memory.recall.explain import (
 from pulsara_agent.memory.governance.executor import MemoryGovernanceApplyResult, MemoryGovernanceExecutor
 from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
-    MemoryGovernanceInput,
     MemoryGovernanceOptions,
     MemoryGovernanceOutput,
     MemoryGovernanceRunResult,
@@ -155,7 +154,6 @@ __all__ = [
     "MemoryDomainContext",
     "MemoryGovernanceEngine",
     "MemoryGovernanceExecutor",
-    "MemoryGovernanceInput",
     "MemoryLifecycle",
     "MemoryGovernanceOptions",
     "MemoryGovernanceRelatednessOptions",

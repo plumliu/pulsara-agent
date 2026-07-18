@@ -12,7 +12,12 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallStartEvent,
 )
-from pulsara_agent.event_log import EventIdConflict, EventLog, EventLogWriteConflict
+from pulsara_agent.event_log import (
+    EventIdConflict,
+    EventLog,
+    EventLogWriteConflict,
+    InMemoryEventLog,
+)
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.llm.control import build_model_call_control_disposition_event
 from pulsara_agent.llm.control_contract import (
@@ -21,9 +26,16 @@ from pulsara_agent.llm.control_contract import (
 )
 from pulsara_agent.llm.materialize import (
     ModelStreamMaterializationError,
-    materialize_committed_model_call_result_from_events,
+    materialize_committed_model_call_result_from_terminal_projection,
 )
+from pulsara_agent.llm.terminal_projection import hydrate_terminal_projection_text
+from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
+from pulsara_agent.runtime.authority_materialization import (
+    MaterializationAccountCommitFailed,
+    MaterializationAccountReconciliationRequired,
+    commit_quiescent_accounted_batch,
+)
 
 
 class ModelCallControlRecoveryError(RuntimeError):
@@ -52,8 +64,23 @@ class ModelCallControlRecoveryReport:
 class ModelCallControlDispositionRecoveryService:
     """Close completed main-call control gaps during a quiescent reopen."""
 
-    def __init__(self, *, event_log: EventLog) -> None:
+    def __init__(
+        self,
+        *,
+        event_log: EventLog,
+        archive: ArtifactStore,
+        allow_unbootstrapped_test_events: bool = False,
+    ) -> None:
+        if allow_unbootstrapped_test_events and not isinstance(
+            event_log, InMemoryEventLog
+        ):
+            raise ValueError(
+                "unbootstrapped control recovery is restricted to the in-memory "
+                "pytest event log"
+            )
         self._event_log = event_log
+        self._archive = archive
+        self._allow_unbootstrapped_test_events = allow_unbootstrapped_test_events
 
     def repair_missing_dispositions(
         self,
@@ -69,7 +96,13 @@ class ModelCallControlDispositionRecoveryService:
             candidates = _completed_main_starts(events)
             unresolved = False
             for start in candidates:
-                result = _materialize(events=events, start=start)
+                result = _materialize(
+                    events=events,
+                    start=start,
+                    event_log=self._event_log,
+                    archive=self._archive,
+                    deadline_monotonic=deadline_monotonic,
+                )
                 dispositions = _matching_dispositions(events=events, start=start)
                 downstream = _matching_downstream(
                     events=events,
@@ -126,28 +159,18 @@ class ModelCallControlDispositionRecoveryService:
                     metadata=start.metadata,
                 )
                 try:
-                    stored = tuple(
-                        self._event_log.extend(
-                            (candidate,),
-                            expected_last_sequence=high_water,
-                        )
+                    stored = self._commit_candidate(
+                        candidate=candidate,
+                        high_water=high_water,
+                        deadline_monotonic=deadline_monotonic,
                     )
-                except EventLogWriteConflict:
+                except (EventLogWriteConflict, MaterializationAccountCommitFailed):
                     break
                 except EventIdConflict as exc:
                     raise ModelCallControlRecoveryStructuralError(
                         "model control recovery event identity conflicts"
                     ) from exc
-                except BaseException:
-                    confirmation = self._event_log.confirm_batch((candidate,))
-                    if confirmation.missing_event_ids:
-                        if confirmation.committed_events:
-                            raise ModelCallControlRecoveryStructuralError(
-                                "model control recovery committed partially"
-                            )
-                        raise
-                    stored = confirmation.committed_events
-                if len(stored) != 1 or stored[0].id != candidate.id:
+                if not stored or stored[0].id != candidate.id:
                     raise ModelCallControlRecoveryStructuralError(
                         "model control recovery confirmed another winner"
                     )
@@ -171,6 +194,49 @@ class ModelCallControlDispositionRecoveryService:
             # A CAS-stale snapshot or one newly committed recovery winner is
             # always re-read before another decision.
             continue
+
+    def _commit_candidate(
+        self,
+        *,
+        candidate: ModelCallControlDispositionResolvedEvent,
+        high_water: int,
+        deadline_monotonic: float | None,
+    ) -> tuple[AgentEvent, ...]:
+        account = self._event_log.read_materialization_account_state(
+            deadline_monotonic=deadline_monotonic
+        )
+        if account is not None:
+            try:
+                return commit_quiescent_accounted_batch(
+                    event_log=self._event_log,
+                    business_events=(candidate,),
+                    owner_scope="model-control-recovery",
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except MaterializationAccountReconciliationRequired as exc:
+                raise ModelCallControlRecoveryStructuralError(
+                    "model control recovery account outcome is unknown"
+                ) from exc
+        if not self._allow_unbootstrapped_test_events:
+            raise ModelCallControlRecoveryStructuralError(
+                "model control recovery ledger is missing its materialization account"
+            )
+        try:
+            return tuple(
+                self._event_log.extend(
+                    (candidate,),
+                    expected_last_sequence=high_water,
+                )
+            )
+        except BaseException:
+            confirmation = self._event_log.confirm_batch((candidate,))
+            if confirmation.missing_event_ids:
+                if confirmation.committed_events:
+                    raise ModelCallControlRecoveryStructuralError(
+                        "model control recovery committed partially"
+                    )
+                raise
+            return confirmation.committed_events
 
     def _read_snapshot(
         self, deadline_monotonic: float | None
@@ -248,11 +314,28 @@ def _model_end(
     return end
 
 
-def _materialize(*, events: tuple[AgentEvent, ...], start: ModelCallStartEvent):
+def _materialize(
+    *,
+    events: tuple[AgentEvent, ...],
+    start: ModelCallStartEvent,
+    event_log: EventLog,
+    archive: ArtifactStore,
+    deadline_monotonic: float | None,
+):
     try:
-        return materialize_committed_model_call_result_from_events(
+        end = _model_end(events=events, start=start)
+        reference = end.terminal_projection.projection_reference
+        document_text = archive.get_text(
+            reference.document_artifact_id,
+            session_id=event_log.runtime_session_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+        document = hydrate_terminal_projection_text(reference, document_text)
+        return materialize_committed_model_call_result_from_terminal_projection(
             events,
             resolved_model_call_id=start.resolved_call.resolved_model_call_id,
+            runtime_session_id=event_log.runtime_session_id,
+            document=document,
         )
     except ModelStreamMaterializationError as exc:
         raise ModelCallControlRecoveryStructuralError(

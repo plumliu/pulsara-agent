@@ -5,7 +5,11 @@ from threading import Barrier
 
 import pytest
 
-from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
+from pulsara_agent.event import EventContext
 from pulsara_agent.event_log import EventLogWriteConflict, InMemoryEventLog
 
 
@@ -14,7 +18,7 @@ CTX = EventContext(run_id="run:event-log", turn_id="turn:event-log", reply_id="r
 
 def _events(prefix: str, count: int = 3):
     return [
-        TextBlockDeltaEvent(
+        make_text_block_segment_event(
             **CTX.event_fields(),
             block_id=f"{prefix}:{index}",
             delta=prefix,

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
+from tests.support.model_stream import (
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     EventContext,
     RequireUserConfirmEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
 )
@@ -22,7 +27,7 @@ CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test"
 
 def test_classifies_pending_approval_as_not_executed() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
         ),
         RequireUserConfirmEvent(
@@ -46,7 +51,7 @@ def test_classifies_pending_approval_as_not_executed() -> None:
 
 def test_started_call_takes_priority_over_pending_approval() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:terminal",
             tool_call_name="terminal",
@@ -77,34 +82,36 @@ def test_started_call_takes_priority_over_pending_approval() -> None:
     assert "did not execute" not in summary
 
 
-def test_name_falls_back_to_confirmation_or_result_start_event() -> None:
-    pending_events = [
-        ToolCallStartEvent(
-            **CTX.event_fields(), tool_call_id="call:pending", tool_call_name=""
+def test_durable_tool_call_name_remains_recovery_authority() -> None:
+    events = [
+        make_tool_call_start_event(
+            **CTX.event_fields(),
+            tool_call_id="call:write",
+            tool_call_name="write_file",
         ),
         RequireUserConfirmEvent(
             **CTX.event_fields(),
             tool_calls=[
-                ToolCallBlock(id="call:pending", name="write_file", input="{}")
+                ToolCallBlock(id="call:write", name="write_file", input="{}")
             ],
         ),
-    ]
-    started_events = [
-        ToolCallStartEvent(
-            **CTX.event_fields(), tool_call_id="call:started", tool_call_name=""
-        ),
         ToolResultStartEvent(
-            **CTX.event_fields(), tool_call_id="call:started", tool_call_name="terminal"
+            **CTX.event_fields(),
+            tool_call_id="call:write",
+            tool_call_name="write_file",
         ),
     ]
 
-    assert classify_unfinished_tool_calls(pending_events)[0].tool_name == "write_file"
-    assert classify_unfinished_tool_calls(started_events)[0].tool_name == "terminal"
+    unfinished = classify_unfinished_tool_calls(events)
+
+    assert unfinished[0].tool_name == "write_file"
+    assert unfinished[0].severity is ToolSeverity.BOUNDED_WRITE
+    assert unfinished[0].state is UnfinishedState.STARTED
 
 
 def test_completed_call_is_not_unfinished_even_when_result_end_is_late() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:terminal",
             tool_call_name="terminal",
@@ -131,25 +138,25 @@ def test_completed_call_is_not_unfinished_even_when_result_end_is_late() -> None
 
 def test_rendering_uses_conservative_wording_and_truncates_tool_names() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"
         ),
         ToolResultStartEvent(
             **CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"
         ),
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
         ),
         ToolResultStartEvent(
             **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
         ),
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(), tool_call_id="call:term", tool_call_name="terminal"
         ),
         ToolResultStartEvent(
             **CTX.event_fields(), tool_call_id="call:term", tool_call_name="terminal"
         ),
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:unknown",
             tool_call_name="custom_tool",
@@ -169,7 +176,7 @@ def test_rendering_uses_conservative_wording_and_truncates_tool_names() -> None:
 
 def test_read_only_pending_call_is_omitted_from_summary() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(), tool_call_id="call:read", tool_call_name="read_file"
         ),
         RequireUserConfirmEvent(
@@ -186,7 +193,7 @@ def test_read_only_pending_call_is_omitted_from_summary() -> None:
 
 def test_terminal_process_is_terminal_severity_without_action_parsing() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:process",
             tool_call_name="terminal_process",
@@ -220,7 +227,7 @@ def test_classifies_known_tool_severities() -> None:
 
     for tool_name, severity in expected.items():
         events = [
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id=f"call:{tool_name}",
                 tool_call_name=tool_name,
@@ -234,7 +241,7 @@ def test_classifies_known_tool_severities() -> None:
 
 def test_unknown_tool_uses_unknown_effect_wording() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:custom",
             tool_call_name="custom_side_effect",
@@ -251,12 +258,12 @@ def test_unknown_tool_uses_unknown_effect_wording() -> None:
 
 def test_workflow_tools_are_omitted_from_unfinished_recovery_summary() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:question",
             tool_call_name="ask_plan_question",
         ),
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:exit",
             tool_call_name="exit_plan",
@@ -269,27 +276,18 @@ def test_workflow_tools_are_omitted_from_unfinished_recovery_summary() -> None:
     assert render_unfinished_summary(unfinished, run_status="aborted") == ""
 
 
-def test_empty_tool_name_uses_unknown_effect_wording() -> None:
-    events = [
-        ToolCallStartEvent(
+def test_empty_durable_tool_name_is_rejected_by_schema() -> None:
+    with pytest.raises(ValueError, match="at least 1 character"):
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:empty",
             tool_call_name="",
         )
-    ]
-
-    unfinished = classify_unfinished_tool_calls(events)
-    summary = render_unfinished_summary(unfinished, run_status="failed")
-
-    assert unfinished[0].tool_name == ""
-    assert unfinished[0].severity is ToolSeverity.UNKNOWN_EFFECT
-    assert "unknown_tool" in summary
-    assert "effect is unknown; verify before continuing" in summary
 
 
 def test_bounded_write_started_wording_does_not_claim_background_running() -> None:
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
         ),
         ToolResultStartEvent(

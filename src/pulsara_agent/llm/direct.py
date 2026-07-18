@@ -15,6 +15,8 @@ from pulsara_agent.primitives.model_call import (
     ModelTokenUsageFact,
     ResolvedModelCallFact,
 )
+from pulsara_agent.primitives.frozen import StableEventIdentityFact
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 
 
 class DirectModelCallCollectionError(RuntimeError):
@@ -33,12 +35,14 @@ class DirectModelCallResult:
     usage_status: Literal["reported", "missing"]
     usage: ModelTokenUsageFact | None
     reported_model_id: str | None
+    model_call_end_event_identity: StableEventIdentityFact
 
 
 async def collect_direct_model_call_handle(
     handle: ModelStreamExecutionHandle,
     *,
     expected_call: ResolvedModelCall,
+    runtime_session_id: str,
 ) -> DirectModelCallResult:
     """Materialize one direct result from the session-owned durable worker."""
 
@@ -97,4 +101,8 @@ async def collect_direct_model_call_handle(
         usage_status=result.usage_status,
         usage=result.usage,
         reported_model_id=result.reported_model_id,
+        model_call_end_event_identity=stable_event_identity(
+            model_end,
+            runtime_session_id=runtime_session_id,
+        ),
     )

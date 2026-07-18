@@ -1,0 +1,125 @@
+{
+  "benchmark_run_id": "benchmark:71e3adc8499a48f38ba7511c",
+  "case_aggregates": [
+    {
+      "case_contract_fingerprint": "sha256:8bbca3d53511ee26b54d03d95b212feaee0960e096e8919b7aa6388d1917bc2d",
+      "case_id": "batch-16",
+      "metrics": [
+        {
+          "maximum": 15.941634241245136,
+          "median": 15.941634241245136,
+          "metric_id": "average_semantic_batch_size",
+          "minimum": 15.87984496124031,
+          "p95_nearest_rank": 15.941634241245136,
+          "sample_count": 30,
+          "unit": "events"
+        },
+        {
+          "maximum": 8719,
+          "median": 8717.0,
+          "metric_id": "ledger_event_delta",
+          "minimum": 8717,
+          "p95_nearest_rank": 8718,
+          "sample_count": 30,
+          "unit": "events"
+        },
+        {
+          "maximum": 1064.0712716621917,
+          "median": 1063.8271906272882,
+          "metric_id": "ledger_events_per_1000_source_items",
+          "minimum": 1063.8271906272882,
+          "p95_nearest_rank": 1063.94923114474,
+          "sample_count": 30,
+          "unit": "events_per_1000_source_items"
+        },
+        {
+          "maximum": 518,
+          "median": 516.0,
+          "metric_id": "logical_model_commit_count",
+          "minimum": 516,
+          "p95_nearest_rank": 517,
+          "sample_count": 30,
+          "unit": "count"
+        },
+        {
+          "maximum": 516,
+          "median": 514.0,
+          "metric_id": "logical_semantic_batch_count",
+          "minimum": 514,
+          "p95_nearest_rank": 515,
+          "sample_count": 30,
+          "unit": "count"
+        },
+        {
+          "maximum": 99.33682904101443,
+          "median": 24.247901208582334,
+          "metric_id": "model_stream_wall_seconds",
+          "minimum": 19.084091000026092,
+          "p95_nearest_rank": 69.48177145805676,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 93.17498309270013,
+          "median": 20.90703203045996,
+          "metric_id": "semantic_commit_port_wall_seconds",
+          "minimum": 16.49661849264521,
+          "p95_nearest_rank": 65.01042733038776,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 11.371123150195281,
+          "median": 2.551505007378565,
+          "metric_id": "writer_seconds_per_1000_source_items",
+          "minimum": 2.0132558570472554,
+          "p95_nearest_rank": 7.933906191162772,
+          "sample_count": 30,
+          "unit": "seconds_per_1000_source_items"
+        }
+      ],
+      "sample_count": 30
+    }
+  ],
+  "case_contract_fingerprints": [
+    "sha256:8bbca3d53511ee26b54d03d95b212feaee0960e096e8919b7aa6388d1917bc2d"
+  ],
+  "counterfactual_samples_excluded": true,
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "environment": {
+    "git": {
+      "commit": "a2ae672691818ea7fe8f164f90e83df842154e73",
+      "dirty": false
+    },
+    "postgres": {
+      "configuration_fingerprint": "sha256:1babd816a44e245de601de61f9db2a11eb04b3903e9f7c42474a40a3e29cf358",
+      "connection_pool_fingerprint": "sha256:874e657a39df00365d9d647cea45f7143fee98c53618629c77d0ce75d7e643a7",
+      "server_version": "17.9 (Homebrew)"
+    },
+    "python": {
+      "implementation": "CPython",
+      "machine": "arm64",
+      "platform": "macOS-26.2-arm64-arm-64bit",
+      "version": "3.12.12"
+    },
+    "runner_build_fingerprint": "sha256:73625eb1df2345d4efd3c383ca4be91c9e9cc1714df5794e8f93c16c5821f1d0",
+    "runtime_capacity": {
+      "auxiliary_io_workers": 12,
+      "configuration_fingerprint": "sha256:393aa28a338fc8484f804286baf6cc604a6bb8f9a51aaef03197233b0e8a45bd",
+      "critical_ledger_workers": 4,
+      "postgres_bounded_read_capacity": 12,
+      "postgres_critical_write_reserve": 4,
+      "postgres_default_lease_timeout_seconds": 30.0,
+      "postgres_pool_max_connections": 16
+    },
+    "schema_version": "pulsara.durable-runtime.environment.v1"
+  },
+  "manifest_contract_fingerprint": "sha256:8751b64a6778c81c05c5d07d4213a1ff04626193a3202121ff1d08ebf4e484b2",
+  "measurement_contract_adhered": true,
+  "percentile_contract": "nearest_rank_v1",
+  "production_acceptance_passed": true,
+  "raw_sample_vector_sha256": "sha256:3b5a252d2b2c9cfffbef8f229ede20bd7de946ae69860fec717823db8b9a5446",
+  "sample_count": 30,
+  "scenario_id": "model-semantic-batch-matrix",
+  "schema_version": "pulsara.durable-runtime.run-summary.v1"
+}

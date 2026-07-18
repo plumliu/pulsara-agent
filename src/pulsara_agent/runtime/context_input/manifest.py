@@ -41,6 +41,9 @@ from pulsara_agent.primitives.long_horizon import (
     SubagentGraphSemanticSourceFact,
 )
 from pulsara_agent.primitives.tool_result import PreparedToolResultRenderInput
+from pulsara_agent.runtime.context_input.transcript_authority import (
+    PreparedTranscriptProjectionInput,
+)
 from pulsara_agent.runtime.context_input.render import PreparedToolResultRenderOutput
 
 if TYPE_CHECKING:
@@ -48,7 +51,7 @@ if TYPE_CHECKING:
 
 
 CONTEXT_INPUT_MANIFEST_MEDIA_TYPE = (
-    "application/vnd.pulsara.context-input-manifest+json; version=2"
+    "application/vnd.pulsara.context-input-manifest+json; version=6"
 )
 
 
@@ -703,7 +706,7 @@ def _operation_result_status(result: object, error: BaseException | None) -> str
 def build_context_input_manifest(
     *,
     snapshot: ContextFactSnapshotFact,
-    transcript: TranscriptCompileInput,
+    prepared_transcript_projection: PreparedTranscriptProjectionInput,
     prepared_tool_results: PreparedToolResultRenderInput,
     rendered_tool_results: PreparedToolResultRenderOutput,
     active_window: ContextWindowFact,
@@ -719,6 +722,13 @@ def build_context_input_manifest(
 ) -> ContextCompileInputManifestFact:
     """Build the exact event-safe input aggregate consumed by one compile."""
 
+    transcript = prepared_transcript_projection.final_normalized_transcript.transcript
+    transcript_provider_projection = (
+        prepared_transcript_projection.provider_projection.projection_fact
+    )
+    transcript_authority = prepared_transcript_projection.authority
+    if transcript_provider_projection.context_id != snapshot.identity.context_id:
+        raise ValueError("prepared transcript projection invocation mismatch")
     if prepared_tool_results.resolved_policy.basis != (
         snapshot.compile_policy.tool_result_basis
     ):
@@ -735,10 +745,12 @@ def build_context_input_manifest(
         projection_state=projection_state,
     )
     aggregate = context_fingerprint(
-        "context-compile-input-aggregate:v2",
+        "context-compile-input-aggregate:v6",
         [
             snapshot.snapshot_semantic_fingerprint,
             transcript.transcript_fingerprint,
+            transcript_provider_projection.semantic_identity.semantic_fingerprint,
+            transcript_authority.provider_semantic_identity.provider_semantic_fingerprint,
             prepared_tool_results.render_input_fingerprint,
             prepared_candidates.candidate_set_fingerprint,
             active_window.window_semantic_fingerprint,
@@ -756,7 +768,7 @@ def build_context_input_manifest(
         ],
     )
     payload = {
-        "schema_version": "context-input-manifest:v2",
+        "schema_version": "context-input-manifest:v6",
         "input_aggregate_fingerprint": aggregate,
         "snapshot": snapshot,
         "subagent_graph_semantic_source": (
@@ -765,6 +777,8 @@ def build_context_input_manifest(
         "subagent_graph_acceleration": snapshot.subagent_graph_acceleration,
         "prepared_candidate_set": prepared_candidates,
         "transcript_fingerprint": transcript.transcript_fingerprint,
+        "transcript_provider_projection": transcript_provider_projection,
+        "transcript_authority": transcript_authority,
         "tool_result_units_fingerprint": units_fingerprint,
         "tool_result_render_policy": prepared_tool_results.resolved_policy,
         "tool_result_render_input_fingerprint": (
@@ -929,7 +943,7 @@ def build_context_input_manifest_candidate(
         semantic_metadata=metadata,
         content_fingerprint=content_fingerprint,
         metadata_fingerprint=context_fingerprint(
-            "context-input-manifest-metadata:v2", metadata
+            "context-input-manifest-metadata:v6", metadata
         ),
     )
 

@@ -395,6 +395,37 @@ class SubagentGraphCheckpointService:
             "subagent_checkpoint_rebase_unavailable"
         )
 
+    async def checkpoint_for_admission(
+        self,
+        *,
+        requested_through_sequence: int,
+    ) -> SubagentGraphCheckpointDeltaSnapshot:
+        """Force the graph consumer forward when it blocks ledger headroom."""
+
+        result = await asyncio.to_thread(
+            self._read_checkpoint,
+            requested_through_sequence,
+            None,
+        )
+        if isinstance(result, SubagentGraphCheckpointDeltaSnapshot):
+            if not result.delta_events:
+                return result
+            owner = await self._schedule_advancement_if_needed(result, force=True)
+            if owner is None:
+                raise SubagentGraphCheckpointWriteBlocked(
+                    "forced graph checkpoint did not install a writer owner"
+                )
+            return await asyncio.shield(owner)
+        if result.reason_code == "no_confirmed_checkpoint" and self._bootstrap_eligible:
+            return await self._bootstrap(requested_through_sequence)
+        if result.reason_code == "delta_bound_exceeded":
+            raise SubagentGraphCheckpointDeltaBoundExceeded(
+                "subagent_checkpoint_delta_bound_exceeded"
+            )
+        raise SubagentGraphCheckpointRebaseUnavailable(
+            "subagent_checkpoint_rebase_unavailable"
+        )
+
     def _read_checkpoint(
         self,
         requested_through_sequence: int,
@@ -477,22 +508,24 @@ class SubagentGraphCheckpointService:
     async def _schedule_advancement_if_needed(
         self,
         snapshot: SubagentGraphCheckpointDeltaSnapshot,
-    ) -> None:
+        *,
+        force: bool = False,
+    ) -> asyncio.Task[SubagentGraphCheckpointDeltaSnapshot] | None:
         if not snapshot.delta_events:
-            return
+            return None
         delta_bytes = sum(
             len(event.canonical_payload_bytes) for event in snapshot.delta_events
         )
         byte_schedule_threshold = max(1, self.policy.checkpoint_max_delta_bytes // 2)
-        if (
+        if not force and (
             len(snapshot.delta_events) < self.policy.checkpoint_every_events
             and delta_bytes < byte_schedule_threshold
         ):
-            return
+            return None
         sequence = snapshot.requested_through_sequence
         async with self._lock:
             if sequence in self._owners:
-                return
+                return self._owners[sequence]
             state, semantic_source, acceleration = (
                 restore_subagent_graph_from_checkpoint(
                     snapshot=snapshot,
@@ -522,6 +555,7 @@ class SubagentGraphCheckpointService:
                     else None
                 )
             )
+            return owner
 
     async def _await_relevant_writer(self, requested_through_sequence: int) -> bool:
         async with self._lock:
@@ -560,7 +594,88 @@ class SubagentGraphCheckpointService:
         stored = None
         write_error: BaseException | None = None
         try:
-            result = await self.runtime_session.write_event(prepared.event)
+            account = self.runtime_session.materialization_account_store.snapshot()
+            if account is None:
+                result = await self.runtime_session.write_event(prepared.event)
+            else:
+                graph_horizons = tuple(
+                    item
+                    for item in account.generation.consumer_horizons
+                    if item.consumer_kind.value == "subagent_graph"
+                )
+                if len(graph_horizons) != 1:
+                    raise SubagentGraphCheckpointWriteBlocked(
+                        "subagent graph checkpoint has no unique materialization consumer"
+                    )
+                graph_horizon = graph_horizons[0]
+                if prepared.checkpoint.through_sequence <= graph_horizon.through_sequence:
+                    raise SubagentGraphCheckpointWriteBlocked(
+                        "subagent graph checkpoint does not advance its consumer"
+                    )
+                raw_delta = await self.runtime_session.context_input_io_service.execute(
+                    operation_name="subagent-graph-horizon-charge-read",
+                    operation=lambda: self.runtime_session.event_log.read_raw_range_snapshot(
+                        minimum_sequence=graph_horizon.through_sequence + 1,
+                        through_sequence=prepared.checkpoint.through_sequence,
+                        max_events=self.policy.checkpoint_max_delta_events,
+                        max_payload_bytes=self.policy.checkpoint_max_delta_bytes,
+                        deadline_monotonic=deadline_monotonic,
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if len(raw_delta.events) != (
+                    prepared.checkpoint.through_sequence
+                    - graph_horizon.through_sequence
+                ):
+                    raise SubagentGraphCheckpointWriteBlocked(
+                        "subagent graph checkpoint charge range is incomplete"
+                    )
+                from pulsara_agent.event_log.serialization import (
+                    DEFAULT_EVENT_SCHEMA_REGISTRY,
+                )
+                from pulsara_agent.runtime.authority_materialization.account import (
+                    deterministic_ledger_charge,
+                )
+
+                delta_charge = deterministic_ledger_charge(
+                    tuple(
+                        item.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                        for item in raw_delta.events
+                    ),
+                    contract=(
+                        self.runtime_session.authority_materialization_contracts
+                        .charge_contract
+                    ),
+                )
+                charged_prefix = (
+                    graph_horizon.ledger_charged_payload_bytes_through
+                    + delta_charge.charged_payload_bytes
+                )
+                prefix = await self.runtime_session.context_input_io_service.execute(
+                    operation_name="subagent-graph-horizon-prefix-read",
+                    operation=lambda: self.runtime_session.event_log.read_transcript_domain_delta(
+                        after_sequence=prepared.checkpoint.through_sequence,
+                        through_sequence=prepared.checkpoint.through_sequence,
+                        max_events=1,
+                        max_payload_bytes=1,
+                        registry_contract_fingerprint=(
+                            self.runtime_session.authority_materialization_contracts
+                            .event_domain.contract.registry_contract_fingerprint
+                        ),
+                        deadline_monotonic=deadline_monotonic,
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
+                result = await self.runtime_session.event_write_service.execute(
+                    lambda: self.runtime_session.commit_graph_checkpoint_from_thread(
+                        prepared.event,
+                        ledger_charged_payload_bytes_through_checkpoint=charged_prefix,
+                        ledger_continuity_accumulator_through_checkpoint=(
+                            prefix.after.ledger_continuity_accumulator
+                        ),
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
             stored = next(
                 (
                     event

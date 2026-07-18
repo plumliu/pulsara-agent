@@ -9,6 +9,7 @@ by memory governance, not by this producer hook.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import KW_ONLY, dataclass, field
 from datetime import timedelta
 
@@ -42,6 +43,10 @@ from pulsara_agent.runtime.hooks import NoopMemoryHooks
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.runtime.state import LoopState, LoopStatus
 from pulsara_agent.runtime.timeline import build_run_timeline
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.governance_evidence import (
+    CandidateQuotedEvidenceLocatorFact,
+)
 
 
 @dataclass(slots=True)
@@ -145,7 +150,28 @@ class DurableMemoryHooks(NoopMemoryHooks):
                 source_reply_id=state.reply_id,
             )
             if candidate.user_quote is None:
-                candidate = candidate.model_copy(update={"user_quote": _latest_user_quote(state)})
+                quote = _latest_user_quote_with_locator(state)
+                if quote is not None:
+                    text, message_id, start_char, end_char = quote
+                    candidate = candidate.model_copy(
+                        update={
+                            "user_quote": text,
+                            "quoted_evidence_locator": build_frozen_fact(
+                                CandidateQuotedEvidenceLocatorFact,
+                                schema_version="candidate_quoted_evidence_locator.v1",
+                                locator_kind="canonical_user_message_span",
+                                source_message_id=message_id,
+                                source_event_reference=None,
+                                source_artifact_reference=None,
+                                source_quote_index=None,
+                                start_char=start_char,
+                                end_char=end_char,
+                                quoted_text_sha256=hashlib.sha256(
+                                    text.encode("utf-8")
+                                ).hexdigest(),
+                            ),
+                        }
+                    )
             pooled.append(self.candidate_pool.append_candidate(candidate))
         return pooled
 
@@ -331,6 +357,14 @@ def _unique(values: list[str]) -> list[str]:
 
 
 def _latest_user_quote(state: LoopState, max_chars: int = 2_000) -> str | None:
+    quote = _latest_user_quote_with_locator(state, max_chars=max_chars)
+    return quote[0] if quote is not None else None
+
+
+def _latest_user_quote_with_locator(
+    state: LoopState,
+    max_chars: int = 2_000,
+) -> tuple[str, str, int, int] | None:
     for message in reversed(state.messages):
         if message.role != "user":
             continue
@@ -338,8 +372,9 @@ def _latest_user_quote(state: LoopState, max_chars: int = 2_000) -> str | None:
         if not text:
             continue
         if len(text) <= max_chars:
-            return text
-        return text[-max_chars:]
+            return text, message.id, 0, len(text)
+        start = len(text) - max_chars
+        return text[start:], message.id, start, len(text)
     return None
 
 

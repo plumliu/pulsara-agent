@@ -146,6 +146,25 @@ class LongHorizonStateStore:
                 return self._closed_child_rollout_states.get(run_id)
             return replace(state, through_sequence=self._through_sequence)
 
+    def child_rollout_state_at(self, run_id: str, *, through_sequence: int):
+        """Freeze child accounting at an already observed ledger high-water."""
+
+        with self._lock:
+            if through_sequence > self._through_sequence:
+                raise LongHorizonReducerApplyError(
+                    "requested child rollout snapshot exceeds reducer high-water"
+                )
+            state = self._child_rollout_states.get(run_id)
+            if state is None:
+                state = self._closed_child_rollout_states.get(run_id)
+            if state is None:
+                return None
+            if state.through_sequence > through_sequence:
+                raise LongHorizonReducerApplyError(
+                    "requested child rollout snapshot precedes a semantic update"
+                )
+            return replace(state, through_sequence=through_sequence)
+
     def rollout_account(self, account_id: str) -> RolloutBudgetAccountFact | None:
         with self._lock:
             account = self._rollout_accounts.get(account_id)
@@ -161,6 +180,25 @@ class LongHorizonStateStore:
                 closed = self._closed_rollout_accounts.get(account_id)
                 return closed[1] if closed is not None else None
             return advance_rollout_state(state, self._through_sequence)
+
+    def rollout_state_snapshot(
+        self, account_id: str
+    ) -> tuple[int, RolloutBudgetStateFact | None]:
+        """Return one immutable account state and its exact reducer high-water."""
+
+        with self._lock:
+            state = self._rollout_states.get(account_id)
+            if state is None:
+                closed = self._closed_rollout_accounts.get(account_id)
+                state = closed[1] if closed is not None else None
+            return (
+                self._through_sequence,
+                (
+                    advance_rollout_state(state, self._through_sequence)
+                    if state is not None
+                    else None
+                ),
+            )
 
     def rollout_state_at(
         self,

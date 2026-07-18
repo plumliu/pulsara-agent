@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from hashlib import sha256
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -17,7 +18,11 @@ from pydantic import (
     model_validator,
 )
 
-from pulsara_agent.event.candidates import MemoryCandidate
+from pulsara_agent.event.candidates import (
+    InvalidAttemptPayload,
+    MemoryCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolResultArtifactRef,
@@ -32,12 +37,42 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelTokenUsageFact,
     ModelCallControlDisposition,
+    ModelStreamDurableSemanticKind,
     ModelStreamSemanticAttributionFact,
     ProviderSanitizedErrorFact,
     RunTerminationIntentAttributionFact,
     ResolvedModelCallFact,
     ResolvedModelTargetFact,
     sha256_fingerprint,
+)
+from pulsara_agent.primitives.transcript_projection import (
+    RunTranscriptSeedReferenceFact,
+    RunTranscriptSeedSemanticFact,
+    TranscriptProjectionScopeFact,
+)
+from pulsara_agent.primitives.authority_materialization import (
+    CheckpointConsumerCauseFact,
+    CheckpointDispatchBarrierFact,
+    ConsumerRetirementCauseFact,
+    LedgerMaterializationAccountGenesisFact,
+    LedgerMaterializationAccountStateFact,
+    LedgerMaterializationAccountTransitionFact,
+    LedgerMaterializationConsumerHorizonFact,
+    LedgerMaterializationConsumerRegistrationCauseFact,
+    LedgerMaterializationGenerationFact,
+    PhysicalOperationChargeAppliedFact,
+    PhysicalOperationReservationFact,
+    PhysicalOperationSettlementFact,
+    PhysicalOperationSuspensionTailFact,
+)
+from pulsara_agent.primitives.transcript_checkpoint import (
+    CheckpointCancellationReasonCode,
+    CheckpointCancellationSource,
+    CheckpointDispatchBarrierReleaseFact,
+    CheckpointFailureReasonCode,
+    CheckpointTerminalContractFact,
+    CheckpointTerminalDiagnosticFact,
+    TranscriptProjectionCheckpointCandidateFact,
 )
 from pulsara_agent.primitives.long_horizon import (
     ChildRolloutReservationPolicyFact,
@@ -109,6 +144,20 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultStateFact,
 )
 from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
+from pulsara_agent.primitives.terminal_projection import (
+    ModelCallTerminalProjectionEndReferenceFact,
+    TerminalProjectionReferenceFact,
+    ToolResultTerminalProjectionEndReferenceFact,
+)
+from pulsara_agent.primitives.frozen import StableEventIdentityFact
+from pulsara_agent.primitives.governance_evidence import (
+    CompactionCandidateAttributionFact,
+    CompactionMemoryCandidateExtractorContractFact,
+    GovernanceBatchInputReferenceFact,
+    GovernanceModelInputAttributionFact,
+    MemoryCandidateEvidenceRejectedRecord,
+    ReflectionCandidateAttributionFact,
+)
 from pulsara_agent.primitives.run_lifecycle import (
     FAILURE_STOP_REASONS,
     RunStopReason,
@@ -163,6 +212,9 @@ class EventType(StrEnum):
 
     MODEL_CALL_START = "MODEL_CALL_START"
     MODEL_CALL_END = "MODEL_CALL_END"
+    MODEL_CALL_TERMINAL_PROJECTION_COMMITTED = (
+        "MODEL_CALL_TERMINAL_PROJECTION_COMMITTED"
+    )
     MODEL_CALL_REJECTED = "MODEL_CALL_REJECTED"
     PROVIDER_MODEL_STREAM_ERROR = "PROVIDER_MODEL_STREAM_ERROR"
     MODEL_CALL_CONTROL_DISPOSITION_RESOLVED = (
@@ -174,28 +226,78 @@ class EventType(StrEnum):
     RUN_INTERACTION_RESUME_BOUNDARY = "RUN_INTERACTION_RESUME_BOUNDARY"
     MCP_CAPABILITY_SNAPSHOT_INSTALLED = "MCP_CAPABILITY_SNAPSHOT_INSTALLED"
 
+    TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED"
+    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED = (
+        "TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED"
+    )
+    LEDGER_MATERIALIZATION_ACCOUNT_GENESIS = (
+        "LEDGER_MATERIALIZATION_ACCOUNT_GENESIS"
+    )
+    LEDGER_MATERIALIZATION_CONSUMER_REGISTERED = (
+        "LEDGER_MATERIALIZATION_CONSUMER_REGISTERED"
+    )
+    LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED = (
+        "LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED"
+    )
+    LEDGER_MATERIALIZATION_CONSUMER_RETIRED = (
+        "LEDGER_MATERIALIZATION_CONSUMER_RETIRED"
+    )
+    LEDGER_MATERIALIZATION_GENERATION_ADVANCED = (
+        "LEDGER_MATERIALIZATION_GENERATION_ADVANCED"
+    )
+    PHYSICAL_OPERATION_RESERVATION_CREATED = (
+        "PHYSICAL_OPERATION_RESERVATION_CREATED"
+    )
+    PHYSICAL_OPERATION_CHARGE_APPLIED = "PHYSICAL_OPERATION_CHARGE_APPLIED"
+    PHYSICAL_OPERATION_RESERVATION_SUSPENDED = (
+        "PHYSICAL_OPERATION_RESERVATION_SUSPENDED"
+    )
+    PHYSICAL_OPERATION_RESERVATION_SETTLED = (
+        "PHYSICAL_OPERATION_RESERVATION_SETTLED"
+    )
+    CHECKPOINT_DISPATCH_BARRIER_INSTALLED = (
+        "CHECKPOINT_DISPATCH_BARRIER_INSTALLED"
+    )
+    CHECKPOINT_DISPATCH_BARRIER_RELEASED = (
+        "CHECKPOINT_DISPATCH_BARRIER_RELEASED"
+    )
+
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
-    TEXT_BLOCK_DELTA = "TEXT_BLOCK_DELTA"
+    TEXT_BLOCK_SEGMENT = "TEXT_BLOCK_SEGMENT"
     TEXT_BLOCK_END = "TEXT_BLOCK_END"
 
     DATA_BLOCK_START = "DATA_BLOCK_START"
-    DATA_BLOCK_DELTA = "DATA_BLOCK_DELTA"
+    DATA_BLOCK_SEGMENT = "DATA_BLOCK_SEGMENT"
     DATA_BLOCK_END = "DATA_BLOCK_END"
 
     THINKING_BLOCK_START = "THINKING_BLOCK_START"
-    THINKING_BLOCK_DELTA = "THINKING_BLOCK_DELTA"
+    THINKING_BLOCK_SEGMENT = "THINKING_BLOCK_SEGMENT"
     THINKING_BLOCK_END = "THINKING_BLOCK_END"
 
     HINT_BLOCK = "HINT_BLOCK"
 
     TOOL_CALL_START = "TOOL_CALL_START"
-    TOOL_CALL_DELTA = "TOOL_CALL_DELTA"
+    TOOL_CALL_ARGUMENTS_SEGMENT = "TOOL_CALL_ARGUMENTS_SEGMENT"
     TOOL_CALL_END = "TOOL_CALL_END"
 
     TOOL_RESULT_START = "TOOL_RESULT_START"
     TOOL_RESULT_TEXT_DELTA = "TOOL_RESULT_TEXT_DELTA"
     TOOL_RESULT_DATA_DELTA = "TOOL_RESULT_DATA_DELTA"
     TOOL_RESULT_END = "TOOL_RESULT_END"
+    TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED = (
+        "TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED"
+    )
     TOOL_EXECUTION_SUSPENDED = "TOOL_EXECUTION_SUSPENDED"
 
     REQUIRE_USER_CONFIRM = "REQUIRE_USER_CONFIRM"
@@ -221,6 +323,11 @@ class EventType(StrEnum):
     MEMORY_MAINTENANCE_PROPOSED = "MEMORY_MAINTENANCE_PROPOSED"
     MEMORY_MAINTENANCE_APPLIED = "MEMORY_MAINTENANCE_APPLIED"
     MEMORY_MAINTENANCE_REJECTED = "MEMORY_MAINTENANCE_REJECTED"
+    MEMORY_GOVERNANCE_BATCH_PREPARED = "MEMORY_GOVERNANCE_BATCH_PREPARED"
+    MEMORY_GOVERNANCE_BATCH_COMPLETED = "MEMORY_GOVERNANCE_BATCH_COMPLETED"
+    MEMORY_GOVERNANCE_BATCH_FAILED = "MEMORY_GOVERNANCE_BATCH_FAILED"
+    MEMORY_GOVERNANCE_BATCH_BLOCKED = "MEMORY_GOVERNANCE_BATCH_BLOCKED"
+    MEMORY_CANDIDATE_EVIDENCE_REJECTED = "MEMORY_CANDIDATE_EVIDENCE_REJECTED"
 
     PROJECTION_REQUESTED = "PROJECTION_REQUESTED"
     PROJECTION_READY = "PROJECTION_READY"
@@ -315,6 +422,8 @@ class RunStartEvent(EventBase):
     mcp_installation_owner_runtime_session_id: str
     run_entry_kind: RunEntryKind
     current_user_message: CurrentUserMessageFact
+    run_transcript_seed_semantic: RunTranscriptSeedSemanticFact
+    run_transcript_seed_reference: RunTranscriptSeedReferenceFact
     terminal_run_end_event_id: str = Field(min_length=1)
     new_run_boundary: NewRunBoundaryFact | None
     subagent_run_entry: SubagentRunEntryFact | None
@@ -345,6 +454,21 @@ class RunStartEvent(EventBase):
             raise ValueError("host RunStart long-horizon account owner mismatch")
         if self.user_input_chars != len(self.current_user_message.text):
             raise ValueError("RunStartEvent user_input_chars mismatch")
+        if self.run_transcript_seed_reference.seed_semantic_fingerprint != (
+            self.run_transcript_seed_semantic.seed_semantic_fingerprint
+        ):
+            raise ValueError("RunStartEvent transcript seed identity mismatch")
+        if (
+            self.run_entry_kind is RunEntryKind.HOST
+            and self.run_transcript_seed_reference.source_runtime_session_id
+            != self.mcp_installation_owner_runtime_session_id
+        ):
+            raise ValueError("RunStartEvent transcript seed ledger mismatch")
+        if self.sequence is not None and (
+            self.run_transcript_seed_reference.source_ledger_through_sequence
+            >= self.sequence
+        ):
+            raise ValueError("RunStartEvent transcript seed must predate RunStart")
         created_at = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
         observed_at = datetime.fromisoformat(
             self.current_user_message.observed_at_utc.replace("Z", "+00:00")
@@ -926,6 +1050,7 @@ class ModelCallStartEvent(EventBase):
     context_id: str
     model_call_index: int | None = None
     recovery_plan: ModelStreamRecoveryPlanFact
+    governance_input_attribution: GovernanceModelInputAttributionFact | None = None
 
     @model_validator(mode="after")
     def _validate_call_context(self) -> "ModelCallStartEvent":
@@ -951,6 +1076,20 @@ class ModelCallStartEvent(EventBase):
             and self.model_call_index is not None
         ):
             raise ValueError("model call start recovery plan lifecycle mismatch")
+        is_governance = self.resolved_call.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
+        if is_governance != (self.governance_input_attribution is not None):
+            raise ValueError(
+                "memory governance model Start requires exact batch input attribution"
+            )
+        if self.governance_input_attribution is not None:
+            attribution = self.governance_input_attribution
+            if (
+                attribution.resolved_model_call_id
+                != self.resolved_call.resolved_model_call_id
+                or attribution.target_fingerprint
+                != self.resolved_call.target.target_fingerprint
+            ):
+                raise ValueError("governance model Start attribution drifted")
         return self
 
 
@@ -1156,6 +1295,7 @@ class ModelCallEndEvent(EventBase):
     usage: ModelTokenUsageFact | None
     estimated_input_tokens: int = Field(ge=0)
     diagnostics: tuple[ModelCallDiagnosticFact, ...] = ()
+    terminal_projection: ModelCallTerminalProjectionEndReferenceFact
 
     @model_validator(mode="after")
     def _validate_usage(self) -> "ModelCallEndEvent":
@@ -1170,6 +1310,32 @@ class ModelCallEndEvent(EventBase):
         ):
             raise ValueError("completed/provider-error outcome requires dispatch")
         _validate_reported_model_id(self.reported_model_id)
+        semantic_join = self.terminal_projection.projection_reference.semantic_join
+        if (
+            semantic_join.projection_kind != "model_call"
+            or semantic_join.terminal_outcome != self.outcome
+        ):
+            raise ValueError("ModelCallEnd terminal projection outcome mismatch")
+        return self
+
+
+class ModelCallTerminalProjectionCommittedEvent(EventBase):
+    type: Literal[EventType.MODEL_CALL_TERMINAL_PROJECTION_COMMITTED] = (
+        EventType.MODEL_CALL_TERMINAL_PROJECTION_COMMITTED
+    )
+    resolved_model_call_id: str = Field(min_length=1)
+    model_call_start_event_identity: StableEventIdentityFact
+    projection_reference: TerminalProjectionReferenceFact
+
+    @model_validator(mode="after")
+    def _projection_identity(self) -> "ModelCallTerminalProjectionCommittedEvent":
+        if self.projection_reference.projection_kind != "model_call":
+            raise ValueError("model projection event requires model projection reference")
+        if (
+            self.model_call_start_event_identity.event_type
+            != EventType.MODEL_CALL_START.value
+        ):
+            raise ValueError("model projection source must be ModelCallStart")
         return self
 
 
@@ -1182,7 +1348,10 @@ class ProviderModelStreamErrorEvent(EventBase):
 
     @model_validator(mode="after")
     def _validate_attribution(self) -> "ProviderModelStreamErrorEvent":
-        if self.model_stream_attribution.draft_kind != "provider_error":
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.PROVIDER_ERROR
+        ):
             raise ValueError("provider stream error requires provider_error attribution")
         return self
 
@@ -1273,63 +1442,190 @@ class ModelCallRejectedEvent(EventBase):
         return self
 
 
+def _validate_model_stream_segment_content(
+    *,
+    content: str,
+    content_utf8_bytes: int,
+    content_sha256: str,
+    estimated_tokens_v1: int | None,
+) -> None:
+    encoded = content.encode("utf-8")
+    if content_utf8_bytes != len(encoded):
+        raise ValueError("model stream segment UTF-8 byte count mismatch")
+    if content_sha256 != f"sha256:{sha256(encoded).hexdigest()}":
+        raise ValueError("model stream segment content SHA mismatch")
+    if estimated_tokens_v1 is not None and estimated_tokens_v1 != max(
+        1, (len(content) + 3) // 4
+    ):
+        raise ValueError("model stream segment V1 token estimate mismatch")
+
+
+def _require_model_stream_durable_kind(
+    attribution: ModelStreamSemanticAttributionFact,
+    expected: ModelStreamDurableSemanticKind,
+) -> None:
+    if attribution.durable_kind is not expected:
+        raise ValueError("model stream singleton attribution kind mismatch")
+
+
 class TextBlockStartEvent(EventBase):
     type: Literal[EventType.TEXT_BLOCK_START] = EventType.TEXT_BLOCK_START
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "TextBlockStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TEXT_BLOCK_START,
+        )
+        return self
 
 
-class TextBlockDeltaEvent(EventBase):
-    type: Literal[EventType.TEXT_BLOCK_DELTA] = EventType.TEXT_BLOCK_DELTA
-    block_id: str
-    delta: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class TextBlockSegmentEvent(EventBase):
+    type: Literal[EventType.TEXT_BLOCK_SEGMENT] = EventType.TEXT_BLOCK_SEGMENT
+    block_id: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    estimated_tokens_v1: int = Field(ge=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "TextBlockSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.text,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=self.estimated_tokens_v1,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.TEXT_BLOCK_SEGMENT
+        ):
+            raise ValueError("text segment attribution kind mismatch")
+        return self
 
 
 class TextBlockEndEvent(EventBase):
     type: Literal[EventType.TEXT_BLOCK_END] = EventType.TEXT_BLOCK_END
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "TextBlockEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TEXT_BLOCK_END,
+        )
+        return self
 
 
 class DataBlockStartEvent(EventBase):
     type: Literal[EventType.DATA_BLOCK_START] = EventType.DATA_BLOCK_START
-    block_id: str
-    media_type: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    media_type: str = Field(min_length=1, max_length=256)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "DataBlockStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.DATA_BLOCK_START,
+        )
+        return self
 
 
-class DataBlockDeltaEvent(EventBase):
-    type: Literal[EventType.DATA_BLOCK_DELTA] = EventType.DATA_BLOCK_DELTA
-    block_id: str
-    data: str
-    media_type: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class DataBlockSegmentEvent(EventBase):
+    type: Literal[EventType.DATA_BLOCK_SEGMENT] = EventType.DATA_BLOCK_SEGMENT
+    block_id: str = Field(min_length=1, max_length=128)
+    media_type: str = Field(min_length=1, max_length=256)
+    data: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "DataBlockSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.data,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=None,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.DATA_BLOCK_SEGMENT
+        ):
+            raise ValueError("data segment attribution kind mismatch")
+        return self
 
 
 class DataBlockEndEvent(EventBase):
     type: Literal[EventType.DATA_BLOCK_END] = EventType.DATA_BLOCK_END
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "DataBlockEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.DATA_BLOCK_END,
+        )
+        return self
 
 
 class ThinkingBlockStartEvent(EventBase):
     type: Literal[EventType.THINKING_BLOCK_START] = EventType.THINKING_BLOCK_START
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ThinkingBlockStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.THINKING_BLOCK_START,
+        )
+        return self
 
 
-class ThinkingBlockDeltaEvent(EventBase):
-    type: Literal[EventType.THINKING_BLOCK_DELTA] = EventType.THINKING_BLOCK_DELTA
-    block_id: str
-    delta: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class ThinkingBlockSegmentEvent(EventBase):
+    type: Literal[EventType.THINKING_BLOCK_SEGMENT] = EventType.THINKING_BLOCK_SEGMENT
+    block_id: str = Field(min_length=1, max_length=128)
+    thinking: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    estimated_tokens_v1: int = Field(ge=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "ThinkingBlockSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.thinking,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=self.estimated_tokens_v1,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.THINKING_BLOCK_SEGMENT
+        ):
+            raise ValueError("thinking segment attribution kind mismatch")
+        return self
 
 
 class ThinkingBlockEndEvent(EventBase):
     type: Literal[EventType.THINKING_BLOCK_END] = EventType.THINKING_BLOCK_END
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ThinkingBlockEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.THINKING_BLOCK_END,
+        )
+        return self
 
 
 class HintBlockEvent(EventBase):
@@ -1341,22 +1637,58 @@ class HintBlockEvent(EventBase):
 
 class ToolCallStartEvent(EventBase):
     type: Literal[EventType.TOOL_CALL_START] = EventType.TOOL_CALL_START
-    tool_call_id: str
-    tool_call_name: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    tool_call_name: str = Field(min_length=1, max_length=256)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ToolCallStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TOOL_CALL_START,
+        )
+        return self
 
 
-class ToolCallDeltaEvent(EventBase):
-    type: Literal[EventType.TOOL_CALL_DELTA] = EventType.TOOL_CALL_DELTA
-    tool_call_id: str
-    delta: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class ToolCallArgumentsSegmentEvent(EventBase):
+    type: Literal[EventType.TOOL_CALL_ARGUMENTS_SEGMENT] = (
+        EventType.TOOL_CALL_ARGUMENTS_SEGMENT
+    )
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    arguments_json_fragment: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    estimated_tokens_v1: int = Field(ge=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "ToolCallArgumentsSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.arguments_json_fragment,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=self.estimated_tokens_v1,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.TOOL_CALL_ARGUMENTS_SEGMENT
+        ):
+            raise ValueError("tool-call segment attribution kind mismatch")
+        return self
 
 
 class ToolCallEndEvent(EventBase):
     type: Literal[EventType.TOOL_CALL_END] = EventType.TOOL_CALL_END
-    tool_call_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ToolCallEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TOOL_CALL_END,
+        )
+        return self
 
 
 class ToolResultStartEvent(EventBase):
@@ -1401,6 +1733,7 @@ class ToolResultEndEvent(EventBase):
     essential_result: ToolResultEssentialFact | None = None
     terminal_payload_timing: TerminalPayloadTimingFact | None = None
     rollup_semantics: ToolResultRollupSemanticsFact | None
+    terminal_projection: ToolResultTerminalProjectionEndReferenceFact
 
     @model_validator(mode="after")
     def _validate_tool_observation_timing(self) -> "ToolResultEndEvent":
@@ -1418,6 +1751,37 @@ class ToolResultEndEvent(EventBase):
             terminal_payload_timing=self.terminal_payload_timing,
             rollup_semantics=self.rollup_semantics,
         )
+        semantic_join = self.terminal_projection.projection_reference.semantic_join
+        if (
+            semantic_join.projection_kind != "tool_result"
+            or semantic_join.tool_call_id != self.tool_call_id
+            or semantic_join.result_state.value != self.state.value
+        ):
+            raise ValueError("ToolResultEnd terminal projection mismatch")
+        return self
+
+
+class ToolResultTerminalProjectionCommittedEvent(EventBase):
+    type: Literal[EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED] = (
+        EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED
+    )
+    tool_call_id: str = Field(min_length=1)
+    source_kind: Literal["tool_result_stream", "external_requirement"]
+    source_event_identity: StableEventIdentityFact
+    projection_reference: TerminalProjectionReferenceFact
+
+    @model_validator(mode="after")
+    def _projection_identity(self) -> "ToolResultTerminalProjectionCommittedEvent":
+        if self.projection_reference.projection_kind != "tool_result":
+            raise ValueError("tool projection event requires tool projection reference")
+        expected_event_type = {
+            "tool_result_stream": EventType.TOOL_RESULT_START.value,
+            "external_requirement": EventType.REQUIRE_EXTERNAL_EXECUTION.value,
+        }[self.source_kind]
+        if self.source_event_identity.event_type != expected_event_type:
+            raise ValueError("tool projection source event type mismatch")
+        if self.projection_reference.semantic_join.tool_call_id != self.tool_call_id:
+            raise ValueError("tool projection reference call identity mismatch")
         return self
 
 
@@ -1478,6 +1842,9 @@ class ExternalExecutionResultEvent(EventBase):
         EventType.EXTERNAL_EXECUTION_RESULT
     )
     external_results: tuple[ExternalToolResultIngressFact, ...]
+    terminal_projections: tuple[
+        ToolResultTerminalProjectionEndReferenceFact, ...
+    ]
 
     @model_validator(mode="after")
     def _validate_external_results(self) -> "ExternalExecutionResultEvent":
@@ -1494,6 +1861,14 @@ class ExternalExecutionResultEvent(EventBase):
             )
         if not result_ids:
             raise ValueError("ExternalExecutionResultEvent requires external results")
+        projection_ids = tuple(
+            item.projection_reference.semantic_join.tool_call_id
+            for item in self.terminal_projections
+        )
+        if projection_ids != tuple(result_ids):
+            raise ValueError(
+                "ExternalExecutionResultEvent terminal projections differ from results"
+            )
         return self
 
 
@@ -1688,11 +2063,34 @@ class MemoryReflectionCompletedEvent(EventBase):
     usage: ModelTokenUsageFact | None
     estimated_input_tokens: int = Field(ge=0)
     reported_model_id: str | None
+    reflection_model_call_end_event_identity: StableEventIdentityFact
+    reflection_model_result_semantic_fingerprint: str = Field(min_length=1)
+    reflection_policy_contract_fingerprint: str = Field(min_length=1)
+    ordered_candidate_attributions: tuple[
+        ReflectionCandidateAttributionFact, ...
+    ] = Field(max_length=256)
 
     @model_validator(mode="after")
     def _validate_usage(self) -> "MemoryReflectionCompletedEvent":
         _validate_model_usage(self.usage_status, self.usage)
         _validate_reported_model_id(self.reported_model_id)
+        if self.proposed_count != len(self.ordered_candidate_attributions):
+            raise ValueError("reflection proposed count/attribution mismatch")
+        indices = tuple(
+            item.candidate_index for item in self.ordered_candidate_attributions
+        )
+        if indices != tuple(range(len(indices))):
+            raise ValueError("reflection candidate indices must be contiguous")
+        expected_kinds = tuple(
+            item.candidate_payload.candidate.kind
+            if isinstance(item.candidate_payload, ValidCandidatePayload)
+            else item.candidate_payload.attempted_kind or "invalid"
+            if isinstance(item.candidate_payload, InvalidAttemptPayload)
+            else "invalid"
+            for item in self.ordered_candidate_attributions
+        )
+        if tuple(self.candidate_kinds) != expected_kinds:
+            raise ValueError("reflection candidate kinds/attributions mismatch")
         return self
 
 
@@ -2028,6 +2426,105 @@ class ContextCompactionMemoryCandidatesProposedEvent(EventBase):
     error_count: int = 0
     extractor_version: str = "compaction-memory-candidates:v1"
     diagnostics: list[CompactionCandidateDiagnosticEvent] = Field(default_factory=list)
+    summary_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    summary_content_bytes: int = Field(ge=0, le=16 * 1024 * 1024)
+    extractor_contract: CompactionMemoryCandidateExtractorContractFact
+    ordered_candidate_attributions: tuple[
+        CompactionCandidateAttributionFact, ...
+    ] = Field(max_length=256)
+    completed_compaction_event_identity: StableEventIdentityFact
+
+    @model_validator(mode="after")
+    def _candidate_attribution_join(
+        self,
+    ) -> "ContextCompactionMemoryCandidatesProposedEvent":
+        if self.proposed_count != len(self.ordered_candidate_attributions):
+            raise ValueError("compaction proposed count/attribution mismatch")
+        if tuple(self.candidate_entry_ids) != tuple(
+            item.candidate_entry_id for item in self.ordered_candidate_attributions
+        ):
+            raise ValueError("compaction candidate IDs/attributions mismatch")
+        if self.extractor_version != self.extractor_contract.extractor_version:
+            raise ValueError("compaction extractor version drifted")
+        return self
+
+
+class MemoryCandidateEvidenceRejectedEvent(EventBase):
+    type: Literal[EventType.MEMORY_CANDIDATE_EVIDENCE_REJECTED] = (
+        EventType.MEMORY_CANDIDATE_EVIDENCE_REJECTED
+    )
+    governance_batch_id: str = Field(min_length=1, max_length=256)
+    rejection: MemoryCandidateEvidenceRejectedRecord
+
+
+class MemoryGovernanceBatchPreparedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_PREPARED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_PREPARED
+    )
+    governance_batch_id: str = Field(min_length=1, max_length=256)
+    source_ledger_through_sequence: int = Field(ge=0)
+    candidate_entry_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
+    preparing_claims_fingerprint: str = Field(min_length=1)
+    batch_input_reference: GovernanceBatchInputReferenceFact
+    resolved_model_call_id: str = Field(min_length=1, max_length=256)
+    target_fingerprint: str = Field(min_length=1)
+    model_input_fingerprint: str = Field(min_length=1)
+    ordered_prompt_projections_fingerprint: str = Field(min_length=1)
+    event_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _prepared_join(self) -> "MemoryGovernanceBatchPreparedEvent":
+        if self.batch_input_reference.governance_batch_id != self.governance_batch_id:
+            raise ValueError("prepared governance batch reference drifted")
+        if len(self.candidate_entry_ids) != len(set(self.candidate_entry_ids)):
+            raise ValueError("prepared governance candidate IDs must be unique")
+        return self
+
+
+class MemoryGovernanceBatchCompletedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_COMPLETED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_COMPLETED
+    )
+    governance_batch_id: str
+    prepared_event_id: str
+    batch_input_fingerprint: str
+    governance_model_call_id: str
+    decision_ids: tuple[str, ...] = Field(max_length=32)
+    terminal_reason: Literal["decisions_applied", "no_decisions"]
+    diagnostics: tuple[str, ...] = Field(max_length=8)
+    terminal_event_fingerprint: str
+
+
+class MemoryGovernanceBatchFailedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_FAILED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_FAILED
+    )
+    governance_batch_id: str
+    prepared_event_id: str
+    batch_input_fingerprint: str
+    governance_model_call_id: str | None
+    decision_ids: tuple[str, ...] = Field(max_length=32)
+    terminal_reason: Literal[
+        "model_failed", "output_invalid", "decision_apply_failed", "cancelled"
+    ]
+    diagnostics: tuple[str, ...] = Field(max_length=8)
+    terminal_event_fingerprint: str
+
+
+class MemoryGovernanceBatchBlockedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_BLOCKED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_BLOCKED
+    )
+    governance_batch_id: str
+    prepared_event_id: str
+    batch_input_fingerprint: str
+    governance_model_call_id: str | None
+    decision_ids: tuple[str, ...] = Field(max_length=32)
+    terminal_reason: Literal[
+        "authority_untrusted", "artifact_untrusted", "historical_binding_missing"
+    ]
+    diagnostics: tuple[str, ...] = Field(max_length=8)
+    terminal_event_fingerprint: str
 
 
 class ContextCompactionFailedEvent(EventBase):
@@ -2851,6 +3348,254 @@ class SubagentGraphCheckpointCommittedEvent(EventBase):
         return self
 
 
+class TranscriptProjectionCheckpointIntentEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    scope: TranscriptProjectionScopeFact
+    source_ledger_materialization_generation: int = Field(ge=0)
+    source_consumer_horizon_revision: int = Field(ge=0)
+    frozen_ledger_through_sequence: int = Field(ge=0)
+    frozen_ledger_continuity_accumulator: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    maintenance_reservation_id: str = Field(min_length=1, max_length=128)
+    intent_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    terminal_contract: CheckpointTerminalContractFact
+
+    @model_validator(mode="after")
+    def _scope_identity(self) -> "TranscriptProjectionCheckpointIntentEvent":
+        if self.scope.run_id != self.run_id:
+            raise ValueError("checkpoint intent scope run mismatch")
+        return self
+
+
+class TranscriptProjectionCheckpointCommittedEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    checkpoint: TranscriptProjectionCheckpointCandidateFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _candidate_identity(
+        self,
+    ) -> "TranscriptProjectionCheckpointCommittedEvent":
+        if (
+            self.checkpoint.checkpoint_id != self.checkpoint_id
+            or self.checkpoint.candidate_fingerprint
+            != self.checkpoint_candidate_fingerprint
+            or self.checkpoint.scope.run_id != self.run_id
+        ):
+            raise ValueError("checkpoint committed candidate identity mismatch")
+        return self
+
+
+class TranscriptProjectionCheckpointFailedEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    stable_reason_code: CheckpointFailureReasonCode
+    diagnostics: tuple[CheckpointTerminalDiagnosticFact, ...] = Field(max_length=8)
+
+
+class TranscriptProjectionCheckpointCancelledEvent(EventBase):
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED] = (
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED
+    )
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    cancellation_source: CheckpointCancellationSource
+    stable_reason_code: CheckpointCancellationReasonCode
+
+
+class TranscriptProjectionCheckpointRecoveredInterruptedEvent(EventBase):
+    type: Literal[
+        EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED
+    ] = EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED
+    checkpoint_id: str = Field(min_length=1, max_length=128)
+    checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_intent_event_identity: StableEventIdentityFact
+    barrier_installed_event_identity: StableEventIdentityFact
+    terminal_contract_id: str = Field(min_length=1, max_length=128)
+    terminal_contract_version: str = Field(min_length=1, max_length=64)
+    terminal_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    reopen_ledger_high_water: int = Field(ge=0)
+    stable_reason_code: Literal["checkpoint_recovered_interrupted"] = (
+        "checkpoint_recovered_interrupted"
+    )
+
+
+class LedgerMaterializationAccountGenesisEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_ACCOUNT_GENESIS] = (
+        EventType.LEDGER_MATERIALIZATION_ACCOUNT_GENESIS
+    )
+    genesis: LedgerMaterializationAccountGenesisFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state: LedgerMaterializationAccountStateFact
+
+    @model_validator(mode="after")
+    def _result_join(self) -> "LedgerMaterializationAccountGenesisEvent":
+        if (
+            self.genesis.runtime_session_id
+            != self.resulting_account_state.runtime_session_id
+            or self.transition.after_account_state_fingerprint
+            != self.resulting_account_state.account_state_fingerprint
+        ):
+            raise ValueError("ledger genesis resulting account mismatch")
+        return self
+
+
+class LedgerMaterializationConsumerRegisteredEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_CONSUMER_REGISTERED] = (
+        EventType.LEDGER_MATERIALIZATION_CONSUMER_REGISTERED
+    )
+    consumer: LedgerMaterializationConsumerHorizonFact
+    cause: LedgerMaterializationConsumerRegistrationCauseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class LedgerMaterializationConsumerHorizonAdvancedEvent(EventBase):
+    type: Literal[
+        EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED
+    ] = EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED
+    previous_horizon: LedgerMaterializationConsumerHorizonFact
+    resulting_horizon: LedgerMaterializationConsumerHorizonFact
+    cause: CheckpointConsumerCauseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def _horizon_identity(
+        self,
+    ) -> "LedgerMaterializationConsumerHorizonAdvancedEvent":
+        before = self.previous_horizon
+        after = self.resulting_horizon
+        if (
+            before.runtime_session_id != after.runtime_session_id
+            or before.consumer_kind != after.consumer_kind
+            or before.consumer_id != after.consumer_id
+            or after.through_sequence <= before.through_sequence
+        ):
+            raise ValueError("consumer horizon transition is invalid")
+        return self
+
+
+class LedgerMaterializationConsumerRetiredEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_CONSUMER_RETIRED] = (
+        EventType.LEDGER_MATERIALIZATION_CONSUMER_RETIRED
+    )
+    retired_horizon: LedgerMaterializationConsumerHorizonFact
+    cause: ConsumerRetirementCauseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class LedgerMaterializationGenerationAdvancedEvent(EventBase):
+    type: Literal[EventType.LEDGER_MATERIALIZATION_GENERATION_ADVANCED] = (
+        EventType.LEDGER_MATERIALIZATION_GENERATION_ADVANCED
+    )
+    previous_generation: LedgerMaterializationGenerationFact
+    resulting_generation: LedgerMaterializationGenerationFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationReservationCreatedEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_RESERVATION_CREATED] = (
+        EventType.PHYSICAL_OPERATION_RESERVATION_CREATED
+    )
+    reservation: PhysicalOperationReservationFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationChargeAppliedEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_CHARGE_APPLIED] = (
+        EventType.PHYSICAL_OPERATION_CHARGE_APPLIED
+    )
+    charge: PhysicalOperationChargeAppliedFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationReservationSuspendedEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_RESERVATION_SUSPENDED] = (
+        EventType.PHYSICAL_OPERATION_RESERVATION_SUSPENDED
+    )
+    suspension: PhysicalOperationSuspensionTailFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class PhysicalOperationReservationSettledEvent(EventBase):
+    type: Literal[EventType.PHYSICAL_OPERATION_RESERVATION_SETTLED] = (
+        EventType.PHYSICAL_OPERATION_RESERVATION_SETTLED
+    )
+    settlement: PhysicalOperationSettlementFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class CheckpointDispatchBarrierInstalledEvent(EventBase):
+    type: Literal[EventType.CHECKPOINT_DISPATCH_BARRIER_INSTALLED] = (
+        EventType.CHECKPOINT_DISPATCH_BARRIER_INSTALLED
+    )
+    barrier: CheckpointDispatchBarrierFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
+class CheckpointDispatchBarrierReleasedEvent(EventBase):
+    type: Literal[EventType.CHECKPOINT_DISPATCH_BARRIER_RELEASED] = (
+        EventType.CHECKPOINT_DISPATCH_BARRIER_RELEASED
+    )
+    release: CheckpointDispatchBarrierReleaseFact
+    transition: LedgerMaterializationAccountTransitionFact
+    resulting_account_state_fingerprint: str = Field(
+        pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+
 class CustomEvent(EventBase):
     type: Literal[EventType.CUSTOM] = EventType.CUSTOM
     name: str
@@ -2882,26 +3627,28 @@ AgentEvent: TypeAlias = (
     | ContextCompiledEvent
     | CapabilityGateDecisionEvent
     | ModelCallStartEvent
+    | ModelCallTerminalProjectionCommittedEvent
     | ModelCallEndEvent
     | ProviderModelStreamErrorEvent
     | ModelCallControlDispositionResolvedEvent
     | ModelCallRejectedEvent
     | TextBlockStartEvent
-    | TextBlockDeltaEvent
+    | TextBlockSegmentEvent
     | TextBlockEndEvent
     | DataBlockStartEvent
-    | DataBlockDeltaEvent
+    | DataBlockSegmentEvent
     | DataBlockEndEvent
     | ThinkingBlockStartEvent
-    | ThinkingBlockDeltaEvent
+    | ThinkingBlockSegmentEvent
     | ThinkingBlockEndEvent
     | HintBlockEvent
     | ToolCallStartEvent
-    | ToolCallDeltaEvent
+    | ToolCallArgumentsSegmentEvent
     | ToolCallEndEvent
     | ToolResultStartEvent
     | ToolResultTextDeltaEvent
     | ToolResultDataDeltaEvent
+    | ToolResultTerminalProjectionCommittedEvent
     | ToolResultEndEvent
     | ToolExecutionSuspendedEvent
     | RequireUserConfirmEvent
@@ -2926,6 +3673,11 @@ AgentEvent: TypeAlias = (
     | MemoryMaintenanceProposedEvent
     | MemoryMaintenanceAppliedEvent
     | MemoryMaintenanceRejectedEvent
+    | MemoryGovernanceBatchPreparedEvent
+    | MemoryGovernanceBatchCompletedEvent
+    | MemoryGovernanceBatchFailedEvent
+    | MemoryGovernanceBatchBlockedEvent
+    | MemoryCandidateEvidenceRejectedEvent
     | ProjectionRequestedEvent
     | ProjectionReadyEvent
     | ProjectionFailedEvent
@@ -2952,5 +3704,21 @@ AgentEvent: TypeAlias = (
     | SubagentResultSubmittedEvent
     | SubagentResultConsumedEvent
     | SubagentGraphCheckpointCommittedEvent
+    | TranscriptProjectionCheckpointIntentEvent
+    | TranscriptProjectionCheckpointCommittedEvent
+    | TranscriptProjectionCheckpointFailedEvent
+    | TranscriptProjectionCheckpointCancelledEvent
+    | TranscriptProjectionCheckpointRecoveredInterruptedEvent
+    | LedgerMaterializationAccountGenesisEvent
+    | LedgerMaterializationConsumerRegisteredEvent
+    | LedgerMaterializationConsumerHorizonAdvancedEvent
+    | LedgerMaterializationConsumerRetiredEvent
+    | LedgerMaterializationGenerationAdvancedEvent
+    | PhysicalOperationReservationCreatedEvent
+    | PhysicalOperationChargeAppliedEvent
+    | PhysicalOperationReservationSuspendedEvent
+    | PhysicalOperationReservationSettledEvent
+    | CheckpointDispatchBarrierInstalledEvent
+    | CheckpointDispatchBarrierReleasedEvent
     | CustomEvent
 )

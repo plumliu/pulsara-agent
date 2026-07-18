@@ -12,6 +12,7 @@ from pulsara_agent.event import (
     ContextWindowCompactionStartedEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
@@ -25,6 +26,16 @@ from pulsara_agent.event_log.serialization import (
     freeze_event_write_candidate,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives.model_call import (
+    DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT,
+)
+from pulsara_agent.primitives.terminal_projection import ModelCallSemanticSourceFact
+from pulsara_agent.llm.terminal_projection import (
+    MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
+)
+from pulsara_agent.runtime.long_horizon.store import (
+    LongHorizonReducerApplyError,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.llm.execution import ModelStreamLiveSemanticCursor
@@ -35,6 +46,9 @@ if TYPE_CHECKING:
     )
     from pulsara_agent.runtime.session import EventWriteResult, RuntimeSession
     from pulsara_agent.runtime.state import LoopState
+    from pulsara_agent.primitives.authority_materialization import (
+        PhysicalOperationReservationFact,
+    )
 
 
 class ModelStreamCommitContractError(RuntimeError):
@@ -50,6 +64,7 @@ class ConfirmedCommittedBatch:
     committed_events: tuple[RawStoredEventEnvelope, ...]
     committed_through_sequence: int
     batch_fingerprint: str
+    accounting_events: tuple[AgentEvent, ...] = ()
 
     def decode_owned(self) -> tuple[AgentEvent, ...]:
         return tuple(
@@ -75,7 +90,11 @@ class ModelStreamSemanticCommitGuard:
     resolved_model_call_id: str
     model_call_start_event_id: str
     first_transport_sequence_index: int
-    semantic_item_count: int
+    source_item_count: int
+    source_accumulator_before: str
+    source_accumulator_after: str
+    first_durable_semantic_event_index: int
+    durable_event_count: int
     expected_previous_semantic_event_id: str | None
 
 
@@ -88,7 +107,10 @@ class ModelStreamTerminalCommitGuard:
     stable_reply_end_event_id: str | None
     stable_settlement_event_id: str | None
     expected_last_semantic_event_id: str | None
-    semantic_item_count: int
+    source_item_count: int
+    source_accumulator: str
+    durable_event_count: int
+    model_stream_measurement_fingerprint: str
     rollout_accounting_mode: RolloutAccountingMode
     reservation_id: str | None
     reservation_quote_fingerprint: str | None
@@ -124,7 +146,10 @@ def build_model_stream_terminal_commit_guard(
     bundle: ModelLifecycleStartCommitBundle,
     *,
     expected_last_semantic_event_id: str | None,
-    semantic_item_count: int,
+    source_item_count: int,
+    source_accumulator: str,
+    durable_event_count: int,
+    model_stream_measurement_fingerprint: str,
 ) -> ModelStreamTerminalCommitGuard:
     reservation = bundle.reservation
     return ModelStreamTerminalCommitGuard(
@@ -139,7 +164,12 @@ def build_model_stream_terminal_commit_guard(
             bundle.recovery_plan.stable_settlement_event_id
         ),
         expected_last_semantic_event_id=expected_last_semantic_event_id,
-        semantic_item_count=semantic_item_count,
+        source_item_count=source_item_count,
+        source_accumulator=source_accumulator,
+        durable_event_count=durable_event_count,
+        model_stream_measurement_fingerprint=(
+            model_stream_measurement_fingerprint
+        ),
         rollout_accounting_mode=bundle.rollout_accounting_mode,
         reservation_id=reservation.reservation_id if reservation else None,
         reservation_quote_fingerprint=(
@@ -161,6 +191,7 @@ class RuntimeSessionModelStreamEventCommitPort:
     ) -> None:
         self._runtime_session = runtime_session
         self._state = state
+        self._physical_reservation: PhysicalOperationReservationFact | None = None
 
     @property
     def runtime_session(self) -> RuntimeSession:
@@ -169,6 +200,15 @@ class RuntimeSessionModelStreamEventCommitPort:
     @property
     def state(self) -> LoopState | None:
         return self._state
+
+    async def ensure_physical_headroom(self) -> None:
+        from pulsara_agent.primitives.authority_materialization import (
+            PhysicalOperationKind,
+        )
+
+        await self._runtime_session.ensure_physical_operation_headroom(
+            PhysicalOperationKind.MODEL_CALL
+        )
 
     async def commit_start(
         self,
@@ -252,15 +292,38 @@ class RuntimeSessionModelStreamEventCommitPort:
                         run_id=start.run_id,
                         account_id=reservation.account_id,
                         accounting_mode=guard.rollout_accounting_mode,
+                        source_sequence=reservation.source_sequence,
                         expected_fingerprint=(
                             guard.expected_rollout_account_state_fingerprint
                         ),
                     )
-                return self._commit_in_writer(candidates, events=events)
+                if (
+                    self._runtime_session.materialization_account_store.snapshot()
+                    is None
+                    and self._runtime_session.allow_unbootstrapped_test_events
+                ):
+                    return self._commit_in_writer(candidates, events=events)
+                from pulsara_agent.primitives.authority_materialization import (
+                    PhysicalOperationKind,
+                )
 
-        return await self._runtime_session.event_write_service.execute(
-            commit_start_in_writer
-        )
+                physical_reservation_id = (
+                    "model_physical:"
+                    + guard.resolved_model_call_id.removeprefix("sha256:")[-96:]
+                )
+                physical_reservation, result = (
+                    self._runtime_session.reserve_physical_operation_from_thread(
+                        events,
+                        operation_kind=PhysicalOperationKind.MODEL_CALL,
+                        reservation_id=physical_reservation_id,
+                        owner_id=guard.resolved_model_call_id,
+                        state=self._state,
+                    )
+                )
+                self._physical_reservation = physical_reservation
+                return self._confirmed_batch(candidates, result=result)
+
+        return await self._execute_owned_commit(commit_start_in_writer)
 
     async def commit_semantic(
         self,
@@ -270,11 +333,24 @@ class RuntimeSessionModelStreamEventCommitPort:
         live_cursor: ModelStreamLiveSemanticCursor,
     ) -> ConfirmedCommittedBatch:
         events = self._decode_candidates(candidates)
-        if not events or len(events) != guard.semantic_item_count:
+        if not events or len(events) != guard.durable_event_count:
             raise ModelStreamCommitContractError(
                 "model semantic commit candidate count drifted"
             )
-        for offset, event in enumerate(events):
+        policy = DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT
+        if (
+            len(events) > policy.commit_max_durable_events
+            or sum(len(item.canonical_payload_bytes) for item in candidates)
+            > policy.commit_max_candidate_bytes
+        ):
+            raise ModelStreamCommitContractError(
+                "model semantic commit exceeds its durable batch contract"
+            )
+        next_source_index = guard.first_transport_sequence_index
+        source_accumulator = guard.source_accumulator_before
+        for offset, (candidate, event) in enumerate(
+            zip(candidates, events, strict=True)
+        ):
             attribution = getattr(event, "model_stream_attribution", None)
             if attribution is None or isinstance(
                 event,
@@ -289,27 +365,82 @@ class RuntimeSessionModelStreamEventCommitPort:
                     "model semantic commit requires attributed semantic events"
                 )
             if (
+                attribution.segment_policy_contract_fingerprint
+                != policy.contract_fingerprint
+                or len(candidate.canonical_payload_bytes)
+                > policy.max_canonical_event_bytes
+            ):
+                raise ModelStreamCommitContractError(
+                    "model semantic event exceeds or changes its segment policy"
+                )
+            if attribution.segment_seal_reason is not None and (
+                attribution.source_span.source_item_count
+                > policy.max_segment_source_items
+                or getattr(event, "content_utf8_bytes", 0)
+                > policy.max_content_utf8_bytes
+            ):
+                raise ModelStreamCommitContractError(
+                    "model semantic segment exceeds its source/content contract"
+                )
+            if (
                 attribution.resolved_model_call_id != guard.resolved_model_call_id
                 or attribution.model_call_start_event_id
                 != guard.model_call_start_event_id
-                or attribution.transport_sequence_index
-                != guard.first_transport_sequence_index + offset
+                or attribution.durable_semantic_event_index
+                != guard.first_durable_semantic_event_index + offset
             ):
                 raise ModelStreamCommitContractError(
                     "model semantic event does not match its frozen commit guard"
                 )
+            span = attribution.source_span
+            if (
+                span.first_transport_sequence_index != next_source_index
+                or span.source_accumulator_before != source_accumulator
+            ):
+                raise ModelStreamCommitContractError(
+                    "model semantic source spans are not contiguous"
+                )
+            next_source_index += span.source_item_count
+            source_accumulator = span.source_accumulator_after
+        if (
+            next_source_index
+            != guard.first_transport_sequence_index + guard.source_item_count
+            or source_accumulator != guard.source_accumulator_after
+        ):
+            raise ModelStreamCommitContractError(
+                "model semantic source coverage does not match commit guard"
+            )
         self._runtime_session.publisher.bind_running_loop()
 
         def commit_semantic_in_writer() -> ConfirmedCommittedBatch:
             with self._runtime_session.write_coordinator.lock:
-                self._require_live_semantic_cursor(live_cursor, guard)
-                result = self._commit_in_writer(candidates, events=events)
-                live_cursor.advance_semantic(result.decode_owned())
-                return result
+                try:
+                    self._require_live_semantic_cursor(live_cursor, guard)
+                    if self._physical_reservation is None and (
+                        self._runtime_session.materialization_account_store.snapshot()
+                        is None
+                        and self._runtime_session.allow_unbootstrapped_test_events
+                    ):
+                        confirmed = self._commit_in_writer(candidates, events=events)
+                    else:
+                        physical_reservation = self._require_physical_reservation(
+                            resolved_model_call_id=guard.resolved_model_call_id
+                        )
+                        result = (
+                            self._runtime_session.charge_physical_operation_from_thread(
+                                events,
+                                reservation=physical_reservation,
+                                state=self._state,
+                            )
+                        )
+                        confirmed = self._confirmed_batch(candidates, result=result)
+                    live_cursor.advance_semantic(confirmed.decode_owned())
+                    return confirmed
+                except BaseException as exc:
+                    self._raise_retryable_none(exc, phase="semantic")
+                    raise
 
-        return await self._runtime_session.event_write_service.execute(
-            commit_semantic_in_writer
-        )
+        return await self._execute_owned_commit(commit_semantic_in_writer)
 
     async def commit_terminal(
         self,
@@ -319,15 +450,27 @@ class RuntimeSessionModelStreamEventCommitPort:
         live_cursor: ModelStreamLiveSemanticCursor,
     ) -> ConfirmedCommittedBatch:
         events = self._decode_candidates(candidates)
-        if not events or not isinstance(events[0], ModelCallEndEvent):
+        if (
+            len(events) < 2
+            or not isinstance(events[0], ModelCallTerminalProjectionCommittedEvent)
+            or not isinstance(events[1], ModelCallEndEvent)
+        ):
             raise ModelStreamCommitContractError(
-                "model terminal batch must begin with ModelCallEndEvent"
+                "model terminal batch must begin with projection then ModelCallEnd"
+            )
+        if sum(
+            isinstance(event, ModelCallTerminalProjectionCommittedEvent)
+            for event in events
+        ) != 1:
+            raise ModelStreamCommitContractError(
+                "model terminal batch requires exactly one projection event"
             )
         if sum(isinstance(event, ModelCallEndEvent) for event in events) != 1:
             raise ModelStreamCommitContractError(
                 "model terminal batch requires exactly one ModelCallEndEvent"
             )
         allowed = (
+            ModelCallTerminalProjectionCommittedEvent,
             ModelCallEndEvent,
             RolloutBudgetReservationSettledEvent,
             ReplyEndEvent,
@@ -340,7 +483,9 @@ class RuntimeSessionModelStreamEventCommitPort:
             raise ModelStreamCommitContractError(
                 "ReplyEndEvent must be the final terminal fact"
             )
-        model_end = events[0]
+        projection = events[0]
+        assert isinstance(projection, ModelCallTerminalProjectionCommittedEvent)
+        model_end = events[1]
         assert isinstance(model_end, ModelCallEndEvent)
         if (
             model_end.id != guard.stable_model_call_end_event_id
@@ -348,6 +493,51 @@ class RuntimeSessionModelStreamEventCommitPort:
         ):
             raise ModelStreamCommitContractError(
                 "model terminal end does not match its frozen commit guard"
+            )
+        end_projection = model_end.terminal_projection
+        if (
+            projection.resolved_model_call_id != guard.resolved_model_call_id
+            or projection.model_call_start_event_identity.event_id
+            != guard.model_call_start_event_id
+            or end_projection is None
+            or end_projection.projection_reference != projection.projection_reference
+            or end_projection.projection_committed_event_identity.event_id
+            != projection.id
+            or end_projection.projection_committed_event_identity.payload_fingerprint
+            != candidates[0].payload_fingerprint
+        ):
+            raise ModelStreamCommitContractError(
+                "model terminal projection/End reference join drifted"
+            )
+        document = (
+            self._runtime_session.transcript_projection_document_registry.resolve(
+                projection.projection_reference
+            )
+        )
+        source = document.source_fact
+        if (
+            not isinstance(source, ModelCallSemanticSourceFact)
+            or source.resolved_model_call_id != guard.resolved_model_call_id
+            or source.model_call_start_event_identity.event_id
+            != guard.model_call_start_event_id
+            or source.source_semantic_item_count != guard.source_item_count
+            or source.source_semantic_accumulator != guard.source_accumulator
+            or source.durable_semantic_event_count != guard.durable_event_count
+            or source.stream_settlement_measurement.measurement_fingerprint
+            != guard.model_stream_measurement_fingerprint
+            or source.segment_policy_contract_fingerprint
+            != DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.contract_fingerprint
+            or source.model_stream_semantic_domain_contract_fingerprint
+            != (
+                self._runtime_session.authority_materialization_contracts
+                .event_domain.contract
+                .transcript_semantic_domain_contract_fingerprint
+            )
+            or source.reducer_contract_fingerprint
+            != MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
+        ):
+            raise ModelStreamCommitContractError(
+                "model terminal projection source/live cursor join drifted"
             )
         settlements = tuple(
             event
@@ -406,26 +596,124 @@ class RuntimeSessionModelStreamEventCommitPort:
                 if accounted:
                     self._require_active_reservation(guard, run_id=model_end.run_id)
                 try:
-                    result = self._commit_in_writer(candidates, events=events)
+                    if self._physical_reservation is None and (
+                        self._runtime_session.materialization_account_store.snapshot()
+                        is None
+                        and self._runtime_session.allow_unbootstrapped_test_events
+                    ):
+                        result = self._commit_in_writer(candidates, events=events)
+                    else:
+                        physical_reservation = self._require_physical_reservation(
+                            resolved_model_call_id=guard.resolved_model_call_id
+                        )
+                        write_result = (
+                            self._runtime_session.settle_physical_operation_from_thread(
+                                events,
+                                reservation=physical_reservation,
+                                terminal_outcome=model_end.outcome,
+                                model_stream_measurement_fingerprint=(
+                                    guard.model_stream_measurement_fingerprint
+                                ),
+                                state=self._state,
+                            )
+                        )
+                        result = self._confirmed_batch(
+                            candidates, result=write_result
+                        )
                     committed_end = next(
                         event
                         for event in result.decode_owned()
                         if isinstance(event, ModelCallEndEvent)
                     )
                     live_cursor.mark_terminal(committed_end)
+                    self._physical_reservation = None
                     return result
                 except BaseException as exc:
                     from pulsara_agent.runtime.session import EventCommitError
 
                     if isinstance(exc, EventCommitError):
-                        raise ModelStreamCommitNotCommitted(
-                            "stable model-stream terminal batch was not committed"
-                        ) from exc
+                        self._raise_retryable_none(exc, phase="terminal")
                     raise
 
-        return await self._runtime_session.event_write_service.execute(
-            commit_terminal_in_writer
+        return await self._execute_owned_commit(commit_terminal_in_writer)
+
+    async def _execute_owned_commit(self, operation):
+        """Recover a FULL physical write hidden behind caller cancellation."""
+
+        from pulsara_agent.primitives.authority_materialization import (
+            LedgerWriteAdmissionClass,
+            PhysicalOperationKind,
         )
+        from pulsara_agent.runtime.event_write_service import (
+            PendingRuntimeEventWriteError,
+            RuntimeEventWriteCancelled,
+        )
+        from pulsara_agent.runtime.session import EventCommitError
+
+        admission_kwargs = {}
+        if self._physical_reservation is not None:
+            admission_kwargs = {
+                "admission_class": LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
+                "operation_owner_id": (
+                    self._runtime_session.physical_operation_admission_owner_id(
+                        operation_kind=PhysicalOperationKind.MODEL_CALL,
+                        owner_id=self._physical_reservation.owner_id,
+                    )
+                ),
+            }
+        try:
+            return await self._runtime_session.event_write_service.execute(
+                operation,
+                **admission_kwargs,
+            )
+        except RuntimeEventWriteCancelled as cancelled:
+            result = cancelled.operation_result
+            if isinstance(result, ConfirmedCommittedBatch):
+                return result
+            error = cancelled.operation_error
+            if isinstance(error, ModelStreamCommitNotCommitted):
+                raise error
+            if isinstance(error, PendingRuntimeEventWriteError) or (
+                isinstance(error, EventCommitError)
+                and error.commit_outcome == "none"
+            ):
+                raise ModelStreamCommitNotCommitted(
+                    "stable model-stream batch was not physically committed"
+                ) from cancelled
+            if error is not None:
+                raise error from cancelled
+            self._runtime_session.latch_event_commit_outcome_unknown()
+            raise ModelStreamCommitContractError(
+                "model-stream writer cancellation lost its physical outcome"
+            ) from cancelled
+
+    def _require_physical_reservation(
+        self,
+        *,
+        resolved_model_call_id: str,
+    ) -> PhysicalOperationReservationFact:
+        reservation = self._physical_reservation
+        if reservation is None:
+            raise ModelStreamCommitContractError(
+                "model stream has no active physical reservation"
+            )
+        if (
+            reservation.owner_kind.value != "model_call"
+            or reservation.owner_id != resolved_model_call_id
+        ):
+            raise ModelStreamCommitContractError(
+                "model stream physical reservation identity drifted"
+            )
+        return reservation
+
+    @staticmethod
+    def _raise_retryable_none(exc: BaseException, *, phase: str) -> None:
+        from pulsara_agent.runtime.session import EventCommitError
+
+        if isinstance(exc, EventCommitError) and exc.commit_outcome == "none":
+            raise ModelStreamCommitNotCommitted(
+                f"stable model-stream {phase} batch was not committed"
+            ) from exc
 
     def _commit_in_writer(
         self,
@@ -456,7 +744,7 @@ class RuntimeSessionModelStreamEventCommitPort:
                 from pulsara_agent.runtime.session import EventCommitError
 
                 if isinstance(confirmation_error, EventCommitError):
-                    raise original
+                    raise confirmation_error from original
                 self._runtime_session.latch_event_commit_outcome_unknown()
                 raise
         return self._confirmed_batch(candidates, result=result)
@@ -541,6 +829,7 @@ class RuntimeSessionModelStreamEventCommitPort:
             batch_fingerprint=context_fingerprint(
                 "confirmed-model-stream-batch:v1", payload
             ),
+            accounting_events=result.accounting_events,
         )
 
     def _require_expected_rollout_state(
@@ -549,39 +838,44 @@ class RuntimeSessionModelStreamEventCommitPort:
         run_id: str,
         account_id: str,
         accounting_mode: RolloutAccountingMode,
+        source_sequence: int,
         expected_fingerprint: str | None,
     ) -> None:
-        from pulsara_agent.runtime.long_horizon.accounting import (
-            resolve_run_rollout_binding,
-        )
-
         if expected_fingerprint is None:
             raise ModelStreamCommitContractError(
                 "accounted model start requires an expected rollout state"
             )
-        if accounting_mode == "root_account":
-            state = self._runtime_session.long_horizon_state_store.rollout_state(
-                account_id
-            )
-            if state is None:
-                raise ModelStreamCommitContractError(
-                    "root-account start lacks its rollout reducer state"
+        try:
+            if accounting_mode == "root_account":
+                state = (
+                    self._runtime_session.long_horizon_state_store.rollout_state_at(
+                        account_id,
+                        through_sequence=source_sequence,
+                    )
                 )
-            actual = state.state_fingerprint
-        elif accounting_mode == "child_subaccount":
-            binding = resolve_run_rollout_binding(
-                self._runtime_session,
-                run_id=run_id,
-            )
-            if binding.child_state is None:
-                raise ModelStreamCommitContractError(
-                    "child-account start lacks a child rollout ledger"
+                if state is None:
+                    raise ModelStreamCommitContractError(
+                        "root-account start lacks its rollout reducer state"
+                    )
+                actual = state.state_fingerprint
+            elif accounting_mode == "child_subaccount":
+                state = self._runtime_session.long_horizon_state_store.child_rollout_state_at(
+                    run_id,
+                    through_sequence=source_sequence,
                 )
-            actual = binding.child_state.state_fingerprint
-        else:
+                if state is None:
+                    raise ModelStreamCommitContractError(
+                        "child-account start lacks a child rollout ledger"
+                    )
+                actual = state.state_fingerprint
+            else:
+                raise ModelStreamCommitContractError(
+                    "unaccounted model start cannot validate rollout state"
+                )
+        except LongHorizonReducerApplyError as exc:
             raise ModelStreamCommitContractError(
-                "unaccounted model start cannot validate rollout state"
-            )
+                "model start rollout account state changed after preparation"
+            ) from exc
         if actual != expected_fingerprint:
             raise ModelStreamCommitContractError(
                 "model start rollout account state changed after preparation"
@@ -596,7 +890,11 @@ class RuntimeSessionModelStreamEventCommitPort:
             live_cursor.require_open(
                 resolved_model_call_id=guard.resolved_model_call_id,
                 model_call_start_event_id=guard.model_call_start_event_id,
-                expected_semantic_item_count=guard.first_transport_sequence_index,
+                expected_source_item_count=guard.first_transport_sequence_index,
+                expected_source_accumulator=guard.source_accumulator_before,
+                expected_durable_event_count=(
+                    guard.first_durable_semantic_event_index
+                ),
                 expected_previous_semantic_event_id=(
                     guard.expected_previous_semantic_event_id
                 ),
@@ -613,7 +911,9 @@ class RuntimeSessionModelStreamEventCommitPort:
             live_cursor.require_open(
                 resolved_model_call_id=guard.resolved_model_call_id,
                 model_call_start_event_id=guard.model_call_start_event_id,
-                expected_semantic_item_count=guard.semantic_item_count,
+                expected_source_item_count=guard.source_item_count,
+                expected_source_accumulator=guard.source_accumulator,
+                expected_durable_event_count=guard.durable_event_count,
                 expected_previous_semantic_event_id=(
                     guard.expected_last_semantic_event_id
                 ),

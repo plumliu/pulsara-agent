@@ -612,6 +612,7 @@ class ContextWindowCompactionService:
             result = await collect_direct_model_call_handle(
                 handle,
                 expected_call=call,
+                runtime_session_id=self.runtime_session.runtime_session_id,
             )
             started_committed = self.runtime_session.event_log.get_by_id(
                 plan.stable_started_event_id

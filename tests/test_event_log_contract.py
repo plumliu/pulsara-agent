@@ -20,6 +20,12 @@ from tests.support import (
 )
 from tests.support.runtime_session import in_memory_runtime_session
 
+from tests.support.model_stream import (
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+)
+
 from pulsara_agent.event import (
     CapabilityGateDecisionEvent,
     ContextCompiledEvent,
@@ -37,9 +43,7 @@ from pulsara_agent.event import (
     ReplyStartEvent,
     RunEndEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
+    TextBlockSegmentEvent,
 )
 from pulsara_agent.event import TerminalProcessCompletedEvent
 from pulsara_agent.event_log import (
@@ -55,7 +59,9 @@ from pulsara_agent.event_log import (
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.llm.control import build_model_call_control_disposition_event
-from pulsara_agent.llm.materialize import materialize_committed_model_call_result
+from pulsara_agent.llm.diagnostic_materialize import (
+    materialize_committed_model_call_result,
+)
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
 from pulsara_agent.runtime.tool_action import (
     builtin_tool_action_policy,
@@ -102,10 +108,10 @@ def _ctx(label: str) -> EventContext:
 def _reply_events(ctx: EventContext):
     return [
         ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-        TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-        TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello "),
-        TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="world"),
-        TextBlockEndEvent(**ctx.event_fields(), block_id="text:1"),
+        make_text_block_start_event(**ctx.event_fields(), block_id="text:1"),
+        make_text_block_segment_event(**ctx.event_fields(), block_id="text:1", delta="hello "),
+        make_text_block_segment_event(**ctx.event_fields(), block_id="text:1", delta="world"),
+        make_text_block_end_event(**ctx.event_fields(), block_id="text:1"),
         ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
     ]
 
@@ -123,14 +129,14 @@ def _append_canonical_reply_events(event_log: EventLog, ctx: EventContext) -> No
             name="assistant",
         ),
         start,
-        TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-        TextBlockDeltaEvent(
+        make_text_block_start_event(**ctx.event_fields(), block_id="text:1"),
+        make_text_block_segment_event(
             **ctx.event_fields(), block_id="text:1", delta="hello "
         ),
-        TextBlockDeltaEvent(
+        make_text_block_segment_event(
             **ctx.event_fields(), block_id="text:1", delta="world"
         ),
-        TextBlockEndEvent(**ctx.event_fields(), block_id="text:1"),
+        make_text_block_end_event(**ctx.event_fields(), block_id="text:1"),
         ModelCallEndEvent(
             id=start.recovery_plan.stable_model_call_end_event_id,
             **ctx.event_fields(),
@@ -182,7 +188,7 @@ def test_event_log_assigns_sequences_and_filters_events(event_log: EventLog) -> 
 
     event_log.extend(_reply_events(first))
     stored = event_log.append(
-        TextBlockDeltaEvent(**second.event_fields(), block_id="text:2", delta="other")
+        make_text_block_segment_event(**second.event_fields(), block_id="text:2", delta="other")
     )
 
     assert stored.sequence == 7
@@ -200,7 +206,7 @@ def test_event_log_single_append_is_idempotent_by_exact_event_payload(
     event_log: EventLog,
 ) -> None:
     ctx = _ctx("contract:idempotent-event-id")
-    candidate = TextBlockDeltaEvent(
+    candidate = make_text_block_segment_event(
         **ctx.event_fields(),
         block_id="text:idempotent",
         delta="stable",
@@ -213,7 +219,7 @@ def test_event_log_single_append_is_idempotent_by_exact_event_payload(
     assert event_log.get_by_id(candidate.id) == first
     assert len(event_log.iter()) == 1
 
-    conflicting = candidate.model_copy(update={"delta": "different"})
+    conflicting = candidate.model_copy(update={"text": "different"})
     with pytest.raises(EventIdConflict):
         event_log.append(conflicting)
 
@@ -286,6 +292,18 @@ def test_raw_event_type_selection_can_limit_to_active_runs(
     assert tuple(event.run_id for event in snapshot.events) == (active_ctx.run_id,)
     assert tuple(event.event_type for event in snapshot.events) == ("RUN_START",)
 
+    historical = event_log.read_raw_events_by_types(
+        ("RUN_START", "RUN_END"),
+        through_sequence=2,
+    )
+
+    assert historical.through_sequence == 2
+    assert tuple(event.sequence for event in historical.events) == (1, 2)
+    assert tuple(event.event_type for event in historical.events) == (
+        "RUN_START",
+        "RUN_START",
+    )
+
 
 def test_context_authority_bundle_freezes_all_channels_at_one_high_water(
     event_log: EventLog,
@@ -298,7 +316,7 @@ def test_context_authority_bundle_freezes_all_channels_at_one_high_water(
                 **run_start_permission_fields(ctx.run_id, user_input="bundle"),
                 user_input_chars=6,
             ),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **ctx.event_fields(),
                 block_id="text:bundle",
                 delta="payload",
@@ -816,7 +834,7 @@ def test_event_log_live_append_rejects_presequenced_event(event_log: EventLog) -
     ctx = _ctx("contract:preset")
     with pytest.raises(ValueError, match="sequence=None"):
         event_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **ctx.event_fields(),
                 block_id="text:10",
                 delta="preset",
@@ -898,7 +916,7 @@ def test_postgres_event_log_concurrent_append_keeps_unique_sequences(
         )
         ctx = _ctx("postgres:concurrent")
         events = [
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id=f"text:{index}", delta=str(index)
             )
             for index in range(12)
@@ -928,7 +946,7 @@ def test_postgres_event_log_extend_allocates_contiguous_atomic_batch(
         ctx = _ctx("postgres:atomic-batch")
         stored = log.extend(
             [
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(),
                     block_id=f"text:{index}",
                     delta=str(index),
@@ -955,7 +973,7 @@ def test_postgres_event_log_concurrent_batches_never_interleave(tmp_path: Path) 
         barrier.wait(timeout=2)
         return log.extend(
             [
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(),
                     block_id=f"{prefix}:{index}",
                     delta=prefix,
@@ -988,12 +1006,12 @@ def test_postgres_event_log_conditional_extend_conflict_writes_nothing(
         )
         ctx = _ctx("postgres:cas")
         log.append(
-            TextBlockDeltaEvent(**ctx.event_fields(), block_id="seed", delta="seed")
+            make_text_block_segment_event(**ctx.event_fields(), block_id="seed", delta="seed")
         )
         with pytest.raises(EventLogWriteConflict) as captured:
             log.extend(
                 [
-                    TextBlockDeltaEvent(
+                    make_text_block_segment_event(
                         **ctx.event_fields(), block_id="stale", delta="stale"
                     )
                 ],
@@ -1036,7 +1054,7 @@ def test_postgres_event_log_batch_failure_rolls_back_prior_event_and_projection(
     )
     try:
         owner.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **owner_context.event_fields(),
                 block_id="owner",
                 delta="owner",
@@ -1053,7 +1071,7 @@ def test_postgres_event_log_batch_failure_rolls_back_prior_event_and_projection(
                         ),
                         user_input_chars=1,
                     ),
-                    TextBlockDeltaEvent(
+                    make_text_block_segment_event(
                         **conflicting_context.event_fields(),
                         block_id="conflict",
                         delta="conflict",
@@ -1095,14 +1113,14 @@ def test_postgres_event_log_rejects_cross_session_run_id_reuse(tmp_path: Path) -
         )
 
         first_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **first_ctx.event_fields(), block_id="text:1", delta="first"
             )
         )
 
         with pytest.raises(ValueError, match="already belongs to runtime session"):
             second_log.append(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **second_ctx.event_fields(), block_id="text:2", delta="second"
                 )
             )
@@ -1133,14 +1151,14 @@ def test_postgres_event_log_rejects_cross_run_turn_id_reuse(tmp_path: Path) -> N
         )
 
         event_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **first_ctx.event_fields(), block_id="text:1", delta="first"
             )
         )
 
         with pytest.raises(ValueError, match="already belongs to runtime session"):
             event_log.append(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **second_ctx.event_fields(), block_id="text:2", delta="second"
                 )
             )
@@ -1162,7 +1180,7 @@ def test_postgres_event_log_rejects_concurrent_cross_session_run_id_reuse(
         barrier.wait(timeout=2)
         try:
             log.append(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(), block_id=f"text:{uuid4().hex}", delta="x"
                 )
             )
@@ -1215,7 +1233,7 @@ def test_postgres_event_log_rejects_concurrent_cross_session_turn_id_reuse(
         barrier.wait(timeout=2)
         try:
             log.append(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(), block_id=f"text:{uuid4().hex}", delta="x"
                 )
             )
@@ -1285,7 +1303,7 @@ def test_postgres_event_log_transaction_failure_leaves_no_partial_events(
             reply_id=f"reply:{uuid4().hex}",
         )
         conflicting_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **conflicting_ctx.event_fields(), block_id="text:seed", delta="seed"
             )
         )
@@ -1293,10 +1311,10 @@ def test_postgres_event_log_transaction_failure_leaves_no_partial_events(
         with pytest.raises(ValueError, match="already belongs to runtime session"):
             event_log.extend(
                 [
-                    TextBlockDeltaEvent(
+                    make_text_block_segment_event(
                         **valid_ctx.event_fields(), block_id="text:valid", delta="valid"
                     ),
-                    TextBlockDeltaEvent(
+                    make_text_block_segment_event(
                         **invalid_ctx.event_fields(),
                         block_id="text:invalid",
                         delta="invalid",
@@ -1325,31 +1343,56 @@ def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> Non
             tmp_path,
             runtime_session_id=runtime_session_id,
             event_log=event_log,
+            allow_unbootstrapped_test_events=False,
         )
         ctx = _ctx("postgres:runtime")
 
         async def run() -> None:
+            await runtime.emit(
+                RunStartEvent(
+                    id=f"run_start:test:{ctx.run_id}",
+                    **ctx.event_fields(),
+                    **run_start_permission_fields(
+                        ctx.run_id,
+                        user_input="postgres runtime contract",
+                        turn_id=ctx.turn_id,
+                        reply_id=ctx.reply_id,
+                        mcp_installation_owner_runtime_session_id=(
+                            runtime_session_id
+                        ),
+                    ),
+                    user_input_chars=len("postgres runtime contract"),
+                )
+            )
             first = await runtime.emit(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(), block_id="text:1", delta="hello"
                 )
             )
             second = await runtime.emit(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(), block_id="text:1", delta=" world"
                 )
             )
-            assert [first.sequence, second.sequence] == [1, 2]
+            assert first.sequence is not None
+            assert second.sequence is not None
+            assert first.sequence < second.sequence
 
-        asyncio.run(run())
+        try:
+            asyncio.run(run())
+        finally:
+            runtime.close()
 
         reloaded = PostgresEventLog(
             dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
         )
-        assert [event.sequence for event in reloaded.iter(reply_id=ctx.reply_id)] == [
-            1,
-            2,
+        deltas = [
+            event
+            for event in reloaded.iter(reply_id=ctx.reply_id)
+            if isinstance(event, TextBlockSegmentEvent)
         ]
+        assert [event.text for event in deltas] == ["hello", " world"]
+        assert all(event.sequence is not None for event in deltas)
     finally:
         _cleanup_session(dsn, runtime_session_id)
 
@@ -1383,9 +1426,12 @@ def test_model_call_end_usage_breakdown_round_trips_postgres(
                     output_tokens=30,
                     reasoning_output_tokens=10,
                     total_tokens=150,
+                    ),
+                    estimated_input_tokens=128,
+                    terminal_projection=model_call_end_fields(
+                        resolved_call=call
+                    )["terminal_projection"],
                 ),
-                estimated_input_tokens=128,
-            ),
         )
     )
 

@@ -1,0 +1,169 @@
+{
+  "benchmark_run_id": "benchmark:6c692ee723522af3b070cad5",
+  "case_aggregates": [
+    {
+      "case_contract_fingerprint": "sha256:d21ad7c4b4eba95e699efb8a24bdb9b1b2c1cc7803bedc3d4e14d463b6b4ab0c",
+      "case_id": "incremental-active-window:default:process_cold",
+      "metrics": [
+        {
+          "maximum": 0.5955035000806674,
+          "median": 0.48847147944616154,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.4426749999402091,
+          "p95_nearest_rank": 0.5216554580256343,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.28808109375677304,
+          "median": 0.2824120618388406,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.2795712538099906,
+          "p95_nearest_rank": 0.28780629026005045,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 9.218595000216737,
+          "median": 9.0371859788429,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 8.946280121919699,
+          "p95_nearest_rank": 9.209801288321614,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 621,
+          "median": 621.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 621,
+          "p95_nearest_rank": 621,
+          "sample_count": 30,
+          "unit": "events"
+        },
+        {
+          "maximum": 82,
+          "median": 82.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 82,
+          "p95_nearest_rank": 82,
+          "sample_count": 30,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.20565779076423496,
+          "median": 0.13905397994676605,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.13728391530457884,
+          "p95_nearest_rank": 0.14757429051678628,
+          "sample_count": 30,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 30
+    },
+    {
+      "case_contract_fingerprint": "sha256:fdf3629d3999e10475f5883d145f0f4f55e418877b1f1064a7f6e8b2321bc6b7",
+      "case_id": "incremental-active-window:default:steady_state",
+      "metrics": [
+        {
+          "maximum": 0.43367595796007663,
+          "median": 0.3987437505275011,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.35248887503985316,
+          "p95_nearest_rank": 0.4293454580474645,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.23836844274046598,
+          "median": 0.22937599158467492,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.22524131379032042,
+          "p95_nearest_rank": 0.2351961745043809,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 7.627790167694911,
+          "median": 7.3400317307095975,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 7.207722041290253,
+          "p95_nearest_rank": 7.526277584140189,
+          "sample_count": 30,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 621,
+          "median": 621.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 621,
+          "p95_nearest_rank": 621,
+          "sample_count": 30,
+          "unit": "events"
+        },
+        {
+          "maximum": 82,
+          "median": 82.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 82,
+          "p95_nearest_rank": 82,
+          "sample_count": 30,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.14274949696846306,
+          "median": 0.13918397953966632,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.13740762404631823,
+          "p95_nearest_rank": 0.1426770790712908,
+          "sample_count": 30,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 30
+    }
+  ],
+  "case_contract_fingerprints": [
+    "sha256:d21ad7c4b4eba95e699efb8a24bdb9b1b2c1cc7803bedc3d4e14d463b6b4ab0c",
+    "sha256:fdf3629d3999e10475f5883d145f0f4f55e418877b1f1064a7f6e8b2321bc6b7"
+  ],
+  "counterfactual_samples_excluded": true,
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "environment": {
+    "git": {
+      "commit": "df869e93df0bca4eb58ce87c6a97ac960cb0706d",
+      "dirty": false
+    },
+    "postgres": {
+      "configuration_fingerprint": "sha256:1babd816a44e245de601de61f9db2a11eb04b3903e9f7c42474a40a3e29cf358",
+      "connection_pool_fingerprint": "sha256:874e657a39df00365d9d647cea45f7143fee98c53618629c77d0ce75d7e643a7",
+      "server_version": "17.9 (Homebrew)"
+    },
+    "python": {
+      "implementation": "CPython",
+      "machine": "arm64",
+      "platform": "macOS-26.2-arm64-arm-64bit",
+      "version": "3.12.12"
+    },
+    "runner_build_fingerprint": "sha256:b5b44c31d7dec2834255b4c21f14fd6ba28f3c134f88702cdec297de9614d8e7",
+    "runtime_capacity": {
+      "auxiliary_io_workers": 12,
+      "configuration_fingerprint": "sha256:393aa28a338fc8484f804286baf6cc604a6bb8f9a51aaef03197233b0e8a45bd",
+      "critical_ledger_workers": 4,
+      "postgres_bounded_read_capacity": 12,
+      "postgres_critical_write_reserve": 4,
+      "postgres_default_lease_timeout_seconds": 30.0,
+      "postgres_pool_max_connections": 16
+    },
+    "schema_version": "pulsara.durable-runtime.environment.v1"
+  },
+  "manifest_contract_fingerprint": "sha256:8751b64a6778c81c05c5d07d4213a1ff04626193a3202121ff1d08ebf4e484b2",
+  "measurement_contract_adhered": true,
+  "percentile_contract": "nearest_rank_v1",
+  "production_acceptance_passed": true,
+  "raw_sample_vector_sha256": "sha256:96d54549354992a407322b5d09099978f7594c2229b2f0ddbba62fa0b789184f",
+  "sample_count": 60,
+  "scenario_id": "incremental-active-window",
+  "schema_version": "pulsara.durable-runtime.run-summary.v1"
+}

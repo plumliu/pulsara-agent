@@ -1,0 +1,118 @@
+{
+  "schema_version": "pulsara.durable-runtime.context-scenario.v1",
+  "scenario_id": "long-plan-prefix-growth",
+  "seed": 452001,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "Nineteen model steps with an adopted run seed that does not advance during measurement, reproducing cumulative transcript evidence reads within the current physical authority circuit breaker.",
+  "generator_contract": {
+    "generator_id": "pulsara.context.long-plan-prefix-growth",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.context.long-plan-authority",
+    "grader_version": "1",
+    "assertion_ids": [
+      "projection_base_stable",
+      "semantic_delta_total_exact",
+      "authority_manifest_fingerprints_valid",
+      "normalized_transcript_equal"
+    ]
+  },
+  "ledger": {
+    "runtime_sessions": 1,
+    "runs": 1,
+    "prior_transcript_messages": 8,
+    "model_calls": 19,
+    "semantic_delta_events_per_call": [
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      216,
+      208
+    ],
+    "characters_per_semantic_delta": 16,
+    "tool_calls_per_model_call": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      3
+    ],
+    "tool_result_profile": {
+      "default_characters": 4096,
+      "large_every_nth_result": 5,
+      "large_characters": 32768,
+      "artifact_backed": true
+    },
+    "checkpoint_policy": "do_not_advance_during_measurement"
+  },
+  "compile_schedule": {
+    "after_model_call_ordinals": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    "compile_attempts_per_point": 1
+  },
+  "measurement": {
+    "modes": [
+      "process_cold",
+      "steady_state"
+    ],
+    "warmup_iterations": 3,
+    "measured_iterations": 20
+  },
+  "invariants": [
+    "every compile uses the same adopted projection base",
+    "the final semantic delta count is 4096",
+    "all compile points produce valid authority and manifest fingerprints",
+    "cache or optimization changes cannot alter normalized transcript semantics"
+  ]
+}

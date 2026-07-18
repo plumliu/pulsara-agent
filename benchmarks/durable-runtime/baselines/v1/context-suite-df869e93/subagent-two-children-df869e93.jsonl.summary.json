@@ -1,0 +1,169 @@
+{
+  "benchmark_run_id": "benchmark:37f21bcbdb77cef4db5ca596",
+  "case_aggregates": [
+    {
+      "case_contract_fingerprint": "sha256:688225cc218af38fa703b1ebd06b3537febdcb8bba7aa041da9d3575d0f62887",
+      "case_id": "subagent-two-children:default:process_cold",
+      "metrics": [
+        {
+          "maximum": 0.3534321249462664,
+          "median": 0.30487439600983635,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.2666897919261828,
+          "p95_nearest_rank": 0.34555816603824496,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.21176494992493342,
+          "median": 0.2057577818981372,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.2004164167214185,
+          "p95_nearest_rank": 0.21121621378697455,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 3.176474248874001,
+          "median": 3.0863667284720577,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 3.0062462508212775,
+          "p95_nearest_rank": 3.1682432068046182,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 319,
+          "median": 319.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 319,
+          "p95_nearest_rank": 319,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 38,
+          "median": 38.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 38,
+          "p95_nearest_rank": 38,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.1371502939146012,
+          "median": 0.05961991468211636,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.058752414770424366,
+          "p95_nearest_rank": 0.06157962721772492,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    },
+    {
+      "case_contract_fingerprint": "sha256:96df88f86c216c6bd74928dafad21a06423e131ab78c37611bddd1be3727d30b",
+      "case_id": "subagent-two-children:default:steady_state",
+      "metrics": [
+        {
+          "maximum": 0.28214683395344764,
+          "median": 0.21955739549594,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.20401929202489555,
+          "p95_nearest_rank": 0.2815885000163689,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.17002347780702015,
+          "median": 0.16582236108758175,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.16252660554212828,
+          "p95_nearest_rank": 0.1693242415320128,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 2.550352167105302,
+          "median": 2.4873354163137265,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 2.4378990831319243,
+          "p95_nearest_rank": 2.5398636229801923,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 319,
+          "median": 319.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 319,
+          "p95_nearest_rank": 319,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 38,
+          "median": 38.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 38,
+          "p95_nearest_rank": 38,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.061514124856330454,
+          "median": 0.059884980495553464,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.058876585215330124,
+          "p95_nearest_rank": 0.06147504295222461,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    }
+  ],
+  "case_contract_fingerprints": [
+    "sha256:688225cc218af38fa703b1ebd06b3537febdcb8bba7aa041da9d3575d0f62887",
+    "sha256:96df88f86c216c6bd74928dafad21a06423e131ab78c37611bddd1be3727d30b"
+  ],
+  "counterfactual_samples_excluded": true,
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "environment": {
+    "git": {
+      "commit": "df869e93df0bca4eb58ce87c6a97ac960cb0706d",
+      "dirty": false
+    },
+    "postgres": {
+      "configuration_fingerprint": "sha256:1babd816a44e245de601de61f9db2a11eb04b3903e9f7c42474a40a3e29cf358",
+      "connection_pool_fingerprint": "sha256:874e657a39df00365d9d647cea45f7143fee98c53618629c77d0ce75d7e643a7",
+      "server_version": "17.9 (Homebrew)"
+    },
+    "python": {
+      "implementation": "CPython",
+      "machine": "arm64",
+      "platform": "macOS-26.2-arm64-arm-64bit",
+      "version": "3.12.12"
+    },
+    "runner_build_fingerprint": "sha256:b5b44c31d7dec2834255b4c21f14fd6ba28f3c134f88702cdec297de9614d8e7",
+    "runtime_capacity": {
+      "auxiliary_io_workers": 12,
+      "configuration_fingerprint": "sha256:393aa28a338fc8484f804286baf6cc604a6bb8f9a51aaef03197233b0e8a45bd",
+      "critical_ledger_workers": 4,
+      "postgres_bounded_read_capacity": 12,
+      "postgres_critical_write_reserve": 4,
+      "postgres_default_lease_timeout_seconds": 30.0,
+      "postgres_pool_max_connections": 16
+    },
+    "schema_version": "pulsara.durable-runtime.environment.v1"
+  },
+  "manifest_contract_fingerprint": "sha256:8751b64a6778c81c05c5d07d4213a1ff04626193a3202121ff1d08ebf4e484b2",
+  "measurement_contract_adhered": true,
+  "percentile_contract": "nearest_rank_v1",
+  "production_acceptance_passed": true,
+  "raw_sample_vector_sha256": "sha256:2e8272f69a62648084d0691b03e8b5b088edb07e05ac595122b44b37778c2f16",
+  "sample_count": 40,
+  "scenario_id": "subagent-two-children",
+  "schema_version": "pulsara.durable-runtime.run-summary.v1"
+}

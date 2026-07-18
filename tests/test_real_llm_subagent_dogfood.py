@@ -196,10 +196,20 @@ async def _run_subagent_spawn_wait_dogfood(
         max_consecutive_tool_failures=4,
         max_subagent_results_per_parent_compile=0,
     )
+    child_runner_errors: list[dict[str, str]] = []
+    subagent_runtime = wiring.agent_runtime.subagent_runtime
+    assert subagent_runtime is not None
+
+    async def observed_child_runner(runtime, run_view) -> None:
+        try:
+            await wiring.agent_runtime._run_child_agent(runtime, run_view)
+        except Exception as exc:
+            child_runner_errors.append(_exception_diagnostic(exc))
+            raise
+
+    subagent_runtime.bind_child_runner(observed_child_runner)
     try:
         run_result = await run_agent_task(wiring.agent_runtime, _user_prompt())
-        subagent_runtime = wiring.agent_runtime.subagent_runtime
-        assert subagent_runtime is not None
         parent_events = wiring.runtime_wiring.event_log.iter(
             run_id=run_result.state.run_id
         )
@@ -299,6 +309,7 @@ async def _run_subagent_spawn_wait_dogfood(
                 }
                 for event in failed
             ],
+            "child_runner_errors": child_runner_errors,
             "wait_edge_count": len(wait_edges),
             "started_parent_context_id": started[0].parent_context_id
             if started
@@ -342,6 +353,19 @@ async def _run_subagent_spawn_wait_dogfood(
                     wiring.runtime_wiring.runtime_session.runtime_session_id,
                 ],
             )
+
+
+def _exception_diagnostic(exc: BaseException) -> dict[str, str]:
+    chain: list[str] = []
+    current: BaseException | None = exc
+    while current is not None and len(chain) < 4:
+        chain.append(f"{type(current).__name__}: {str(current)[:1000]}")
+        current = current.__cause__ or current.__context__
+    return {
+        "error_type": type(exc).__name__,
+        "error_message": str(exc)[:1000],
+        "cause_chain": " <- ".join(chain),
+    }
 
 
 async def _run_subagent_background_delivery_dogfood(

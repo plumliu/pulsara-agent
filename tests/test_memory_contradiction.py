@@ -8,8 +8,13 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+from tests.support.governance import make_test_governance_execution_identity
+
 from pulsara_agent.entities.memory import Claim, Preference
-from pulsara_agent.event import EventContext, EventType, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext, EventType
 from pulsara_agent.event.candidates import ClaimCandidate, PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
@@ -78,7 +83,7 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
     query = PostgresMemoryQuery(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
@@ -104,6 +109,10 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
             ),
             governance_batch_id=batch_id,
             relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(pooled,),
+            ),
         )
 
         assert isinstance(result.decision_record.decision, ContradictAndSubmitDecision)
@@ -162,6 +171,7 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=fake_memory_uow_factory(
@@ -181,6 +191,10 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
         governance_batch_id="governance:test:uow-contradiction",
         relatedness_context=_relatedness_context(
             "governance:test:uow-contradiction", pooled.entry_id, (old_id,)
+        ),
+        execution_identity=make_test_governance_execution_identity(
+            governance_batch_id="governance:test:uow-contradiction",
+            candidates=(pooled,),
         ),
     )
 
@@ -210,7 +224,7 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     active_old = "preference:test-contradiction-gates-active"
     inactive_old = "preference:test-contradiction-gates-inactive"
     workspace_old = "preference:test-contradiction-gates-workspace"
@@ -292,6 +306,10 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
                 relatedness_context=_relatedness_context(
                     batch_id, pooled.entry_id, contradicted_ids
                 ),
+                execution_identity=make_test_governance_execution_identity(
+                    governance_batch_id=batch_id,
+                    candidates=(pooled,),
+                ),
             )
 
             assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -319,7 +337,7 @@ def test_postgres_contradiction_downgrades_when_new_node_is_not_active(tmp_path)
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-non-active-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
@@ -349,6 +367,10 @@ def test_postgres_contradiction_downgrades_when_new_node_is_not_active(tmp_path)
                 reason="Should not link contradiction if the new node is not ACTIVE.",
             ),
             governance_batch_id=batch_id,
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(pooled,),
+            ),
         )
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -372,7 +394,7 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-write-failed-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
@@ -401,6 +423,10 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
                 reason="Write should fail before linking contradiction.",
             ),
             governance_batch_id=batch_id,
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(pooled,),
+            ),
         )
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -430,7 +456,7 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-rollback-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
@@ -442,13 +468,14 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
-                memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
-                    dsn=dsn,
-                    runtime_session_id=runtime_session_id,
-                    archive=PostgresArtifactStore(dsn=dsn),
-                    graph_id=graph_id,
+            memory_write_uow_factory=lambda: _FailingContradictionLifecycleUow(
+                dsn=dsn,
+                runtime_session_id=runtime_session_id,
+                archive=PostgresArtifactStore(dsn=dsn),
+                graph_id=graph_id,
                 workspace_root=tmp_path,
             ),
         )
@@ -463,6 +490,10 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
                 ),
                 governance_batch_id=batch_id,
                 relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+                execution_identity=make_test_governance_execution_identity(
+                    governance_batch_id=batch_id,
+                    candidates=(pooled,),
+                ),
             )
 
         old_doc = store.get_jsonld(old_id, graph_id=graph_id)
@@ -499,6 +530,7 @@ def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -
         candidate_pool=pool,
         memory_write_service=service,
         event_log=log,
+        event_commit_port=log.extend,
         graph=graph,
         runtime_session_id="runtime:test",
         memory_write_uow_factory=fake_memory_uow_factory(
@@ -516,6 +548,10 @@ def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -
             reason="Contradiction attempted without relatedness context.",
         ),
         governance_batch_id="governance:test:contradiction-no-context",
+        execution_identity=make_test_governance_execution_identity(
+            governance_batch_id="governance:test:contradiction-no-context",
+            candidates=(pooled,),
+        ),
     )
 
     assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -845,6 +881,7 @@ def _postgres_executor(
         candidate_pool=pool,
         memory_write_service=_service_on(InMemoryGraphStore()),
         event_log=log,
+        event_commit_port=log.extend,
         graph=InMemoryGraphStore(),
         runtime_session_id=runtime_session_id,
         memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
@@ -931,6 +968,7 @@ def _view(
         do_not_apply_when=None,
         created_at=now,
         updated_at=now,
+        node_revision=1,
         evidence_ids=(),
         outgoing=outgoing,
         incoming=incoming,
@@ -1047,6 +1085,9 @@ def _relatedness_context(
         governance_batch_id=batch_id,
         allowlists=MappingProxyType({entry_id: frozenset(memory_ids)}),
         availability=MappingProxyType({entry_id: RelatednessAvailability.FULL}),
+        node_revisions=MappingProxyType(
+            {entry_id: MappingProxyType({memory_id: 1 for memory_id in memory_ids})}
+        ),
     )
 
 

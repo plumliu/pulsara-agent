@@ -10,7 +10,11 @@ from pulsara_agent.runtime.subagent import (
     SubagentRuntime,
     fold_subagent_graph,
 )
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    persist_test_run_transcript_seed,
+    run_end_contract_fields,
+    run_start_permission_fields,
+)
 from tests.support.runtime_session import in_memory_runtime_session
 
 
@@ -151,14 +155,31 @@ def test_child_log_multiple_native_runs_is_v1_error(tmp_path) -> None:
                 turn_id=f"turn:child:{index}",
                 reply_id=f"reply:child:{index}",
             )
-            await session.emit(
+            source_through = session.event_log.next_sequence() - 1
+            fields = run_start_permission_fields(
+                child_ctx.run_id,
+                source="child_profile",
+                user_input="x",
+                transcript_source_through_sequence=source_through,
+            )
+            seed = persist_test_run_transcript_seed(
+                session,
+                run_id=child_ctx.run_id,
+            )
+            fields.update(
+                run_transcript_seed_semantic=seed.seed_semantic,
+                run_transcript_seed_reference=seed.seed_reference,
+            )
+            stored = await session.emit(
                 RunStartEvent(
                     **child_ctx.event_fields(),
-                    **run_start_permission_fields(
-                        child_ctx.run_id, source="child_profile", user_input="x"
-                    ),
+                    **fields,
                     user_input_chars=1,
                 )
+            )
+            assert isinstance(stored, RunStartEvent)
+            session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+                stored
             )
         fact = fold_subagent_graph(parent.event_log.iter()).runs[child.subagent_run_id]
         view = await SubagentGraphHydrator(

@@ -1029,7 +1029,7 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
         )
         event_log = session.wiring.runtime_wiring.runtime_session.event_log
         event_log_type = type(event_log)
-        original_extend = event_log_type.extend
+        original_extend = event_log_type.extend_with_materialization_state
         failed_once = False
 
         def fail_resume_audit_once(self, events, **kwargs):
@@ -1047,7 +1047,11 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
                 raise RuntimeError("synthetic resume audit commit failure")
             return original_extend(self, event_batch, **kwargs)
 
-        monkeypatch.setattr(event_log_type, "extend", fail_resume_audit_once)
+        monkeypatch.setattr(
+            event_log_type,
+            "extend_with_materialization_state",
+            fail_resume_audit_once,
+        )
         with pytest.raises(Exception):
             await session.resolve_mcp_input_required(
                 McpInputRequiredInteractionResolution(
@@ -1059,7 +1063,11 @@ def test_reconfigured_pending_binding_terminalizes_and_releases_lease(
         assert session.mcp_supervisor.pending_completion_count == 1
         assert old_slot.lifecycle == "retiring"
 
-        monkeypatch.setattr(event_log_type, "extend", original_extend)
+        monkeypatch.setattr(
+            event_log_type,
+            "extend_with_materialization_state",
+            original_extend,
+        )
         result = await session.resolve_mcp_input_required(
             McpInputRequiredInteractionResolution(
                 interaction_id=pending.interaction_id,

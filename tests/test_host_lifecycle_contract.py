@@ -19,6 +19,15 @@ import pytest
 from tests.support.runtime_session import in_memory_runtime_session
 from tests.support.settings import compatibility_storage_config
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     CapabilityExposureResolvedEvent,
@@ -26,12 +35,6 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
 )
 from pulsara_agent.host import (
     DuplicateHostSessionError,
@@ -92,23 +95,23 @@ class ScriptedTransport:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 
@@ -1238,13 +1241,17 @@ def test_close_active_streaming_run_emits_auditable_host_teardown(
 
         consumer = asyncio.create_task(consume())
         await asyncio.sleep(0.05)
-        owned = s._active_task is not None  # the HostSession owns the streaming task
+        owned = (
+            s._active_task is not None
+            or s._boundary_task is not None
+            and not s._boundary_task.done()
+        )
         await core.close_session("host:stream")
         await consumer
         return owned, events, s.replay_events(), s.closed
 
     owned, _streamed_events, ledger_events, closed = asyncio.run(run())
-    assert owned  # streaming turn is drainable via the owned handle (P0-6)
+    assert owned  # PREPARING and ACTIVE both have a drainable Host-owned handle.
     assert closed
     # Close first detaches the transport observer so a full queue cannot block
     # terminalization. The terminal fact remains durable even when the detached
@@ -1511,17 +1518,17 @@ def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(
 
         async def stream(self, *, call, context, event_context):
             del call
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id="text:burst"
             )
             for _ in range(total_deltas):
                 self.produced += 1
-                yield TextBlockDeltaEvent(
+                yield RawProviderTextDelta(
                     **event_context.event_fields(),
                     block_id="text:burst",
                     delta="x",
                 )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id="text:burst"
             )
 
@@ -1812,7 +1819,11 @@ def test_nonstream_close_waits_for_abort_finalization(tmp_path, monkeypatch) -> 
 
         monkeypatch.setattr(runtime_type, "abort_run", delayed_abort)
         caller = asyncio.create_task(session.run_turn("hold"))
-        await asyncio.sleep(0.05)
+        for _ in range(200):
+            if session._active_task is not None:
+                break
+            await asyncio.sleep(0.005)
+        assert session._active_task is not None
         closing = asyncio.create_task(core.close_session(session.host_session_id))
         await abort_started.wait()
         assert not closing.done()

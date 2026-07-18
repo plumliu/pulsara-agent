@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from threading import Lock
 
 
@@ -11,6 +12,21 @@ _CRITICAL_LEDGER_EXECUTOR: ThreadPoolExecutor | None = None
 _AUXILIARY_IO_EXECUTOR: ThreadPoolExecutor | None = None
 _MAX_CRITICAL_LEDGER_WORKERS = 4
 _MAX_AUXILIARY_IO_WORKERS = 12
+
+
+@dataclass(frozen=True, slots=True)
+class BlockingExecutorCapacity:
+    critical_ledger_workers: int
+    auxiliary_io_workers: int
+
+
+def blocking_executor_capacity() -> BlockingExecutorCapacity:
+    """Return the process-wide blocking lane configuration for diagnostics."""
+
+    return BlockingExecutorCapacity(
+        critical_ledger_workers=_MAX_CRITICAL_LEDGER_WORKERS,
+        auxiliary_io_workers=_MAX_AUXILIARY_IO_WORKERS,
+    )
 
 
 def critical_ledger_executor() -> ThreadPoolExecutor:
@@ -39,4 +55,9 @@ def auxiliary_io_executor() -> ThreadPoolExecutor:
         return _AUXILIARY_IO_EXECUTOR
 
 
-__all__ = ["auxiliary_io_executor", "critical_ledger_executor"]
+__all__ = [
+    "BlockingExecutorCapacity",
+    "auxiliary_io_executor",
+    "blocking_executor_capacity",
+    "critical_ledger_executor",
+]

@@ -190,12 +190,9 @@ def prepare_current_run_projection_planning_input(
             raise ValueError("current-run planning pair message is missing")
         if unit.source_sequence_end > canonical_slice.through_sequence:
             raise ValueError("current-run result exceeds canonical high-water")
-        result_event = canonical_slice.event_by_id(unit.source_event_ids[-1])
         segment_by_unit[unit.unit_id] = result_message.segment
         is_current = (
-            result_event.run_id == run_id
-            and call_message.run_id == run_id
-            and pair.call_sequence >= run_start_sequence
+            pair.call_sequence >= run_start_sequence
             and pair.result_sequence >= run_start_sequence
         )
         if result_message.segment == "current_run_tail" and not is_current:

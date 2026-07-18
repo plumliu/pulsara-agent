@@ -15,6 +15,19 @@ from tests.conftest import (
 )
 from tests.support.runtime_session import in_memory_runtime_session
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     CapabilityGateDecisionEvent,
@@ -28,6 +41,9 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     ModelCallRejectedEvent,
     ProviderModelStreamErrorEvent,
+    PhysicalOperationReservationCreatedEvent,
+    PhysicalOperationReservationSettledEvent,
+    PhysicalOperationReservationSuspendedEvent,
     RequireUserConfirmEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -38,12 +54,6 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
@@ -202,29 +212,29 @@ class ScriptedTransport:
         self.contexts.append(context)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 
@@ -667,12 +677,16 @@ def test_run_start_and_first_mcp_installation_audit_are_one_atomic_batch(
         pending_audit=_pending_mcp_installation_audit(),
     )
     recorded_batches: list[tuple[EventType, ...]] = []
-    original_extend = InMemoryEventLog.extend
+    original_extend = InMemoryEventLog.extend_with_materialization_state
 
     def record_extend(
         self,
         events,
         *,
+        expected_account_state_fingerprint,
+        resulting_account_state,
+        physical_charge_contract,
+        transaction_companion=None,
         expected_last_sequence=None,
         deadline_monotonic=None,
     ):
@@ -681,11 +695,19 @@ def test_run_start_and_first_mcp_installation_audit_are_one_atomic_batch(
         return original_extend(
             self,
             batch,
+            expected_account_state_fingerprint=expected_account_state_fingerprint,
+            resulting_account_state=resulting_account_state,
+            physical_charge_contract=physical_charge_contract,
+            transaction_companion=transaction_companion,
             expected_last_sequence=expected_last_sequence,
             deadline_monotonic=deadline_monotonic,
         )
 
-    monkeypatch.setattr(InMemoryEventLog, "extend", record_extend)
+    monkeypatch.setattr(
+        InMemoryEventLog,
+        "extend_with_materialization_state",
+        record_extend,
+    )
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
@@ -694,12 +716,13 @@ def test_run_start_and_first_mcp_installation_audit_are_one_atomic_batch(
 
     asyncio.run(run_agent_task(agent, "atomic installation"))
 
-    assert recorded_batches[0] == (
+    assert recorded_batches[0][:4] == (
         EventType.RUN_START,
         EventType.CONTEXT_WINDOW_OPENED,
         EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED,
         EventType.MCP_CAPABILITY_SNAPSHOT_INSTALLED,
     )
+    assert recorded_batches[0][-1] is EventType.LEDGER_MATERIALIZATION_ACCOUNT_GENESIS
     stored = runtime_session.event_log.iter()
     assert isinstance(stored[0], RunStartEvent)
     assert isinstance(stored[3], McpCapabilitySnapshotInstalledEvent)
@@ -718,10 +741,23 @@ def test_failed_run_start_audit_batch_keeps_audit_pending_and_writes_nothing(
         pending_audit=_pending_mcp_installation_audit(),
     )
 
-    def fail_before_commit(self, events, *, expected_last_sequence=None):
+    def fail_before_commit(
+        self,
+        events,
+        *,
+        expected_account_state_fingerprint,
+        resulting_account_state,
+        physical_charge_contract,
+        expected_last_sequence=None,
+        deadline_monotonic=None,
+    ):
         raise RuntimeError("synthetic pre-commit failure")
 
-    monkeypatch.setattr(InMemoryEventLog, "extend", fail_before_commit)
+    monkeypatch.setattr(
+        InMemoryEventLog,
+        "extend_with_materialization_state",
+        fail_before_commit,
+    )
     agent = AgentRuntime(
         capability_runtime=CapabilityRuntime(),
         runtime_session=runtime_session,
@@ -1197,6 +1233,144 @@ def test_suspension_precommit_none_terminalizes_reservation_without_orphan(
     assert runtime_session.tool_execution_terminal_registry.active_owner_count() == 0
 
 
+def test_mcp_suspension_retains_exact_physical_tail_until_terminal_result(
+    tmp_path,
+) -> None:
+    @dataclass(slots=True)
+    class SuspendingTool:
+        name: str = "suspending_tool"
+        description: str = "Return one MCP-style suspended interaction."
+        parameters: dict = field(
+            default_factory=lambda: {"type": "object", "properties": {}}
+        )
+        is_read_only: bool = True
+        is_concurrency_safe: bool = True
+
+        async def execute_async(
+            self,
+            call: ToolCall,
+            *,
+            runtime_context: ToolRuntimeContext,
+        ) -> ToolExecutionSuspended:
+            del runtime_context
+            return ToolExecutionSuspended(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                interaction_kind="mcp_input_required",
+                payload={
+                    "interaction_id": "mcp_input_required:physical-tail",
+                    "mcp_pending_lease_reservation_id": "lease:physical-tail",
+                    "original_request": {"arguments": {}},
+                },
+            )
+
+    class LeaseSupervisor:
+        def __init__(self) -> None:
+            self.confirmed: list[tuple[str, str]] = []
+
+        def confirm_pending_lease(
+            self,
+            interaction_id: str,
+            reservation_id: str,
+        ) -> None:
+            self.confirmed.append((interaction_id, reservation_id))
+
+    runtime_session = in_memory_runtime_session(tmp_path)
+    supervisor = LeaseSupervisor()
+    runtime_session.mcp_supervisor = supervisor
+    registry = ToolRegistry()
+    registry.register(SuspendingTool())
+    agent = AgentRuntime(
+        capability_runtime=CapabilityRuntime(),
+        runtime_session=runtime_session,
+        llm_runtime=make_llm_runtime(
+            ScriptedTransport(
+                [
+                    {
+                        "tool_calls": [
+                            {
+                                "id": "call:mcp-physical-tail",
+                                "name": "suspending_tool",
+                                "arguments": "{}",
+                            }
+                        ]
+                    }
+                ]
+            )
+        ),
+    )
+    _install_registry_with_explicit_test_descriptors(agent, registry)
+    state = agent.new_state()
+
+    first = asyncio.run(run_agent_task(agent, "suspend once", state=state))
+
+    assert first.status is LoopStatus.WAITING_USER
+    reservation_event = next(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, PhysicalOperationReservationCreatedEvent)
+        and event.reservation.owner_id == "call:mcp-physical-tail"
+    )
+    suspension_event = next(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, PhysicalOperationReservationSuspendedEvent)
+        and event.suspension.owner_id == "call:mcp-physical-tail"
+    )
+    active = runtime_session.materialization_account_store.snapshot()
+    assert active is not None and len(active.active_reservations) == 1
+    suspended_state = active.active_reservations[0]
+    assert suspended_state.lifecycle_status == "suspended_tail"
+    assert suspended_state.reservation_id == reservation_event.reservation.reservation_id
+    assert suspended_state.latest_lifecycle_event_id == suspension_event.id
+    assert suspended_state.remaining_events == (
+        reservation_event.reservation.terminal_tail_reserved_events
+    )
+    assert suspended_state.remaining_payload_bytes == (
+        reservation_event.reservation.terminal_tail_reserved_payload_bytes
+    )
+    assert supervisor.confirmed == [
+        ("mcp_input_required:physical-tail", "lease:physical-tail")
+    ]
+
+    rollout_reservation = agent._pending_tool_rollout_reservation(
+        state.pending_interaction_payload,
+        run_id=state.run_id,
+    )
+
+    async def terminalize() -> None:
+        async for _ in agent._emit_tool_result_and_record(
+            state,
+            tool_call_id="call:mcp-physical-tail",
+            tool_call_name="suspending_tool",
+            output="input-required interaction cancelled",
+            result_state=ToolResultState.ERROR,
+            tool_observation_timing_seed=dict(
+                state.pending_interaction_payload.get(
+                    "tool_observation_timing_seed", {}
+                )
+            )
+            or None,
+            rollout_reservation=rollout_reservation,
+        ):
+            pass
+
+    asyncio.run(terminalize())
+
+    settlement = next(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, PhysicalOperationReservationSettledEvent)
+        and event.settlement.reservation_id
+        == reservation_event.reservation.reservation_id
+    )
+    assert settlement.settlement.predecessor_status == "suspended_tail"
+    assert settlement.settlement.terminal_outcome == "runtime_error"
+    account = runtime_session.materialization_account_store.snapshot()
+    assert account is not None and account.active_reservations == ()
+    assert runtime_session.tool_execution_terminal_registry.active_owner_count() == 0
+
+
 @pytest.mark.parametrize(
     ("failure_mode", "expect_terminal", "expect_latched"),
     [
@@ -1525,7 +1699,7 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     assert result.stop_reason == "final"
     assert result.final_text == "done"
     assert any(
-        event.type is EventType.TEXT_BLOCK_DELTA
+        event.type is EventType.TEXT_BLOCK_SEGMENT
         for event in agent.runtime_session.event_log.iter()
     )
     assert (
@@ -1668,7 +1842,7 @@ def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(
     result = asyncio.run(run_agent_task(agent, "Say done"))
 
     assert result.status is LoopStatus.FINISHED
-    assert EventType.TEXT_BLOCK_DELTA in seen_events
+    assert EventType.TEXT_BLOCK_SEGMENT in seen_events
     assert "text" in seen_blocks
 
 
@@ -1848,6 +2022,7 @@ def test_agent_runtime_dispatches_tool_result_hooks(tmp_path) -> None:
     assert seen_tool_result_events == [
         EventType.TOOL_RESULT_START,
         EventType.TOOL_RESULT_TEXT_DELTA,
+        EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED,
         EventType.TOOL_RESULT_END,
     ]
     assert any("hook file" in text for text in seen_tool_result_blocks)
@@ -1857,7 +2032,7 @@ def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
 
     def failing_hook(context, event) -> None:
-        if event.type is EventType.TEXT_BLOCK_DELTA:
+        if event.type is EventType.TEXT_BLOCK_SEGMENT:
             raise RuntimeError("observer failed")
 
     runtime_session.hook_manager.register_event(None, failing_hook)
@@ -1977,6 +2152,7 @@ def test_malformed_tool_json_emits_standard_tool_result_error(tmp_path) -> None:
     ] == [
         EventType.TOOL_RESULT_START,
         EventType.TOOL_RESULT_TEXT_DELTA,
+        EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED,
         EventType.TOOL_RESULT_END,
     ]
     assert isinstance(result_events[-1], ToolResultEndEvent)
@@ -2098,26 +2274,27 @@ def test_model_failure_sets_typed_in_run_recovery_state(tmp_path) -> None:
     assert state.in_run_recovery.consecutive_failures == 1
 
 
-def test_build_tool_result_error_events_use_standard_event_shape() -> None:
-    from pulsara_agent.event_log import InMemoryEventLog
-
-    event_log = InMemoryEventLog()
+def test_build_tool_result_error_events_use_standard_event_shape(tmp_path) -> None:
+    runtime_session = in_memory_runtime_session(tmp_path)
     context = EventContext(
         run_id="run:test", turn_id="turn:test", reply_id="reply:test"
     )
 
-    events = event_log.extend(
-        build_tool_result_error_events(
-            context,
-            tool_call_id="call:bad",
-            tool_call_name="lookup",
-            message="bad json",
+    events = asyncio.run(
+        runtime_session.emit_many(
+            build_tool_result_error_events(
+                context,
+                tool_call_id="call:bad",
+                tool_call_name="lookup",
+                message="bad json",
+            )
         )
     )
 
     assert [event.type for event in events] == [
         EventType.TOOL_RESULT_START,
         EventType.TOOL_RESULT_TEXT_DELTA,
+        EventType.TOOL_RESULT_TERMINAL_PROJECTION_COMMITTED,
         EventType.TOOL_RESULT_END,
     ]
     message = AssistantMsg(id="reply:test", name="assistant", content=[])
@@ -2125,6 +2302,7 @@ def test_build_tool_result_error_events_use_standard_event_shape() -> None:
     for event in events:
         reducer.append(event)
     assert message.content[0].state is ToolResultState.ERROR
+    runtime_session.close()
 
 
 class DenyGate:
@@ -3032,11 +3210,15 @@ def test_run_end_known_precommit_failure_retries_stable_candidate_once(
             super().__init__()
             self.run_end_attempts = 0
 
-        def extend(
+        def extend_with_materialization_state(
             self,
             events,
             *,
-            expected_last_sequence=None,
+            expected_account_state_fingerprint,
+            resulting_account_state,
+            physical_charge_contract,
+            transaction_companion=None,
+            expected_last_sequence,
             deadline_monotonic=None,
         ):
             batch = tuple(events)
@@ -3044,8 +3226,14 @@ def test_run_end_known_precommit_failure_retries_stable_candidate_once(
                 self.run_end_attempts += 1
                 if self.run_end_attempts == 1:
                     raise RuntimeError("synthetic precommit RunEnd failure")
-            return super().extend(
+            return super().extend_with_materialization_state(
                 batch,
+                expected_account_state_fingerprint=(
+                    expected_account_state_fingerprint
+                ),
+                resulting_account_state=resulting_account_state,
+                physical_charge_contract=physical_charge_contract,
+                transaction_companion=transaction_companion,
                 expected_last_sequence=expected_last_sequence,
                 deadline_monotonic=deadline_monotonic,
             )
@@ -3441,7 +3629,7 @@ class FailingHook(NoopMemoryHooks):
 class InvalidEventHook(NoopMemoryHooks):
     async def after_model_reply(self, state: LoopState, assistant) -> list[AgentEvent]:
         return [
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 run_id=state.run_id,
                 turn_id=state.turn_id,
                 reply_id=state.reply_id,
@@ -3704,10 +3892,14 @@ def test_tool_result_persistence_hook_accepts_large_artifact_read_with_source_re
     )
     prepared_terminal = result.prepared_terminal_result
     assert prepared_terminal is not None
-    runtime_session.event_log.append(
-        build_tool_result_terminal_event(
-            event_context=context,
-            prepared=prepared_terminal,
+    asyncio.run(
+        runtime_session.emit_many(
+            (
+                build_tool_result_terminal_event(
+                    event_context=context,
+                    prepared=prepared_terminal,
+                ),
+            )
         )
     )
     replayed = AssistantMsg(name="assistant", id="reply:read", content=[])
@@ -4239,6 +4431,8 @@ def test_cancelled_tool_batch_waits_for_sync_worker_before_releasing_borrow(
         run_start_sequence=1,
         run_model_target=state.run_model_target,
         long_horizon_contract=object(),  # type: ignore[arg-type]
+        run_transcript_seed_semantic=object(),  # type: ignore[arg-type]
+        run_transcript_seed_reference=object(),  # type: ignore[arg-type]
         permission_snapshot=state.permission_snapshot,
         plan_snapshot=object(),  # type: ignore[arg-type]
         capability_resolve_basis=object(),  # type: ignore[arg-type]
@@ -4613,14 +4807,18 @@ def test_tool_gate_allow_and_rollout_reservation_commit_atomically(
     registry.register(SleepTool("sleep_a", delay=0.01))
     registry.register(SleepTool("sleep_b", delay=0.01))
     _install_registry_with_explicit_test_descriptors(agent, registry)
-    original_extend = InMemoryEventLog.extend
+    original_extend = InMemoryEventLog.extend_with_materialization_state
     observed_batches: list[tuple[AgentEvent, ...]] = []
 
     def capture_extend(
         self,
         events,
         *,
-        expected_last_sequence=None,
+        expected_account_state_fingerprint,
+        resulting_account_state,
+        physical_charge_contract,
+        transaction_companion=None,
+        expected_last_sequence,
         deadline_monotonic=None,
     ):
         batch = tuple(events)
@@ -4629,11 +4827,19 @@ def test_tool_gate_allow_and_rollout_reservation_commit_atomically(
         return original_extend(
             self,
             batch,
+            expected_account_state_fingerprint=expected_account_state_fingerprint,
+            resulting_account_state=resulting_account_state,
+            physical_charge_contract=physical_charge_contract,
+            transaction_companion=transaction_companion,
             expected_last_sequence=expected_last_sequence,
             deadline_monotonic=deadline_monotonic,
         )
 
-    monkeypatch.setattr(InMemoryEventLog, "extend", capture_extend)
+    monkeypatch.setattr(
+        InMemoryEventLog,
+        "extend_with_materialization_state",
+        capture_extend,
+    )
 
     result = asyncio.run(run_agent_task(agent, "run both"))
 
@@ -4645,13 +4851,42 @@ def test_tool_gate_allow_and_rollout_reservation_commit_atomically(
         and any(isinstance(event, CapabilityGateDecisionEvent) for event in batch)
     ]
     assert len(admission_batches) == 1
-    admission = admission_batches[0]
+    admission = tuple(
+        event
+        for event in admission_batches[0]
+        if isinstance(
+            event,
+            (CapabilityGateDecisionEvent, RolloutBudgetReservationCreatedEvent),
+        )
+    )
     assert [type(event) for event in admission] == [
         CapabilityGateDecisionEvent,
         RolloutBudgetReservationCreatedEvent,
         CapabilityGateDecisionEvent,
         RolloutBudgetReservationCreatedEvent,
     ]
+    physical_reservations = tuple(
+        event
+        for event in admission_batches[0]
+        if isinstance(event, PhysicalOperationReservationCreatedEvent)
+    )
+    assert len(physical_reservations) == 2
+    assert {event.reservation.owner_id for event in physical_reservations} == {
+        "call:a",
+        "call:b",
+    }
+    physical_settlements = tuple(
+        event
+        for event in runtime_session.event_log.iter()
+        if isinstance(event, PhysicalOperationReservationSettledEvent)
+        and event.settlement.owner_kind.value == "tool_call"
+    )
+    assert {event.settlement.reservation_id for event in physical_settlements} == {
+        event.reservation.reservation_id for event in physical_reservations
+    }
+    account = runtime_session.event_log.read_materialization_account_state()
+    assert account is not None
+    assert account.active_reservations == ()
 
 
 def test_concurrent_tool_admission_failure_leaves_no_partial_reservation(

@@ -152,11 +152,11 @@ def build_core_tool_registry(
             )
         )
     if memory_proposal_sink is not None:
-        register(RememberClaimTool(sink=memory_proposal_sink))
-        register(RememberPreferenceTool(sink=memory_proposal_sink))
-        register(RememberObservationTool(sink=memory_proposal_sink))
-        register(RememberActionBoundaryTool(sink=memory_proposal_sink))
-        register(RememberDecisionTool(sink=memory_proposal_sink))
+        register(RememberClaimTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
+        register(RememberPreferenceTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
+        register(RememberObservationTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
+        register(RememberActionBoundaryTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
+        register(RememberDecisionTool(sink=memory_proposal_sink, runtime_session_id=runtime_session.runtime_session_id))
     subagent_context = runtime_session.default_event_metadata.get("subagent")
     if runtime_session.subagent_runtime is not None and isinstance(subagent_context, dict):
         subagent_run_id = subagent_context.get("subagent_run_id")

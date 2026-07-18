@@ -8,8 +8,13 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+from tests.support.governance import make_test_governance_execution_identity
+
 from pulsara_agent.entities.memory import Preference
-from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
@@ -37,6 +42,9 @@ from pulsara_agent.memory.governance.relatedness import (
 )
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
+
+
+_VERIFIED_REPLACEMENT_REF = "candidate_user_quote"
 
 
 def test_memory_search_index_rebuild_populates_fts_candidates() -> None:
@@ -124,7 +132,7 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
     )
     batch_id = f"governance:test:index-sync:{uuid4().hex}"
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
     query = PostgresMemoryQuery(dsn=dsn)
     try:
@@ -144,6 +152,7 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
@@ -162,6 +171,10 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
                 reason="Submit active memory for index sync.",
             ),
             governance_batch_id=batch_id,
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(candidate,),
+            ),
         )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         memory_id = result.decision_record.write_outcome.memory_id
@@ -224,7 +237,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
     batch_id = f"governance:test:index-sync-supersede:{uuid4().hex}"
     old_id = "preference:index-sync-supersede-old"
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
     store = PostgresGraphStore(dsn=dsn)
     query = PostgresMemoryQuery(dsn=dsn)
@@ -256,6 +269,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
             candidate_pool=pool,
             memory_write_service=_service_on(InMemoryGraphStore()),
             event_log=log,
+            event_commit_port=log.extend,
             graph=InMemoryGraphStore(),
             runtime_session_id=runtime_session_id,
             memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
@@ -272,7 +286,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
                 target_entry_id=candidate.entry_id,
                 candidate=_preference_candidate("candidate:index-sync-supersede-new"),
                 superseded_memory_ids=(old_id,),
-                replacement_evidence_refs=(log.iter(run_id=source_ctx.run_id)[0].id,),
+                replacement_evidence_refs=(_VERIFIED_REPLACEMENT_REF,),
                 reason="Explicitly replace verbose summaries with concise summaries.",
             ),
             governance_batch_id=batch_id,
@@ -282,6 +296,20 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
                 availability=MappingProxyType(
                     {candidate.entry_id: RelatednessAvailability.FULL}
                 ),
+                node_revisions=MappingProxyType(
+                    {candidate.entry_id: MappingProxyType({old_id: 1})}
+                ),
+                verified_evidence_refs=MappingProxyType(
+                    {
+                        candidate.entry_id: frozenset(
+                            {_VERIFIED_REPLACEMENT_REF}
+                        )
+                    }
+                ),
+            ),
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(candidate,),
             ),
         )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)

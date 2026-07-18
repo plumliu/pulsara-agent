@@ -1,0 +1,92 @@
+{
+  "schema_version": "pulsara.durable-runtime.context-scenario.v1",
+  "scenario_id": "subagent-two-children",
+  "seed": 452004,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "A parent run with two task-backed child ledgers, durable result handoff, and repeated parent context compilation.",
+  "generator_contract": {
+    "generator_id": "pulsara.context.subagent-two-children",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.context.subagent-authority",
+    "grader_version": "1",
+    "assertion_ids": [
+      "ledger_identity_isolated",
+      "child_terminal_reference_exact",
+      "dependency_order_valid",
+      "checkpoint_restore_semantics_equal",
+      "child_result_selected_once"
+    ]
+  },
+  "ledger": {
+    "parent": {
+      "model_calls": 13,
+      "semantic_delta_events_per_call": 192,
+      "characters_per_semantic_delta": 24,
+      "tool_calls": 5,
+      "compile_after_every_model_call": true
+    },
+    "children": [
+      {
+        "child_id": "review",
+        "model_calls": 1,
+        "target_raw_events": 600,
+        "tool_calls": 1,
+        "result_artifacts": 1,
+        "handoff": "explicit"
+      },
+      {
+        "child_id": "verify",
+        "depends_on": [
+          "review"
+        ],
+        "model_calls": 1,
+        "target_raw_events": 482,
+        "tool_calls": 1,
+        "result_artifacts": 1,
+        "handoff": "explicit"
+      }
+    ],
+    "subagent_graph_checkpoint": {
+      "enabled": true,
+      "checkpoint_after_terminal_children": true
+    }
+  },
+  "compile_schedule": {
+    "parent_after_model_call_ordinals": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "include_points_after_child_results": true
+  },
+  "measurement": {
+    "modes": [
+      "process_cold",
+      "steady_state"
+    ],
+    "warmup_iterations": 3,
+    "measured_iterations": 20
+  },
+  "invariants": [
+    "parent and child ledger identities never mix",
+    "selected subagent result facts match their exact child terminal events",
+    "dependency ordering places verify after review completion",
+    "checkpoint restore and full diagnostic fold produce the same graph semantics",
+    "parent context includes each selected child result exactly once"
+  ]
+}

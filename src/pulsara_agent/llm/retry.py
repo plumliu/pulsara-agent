@@ -21,6 +21,8 @@ class LLMRetryConfig:
 
     def __post_init__(self) -> None:
         attempts = max(int(self.attempts), 1)
+        if attempts > 32:
+            raise ValueError("attempts must be <= 32")
         jitter_ratio = min(max(float(self.jitter_ratio), 0.0), 1.0)
         base_delay_seconds = float(self.base_delay_seconds)
         max_delay_seconds = float(self.max_delay_seconds)

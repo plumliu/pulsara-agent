@@ -70,7 +70,6 @@ from pulsara_agent.runtime.context_input.event_slice import event_reference_from
 from pulsara_agent.primitives.permission import (
     PermissionMode,
     parse_permission_mode,
-    preset_permission_policy_fact,
 )
 from pulsara_agent.primitives.run_boundary import (
     BoundaryBatchCommitStatus,
@@ -100,6 +99,7 @@ from pulsara_agent.runtime.approval import (
     PendingApproval,
     pending_approval_from_state,
 )
+from pulsara_agent.runtime.authority_materialization import RunSeedSourceStale
 from pulsara_agent.runtime.agent import AgentRunResult
 from pulsara_agent.runtime.permission import (
     ApprovalPolicy,
@@ -124,6 +124,7 @@ from pulsara_agent.runtime.plan import (
     PendingPlanInteraction,
     PlanInteractionResolution,
     PlanWorkflowState,
+    plan_workflow_state_fact,
     pending_plan_interaction_from_state,
     pending_mcp_input_required_from_state,
     reduce_plan_workflow_state,
@@ -172,6 +173,20 @@ from pulsara_agent.capability.types import (
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
 from pulsara_agent.tools.adapters.mcp import McpCapabilityTool
+
+
+_MAX_RUN_SEED_REFREEZE_ATTEMPTS = 3
+
+
+def _caused_by(error: BaseException, error_type: type[BaseException]) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, error_type):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class HostSessionBusyError(RuntimeError):
@@ -458,6 +473,9 @@ class HostSession:
     _boundary_observer: _StreamObserver | None = None
     _preparing_state: LoopState | None = None
     _preparing_identity: HostRunBoundaryIdentityFact | None = None
+    _boundary_stop_requested_run_ids: set[str] = field(
+        default_factory=set, init=False, repr=False
+    )
     _compaction_listeners: list[Callable[[AgentEvent], None]] = field(
         default_factory=list, init=False, repr=False
     )
@@ -915,52 +933,12 @@ class HostSession:
         )
 
     def _plan_workflow_state_fact(self) -> PlanWorkflowStateFact:
-        if self.plan_state.active:
-            if (
-                self.plan_state.entered_event_id is None
-                or self.plan_state.entered_event_sequence is None
-                or self.plan_state.entry_run_id is None
-                or self.plan_state.entry_turn_id is None
-                or self.plan_state.entry_reply_id is None
-            ):
-                raise ValueError(
-                    "active plan workflow requires a durable entered event"
-                )
-            if self.plan_state.pre_plan_permission_mode is None:
-                raise ValueError("active plan workflow is missing stored permission")
-            stored = preset_permission_policy_fact(
-                self.plan_state.pre_plan_permission_mode
-            )
-            return PlanWorkflowStateFact(
-                workflow_id=f"plan_workflow:{self.plan_state.entered_event_id}",
-                active=True,
-                revision=self.plan_state.revision,
-                entered_event_id=self.plan_state.entered_event_id,
-                entered_event_sequence=self.plan_state.entered_event_sequence,
-                entry_run_id=self.plan_state.entry_run_id,
-                entry_turn_id=self.plan_state.entry_turn_id,
-                entry_reply_id=self.plan_state.entry_reply_id,
-                stored_default_permission=stored,
-                accepted_plan_artifact_id=(
-                    self.plan_state.latest_accepted_plan_artifact_id
-                ),
-            )
         mode = self.default_permission_mode
         if mode is None:
             raise ValueError("session default permission must be a preset")
-        return PlanWorkflowStateFact(
-            workflow_id=None,
-            active=False,
-            revision=self.plan_state.revision,
-            entered_event_id=None,
-            entered_event_sequence=None,
-            entry_run_id=None,
-            entry_turn_id=None,
-            entry_reply_id=None,
-            stored_default_permission=preset_permission_policy_fact(mode),
-            accepted_plan_artifact_id=(
-                self.plan_state.latest_accepted_plan_artifact_id
-            ),
+        return plan_workflow_state_fact(
+            self.plan_state,
+            inactive_default_permission_mode=mode,
         )
 
     def _transcript_snapshot_fact(
@@ -1192,6 +1170,10 @@ class HostSession:
             else:
                 outcome = runtime_session.resolved_event_write_outcome(exc)
                 if outcome.status != "full":
+                    if outcome.status == "none":
+                        runtime_session.transcript_projection_checkpoint_service.discard_prepared_run_seed(
+                            state.run_id
+                        )
                     self._set_boundary_commit_confirmation(
                         BoundaryBatchCommitStatus.UNKNOWN
                         if outcome.status == "unknown"
@@ -1316,6 +1298,9 @@ class HostSession:
         committed: CommittedHostRunEntry,
         prepared: PreparedNewRunBoundary,
     ) -> None:
+        self.wiring.runtime_wiring.runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+            committed.run_start_event
+        )
         install_run_working_set(
             state,
             committed,
@@ -1603,7 +1588,23 @@ class HostSession:
             preparing_state=state,
             preparing_identity=identity,
         )
-        return await asyncio.shield(task)
+        try:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if (
+                    not task.cancelled()
+                    or state.run_id not in self._boundary_stop_requested_run_ids
+                ):
+                    raise
+                if state.finalized:
+                    return self.wiring.agent_runtime._run_result(state)
+                owner = self._run_execution_owners.get(state.run_id)
+                if owner is None:
+                    raise
+                return await asyncio.shield(owner.run_completion)
+        finally:
+            self._boundary_stop_requested_run_ids.discard(state.run_id)
 
     async def _run_turn_pipeline(
         self,
@@ -1613,16 +1614,30 @@ class HostSession:
     ) -> AgentRunResult:
         async with self._run_lock:
             try:
-                (
-                    draft,
-                    committed,
-                    _stored,
-                ) = await self._prepare_and_commit_new_run_boundary(
-                    user_input=boundary_input.user_input,
-                    active_skill_names=boundary_input.active_skill_names,
-                    state=state,
-                    identity=boundary_input.identity,
-                )
+                for attempt_index in range(_MAX_RUN_SEED_REFREEZE_ATTEMPTS):
+                    try:
+                        (
+                            draft,
+                            committed,
+                            _stored,
+                        ) = await self._prepare_and_commit_new_run_boundary(
+                            user_input=boundary_input.user_input,
+                            active_skill_names=boundary_input.active_skill_names,
+                            state=state,
+                            identity=boundary_input.identity,
+                        )
+                    except BaseException as exc:
+                        if (
+                            attempt_index + 1
+                            >= _MAX_RUN_SEED_REFREEZE_ATTEMPTS
+                            or not _caused_by(exc, RunSeedSourceStale)
+                        ):
+                            raise
+                        self._reset_boundary_after_run_seed_source_stale()
+                        continue
+                    break
+                else:  # pragma: no cover - bounded loop always breaks or raises.
+                    raise AssertionError("run-seed re-freeze loop exhausted")
                 self._activate_committed_state(state, committed)
                 self._complete_boundary_attempt_after_activation()
                 return await self._run_owned(
@@ -1636,6 +1651,25 @@ class HostSession:
             except BaseException as exc:
                 await self._terminalize_post_commit_pipeline_failure(state, exc)
                 raise
+
+    def _reset_boundary_after_run_seed_source_stale(self) -> None:
+        attempt = self._boundary_attempt
+        if attempt is None:
+            raise RuntimeError("run-seed source retry lost its boundary owner")
+        if (
+            attempt.commit_confirmation is None
+            or attempt.commit_confirmation.status is not BoundaryBatchCommitStatus.NONE
+        ):
+            raise RuntimeError(
+                "run-seed source retry requires a confirmed-NONE boundary batch"
+            )
+        attempt.phase = HostRunBoundaryPhase.ADMISSION
+        attempt.execution_handles = None
+        attempt.candidate_events = ()
+        attempt.candidate_event_ids = ()
+        attempt.candidate_payload_fingerprints = ()
+        attempt.commit_state = "not_started"
+        attempt.commit_confirmation = None
 
     def stream_turn(
         self,
@@ -2167,6 +2201,9 @@ class HostSession:
                 if preparing_state is not None:
                     preparing_state.stop_request = StopRequest(reason=reason)
                     self.stopping_run_id = preparing_state.run_id
+                    self._boundary_stop_requested_run_ids.add(
+                        preparing_state.run_id
+                    )
                 boundary_task.cancel()
                 try:
                     await asyncio.wait_for(
@@ -2280,6 +2317,7 @@ class HostSession:
                 self._finish_active_run()
                 return result
             self.stopping_run_id = state.run_id
+            self._boundary_stop_requested_run_ids.add(state.run_id)
             await self._install_run_termination_intent(state, reason)
             state.stop_request = StopRequest(reason=reason)
             runtime_session = self.wiring.runtime_wiring.runtime_session
@@ -2487,6 +2525,25 @@ class HostSession:
         await runtime_session.tool_execution_terminal_registry.drain_pending(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
+        await runtime_session.transcript_projection_checkpoint_service.request_close_cancellation()
+        governance_engine = self.wiring.runtime_wiring.memory_governance_engine
+        if governance_engine is not None:
+            await governance_engine.stop_admission_and_drain(
+                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            )
+        await self.wiring.runtime_wiring.memory_governance_executor.flush_pending_event_outbox_async(
+            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+        )
+        candidate_projection_port = (
+            self.wiring.runtime_wiring.candidate_projection_commit_port
+        )
+        if candidate_projection_port is not None:
+            await candidate_projection_port.stop_admission_and_drain(
+                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            )
+            await candidate_projection_port.flush_pending(
+                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            )
         await runtime_session.context_input_io_service.drain_pending(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
@@ -2494,6 +2551,9 @@ class HostSession:
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
         await runtime_session.subagent_graph_checkpoint_service.drain_pending(
+            deadline_monotonic=time.monotonic() + drain_timeout_seconds
+        )
+        await runtime_session.transcript_projection_checkpoint_service.drain_pending(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
         window_compaction_service = runtime_session.window_compaction_service
@@ -4293,14 +4353,21 @@ class HostSession:
         self._raise_if_pending_interaction("entering plan")
         self._raise_if_active_run()
         if not self.plan_state.active:
+            runtime_session = self.wiring.runtime_wiring.runtime_session
+            defer_entry_audit = (
+                not runtime_session.allow_unbootstrapped_test_events
+                and runtime_session.materialization_account_store.snapshot() is None
+                and runtime_session.event_log.next_sequence() == 1
+            )
             self.plan_state.begin(
                 source="user",
                 previous_mode=self.default_permission_mode,
                 previous_policy=self.default_permission_policy(),
                 reason=reason,
-                pending_entry_audit=False,
+                pending_entry_audit=defer_entry_audit,
             )
-            self._emit_user_plan_mode_entered(reason=reason)
+            if not defer_entry_audit:
+                self._emit_user_plan_mode_entered(reason=reason)
         policy = preset_to_policy(PermissionMode.READ_ONLY)
         self.last_active_at = time.monotonic()
         return policy

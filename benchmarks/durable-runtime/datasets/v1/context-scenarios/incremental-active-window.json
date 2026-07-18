@@ -1,0 +1,53 @@
+{
+  "schema_version": "pulsara.durable-runtime.context-scenario.v1",
+  "scenario_id": "incremental-active-window",
+  "seed": 452002,
+  "external_network_access": "forbidden",
+  "allowed_local_services": [
+    "postgresql"
+  ],
+  "description": "Thirty-two small high-water advances used to isolate repeated evidence-prefix work from large single-call materialization.",
+  "generator_contract": {
+    "generator_id": "pulsara.context.incremental-active-window",
+    "generator_version": "1"
+  },
+  "grader_contract": {
+    "grader_id": "pulsara.context.incremental-authority",
+    "grader_version": "1",
+    "assertion_ids": [
+      "high_water_monotonic",
+      "delta_increment_exact",
+      "provider_transcript_deterministic",
+      "durable_delta_references_complete"
+    ]
+  },
+  "ledger": {
+    "runtime_sessions": 1,
+    "runs": 1,
+    "prior_transcript_messages": 2,
+    "model_calls": 32,
+    "semantic_delta_events_per_call": 128,
+    "characters_per_semantic_delta": 24,
+    "tool_calls_every_nth_model_call": 4,
+    "tool_result_characters": 2048,
+    "checkpoint_policy": "do_not_advance_during_measurement"
+  },
+  "compile_schedule": {
+    "after_every_model_call": true,
+    "compile_attempts_per_point": 1
+  },
+  "measurement": {
+    "modes": [
+      "process_cold",
+      "steady_state"
+    ],
+    "warmup_iterations": 5,
+    "measured_iterations": 30
+  },
+  "invariants": [
+    "each compile high-water is greater than the previous high-water",
+    "each logical increment contributes exactly 128 semantic deltas before structural facts",
+    "the provider-visible transcript at each point is deterministic",
+    "an incremental cursor may reduce reads but may not remove complete durable delta references"
+  ]
+}

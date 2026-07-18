@@ -8,10 +8,9 @@ from uuid import uuid4
 import pytest
 
 from pulsara_agent.entities.capability import Plugin, Skill
-from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext
 from pulsara_agent.graph import OxigraphGraphStore
 from pulsara_agent.jsonld import NodeRef
-from tests.support import test_llm_config
 from pulsara_agent.memory import (
     ExecutionEvidenceLedger,
     InMemoryArchiveStore,
@@ -24,6 +23,8 @@ from pulsara_agent.ontology import capability as cap
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import build_durable_runtime_wiring
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from tests.conftest import emit_test_accepted_model_reply
+from tests.support import test_llm_config
 
 
 OXIGRAPH_URL = "http://localhost:7878"
@@ -181,12 +182,11 @@ def test_oxigraph_timeline_hook_uses_postgres_event_log_and_artifact_store(
     timeline_blob_id: str | None = None
 
     async def run() -> None:
-        await wiring.runtime_session.emit(
-            TextBlockDeltaEvent(
-                **ctx.event_fields(), block_id="text:1", delta="hello oxigraph"
-            )
+        await emit_test_accepted_model_reply(
+            wiring.runtime_session,
+            event_context=ctx,
+            assistant_text="hello oxigraph",
         )
-        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
     try:
         import asyncio
@@ -240,12 +240,11 @@ def test_durable_runtime_delete_graph_clears_oxigraph_named_graph(tmp_path) -> N
     oxigraph = OxigraphGraphStore(storage.oxigraph_url)
 
     async def run() -> None:
-        await wiring.runtime_session.emit(
-            TextBlockDeltaEvent(
-                **ctx.event_fields(), block_id="text:1", delta="hello delete graph"
-            )
+        await emit_test_accepted_model_reply(
+            wiring.runtime_session,
+            event_context=ctx,
+            assistant_text="hello delete graph",
         )
-        await wiring.runtime_session.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
     try:
         import asyncio

@@ -8,6 +8,7 @@ from pulsara_agent.event_log.protocol import (
     EventLog,
     EventLogReadSnapshot,
     EventLogWriteConflict,
+    MaterializationAccountStateConflict,
     RawCheckpointLedgerCandidate,
     RawCheckpointLedgerSnapshot,
     RawContextAuthorityBundle,
@@ -19,6 +20,8 @@ from pulsara_agent.event_log.protocol import (
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
     RawStoredEventEnvelope,
+    RawTranscriptDomainDeltaSnapshot,
+    RawTranscriptDomainPrefixFact,
     same_event_payload,
 )
 from pulsara_agent.event_log.serialization import (
@@ -40,6 +43,7 @@ __all__ = [
     "EventBatchConfirmation",
     "EventIdConflict",
     "EventLogWriteConflict",
+    "MaterializationAccountStateConflict",
     "RawCheckpointLedgerCandidate",
     "RawCheckpointLedgerSnapshot",
     "RawContextAuthorityBundle",
@@ -51,6 +55,8 @@ __all__ = [
     "RawReplyEventGroup",
     "RawReplySelectionSnapshot",
     "RawStoredEventEnvelope",
+    "RawTranscriptDomainDeltaSnapshot",
+    "RawTranscriptDomainPrefixFact",
     "AGENT_EVENT_SCHEMA_VERSION",
     "DEFAULT_EVENT_SCHEMA_REGISTRY",
     "EventSchemaContractMismatch",

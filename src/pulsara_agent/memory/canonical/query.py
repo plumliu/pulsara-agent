@@ -31,6 +31,7 @@ class CanonicalNodeView:
     do_not_apply_when: str | None
     created_at: datetime
     updated_at: datetime
+    node_revision: int
     evidence_ids: tuple[str, ...]
     outgoing: tuple[tuple[str, str], ...]
     incoming: tuple[tuple[str, str], ...]
@@ -114,7 +115,7 @@ class PostgresMemoryQuery:
                 """
                 SELECT id, memory_type, scope, status, statement, summary, source_authority,
                        verification_status, confidence_level, applies_when, do_not_apply_when,
-                       created_at, updated_at
+                       created_at, updated_at, node_revision
                 FROM memory_nodes
                 WHERE graph_id = %s AND id = ANY(%s)
                 """,
@@ -428,6 +429,7 @@ def _node_view_from_row(
         do_not_apply_when=row["do_not_apply_when"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        node_revision=int(row["node_revision"]),
         evidence_ids=evidence_ids,
         outgoing=outgoing,
         incoming=incoming,

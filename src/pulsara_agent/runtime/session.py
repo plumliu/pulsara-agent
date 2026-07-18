@@ -23,24 +23,48 @@ from pulsara_agent.event import (
     ContextWindowCompactionFailedEvent,
     ContextWindowCompactionStartedEvent,
     ContextWindowOpenedEvent,
+    EventContext,
+    ExternalExecutionResultEvent,
     McpCapabilitySnapshotInstalledEvent,
+    ModelCallEndEvent,
+    ModelCallControlDispositionResolvedEvent,
+    ModelCallStartEvent,
+    ModelCallTerminalProjectionCommittedEvent,
+    PhysicalOperationReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
     EventType,
     RunEndEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
+    RequireExternalExecutionEvent,
+    ToolResultEndEvent,
+    ToolResultDataDeltaEvent,
+    ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
+    ToolResultTerminalProjectionCommittedEvent,
 )
 from pulsara_agent.event_log import (
     EventBatchConfirmation,
     EventIdConflict,
     EventLog,
     EventLogWriteConflict,
+    InMemoryEventLog,
     DEFAULT_EVENT_SCHEMA_REGISTRY,
 )
+from pulsara_agent.event_log.protocol import EventLogTransactionCompanion
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.llm.execution import ModelStreamExecutionRegistry
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
-from pulsara_agent.primitives.context import ContextStaticInstructionFact
+from pulsara_agent.primitives.context import (
+    ContextStaticInstructionFact,
+    context_fingerprint,
+)
+from pulsara_agent.primitives.authority_materialization import (
+    LedgerMaterializationConsumerKind,
+    LedgerWriteAdmissionClass,
+    PhysicalOperationKind,
+    PhysicalOperationReservationFact,
+)
 from pulsara_agent.runtime.hooks import RuntimeHookManager
 from pulsara_agent.runtime.context_input.candidate import InMemoryContextLifecycleCache
 from pulsara_agent.runtime.context_input.event_slice import (
@@ -114,6 +138,7 @@ class EventWriteResult:
     publication_status: Literal["completed", "enqueued", "unavailable"]
     publisher_enqueued_through_sequence: int | None
     publication_errors: tuple[EventPublicationError, ...] = ()
+    accounting_events: tuple[AgentEvent, ...] = ()
 
     def require_reduced(self, reducer_id: str) -> tuple[AgentEvent, ...]:
         last_sequence = max(
@@ -286,6 +311,7 @@ class RuntimeSession:
     mcp_supervisor: Any | None = None
     context_event_log_locator: Any | None = None
     rollout_account_owner_state_store: Any | None = None
+    allow_unbootstrapped_test_events: bool = False
     default_event_metadata: dict[str, Any] = field(default_factory=dict)
     publisher: RuntimeEventPublisher = field(init=False)
     write_coordinator: SessionWriteCoordinator = field(
@@ -329,6 +355,64 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    authority_materialization_contracts: Any = field(
+        init=False,
+        repr=False,
+    )
+    authority_materialization_shadow: Any = field(
+        init=False,
+        repr=False,
+    )
+    materialization_account_store: Any = field(
+        init=False,
+        repr=False,
+    )
+    materialization_coordinator: Any = field(
+        init=False,
+        repr=False,
+    )
+    checkpoint_dispatch_barrier_coordinator: Any = field(
+        init=False,
+        repr=False,
+    )
+    _physical_reservation_facts: dict[
+        tuple[PhysicalOperationKind, str], PhysicalOperationReservationFact
+    ] = field(default_factory=dict, init=False, repr=False)
+    _physical_operation_admission_tokens: dict[
+        tuple[PhysicalOperationKind, str], Any
+    ] = field(default_factory=dict, init=False, repr=False)
+    terminal_projection_contracts: Any = field(
+        init=False,
+        repr=False,
+    )
+    tool_terminal_projection_state_store: Any = field(
+        init=False,
+        repr=False,
+    )
+    tool_terminal_projection_service: Any = field(
+        init=False,
+        repr=False,
+    )
+    transcript_projection_document_registry: Any = field(
+        init=False,
+        repr=False,
+    )
+    transcript_projection_state_store: Any = field(
+        init=False,
+        repr=False,
+    )
+    transcript_projection_materialization_contracts: Any = field(
+        init=False,
+        repr=False,
+    )
+    transcript_projection_restore: Any = field(
+        init=False,
+        repr=False,
+    )
+    transcript_projection_checkpoint_service: Any = field(
+        init=False,
+        repr=False,
+    )
     observation_rollup_content_cache: Any = field(
         init=False,
         repr=False,
@@ -338,6 +422,10 @@ class RuntimeSession:
         repr=False,
     )
     model_stream_execution_registry: ModelStreamExecutionRegistry = field(
+        init=False,
+        repr=False,
+    )
+    model_call_control_disposition_owner: Any = field(
         init=False,
         repr=False,
     )
@@ -361,6 +449,11 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    _memory_governance_reconciliation_required: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
     mcp_installation_id: str = field(default="mcp_installation:empty", init=False)
     mcp_installation_owner_runtime_session_id: str = field(init=False)
     _pending_mcp_installation_audits: list[McpPendingInstallationAudit] = field(
@@ -376,9 +469,16 @@ class RuntimeSession:
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
+        if self.allow_unbootstrapped_test_events and not isinstance(
+            self.event_log, InMemoryEventLog
+        ):
+            raise ValueError(
+                "unbootstrapped event writes are restricted to the pytest in-memory double"
+            )
         bind_event_log_owner = getattr(self.event_log, "bind_runtime_session_id", None)
         if bind_event_log_owner is not None:
             bind_event_log_owner(self.runtime_session_id)
+        self.event_log.ensure_runtime_session_owner()
         self.mcp_installation_owner_runtime_session_id = self.runtime_session_id
         self.artifact_service = ToolResultArtifactService(
             archive=self.archive,
@@ -395,7 +495,177 @@ class RuntimeSession:
         self.context_authority_slice_cache = InMemoryContextAuthoritySliceCache()
         self.tool_result_render_cache = InMemoryToolResultRenderCache()
         self.model_stream_execution_registry = ModelStreamExecutionRegistry()
+        from pulsara_agent.llm.control import (
+            SessionModelCallControlDispositionOwner,
+        )
+
+        self.model_call_control_disposition_owner = (
+            SessionModelCallControlDispositionOwner()
+        )
         self.tool_execution_terminal_registry = ToolExecutionTerminalRegistry(self)
+        from pulsara_agent.llm.terminal_projection import (
+            build_default_terminal_projection_contract_bundle,
+        )
+
+        self.terminal_projection_contracts = (
+            build_default_terminal_projection_contract_bundle()
+        )
+        from pulsara_agent.runtime.authority_materialization import (
+            build_default_authority_materialization_contract_bundle,
+        )
+
+        self.authority_materialization_contracts = (
+            build_default_authority_materialization_contract_bundle()
+        )
+        from pulsara_agent.runtime.authority_materialization import (
+            LedgerMaterializationAccountStore,
+            LedgerMaterializationCoordinator,
+        )
+
+        durable_account = self.event_log.read_materialization_account_state(
+            deadline_monotonic=monotonic() + 30.0
+        )
+        ledger_usage = self.event_log.read_ledger_usage_snapshot(
+            deadline_monotonic=monotonic() + 30.0
+        )
+        if (
+            durable_account is None
+            and ledger_usage.through_sequence != 0
+            and not self.allow_unbootstrapped_test_events
+        ):
+            raise ValueError(
+                "non-empty ledger lacks the required materialization account; "
+                "reset the database for this hard-cut schema"
+            )
+        if durable_account is not None and (
+            durable_account.runtime_session_id != self.runtime_session_id
+            or durable_account.ledger_through_sequence != ledger_usage.through_sequence
+        ):
+            raise ValueError(
+                "durable materialization account does not cover the ledger high-water"
+            )
+        self.materialization_account_store = LedgerMaterializationAccountStore(
+            state=durable_account,
+            charge_contract=(
+                self.authority_materialization_contracts.charge_contract
+            ),
+        )
+        self.materialization_coordinator = LedgerMaterializationCoordinator(
+            runtime_session_id=self.runtime_session_id,
+            event_log=self.event_log,
+            store=self.materialization_account_store,
+            charge_contract=(
+                self.authority_materialization_contracts.charge_contract
+            ),
+            limits=self.authority_materialization_contracts.limits,
+            prepare_event=self.prepare_event_for_write,
+        )
+        from pulsara_agent.runtime.authority_materialization.dispatch_barrier import (
+            CheckpointDispatchBarrierCoordinator,
+        )
+
+        self.checkpoint_dispatch_barrier_coordinator = (
+            CheckpointDispatchBarrierCoordinator(
+                active_barrier=(
+                    None
+                    if durable_account is None
+                    else durable_account.active_checkpoint_barrier
+                )
+            )
+        )
+        self.event_write_service.bind_admission_coordinator(
+            self.checkpoint_dispatch_barrier_coordinator
+        )
+        self._restore_active_physical_reservations(durable_account)
+        from pulsara_agent.runtime.authority_materialization import (
+            build_default_transcript_projection_materialization_contracts,
+        )
+
+        self.transcript_projection_materialization_contracts = (
+            build_default_transcript_projection_materialization_contracts(
+                self.authority_materialization_contracts.limits
+            )
+        )
+        from pulsara_agent.runtime.authority_materialization import (
+            restore_transcript_projection,
+        )
+
+        transcript_restore = restore_transcript_projection(
+            event_log=self.event_log,
+            archive=self.archive,
+            runtime_session_id=self.runtime_session_id,
+            requested_through_sequence=ledger_usage.through_sequence,
+            event_domain_binding=(
+                self.authority_materialization_contracts.event_domain
+            ),
+            materialization_contracts=(
+                self.transcript_projection_materialization_contracts
+            ),
+            limits=self.authority_materialization_contracts.limits,
+            deadline_monotonic=monotonic() + 30.0,
+            allow_seedless_test_bootstrap=(
+                self.allow_unbootstrapped_test_events
+                and isinstance(self.event_log, InMemoryEventLog)
+            ),
+        )
+        self.transcript_projection_restore = transcript_restore
+        self.transcript_projection_document_registry = (
+            transcript_restore.document_registry
+        )
+        self.transcript_projection_state_store = transcript_restore.state_store
+        self.register_committed_reducer(
+            reducer_id=f"transcript_projection:{self.runtime_session_id}",
+            through_sequence=self.transcript_projection_state_store.through_sequence,
+            apply_committed=self.transcript_projection_state_store.apply_committed,
+            rebuild_committed=self.transcript_projection_state_store.rebuild,
+        )
+        # Startup recovery may commit a stable checkpoint terminal batch. The
+        # publisher must own that newly committed suffix before recovery runs.
+        self.publisher = RuntimeEventPublisher(
+            runtime_session_id=self.runtime_session_id,
+            next_sequence_to_publish=_next_publish_sequence(self.event_log),
+        )
+        self.publisher.subscribe(self.hook_manager)
+        from pulsara_agent.runtime.authority_materialization import (
+            TranscriptProjectionCheckpointService,
+        )
+
+        self.transcript_projection_checkpoint_service = (
+            TranscriptProjectionCheckpointService(runtime_session=self)
+        )
+        from pulsara_agent.runtime.terminal_projection import (
+            ToolTerminalProjectionService,
+            ToolTerminalProjectionStateStore,
+        )
+
+        tool_projection_bootstrap = self.event_log.read_raw_events_by_types(
+            (
+                EventType.TOOL_RESULT_START.value,
+                EventType.TOOL_RESULT_TEXT_DELTA.value,
+                EventType.TOOL_RESULT_DATA_DELTA.value,
+                EventType.TOOL_RESULT_END.value,
+            ),
+            active_runs_only=True,
+            deadline_monotonic=monotonic() + 30.0,
+        )
+        self.tool_terminal_projection_state_store = ToolTerminalProjectionStateStore(
+            tuple(
+                event.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+                for event in tool_projection_bootstrap.events
+            ),
+            through_sequence=tool_projection_bootstrap.through_sequence,
+        )
+        self.tool_terminal_projection_service = ToolTerminalProjectionService(
+            runtime_session=self,
+            state_store=self.tool_terminal_projection_state_store,
+            contracts=self.terminal_projection_contracts,
+        )
+        self.register_committed_reducer(
+            reducer_id=f"tool_terminal_projection:{self.runtime_session_id}",
+            through_sequence=self.tool_terminal_projection_state_store.through_sequence,
+            apply_committed=self.tool_terminal_projection_state_store.apply_committed,
+            rebuild_committed=self.tool_terminal_projection_state_store.rebuild,
+        )
         from pulsara_agent.primitives.long_horizon import (
             default_subagent_graph_checkpoint_policy,
         )
@@ -406,16 +676,19 @@ class RuntimeSession:
             build_default_subagent_graph_reducer_binding,
         )
 
+        graph_checkpoint_policy = default_subagent_graph_checkpoint_policy(
+            max_unreclaimable_ledger_events=(
+                self.authority_materialization_contracts.limits.max_unreclaimable_ledger_events
+            ),
+            max_unreclaimable_charged_payload_bytes=(
+                self.authority_materialization_contracts.limits.max_unreclaimable_charged_payload_bytes
+            ),
+        )
         self.subagent_graph_checkpoint_service = SubagentGraphCheckpointService(
             runtime_session=self,
             reducer_binding=build_default_subagent_graph_reducer_binding(),
-            policy=default_subagent_graph_checkpoint_policy(),
+            policy=graph_checkpoint_policy,
         )
-        self.publisher = RuntimeEventPublisher(
-            runtime_session_id=self.runtime_session_id,
-            next_sequence_to_publish=_next_publish_sequence(self.event_log),
-        )
-        self.publisher.subscribe(self.hook_manager)
         from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
         from pulsara_agent.runtime.long_horizon.rollup import (
             InMemoryObservationRollupContentCache,
@@ -465,7 +738,226 @@ class RuntimeSession:
             apply_committed=self.long_horizon_state_store.apply_committed,
             rebuild_committed=self.long_horizon_state_store.rebuild,
         )
+        from pulsara_agent.runtime.authority_materialization import (
+            AuthorityMaterializationShadowAccount,
+        )
+        usage_reader = getattr(self.event_log, "read_ledger_usage_snapshot", None)
+        if usage_reader is None:
+            usage_through = self.long_horizon_state_store.through_sequence
+            usage_payload_bytes = 0
+        else:
+            usage = usage_reader(deadline_monotonic=monotonic() + 30.0)
+            usage_through = usage.through_sequence
+            usage_payload_bytes = usage.candidate_payload_bytes
+        burst_contracts = tuple(
+            item.contract
+            for item in self.authority_materialization_contracts.burst_registry.bindings()
+        )
+        self.authority_materialization_shadow = AuthorityMaterializationShadowAccount(
+            through_sequence=usage_through,
+            candidate_payload_bytes=usage_payload_bytes,
+            limits=self.authority_materialization_contracts.limits,
+            charge_contract=self.authority_materialization_contracts.charge_contract,
+            fixed_graph_delta_event_bound=(
+                graph_checkpoint_policy.checkpoint_max_delta_events
+            ),
+            fixed_graph_delta_payload_byte_bound=(
+                graph_checkpoint_policy.checkpoint_max_delta_bytes
+            ),
+            resolved_max_burst_events=max(
+                item.max_total_reserved_events for item in burst_contracts
+            ),
+            resolved_max_burst_payload_bytes=max(
+                item.max_total_reserved_payload_bytes for item in burst_contracts
+            ),
+        )
+        self.register_committed_reducer(
+            reducer_id=(
+                f"authority_materialization_shadow:{self.runtime_session_id}"
+            ),
+            through_sequence=self.authority_materialization_shadow.through_sequence,
+            apply_committed=self.authority_materialization_shadow.apply_committed,
+        )
         self._bind_terminal(self.terminal_binding)
+
+    def _restore_active_physical_reservations(self, durable_account: Any) -> None:
+        self._physical_reservation_facts = {}
+        self._physical_operation_admission_tokens = {}
+        if durable_account is None or not durable_account.active_reservations:
+            return
+        event_ids = tuple(
+            item.latest_reservation_event_id
+            for item in durable_account.active_reservations
+        )
+        raw_events = self.event_log.read_raw_events_by_id(
+            event_ids,
+            deadline_monotonic=monotonic() + 30.0,
+        )
+        if len(raw_events) != len(event_ids):
+            raise ValueError(
+                "active physical reservation is missing its durable creation fact"
+            )
+        by_id = {
+            raw.event_id: raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            for raw in raw_events
+        }
+        for active in durable_account.active_reservations:
+            event = by_id.get(active.latest_reservation_event_id)
+            if not isinstance(event, PhysicalOperationReservationCreatedEvent):
+                raise ValueError(
+                    "active physical reservation reference is not a creation event"
+                )
+            reservation = event.reservation
+            if (
+                reservation.reservation_id != active.reservation_id
+                or reservation.reservation_fingerprint
+                != active.reservation_fingerprint
+                or reservation.owner_kind != active.owner_kind
+                or reservation.owner_id != active.owner_id
+            ):
+                raise ValueError("active physical reservation durable identity drifted")
+            key = (reservation.owner_kind, reservation.owner_id)
+            if key in self._physical_reservation_facts:
+                raise ValueError("physical reservation owner identity is ambiguous")
+            self._physical_reservation_facts[key] = reservation
+            if reservation.owner_kind is not PhysicalOperationKind.CHECKPOINT_COMMIT:
+                self._physical_operation_admission_tokens[key] = (
+                    self.checkpoint_dispatch_barrier_coordinator
+                    .restore_operation_admission(
+                        operation_owner_id=_physical_operation_admission_owner_id(
+                            key
+                        )
+                    )
+                )
+
+    def _adopt_unbootstrapped_in_memory_account_for_test(
+        self,
+        *,
+        incoming_run_id: str,
+    ) -> None:
+        """Bridge legacy pytest fixtures without weakening production genesis."""
+
+        if self.materialization_account_store.snapshot() is not None:
+            return
+        if not (
+            self.allow_unbootstrapped_test_events
+            and isinstance(self.event_log, InMemoryEventLog)
+        ):
+            raise ValueError("materialization account adoption is pytest-only")
+        from pulsara_agent.event_log.transcript_prefix import (
+            EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+        )
+        from pulsara_agent.primitives.authority_materialization import (
+            LedgerMaterializationConsumerHorizonFact,
+            LedgerMaterializationConsumerKind,
+        )
+        from pulsara_agent.primitives.frozen import build_frozen_fact
+        from pulsara_agent.runtime.authority_materialization import (
+            build_account_state,
+            build_generation,
+            canonical_empty_generation,
+            deterministic_ledger_charge,
+        )
+
+        existing = tuple(self.event_log.iter())
+        through = len(existing)
+        charge = deterministic_ledger_charge(
+            existing,
+            contract=self.authority_materialization_contracts.charge_contract,
+        )
+        prefix = self.event_log.read_transcript_domain_delta(
+            after_sequence=through,
+            through_sequence=through,
+            max_events=1,
+            max_payload_bytes=1,
+            registry_contract_fingerprint=(
+                self.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
+            ),
+        ).after
+        graph = build_frozen_fact(
+            LedgerMaterializationConsumerHorizonFact,
+            schema_version="ledger_materialization_consumer_horizon.v1",
+            runtime_session_id=self.runtime_session_id,
+            consumer_kind=LedgerMaterializationConsumerKind.SUBAGENT_GRAPH,
+            consumer_id=f"subagent_graph:{self.runtime_session_id}",
+            business_run_id=None,
+            business_window_id=None,
+            business_window_generation=None,
+            through_sequence=0,
+            ledger_event_count_through=0,
+            ledger_charged_payload_bytes_through=0,
+            ledger_continuity_accumulator=EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+            consumer_contract_fingerprint=context_fingerprint(
+                "ledger-materialization-consumer-contract:v1",
+                {
+                    "kind": LedgerMaterializationConsumerKind.SUBAGENT_GRAPH.value,
+                    "consumer_id": f"subagent_graph:{self.runtime_session_id}",
+                },
+            ),
+        )
+        transcript = build_frozen_fact(
+            LedgerMaterializationConsumerHorizonFact,
+            schema_version="ledger_materialization_consumer_horizon.v1",
+            runtime_session_id=self.runtime_session_id,
+            consumer_kind=LedgerMaterializationConsumerKind.TRANSCRIPT_WINDOW,
+            consumer_id=f"transcript:test-bootstrap:{incoming_run_id}",
+            business_run_id=incoming_run_id,
+            business_window_id="test-bootstrap",
+            business_window_generation=0,
+            through_sequence=through,
+            ledger_event_count_through=through,
+            ledger_charged_payload_bytes_through=charge.charged_payload_bytes,
+            ledger_continuity_accumulator=prefix.ledger_continuity_accumulator,
+            consumer_contract_fingerprint=context_fingerprint(
+                "ledger-materialization-consumer-contract:v1",
+                {
+                    "kind": LedgerMaterializationConsumerKind.TRANSCRIPT_WINDOW.value,
+                    "consumer_id": f"transcript:test-bootstrap:{incoming_run_id}",
+                },
+            ),
+        )
+        empty_generation = canonical_empty_generation(
+            runtime_session_id=self.runtime_session_id,
+            charge_contract_fingerprint=(
+                self.authority_materialization_contracts.charge_contract.contract_fingerprint
+            ),
+        )
+        generation = build_generation(
+            source=empty_generation,
+            consumer_horizons=(graph, transcript),
+            consumer_horizon_revision=1,
+        )
+        adopted = build_account_state(
+            runtime_session_id=self.runtime_session_id,
+            generation=generation,
+            ledger_through_sequence=through,
+            ledger_charged_payload_bytes_through=charge.charged_payload_bytes,
+            active_reservations=(),
+            active_checkpoint_barrier=None,
+            latest_transition_event_ids=(),
+            reconciliation_required=False,
+            reconciliation_reason_code=None,
+        )
+        self.event_log.adopt_materialization_account_state_for_test(adopted)
+        self.materialization_account_store.install_confirmed_state(adopted)
+
+    def physical_reservation_for_owner(
+        self,
+        *,
+        operation_kind: PhysicalOperationKind,
+        owner_id: str,
+    ) -> PhysicalOperationReservationFact | None:
+        return self._physical_reservation_facts.get((operation_kind, owner_id))
+
+    def physical_operation_admission_owner_id(
+        self,
+        *,
+        operation_kind: PhysicalOperationKind,
+        owner_id: str,
+    ) -> str:
+        """Return the exact process-local gate owner for a durable reservation."""
+
+        return _physical_operation_admission_owner_id((operation_kind, owner_id))
 
     def set_mcp_installation_contract(
         self,
@@ -652,6 +1144,7 @@ class RuntimeSession:
         return (
             self._ledger_reconciliation_required
             or self._context_input_reconciliation_required
+            or self._memory_governance_reconciliation_required
             or self._reconciliation_required
         )
 
@@ -687,6 +1180,12 @@ class RuntimeSession:
 
         with self.write_coordinator.lock:
             self._context_input_reconciliation_required = True
+
+    def latch_memory_governance_reconciliation_required(self) -> None:
+        """Block mutation when durable governance authority cannot be joined."""
+
+        with self.write_coordinator.lock:
+            self._memory_governance_reconciliation_required = True
 
     def record_context_input_cache_diagnostic(
         self,
@@ -1046,21 +1545,87 @@ class RuntimeSession:
         *,
         expected_last_sequence: int | None = None,
         state: LoopState | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
         self.publisher.bind_running_loop()
-        prepared = self._prepare_event_batch(events)
         deadline = self.event_write_service.new_deadline_monotonic()
-        try:
-            attempt = await self.event_write_service.execute(
-                lambda: self._commit_reduce_enqueue(
-                    prepared,
-                    expected_last_sequence=expected_last_sequence,
-                    state=state,
-                    await_delivery=True,
-                    deadline_monotonic=deadline,
-                ),
-                deadline_monotonic=deadline,
+        prepared = await self.tool_terminal_projection_service.prepare_batch(
+            tuple(events),
+            deadline_monotonic=deadline,
+        )
+        prepared = self._prepare_event_batch(prepared)
+        incoming_starts = tuple(
+            event for event in prepared if isinstance(event, RunStartEvent)
+        )
+        if (
+            incoming_starts
+            and self.materialization_account_store.snapshot() is None
+            and self.event_log.next_sequence() > 1
+            and self.allow_unbootstrapped_test_events
+        ):
+            if len(incoming_starts) != 1:
+                raise ValueError("test account adoption requires one RunStart")
+            self._adopt_unbootstrapped_in_memory_account_for_test(
+                incoming_run_id=incoming_starts[0].run_id
             )
+        missing_account = self.materialization_account_store.snapshot() is None
+        run_start_count = sum(isinstance(event, RunStartEvent) for event in prepared)
+        is_genesis = (
+            missing_account
+            and run_start_count == 1
+            and self.event_log.next_sequence() == 1
+        )
+        tool_reservation = self._active_tool_reservation_for_batch(prepared)
+        if transaction_companion is not None and (is_genesis or tool_reservation is not None):
+            raise ValueError(
+                "transaction companion requires an accounted one-shot event batch"
+            )
+        if (
+            missing_account
+            and not is_genesis
+            and not self.allow_unbootstrapped_test_events
+        ):
+            raise ValueError(
+                "empty ledger first batch must contain exactly one RunStartEvent"
+            )
+        try:
+            if is_genesis:
+                if expected_last_sequence not in (None, 0):
+                    raise ValueError("ledger genesis expected sequence must be zero")
+                attempt = await self.event_write_service.execute(
+                    lambda: self._commit_genesis_reduce_enqueue(
+                        prepared,
+                        state=state,
+                        await_delivery=True,
+                        deadline_monotonic=deadline,
+                    ),
+                    deadline_monotonic=deadline,
+                )
+            elif tool_reservation is not None:
+                attempt = await self.event_write_service.execute(
+                    lambda: self._charge_physical_operation_attempt_from_thread(
+                        prepared,
+                        reservation=tool_reservation,
+                        state=state,
+                        await_delivery=True,
+                    ),
+                    deadline_monotonic=deadline,
+                    **self._physical_operation_continuation_admission(
+                        tool_reservation
+                    ),
+                )
+            else:
+                attempt = await self.event_write_service.execute(
+                    lambda: self._commit_reduce_enqueue(
+                        prepared,
+                        expected_last_sequence=expected_last_sequence,
+                        state=state,
+                        await_delivery=True,
+                        deadline_monotonic=deadline,
+                        transaction_companion=transaction_companion,
+                    ),
+                    deadline_monotonic=deadline,
+                )
         except PendingRuntimeEventWriteError as error:
             raise EventCommitError(
                 str(error),
@@ -1108,12 +1673,38 @@ class RuntimeSession:
         expected_last_sequence: int | None = None,
         state: LoopState | None = None,
     ) -> EventWriteResult:
+        self._require_tool_terminal_projection_ready(events)
         prepared = self._prepare_event_batch(events)
+        if (
+            self.materialization_account_store.snapshot() is None
+            and not self.allow_unbootstrapped_test_events
+        ):
+            if self.event_log.next_sequence() == 1:
+                raise ValueError(
+                    "fresh durable ledger genesis must use the async RunStart path"
+                )
+            self._latch_ledger_reconciliation_required()
+            raise EventReconciliationRequired(
+                "non-empty durable ledger lacks its materialization account"
+            )
         deadline = (
             self.event_write_service.current_deadline_monotonic()
             if self.event_write_service.is_current_owner()
             else self.event_write_service.new_deadline_monotonic()
         )
+        tool_reservation = self._active_tool_reservation_for_batch(prepared)
+        if tool_reservation is not None:
+            return self.event_write_service.execute_blocking(
+                lambda: self.charge_physical_operation_from_thread(
+                    prepared,
+                    reservation=tool_reservation,
+                    state=state,
+                ),
+                deadline_monotonic=deadline,
+                **self._physical_operation_continuation_admission(
+                    tool_reservation
+                ),
+            )
         return self.event_write_service.execute_blocking(
             lambda: self._commit_reduce_enqueue(
                 prepared,
@@ -1125,6 +1716,595 @@ class RuntimeSession:
             deadline_monotonic=deadline,
         )
 
+    def _active_tool_reservation_for_batch(
+        self,
+        events: Sequence[AgentEvent],
+    ) -> PhysicalOperationReservationFact | None:
+        tool_events = (
+            ToolResultStartEvent,
+            ToolResultTextDeltaEvent,
+            ToolResultDataDeltaEvent,
+        )
+        if not events or not all(isinstance(event, tool_events) for event in events):
+            return None
+        tool_call_ids = {event.tool_call_id for event in events}
+        if len(tool_call_ids) != 1:
+            raise ValueError(
+                "one tool-operation charge batch must have one tool call identity"
+            )
+        tool_call_id = next(iter(tool_call_ids))
+        return self.physical_reservation_for_owner(
+            operation_kind=PhysicalOperationKind.TOOL_CALL,
+            owner_id=tool_call_id,
+        )
+
+    def _physical_operation_continuation_admission(
+        self,
+        reservation: PhysicalOperationReservationFact,
+    ) -> dict[str, Any]:
+        return {
+            "admission_class": LedgerWriteAdmissionClass.OPERATION_CONTINUATION,
+            "operation_owner_id": self.physical_operation_admission_owner_id(
+                operation_kind=reservation.owner_kind,
+                owner_id=reservation.owner_id,
+            ),
+        }
+
+    def physical_dispatch_capacity(
+        self,
+        operation_kind: PhysicalOperationKind,
+    ) -> int:
+        contract = (
+            self.authority_materialization_contracts.burst_registry
+            .unique_binding_for_operation(operation_kind)
+            .contract
+        )
+        return self.materialization_coordinator.available_dispatch_capacity(
+            burst_contract=contract
+        )
+
+    async def ensure_physical_operation_headroom(
+        self,
+        operation_kind: PhysicalOperationKind,
+    ) -> None:
+        """Advance the current minimum consumer before dispatching an owner."""
+
+        if self.materialization_account_store.snapshot() is None:
+            if self.allow_unbootstrapped_test_events:
+                return
+            raise ValueError(
+                "physical operation requires a bootstrapped materialization account"
+            )
+        while self.physical_dispatch_capacity(operation_kind) <= 0:
+            account = self.materialization_account_store.snapshot()
+            if account is None:
+                raise RuntimeError("materialization account disappeared during recovery")
+            minimum = account.generation.reclaimable_through_sequence
+            blockers = tuple(
+                item
+                for item in account.generation.consumer_horizons
+                if item.through_sequence == minimum
+            )
+            if not blockers:
+                break
+            source_revision = (
+                account.generation.ledger_materialization_generation,
+                account.generation.consumer_horizon_revision,
+                minimum,
+            )
+            for blocker in blockers:
+                if (
+                    blocker.consumer_kind
+                    is LedgerMaterializationConsumerKind.TRANSCRIPT_WINDOW
+                ):
+                    await self.transcript_projection_checkpoint_service.checkpoint_for_admission(
+                        operation_kind=operation_kind
+                    )
+                elif (
+                    blocker.consumer_kind
+                    is LedgerMaterializationConsumerKind.SUBAGENT_GRAPH
+                ):
+                    await self.subagent_graph_checkpoint_service.checkpoint_for_admission(
+                        requested_through_sequence=account.ledger_through_sequence
+                    )
+                if self.physical_dispatch_capacity(operation_kind) > 0:
+                    return
+            updated = self.materialization_account_store.snapshot()
+            if updated is None or source_revision == (
+                updated.generation.ledger_materialization_generation,
+                updated.generation.consumer_horizon_revision,
+                updated.generation.reclaimable_through_sequence,
+            ):
+                break
+
+        if self.physical_dispatch_capacity(operation_kind) > 0:
+            return
+        from pulsara_agent.runtime.authority_materialization import (
+            PhysicalHeadroomExceeded,
+        )
+
+        raise PhysicalHeadroomExceeded(
+            "physical headroom remains exhausted after minimum-consumer recovery"
+        )
+
+    def reserve_physical_operation_from_thread(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        operation_kind: PhysicalOperationKind,
+        reservation_id: str,
+        owner_id: str,
+        state: LoopState | None = None,
+    ) -> tuple[PhysicalOperationReservationFact, EventWriteResult]:
+        """Atomically commit a dispatch proof and retain its physical reserve."""
+
+        if not self.event_write_service.is_current_owner():
+            raise RuntimeError(
+                "physical dispatch reservation requires the critical writer owner"
+            )
+        prepared = self._prepare_event_batch(events)
+        if not prepared:
+            raise ValueError("physical dispatch reservation requires business facts")
+        deadline = self.event_write_service.current_deadline_monotonic()
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            self._validate_run_lifecycle_batch(prepared)
+            self.long_horizon_state_store.validate_next_batch(prepared)
+            first = prepared[0]
+            try:
+                committed = self.materialization_coordinator.reserve_and_commit_dispatch(
+                    context=EventContext(
+                        run_id=first.run_id,
+                        turn_id=first.turn_id,
+                        reply_id=first.reply_id,
+                    ),
+                    business_events=prepared,
+                    reservation_id=reservation_id,
+                    owner_id=owner_id,
+                    burst_contract=(
+                        self.authority_materialization_contracts.burst_registry
+                        .unique_binding_for_operation(operation_kind)
+                        .contract
+                    ),
+                    deadline_monotonic=deadline,
+                )
+            except BaseException as exc:
+                self._raise_materialization_commit_error(
+                    exc,
+                    deadline_monotonic=deadline,
+                )
+                raise AssertionError("unreachable materialization exception mapping")
+            key = (committed.reservation.owner_kind, committed.reservation.owner_id)
+            promoted = self.event_write_service.promote_current_producer_admission(
+                operation_owner_ids=(
+                    _physical_operation_admission_owner_id(key),
+                ),
+            )
+            if len(promoted) != 1 or key in self._physical_operation_admission_tokens:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "physical dispatch admission promotion is ambiguous"
+                )
+            self._physical_operation_admission_tokens[key] = promoted[0]
+            result = self._handoff_accounted_business_batch(
+                stored_events=committed.stored_events,
+                business_events=prepared,
+                state=state,
+                deadline_monotonic=deadline,
+            )
+            physical_reservation = committed.reservation
+            key = (physical_reservation.owner_kind, physical_reservation.owner_id)
+            existing = self._physical_reservation_facts.get(key)
+            if existing is not None and existing != physical_reservation:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "process-local physical reservation owner is ambiguous"
+                )
+            self._physical_reservation_facts[key] = physical_reservation
+            return committed.reservation, result
+
+    def commit_graph_checkpoint_from_thread(
+        self,
+        event: AgentEvent,
+        *,
+        ledger_charged_payload_bytes_through_checkpoint: int,
+        ledger_continuity_accumulator_through_checkpoint: str,
+    ) -> EventWriteResult:
+        """Atomically commit a graph checkpoint and its shared-ledger horizon."""
+
+        from pulsara_agent.event import SubagentGraphCheckpointCommittedEvent
+
+        if not self.event_write_service.is_current_owner():
+            raise RuntimeError("graph checkpoint commit requires the critical writer")
+        if not isinstance(event, SubagentGraphCheckpointCommittedEvent):
+            raise TypeError("graph checkpoint commit requires its typed event")
+        prepared = self._prepare_event_batch((event,))
+        checkpoint_event = prepared[0]
+        assert isinstance(checkpoint_event, SubagentGraphCheckpointCommittedEvent)
+        deadline = self.event_write_service.current_deadline_monotonic()
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            self._validate_run_lifecycle_batch(prepared)
+            self.long_horizon_state_store.validate_next_batch(prepared)
+            try:
+                committed = (
+                    self.materialization_coordinator
+                    .commit_graph_checkpoint_consumer_advance(
+                        checkpoint_event=checkpoint_event,
+                        ledger_charged_payload_bytes_through_checkpoint=(
+                            ledger_charged_payload_bytes_through_checkpoint
+                        ),
+                        ledger_continuity_accumulator_through_checkpoint=(
+                            ledger_continuity_accumulator_through_checkpoint
+                        ),
+                        deadline_monotonic=deadline,
+                    )
+                )
+            except BaseException as exc:
+                self._raise_materialization_commit_error(
+                    exc,
+                    deadline_monotonic=deadline,
+                )
+                raise AssertionError("unreachable materialization exception mapping")
+            return self._handoff_accounted_business_batch(
+                stored_events=committed.stored_events,
+                business_events=(checkpoint_event,),
+                state=None,
+                deadline_monotonic=deadline,
+            )
+
+    def charge_physical_operation_from_thread(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        reservation: PhysicalOperationReservationFact,
+        state: LoopState | None = None,
+    ) -> EventWriteResult:
+        """Charge one stable non-terminal batch to an active reservation."""
+
+        return self._charge_physical_operation_attempt_from_thread(
+            events,
+            reservation=reservation,
+            state=state,
+            await_delivery=False,
+        ).result
+
+    def _charge_physical_operation_attempt_from_thread(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        reservation: PhysicalOperationReservationFact,
+        state: LoopState | None,
+        await_delivery: bool,
+    ) -> _WriteAttempt:
+        """Charge a batch while preserving its ordered publication waiters."""
+
+        if not self.event_write_service.is_current_owner():
+            raise RuntimeError("physical charge requires the critical writer owner")
+        prepared = self._prepare_event_batch(events)
+        deadline = self.event_write_service.current_deadline_monotonic()
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            self._validate_run_lifecycle_batch(prepared)
+            self.long_horizon_state_store.validate_next_batch(prepared)
+            first = prepared[0]
+            try:
+                committed = self.materialization_coordinator.commit_reserved_charge(
+                    context=EventContext(
+                        run_id=first.run_id,
+                        turn_id=first.turn_id,
+                        reply_id=first.reply_id,
+                    ),
+                    reservation=reservation,
+                    business_events=prepared,
+                    deadline_monotonic=deadline,
+                )
+            except BaseException as exc:
+                self._raise_materialization_commit_error(
+                    exc,
+                    deadline_monotonic=deadline,
+                )
+                raise AssertionError("unreachable materialization exception mapping")
+            attempt = self._handoff_accounted_business_batch_attempt(
+                stored_events=committed.stored_events,
+                business_events=prepared,
+                state=state,
+                deadline_monotonic=deadline,
+                await_delivery=await_delivery,
+            )
+            key = (reservation.owner_kind, reservation.owner_id)
+            if self._physical_reservation_facts.get(key) != reservation:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "charged physical reservation registry identity drifted"
+                )
+            return attempt
+
+    def reserve_physical_operation_batch_from_thread(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        dispatch_requests: Sequence[Any],
+        one_shot_request: Any | None = None,
+        state: LoopState | None = None,
+    ) -> tuple[tuple[PhysicalOperationReservationFact, ...], EventWriteResult]:
+        """Atomically admit independent physical owners for one business batch."""
+
+        if not self.event_write_service.is_current_owner():
+            raise RuntimeError(
+                "physical dispatch batch requires the critical writer owner"
+            )
+        prepared = self._prepare_event_batch(events)
+        if not prepared:
+            raise ValueError("physical dispatch batch requires business facts")
+        deadline = self.event_write_service.current_deadline_monotonic()
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            self._validate_run_lifecycle_batch(prepared)
+            self.long_horizon_state_store.validate_next_batch(prepared)
+            first = prepared[0]
+            try:
+                committed = (
+                    self.materialization_coordinator
+                    .reserve_and_commit_dispatch_batch(
+                        context=EventContext(
+                            run_id=first.run_id,
+                            turn_id=first.turn_id,
+                            reply_id=first.reply_id,
+                        ),
+                        business_events=prepared,
+                        dispatch_requests=dispatch_requests,
+                        one_shot_request=one_shot_request,
+                        deadline_monotonic=deadline,
+                    )
+                )
+            except BaseException as exc:
+                self._raise_materialization_commit_error(
+                    exc,
+                    deadline_monotonic=deadline,
+                )
+                raise AssertionError("unreachable materialization exception mapping")
+            operation_keys = tuple(
+                (reservation.owner_kind, reservation.owner_id)
+                for reservation in committed.reservations
+            )
+            promoted = self.event_write_service.promote_current_producer_admission(
+                operation_owner_ids=tuple(
+                    _physical_operation_admission_owner_id(key)
+                    for key in operation_keys
+                ),
+            )
+            if len(promoted) != len(operation_keys) or any(
+                key in self._physical_operation_admission_tokens
+                for key in operation_keys
+            ):
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "physical dispatch batch admission promotion is ambiguous"
+                )
+            self._physical_operation_admission_tokens.update(
+                zip(operation_keys, promoted, strict=True)
+            )
+            result = self._handoff_accounted_business_batch(
+                stored_events=committed.stored_events,
+                business_events=prepared,
+                state=state,
+                deadline_monotonic=deadline,
+            )
+            for reservation in committed.reservations:
+                key = (reservation.owner_kind, reservation.owner_id)
+                existing = self._physical_reservation_facts.get(key)
+                if existing is not None and existing != reservation:
+                    self._latch_ledger_reconciliation_required()
+                    raise EventReconciliationRequired(
+                        "physical dispatch batch registry identity is ambiguous"
+                    )
+                self._physical_reservation_facts[key] = reservation
+            return committed.reservations, result
+
+    def settle_physical_operation_from_thread(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        reservation: PhysicalOperationReservationFact,
+        terminal_outcome: str,
+        model_stream_measurement_fingerprint: str | None = None,
+        state: LoopState | None = None,
+    ) -> EventWriteResult:
+        """Commit a stable terminal batch and remove its exact reserve."""
+
+        if not self.event_write_service.is_current_owner():
+            raise RuntimeError("physical settlement requires the critical writer owner")
+        prepared = self._prepare_event_batch(events)
+        deadline = self.event_write_service.current_deadline_monotonic()
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            self._validate_run_lifecycle_batch(prepared)
+            self.long_horizon_state_store.validate_next_batch(prepared)
+            first = prepared[0]
+            try:
+                committed = self.materialization_coordinator.commit_reserved_settlement(
+                    context=EventContext(
+                        run_id=first.run_id,
+                        turn_id=first.turn_id,
+                        reply_id=first.reply_id,
+                    ),
+                    reservation=reservation,
+                    business_events=prepared,
+                    terminal_outcome=terminal_outcome,
+                    model_stream_measurement_fingerprint=(
+                        model_stream_measurement_fingerprint
+                    ),
+                    deadline_monotonic=deadline,
+                )
+            except BaseException as exc:
+                self._raise_materialization_commit_error(
+                    exc,
+                    deadline_monotonic=deadline,
+                )
+                raise AssertionError("unreachable materialization exception mapping")
+            key = (reservation.owner_kind, reservation.owner_id)
+            operation_token = self._physical_operation_admission_tokens.pop(key, None)
+            if operation_token is None:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "settled physical reservation lost its operation admission"
+                )
+            self.checkpoint_dispatch_barrier_coordinator.release_write_admission(
+                operation_token
+            )
+            result = self._handoff_accounted_business_batch(
+                stored_events=committed.stored_events,
+                business_events=prepared,
+                state=state,
+                deadline_monotonic=deadline,
+            )
+            key = (reservation.owner_kind, reservation.owner_id)
+            if self._physical_reservation_facts.get(key) != reservation:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "settled physical reservation registry identity drifted"
+                )
+            self._physical_reservation_facts.pop(key)
+            return result
+
+    def suspend_physical_operation_from_thread(
+        self,
+        events: Sequence[AgentEvent],
+        *,
+        reservation: PhysicalOperationReservationFact,
+        suspension_id: str,
+        binding_identity_fingerprint: str,
+        state: LoopState | None = None,
+    ) -> EventWriteResult:
+        """Commit a suspension batch and retain only its exact physical tail."""
+
+        if not self.event_write_service.is_current_owner():
+            raise RuntimeError("physical suspension requires the critical writer owner")
+        prepared = self._prepare_event_batch(events)
+        deadline = self.event_write_service.current_deadline_monotonic()
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            self._validate_run_lifecycle_batch(prepared)
+            self.long_horizon_state_store.validate_next_batch(prepared)
+            first = prepared[0]
+            try:
+                committed = self.materialization_coordinator.commit_reserved_suspension(
+                    context=EventContext(
+                        run_id=first.run_id,
+                        turn_id=first.turn_id,
+                        reply_id=first.reply_id,
+                    ),
+                    reservation=reservation,
+                    business_events=prepared,
+                    suspension_id=suspension_id,
+                    binding_identity_fingerprint=binding_identity_fingerprint,
+                    deadline_monotonic=deadline,
+                )
+            except BaseException as exc:
+                self._raise_materialization_commit_error(
+                    exc,
+                    deadline_monotonic=deadline,
+                )
+                raise AssertionError("unreachable materialization exception mapping")
+            result = self._handoff_accounted_business_batch(
+                stored_events=committed.stored_events,
+                business_events=prepared,
+                state=state,
+                deadline_monotonic=deadline,
+            )
+            key = (reservation.owner_kind, reservation.owner_id)
+            if self._physical_reservation_facts.get(key) != reservation:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "suspended physical reservation registry identity drifted"
+                )
+            return result
+
+    def _handoff_accounted_business_batch(
+        self,
+        *,
+        stored_events: tuple[AgentEvent, ...],
+        business_events: tuple[AgentEvent, ...],
+        state: LoopState | None,
+        deadline_monotonic: float,
+    ) -> EventWriteResult:
+        return self._handoff_accounted_business_batch_attempt(
+            stored_events=stored_events,
+            business_events=business_events,
+            state=state,
+            deadline_monotonic=deadline_monotonic,
+        ).result
+
+    def _handoff_accounted_business_batch_attempt(
+        self,
+        *,
+        stored_events: tuple[AgentEvent, ...],
+        business_events: tuple[AgentEvent, ...],
+        state: LoopState | None,
+        deadline_monotonic: float,
+        await_delivery: bool = False,
+    ) -> _WriteAttempt:
+        if not stored_events:
+            raise EventCommitError(
+                "materialization commit returned an empty batch",
+                commit_outcome="unknown",
+                deadline_monotonic=deadline_monotonic,
+            )
+        full_attempt = self._reconcile_confirmed_attempt(
+            stored_events,
+            catch_up_through_sequence=_event_sequence(stored_events[-1]),
+            state=state,
+            await_delivery=await_delivery,
+        )
+        by_id = {event.id: event for event in stored_events}
+        try:
+            committed_business = tuple(by_id[event.id] for event in business_events)
+        except KeyError as exc:
+            self._latch_ledger_reconciliation_required()
+            raise EventReconciliationRequired(
+                "materialization batch lost one of its business facts"
+            ) from exc
+        return _WriteAttempt(
+            result=replace(
+                full_attempt.result,
+                committed_events=committed_business,
+                accounting_events=tuple(
+                    event
+                    for event in stored_events
+                    if event.id not in {item.id for item in business_events}
+                ),
+            ),
+            delivery_futures=full_attempt.delivery_futures,
+            published_events=full_attempt.published_events,
+        )
+
+    def _raise_materialization_commit_error(
+        self,
+        exc: BaseException,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        from pulsara_agent.runtime.authority_materialization import (
+            MaterializationAccountCommitFailed,
+            MaterializationAccountReconciliationRequired,
+        )
+
+        if isinstance(exc, MaterializationAccountReconciliationRequired):
+            self._latch_ledger_reconciliation_required()
+            raise EventCommitError(
+                "materialization event/account outcome is unknown",
+                commit_outcome="unknown",
+                deadline_monotonic=deadline_monotonic,
+            ) from exc
+        if isinstance(exc, MaterializationAccountCommitFailed):
+            raise EventCommitError(
+                "materialization event/account batch was not committed",
+                commit_outcome="none",
+                deadline_monotonic=deadline_monotonic,
+            ) from exc
+        raise exc
+
     def commit_reduce_events_from_thread(
         self,
         events: Sequence[AgentEvent],
@@ -1134,6 +2314,7 @@ class RuntimeSession:
     ) -> EventWriteResult:
         """Commit and synchronously fold while deferring ordered publication."""
 
+        self._require_tool_terminal_projection_ready(events)
         prepared = self._prepare_event_batch(events)
         deadline = (
             self.event_write_service.current_deadline_monotonic()
@@ -1173,14 +2354,196 @@ class RuntimeSession:
     ) -> tuple[AgentEvent, ...]:
         return tuple(self.prepare_event_for_write(event) for event in events)
 
+    @staticmethod
+    def _require_tool_terminal_projection_ready(
+        events: Sequence[AgentEvent],
+    ) -> None:
+        from pulsara_agent.runtime.terminal_projection import ToolResultEndCandidate
+
+        if any(isinstance(event, ToolResultEndCandidate) for event in events):
+            raise ValueError(
+                "thread writer requires a prepared tool terminal projection"
+            )
+
     def prepare_event_for_write(self, event: AgentEvent) -> AgentEvent:
         """Return the exact event value owned by this session's write boundary."""
 
         self._require_runtime_managed_sequence(event)
         return self._with_default_metadata(event)
 
+    def _validate_memory_governance_batch(
+        self,
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        from pulsara_agent.event import (
+            MemoryGovernanceBatchBlockedEvent,
+            MemoryGovernanceBatchCompletedEvent,
+            MemoryGovernanceBatchFailedEvent,
+            MemoryGovernanceBatchPreparedEvent,
+        )
+        from pulsara_agent.memory.governance.batch_input import (
+            hydrate_governance_batch_input,
+        )
+        from pulsara_agent.llm.terminal_projection import stable_event_identity
+
+        terminal_types = (
+            MemoryGovernanceBatchCompletedEvent,
+            MemoryGovernanceBatchFailedEvent,
+            MemoryGovernanceBatchBlockedEvent,
+        )
+        for event in events:
+            if (
+                isinstance(event, ModelCallStartEvent)
+                and event.governance_input_attribution is not None
+            ):
+                attribution = event.governance_input_attribution
+                prepared_ref = attribution.governance_batch_prepared_event_reference
+                prepared_event = self.event_log.get_by_id(
+                    prepared_ref.stable_identity.event_id
+                )
+                if not isinstance(
+                    prepared_event, MemoryGovernanceBatchPreparedEvent
+                ) or prepared_ref.stable_identity != stable_event_identity(
+                    prepared_event,
+                    runtime_session_id=self.runtime_session_id,
+                ):
+                    raise ValueError(
+                        "governance model Start lacks its exact Prepared event"
+                    )
+                snapshot = hydrate_governance_batch_input(
+                    reference=attribution.batch_input_reference,
+                    archive=self.archive,
+                    runtime_session_id=self.runtime_session_id,
+                    deadline_monotonic=(
+                        self.event_write_service.current_deadline_monotonic()
+                    ),
+                )
+                model_input = snapshot.model_input
+                if (
+                    prepared_event.batch_input_reference
+                    != attribution.batch_input_reference
+                    or event.resolved_call != model_input.resolved_call
+                    or event.context_id != model_input.context_id
+                    or attribution.final_model_visible_input_fingerprint
+                    != model_input.provider_neutral_context_fingerprint
+                ):
+                    raise ValueError(
+                        "governance model Start/artifact identity drifted"
+                    )
+            elif isinstance(event, MemoryGovernanceBatchPreparedEvent):
+                snapshot = hydrate_governance_batch_input(
+                    reference=event.batch_input_reference,
+                    archive=self.archive,
+                    runtime_session_id=self.runtime_session_id,
+                    deadline_monotonic=(
+                        self.event_write_service.current_deadline_monotonic()
+                    ),
+                )
+                expected_prompt_fingerprint = context_fingerprint(
+                    "governance-ordered-prompt-projections:v1",
+                    {
+                        "evidence": tuple(
+                            item.prompt_projection.projection_fingerprint
+                            for item in snapshot.ordered_candidate_snapshots
+                        ),
+                        "relatedness": tuple(
+                            item.snapshot_fingerprint
+                            for item in snapshot.ordered_relatedness_snapshots
+                        ),
+                    },
+                )
+                expected_payload = {
+                    "governance_batch_id": snapshot.governance_batch_id,
+                    "source_ledger_through_sequence": (
+                        snapshot.source_ledger_through_sequence
+                    ),
+                    "candidate_entry_ids": tuple(
+                        item.candidate_entry_id
+                        for item in snapshot.ordered_preparing_claims
+                    ),
+                    "preparing_claims_fingerprint": context_fingerprint(
+                        "governance-preparing-claims:v1",
+                        tuple(
+                            item.claim_fingerprint
+                            for item in snapshot.ordered_preparing_claims
+                        ),
+                    ),
+                    "batch_input_reference": event.batch_input_reference,
+                    "resolved_model_call_id": (
+                        snapshot.model_input.resolved_call.resolved_model_call_id
+                    ),
+                    "target_fingerprint": snapshot.model_input.target_fingerprint,
+                    "model_input_fingerprint": (
+                        snapshot.model_input.provider_neutral_context_fingerprint
+                    ),
+                    "ordered_prompt_projections_fingerprint": (
+                        expected_prompt_fingerprint
+                    ),
+                }
+                if (
+                    event.governance_batch_id != snapshot.governance_batch_id
+                    or event.source_ledger_through_sequence
+                    != snapshot.source_ledger_through_sequence
+                    or event.candidate_entry_ids
+                    != expected_payload["candidate_entry_ids"]
+                    or event.preparing_claims_fingerprint
+                    != expected_payload["preparing_claims_fingerprint"]
+                    or event.resolved_model_call_id
+                    != expected_payload["resolved_model_call_id"]
+                    or event.target_fingerprint
+                    != expected_payload["target_fingerprint"]
+                    or event.model_input_fingerprint
+                    != expected_payload["model_input_fingerprint"]
+                    or event.ordered_prompt_projections_fingerprint
+                    != expected_prompt_fingerprint
+                    or event.event_fingerprint
+                    != context_fingerprint(
+                        "memory-governance-batch-prepared-event:v1",
+                        expected_payload,
+                    )
+                ):
+                    raise ValueError(
+                        "governance Prepared event/artifact join drifted"
+                    )
+            elif isinstance(event, terminal_types):
+                prepared = self.event_log.get_by_id(event.prepared_event_id)
+                if not isinstance(prepared, MemoryGovernanceBatchPreparedEvent):
+                    raise ValueError(
+                        "governance terminal event lacks its Prepared authority"
+                    )
+                if (
+                    prepared.governance_batch_id != event.governance_batch_id
+                    or prepared.batch_input_reference.batch_input_fingerprint
+                    != event.batch_input_fingerprint
+                ):
+                    raise ValueError("governance terminal/Prepared identity drifted")
+                terminal_kind = (
+                    "completed"
+                    if isinstance(event, MemoryGovernanceBatchCompletedEvent)
+                    else "failed"
+                    if isinstance(event, MemoryGovernanceBatchFailedEvent)
+                    else "blocked"
+                )
+                payload = {
+                    "governance_batch_id": event.governance_batch_id,
+                    "prepared_event_id": event.prepared_event_id,
+                    "batch_input_fingerprint": event.batch_input_fingerprint,
+                    "governance_model_call_id": event.governance_model_call_id,
+                    "decision_ids": event.decision_ids,
+                    "terminal_reason": event.terminal_reason,
+                    "diagnostics": event.diagnostics,
+                }
+                if event.terminal_event_fingerprint != context_fingerprint(
+                    f"memory-governance-batch-{terminal_kind}-event:v1",
+                    payload,
+                ):
+                    raise ValueError("governance terminal event fingerprint drifted")
+
     def _validate_run_lifecycle_batch(self, events: tuple[AgentEvent, ...]) -> None:
         """Enforce the stable RunStart-to-RunEnd identity before commit."""
+
+        self._validate_memory_governance_batch(events)
+        self._validate_terminal_projection_batch(events)
 
         starts_in_batch = {
             event.run_id: event for event in events if isinstance(event, RunStartEvent)
@@ -1194,6 +2557,22 @@ class RuntimeSession:
             if terminal.run_id in ends_in_batch:
                 raise ValueError("event batch contains duplicate RunEnd facts")
             ends_in_batch.add(terminal.run_id)
+            resolving_call_ids = {
+                event.resolved_model_call_id
+                for event in events
+                if isinstance(event, ModelCallControlDispositionResolvedEvent)
+                and event.run_id == terminal.run_id
+            }
+            unresolved_call_ids = set(
+                self.transcript_projection_state_store.unresolved_completed_call_ids(
+                    terminal.run_id
+                )
+            ) - resolving_call_ids
+            if unresolved_call_ids:
+                raise ValueError(
+                    "RunEnd requires FULL model control disposition commit: "
+                    + ", ".join(sorted(unresolved_call_ids))
+                )
             candidate_start = starts_in_batch.get(terminal.run_id)
             stored_start = self.long_horizon_state_store.run_start(terminal.run_id)
             if candidate_start is not None and stored_start is not None:
@@ -1591,6 +2970,167 @@ class RuntimeSession:
                         "resume boundary MCP audits must precede its exposure"
                     )
 
+    def _validate_terminal_projection_batch(
+        self,
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        from pulsara_agent.llm.terminal_projection import (
+            stable_event_identity,
+            validate_model_terminal_projection_document,
+        )
+
+        projection_types = (
+            ModelCallTerminalProjectionCommittedEvent,
+            ToolResultTerminalProjectionCommittedEvent,
+        )
+        terminal_types = (ModelCallEndEvent, ToolResultEndEvent)
+        for index, event in enumerate(events):
+            if isinstance(event, projection_types):
+                if (
+                    isinstance(event, ToolResultTerminalProjectionCommittedEvent)
+                    and event.source_kind == "external_requirement"
+                ):
+                    external_terminal = next(
+                        (
+                            item
+                            for item in events[index + 1 :]
+                            if not isinstance(item, projection_types)
+                        ),
+                        None,
+                    )
+                    if not isinstance(
+                        external_terminal, ExternalExecutionResultEvent
+                    ) or event.projection_reference not in tuple(
+                        item.projection_reference
+                        for item in external_terminal.terminal_projections
+                    ):
+                        raise ValueError(
+                            "external terminal projection requires its result batch"
+                        )
+                    continue
+                if index + 1 >= len(events) or not isinstance(
+                    events[index + 1], terminal_types
+                ):
+                    raise ValueError(
+                        "terminal projection must immediately precede its End"
+                    )
+                continue
+            if not isinstance(event, terminal_types):
+                if not isinstance(event, ExternalExecutionResultEvent):
+                    continue
+                projection_count = len(event.terminal_projections)
+                if projection_count != len(event.external_results):
+                    raise ValueError(
+                        "external result requires one terminal projection per result"
+                    )
+                if index < projection_count:
+                    raise ValueError(
+                        "external result requires adjacent terminal projections"
+                    )
+                committed_projections = events[index - projection_count : index]
+                if not all(
+                    isinstance(item, ToolResultTerminalProjectionCommittedEvent)
+                    and item.source_kind == "external_requirement"
+                    for item in committed_projections
+                ):
+                    raise ValueError(
+                        "external result requires adjacent external projections"
+                    )
+                requirements: dict[str, RequireExternalExecutionEvent] = {}
+                ingress_by_call = {
+                    item.result_block.tool_call_id: item
+                    for item in event.external_results
+                }
+                for committed, end_reference in zip(
+                    committed_projections,
+                    event.terminal_projections,
+                    strict=True,
+                ):
+                    assert isinstance(
+                        committed, ToolResultTerminalProjectionCommittedEvent
+                    )
+                    if (
+                        committed.projection_reference
+                        != end_reference.projection_reference
+                        or end_reference.projection_committed_event_identity
+                        != stable_event_identity(
+                            committed,
+                            runtime_session_id=self.runtime_session_id,
+                        )
+                    ):
+                        raise ValueError(
+                            "external terminal projection carrier identity drifted"
+                        )
+                    source_id = committed.source_event_identity.event_id
+                    requirement = requirements.get(source_id)
+                    if requirement is None:
+                        stored = self.event_log.get_by_id(source_id)
+                        if not isinstance(stored, RequireExternalExecutionEvent):
+                            raise ValueError(
+                                "external terminal projection requirement is unavailable"
+                            )
+                        requirement = stored
+                        requirements[source_id] = requirement
+                    ingress = ingress_by_call.get(committed.tool_call_id)
+                    if ingress is None:
+                        raise ValueError(
+                            "external terminal projection result identity drifted"
+                        )
+                    document = self.transcript_projection_document_registry.resolve(
+                        committed.projection_reference
+                    )
+                    self.tool_terminal_projection_service.validate_external_document(
+                        requirement=requirement,
+                        result=event,
+                        ingress=ingress,
+                        document=document,
+                    )
+                continue
+            projection = event.terminal_projection
+            if index == 0 or not isinstance(events[index - 1], projection_types):
+                raise ValueError("terminal End requires an adjacent projection")
+            committed = events[index - 1]
+            if projection.projection_reference != committed.projection_reference:
+                raise ValueError("terminal projection reference drifted")
+            expected_identity = stable_event_identity(
+                committed,
+                runtime_session_id=self.runtime_session_id,
+            )
+            if projection.projection_committed_event_identity != expected_identity:
+                raise ValueError("terminal projection event identity drifted")
+            document = self.transcript_projection_document_registry.resolve(
+                committed.projection_reference
+            )
+            if isinstance(event, ModelCallEndEvent):
+                if not isinstance(
+                    committed, ModelCallTerminalProjectionCommittedEvent
+                ):
+                    raise ValueError("model End requires a model projection event")
+                start = self.event_log.get_by_id(
+                    committed.model_call_start_event_identity.event_id
+                )
+                if not isinstance(start, ModelCallStartEvent):
+                    raise ValueError(
+                        "model terminal projection Start is unavailable"
+                    )
+                validate_model_terminal_projection_document(
+                    runtime_session_id=self.runtime_session_id,
+                    start=start,
+                    committed=committed,
+                    end=event,
+                    document=document,
+                )
+            else:
+                if not isinstance(
+                    committed, ToolResultTerminalProjectionCommittedEvent
+                ):
+                    raise ValueError("tool End requires a tool projection event")
+                self.tool_terminal_projection_service.validate_tool_document(
+                    terminal=event,
+                    document=document,
+                    batch_prefix=events[:index],
+                )
+
     def _commit_reduce_enqueue(
         self,
         events: tuple[AgentEvent, ...],
@@ -1600,6 +3140,7 @@ class RuntimeSession:
         await_delivery: bool,
         deadline_monotonic: float,
         enqueue_publication: bool = True,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> _WriteAttempt:
         if not events:
             result = EventWriteResult(
@@ -1630,6 +3171,20 @@ class RuntimeSession:
                 )
             self._validate_run_lifecycle_batch(events)
             self.long_horizon_state_store.validate_next_batch(events)
+            if self.materialization_account_store.snapshot() is not None:
+                return self._commit_accounted_one_shot_reduce_enqueue(
+                    events,
+                    expected_last_sequence=expected_last_sequence,
+                    state=state,
+                    await_delivery=await_delivery,
+                    deadline_monotonic=deadline_monotonic,
+                    enqueue_publication=enqueue_publication,
+                    transaction_companion=transaction_companion,
+                )
+            if transaction_companion is not None:
+                raise EventReconciliationRequired(
+                    "transaction companion requires a materialization account"
+                )
             commit_deadline = _commit_phase_deadline(deadline_monotonic)
             try:
                 committed = tuple(
@@ -1792,6 +3347,214 @@ class RuntimeSession:
                 published_events=publisher_events,
             )
 
+    def _commit_accounted_one_shot_reduce_enqueue(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        expected_last_sequence: int | None,
+        state: LoopState | None,
+        await_delivery: bool,
+        deadline_monotonic: float,
+        enqueue_publication: bool,
+        transaction_companion: EventLogTransactionCompanion | None = None,
+    ) -> _WriteAttempt:
+        """Commit an already-frozen finite ledger batch with typed accounting."""
+
+        source = self.materialization_account_store.snapshot()
+        if source is None:
+            raise EventReconciliationRequired(
+                "materialization account disappeared before one-shot commit"
+            )
+        if (
+            expected_last_sequence is not None
+            and expected_last_sequence != source.ledger_through_sequence
+        ):
+            raise EventWriteConflict(
+                runtime_session_id=self.runtime_session_id,
+                expected_last_sequence=expected_last_sequence,
+                actual_last_sequence=source.ledger_through_sequence,
+                deadline_monotonic=deadline_monotonic,
+            )
+        identity = context_fingerprint(
+            "runtime-one-shot-physical-operation:v1",
+            tuple((event.id, str(event.type)) for event in events),
+        ).removeprefix("sha256:")
+        first = events[0]
+        operation_kind = _fixed_one_shot_operation_kind(events)
+        if operation_kind is PhysicalOperationKind.EXTERNAL_EXECUTION:
+            raise EventReconciliationRequired(
+                "external execution requires a retained physical reservation"
+            )
+        try:
+            burst_contract = (
+                self.authority_materialization_contracts.burst_registry
+                .unique_binding_for_operation(operation_kind)
+                .contract
+            )
+            starts = tuple(
+                event for event in events if isinstance(event, RunStartEvent)
+            )
+            if starts:
+                if len(starts) != 1 or operation_kind is not PhysicalOperationKind.HOST_RUN_BOUNDARY:
+                    raise EventReconciliationRequired(
+                        "RunStart requires one Host boundary consumer rotation"
+                    )
+                start = starts[0]
+                seed = start.run_transcript_seed_reference
+                committed = (
+                    self.materialization_coordinator.commit_run_seed_consumer_rotation(
+                        context=EventContext(
+                            run_id=start.run_id,
+                            turn_id=start.turn_id,
+                            reply_id=start.reply_id,
+                        ),
+                        business_events=events,
+                        run_start_event_id=start.id,
+                        seed_semantic_fingerprint=(
+                            start.run_transcript_seed_semantic.seed_semantic_fingerprint
+                        ),
+                        seed_reference_fingerprint=seed.reference_fingerprint,
+                        seed_source_through_sequence=(
+                            seed.source_ledger_through_sequence
+                        ),
+                        seed_source_ledger_continuity_accumulator=(
+                            seed.source_ledger_continuity_accumulator
+                        ),
+                        reservation_id=f"one_shot:{identity}",
+                        owner_id=f"one_shot:{identity}",
+                        burst_contract=burst_contract,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                )
+            else:
+                committed = self.materialization_coordinator.commit_one_shot_operation(
+                    context=EventContext(
+                        run_id=first.run_id,
+                        turn_id=first.turn_id,
+                        reply_id=first.reply_id,
+                    ),
+                    business_events=events,
+                    reservation_id=f"one_shot:{identity}",
+                    owner_id=f"one_shot:{identity}",
+                    burst_contract=burst_contract,
+                    deadline_monotonic=deadline_monotonic,
+                    transaction_companion=transaction_companion,
+                )
+        except Exception as exc:
+            from pulsara_agent.runtime.authority_materialization import (
+                MaterializationAccountCommitFailed,
+                MaterializationAccountReconciliationRequired,
+            )
+
+            if isinstance(exc, MaterializationAccountReconciliationRequired):
+                self._latch_ledger_reconciliation_required()
+                raise EventCommitError(
+                    "Event batch materialization confirmation is unknown",
+                    commit_outcome="unknown",
+                    deadline_monotonic=deadline_monotonic,
+                ) from exc
+            if isinstance(exc, MaterializationAccountCommitFailed):
+                raise EventCommitError(
+                    "Event batch materialization was not committed",
+                    commit_outcome="none",
+                    deadline_monotonic=deadline_monotonic,
+                ) from exc
+            raise
+        full_attempt = self._reconcile_confirmed_attempt(
+            committed.stored_events,
+            catch_up_through_sequence=_event_sequence(committed.stored_events[-1]),
+            state=state,
+            await_delivery=await_delivery,
+            enqueue_publication=enqueue_publication,
+        )
+        by_id = {event.id: event for event in committed.stored_events}
+        business = tuple(by_id[event.id] for event in events)
+        return _WriteAttempt(
+            result=replace(full_attempt.result, committed_events=business),
+            delivery_futures=full_attempt.delivery_futures,
+            published_events=full_attempt.published_events,
+        )
+
+    def _commit_genesis_reduce_enqueue(
+        self,
+        events: tuple[AgentEvent, ...],
+        *,
+        state: LoopState | None,
+        await_delivery: bool,
+        deadline_monotonic: float,
+    ) -> _WriteAttempt:
+        """Commit the first business facts and canonical account genesis together."""
+
+        with self.write_coordinator.lock:
+            self.require_mutation_allowed()
+            if self.materialization_account_store.snapshot() is not None:
+                raise EventWriteConflict(
+                    runtime_session_id=self.runtime_session_id,
+                    expected_last_sequence=0,
+                    actual_last_sequence=self.event_log.next_sequence() - 1,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            self._validate_run_lifecycle_batch(events)
+            self.long_horizon_state_store.validate_next_batch(events)
+            start = next(event for event in events if isinstance(event, RunStartEvent))
+            profile = (
+                "subagent_first_run"
+                if start.run_entry_kind.value == "subagent_child"
+                else "host_first_run"
+            )
+            from pulsara_agent.runtime.authority_materialization import (
+                MaterializationAccountCommitFailed,
+                MaterializationAccountReconciliationRequired,
+            )
+
+            try:
+                committed = self.materialization_coordinator.bootstrap_genesis(
+                    context=EventContext(
+                        run_id=start.run_id,
+                        turn_id=start.turn_id,
+                        reply_id=start.reply_id,
+                    ),
+                    business_events=events,
+                    genesis_profile=profile,
+                    genesis_burst_contract=(
+                        self.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                            PhysicalOperationKind.LEDGER_GENESIS
+                        ).contract
+                    ),
+                    register_transcript_consumer=True,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except MaterializationAccountReconciliationRequired as exc:
+                self._latch_ledger_reconciliation_required()
+                raise EventCommitError(
+                    "Event batch commit confirmation failed: materialization account",
+                    commit_outcome="unknown",
+                    deadline_monotonic=deadline_monotonic,
+                ) from exc
+            except MaterializationAccountCommitFailed as exc:
+                raise EventCommitError(
+                    "Event batch commit failed: materialization account",
+                    commit_outcome="none",
+                    deadline_monotonic=deadline_monotonic,
+                ) from exc
+            stored = committed.stored_events
+            full_attempt = self._reconcile_confirmed_attempt(
+                stored,
+                catch_up_through_sequence=_event_sequence(stored[-1]),
+                state=state,
+                await_delivery=await_delivery,
+            )
+            by_id = {event.id: event for event in stored}
+            business = tuple(by_id[event.id] for event in events)
+            return _WriteAttempt(
+                result=replace(
+                    full_attempt.result,
+                    committed_events=business,
+                ),
+                delivery_futures=full_attempt.delivery_futures,
+                published_events=full_attempt.published_events,
+            )
+
     def _confirm_committed_batch(
         self,
         candidates: tuple[AgentEvent, ...],
@@ -1820,6 +3583,58 @@ class RuntimeSession:
 
     def _latch_ledger_reconciliation_required(self) -> None:
         self._ledger_reconciliation_required = True
+
+    def accept_authority_materialization_transition(
+        self,
+        committed: tuple[AgentEvent, ...],
+    ) -> None:
+        """Fold and enqueue a coordinator-owned batch after its durable FULL commit."""
+
+        if not committed:
+            raise ValueError("authority transition cannot be empty")
+        self._sync_physical_reservation_facts(committed)
+        self._reconcile_confirmed_attempt(
+            committed,
+            catch_up_through_sequence=_event_sequence(committed[-1]),
+            state=None,
+            await_delivery=False,
+        )
+
+    def _sync_physical_reservation_facts(
+        self,
+        committed: tuple[AgentEvent, ...],
+    ) -> None:
+        """Mirror the durable active-reservation set after a coordinator CAS."""
+
+        for event in committed:
+            if not isinstance(event, PhysicalOperationReservationCreatedEvent):
+                continue
+            reservation = event.reservation
+            key = (reservation.owner_kind, reservation.owner_id)
+            existing = self._physical_reservation_facts.get(key)
+            if existing is not None and existing != reservation:
+                self._latch_ledger_reconciliation_required()
+                raise EventReconciliationRequired(
+                    "authority transition reservation identity is ambiguous"
+                )
+            self._physical_reservation_facts[key] = reservation
+        account = self.materialization_account_store.snapshot()
+        if account is None:
+            return
+        active_keys = {
+            (item.owner_kind, item.owner_id) for item in account.active_reservations
+        }
+        missing = active_keys.difference(self._physical_reservation_facts)
+        if missing:
+            self._latch_ledger_reconciliation_required()
+            raise EventReconciliationRequired(
+                "authority transition lost a process-local reservation fact"
+            )
+        self._physical_reservation_facts = {
+            key: reservation
+            for key, reservation in self._physical_reservation_facts.items()
+            if key in active_keys
+        }
 
     def _reconcile_confirmed_attempt(
         self,
@@ -1927,8 +3742,11 @@ class RuntimeSession:
             try:
                 registration.apply_committed(missing)
                 registration.through_sequence = through_sequence
-            except Exception:
+            except Exception as exc:
                 registration.reconciliation_required = True
+                registration.last_error = (
+                    f"{type(exc).__name__}: {_bounded_error(exc)}"
+                )
                 self._reconciliation_required = True
 
     def _catch_up_publisher(
@@ -1994,7 +3812,7 @@ class RuntimeSession:
         result = await self.write_event(event, state=state)
         if result.publication_errors:
             raise EventPublicationAfterCommitError(result)
-        return result.committed_events[0]
+        return next(item for item in result.committed_events if item.id == event.id)
 
     async def emit_many(
         self,
@@ -2011,7 +3829,7 @@ class RuntimeSession:
         self, event: AgentEvent, *, state: LoopState | None = None
     ) -> AgentEvent:
         result = self.write_events_from_thread((event,), state=state)
-        return result.committed_events[0]
+        return next(item for item in result.committed_events if item.id == event.id)
 
     def publish_stored_event(
         self, event: AgentEvent, *, state: LoopState | None = None
@@ -2067,15 +3885,25 @@ class RuntimeSession:
         # NOT kill/detach/shutdown the shared manager here — lease release is the
         # supervisor/HostCore job and must run exactly once (contract §5).
         # Idempotent: shutting an already-shut manager down is a no-op.
+        if self.model_call_control_disposition_owner.pending_candidate_count:
+            raise RuntimeError(
+                "cannot close RuntimeSession with pending model control disposition"
+            )
+        if self._physical_operation_admission_tokens:
+            raise RuntimeError(
+                "cannot close RuntimeSession with active physical operation admissions"
+            )
         self.context_input_manifest_service.close_if_idle()
         self.context_input_io_service.close_if_idle()
         self.event_write_service.close_if_idle()
         self.subagent_graph_checkpoint_service.close_if_idle()
+        self.transcript_projection_checkpoint_service.close_if_idle()
         if self.window_compaction_service is not None:
             self.window_compaction_service.close_if_idle()
         self.context_static_instruction_cache.clear()
         self.context_candidate_lifecycle_cache.clear()
         self.tool_result_render_cache.clear()
+        self.model_call_control_disposition_owner.clear()
         self._context_input_cache_diagnostics.clear()
         subagent_runtime = self.subagent_runtime
         detach = getattr(subagent_runtime, "detach_from_parent_session", None)
@@ -2089,6 +3917,7 @@ class RuntimeSession:
             self._reconciliation_required = False
             self._ledger_reconciliation_required = False
             self._context_input_reconciliation_required = False
+            self._memory_governance_reconciliation_required = False
         if self._owns_terminal_manager:
             self.terminal_sessions.shutdown()
 
@@ -2175,6 +4004,73 @@ def _cancelled_event_commit_outcome(
 
 def _next_publish_sequence(event_log: EventLog) -> int:
     return event_log.next_sequence()
+
+
+_CHILD_PARENT_FIXED_EVENT_TYPES = frozenset(
+    {
+        EventType.SUBAGENT_RUN_STARTED,
+        EventType.SUBAGENT_MESSAGE_SENT,
+        EventType.SUBAGENT_RUN_SUSPENDED,
+        EventType.SUBAGENT_RUN_COMPLETED,
+        EventType.SUBAGENT_RUN_FAILED,
+        EventType.SUBAGENT_RUN_CANCELLED,
+        EventType.SUBAGENT_EDGE_RECORDED,
+        EventType.SUBAGENT_RESULT_DELIVERED,
+        EventType.SUBAGENT_TASK_CREATED,
+        EventType.SUBAGENT_TASK_SCHEDULED,
+        EventType.SUBAGENT_TASK_STARTED,
+        EventType.SUBAGENT_TASK_BLOCKED,
+        EventType.SUBAGENT_TASK_COMPLETED,
+        EventType.SUBAGENT_TASK_FAILED,
+        EventType.SUBAGENT_TASK_CANCELLED,
+        EventType.SUBAGENT_PHASE_REPORTED,
+        EventType.SUBAGENT_RESULT_SUBMITTED,
+        EventType.SUBAGENT_RESULT_CONSUMED,
+        EventType.SUBAGENT_ROLLOUT_BUDGET_RESOLVED,
+        EventType.ROLLOUT_BUDGET_RESERVATION_CREATED,
+        EventType.ROLLOUT_BUDGET_RESERVATION_SETTLED,
+        EventType.CHILD_ROLLOUT_SUBACCOUNT_CLOSED,
+    }
+)
+_HOST_BOUNDARY_FIXED_EVENT_TYPES = frozenset(
+    {
+        EventType.RUN_START,
+        EventType.RUN_END,
+        EventType.RUN_INTERACTION_RESUME_BOUNDARY,
+        EventType.CAPABILITY_EXPOSURE_RESOLVED,
+        EventType.MCP_CAPABILITY_SNAPSHOT_INSTALLED,
+        EventType.CONTEXT_WINDOW_OPENED,
+        EventType.CONTEXT_WINDOW_CLOSED,
+        EventType.ROLLOUT_BUDGET_ACCOUNT_OPENED,
+        EventType.ROLLOUT_BUDGET_ACCOUNT_CLOSED,
+    }
+)
+_EXTERNAL_EXECUTION_FIXED_EVENT_TYPES = frozenset(
+    {
+        EventType.REQUIRE_EXTERNAL_EXECUTION,
+        EventType.EXTERNAL_EXECUTION_RESULT,
+    }
+)
+
+
+def _fixed_one_shot_operation_kind(
+    events: tuple[AgentEvent, ...],
+) -> PhysicalOperationKind:
+    event_types = frozenset(event.type for event in events)
+    if event_types and event_types <= _CHILD_PARENT_FIXED_EVENT_TYPES:
+        return PhysicalOperationKind.CHILD_PARENT_GRAPH_WRITE
+    if event_types and event_types <= _HOST_BOUNDARY_FIXED_EVENT_TYPES:
+        return PhysicalOperationKind.HOST_RUN_BOUNDARY
+    if event_types & _EXTERNAL_EXECUTION_FIXED_EVENT_TYPES:
+        return PhysicalOperationKind.EXTERNAL_EXECUTION
+    return PhysicalOperationKind.RUNTIME_INTERNAL_WRITE
+
+
+def _physical_operation_admission_owner_id(
+    key: tuple[PhysicalOperationKind, str],
+) -> str:
+    operation_kind, owner_id = key
+    return f"{operation_kind.value}:{owner_id}"
 
 
 def _merge_event_metadata(

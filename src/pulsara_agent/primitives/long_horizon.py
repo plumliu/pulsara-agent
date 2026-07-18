@@ -394,10 +394,10 @@ class SubagentGraphCheckpointArtifactFact(FrozenLongHorizonFact):
 
 class SubagentGraphCheckpointPolicyFact(FrozenLongHorizonFact):
     checkpoint_every_events: int = Field(default=512, ge=1)
-    checkpoint_max_delta_events: int = Field(default=32_768, ge=0)
-    checkpoint_max_delta_bytes: int = Field(default=33_554_432, ge=0)
-    bootstrap_max_events: int = Field(default=2048, ge=1)
-    bootstrap_max_bytes: int = Field(default=8_388_608, ge=1)
+    checkpoint_max_delta_events: int = Field(ge=1)
+    checkpoint_max_delta_bytes: int = Field(ge=1)
+    bootstrap_max_events: int = Field(ge=1)
+    bootstrap_max_bytes: int = Field(ge=1)
     rebase_max_checkpoint_candidates: int = Field(default=8, ge=1)
     retained_checkpoint_min_count: int = Field(default=2, ge=1)
     policy_fingerprint: str = Field(min_length=1)
@@ -1980,13 +1980,23 @@ def _validate_fingerprint(
         raise ValueError(f"{field_name} mismatch")
 
 
-def default_subagent_graph_checkpoint_policy() -> SubagentGraphCheckpointPolicyFact:
+def default_subagent_graph_checkpoint_policy(
+    *,
+    max_unreclaimable_ledger_events: int,
+    max_unreclaimable_charged_payload_bytes: int,
+) -> SubagentGraphCheckpointPolicyFact:
+    """Resolve graph continuity bounds from the shared ledger hard horizon."""
+
+    if max_unreclaimable_ledger_events < 1:
+        raise ValueError("graph checkpoint ledger event bound must be positive")
+    if max_unreclaimable_charged_payload_bytes < 1:
+        raise ValueError("graph checkpoint ledger byte bound must be positive")
     payload = {
         "checkpoint_every_events": 512,
-        "checkpoint_max_delta_events": 32_768,
-        "checkpoint_max_delta_bytes": 33_554_432,
-        "bootstrap_max_events": 2048,
-        "bootstrap_max_bytes": 8_388_608,
+        "checkpoint_max_delta_events": max_unreclaimable_ledger_events,
+        "checkpoint_max_delta_bytes": max_unreclaimable_charged_payload_bytes,
+        "bootstrap_max_events": max_unreclaimable_ledger_events,
+        "bootstrap_max_bytes": max_unreclaimable_charged_payload_bytes,
         "rebase_max_checkpoint_candidates": 8,
         "retained_checkpoint_min_count": 2,
     }

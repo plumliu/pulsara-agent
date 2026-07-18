@@ -6,7 +6,11 @@ from time import monotonic
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
 
-from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
+from pulsara_agent.event import EventContext
 from pulsara_agent.event_log import EventIdConflict, InMemoryEventLog
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.runtime import (
@@ -156,7 +160,7 @@ def test_runtime_session_confirms_uncertain_commit_and_catches_up_reducer_and_pu
             through_sequence=0,
             apply_committed=lambda events: reduced.extend(event.id for event in events),
         )
-        candidate = TextBlockDeltaEvent(
+        candidate = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:uncertain",
             delta="committed",
@@ -179,7 +183,7 @@ def test_runtime_session_reserves_deadline_for_stable_commit_confirmation(
     async def run() -> None:
         event_log = DeadlineRecordingCommitFailureEventLog()
         runtime = in_memory_runtime_session(tmp_path, event_log=event_log)
-        candidate = TextBlockDeltaEvent(
+        candidate = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:deadline-reserve",
             delta="candidate",
@@ -200,7 +204,7 @@ def test_runtime_session_confirmation_requires_writer_owner_or_explicit_deadline
 ) -> None:
     event_log = DeadlineRecordingCommitFailureEventLog()
     runtime = in_memory_runtime_session(tmp_path, event_log=event_log)
-    candidate = TextBlockDeltaEvent(
+    candidate = make_text_block_segment_event(
         **CTX.event_fields(),
         block_id="text:explicit-confirmation-deadline",
         delta="candidate",
@@ -228,12 +232,12 @@ def test_runtime_session_cancellation_returns_writer_owned_full_and_none_outcome
     async def run() -> None:
         event_log = CommitThenBlockEventLog()
         runtime = in_memory_runtime_session(tmp_path, event_log=event_log)
-        first = TextBlockDeltaEvent(
+        first = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:active-cancel",
             delta="first",
         )
-        second = TextBlockDeltaEvent(
+        second = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:queued-cancel",
             delta="second",
@@ -279,12 +283,12 @@ def test_runtime_session_cas_confirmation_catches_up_through_conflict_high_water
                 event.sequence for event in events if event.sequence is not None
             ),
         )
-        candidate = TextBlockDeltaEvent(
+        candidate = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:confirmed",
             delta="confirmed",
         )
-        later = TextBlockDeltaEvent(
+        later = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:later",
             delta="later",
@@ -320,12 +324,12 @@ def test_runtime_session_partial_batch_confirmation_latches_reconciliation(
                 [event.id for event in events],
             ),
         )
-        first = TextBlockDeltaEvent(
+        first = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:partial-first",
             delta="first",
         )
-        missing = TextBlockDeltaEvent(
+        missing = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:partial-missing",
             delta="missing",
@@ -342,7 +346,7 @@ def test_runtime_session_partial_batch_confirmation_latches_reconciliation(
         assert runtime.ledger_reconciliation_required is True
         with pytest.raises(EventReconciliationRequired):
             await runtime.write_event(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **CTX.event_fields(),
                     block_id="text:after-partial",
                     delta="must fail closed",
@@ -358,13 +362,13 @@ def test_runtime_session_event_id_payload_conflict_preserves_stable_error_type(
     async def run() -> None:
         event_log = InMemoryEventLog()
         runtime = in_memory_runtime_session(tmp_path, event_log=event_log)
-        candidate = TextBlockDeltaEvent(
+        candidate = make_text_block_segment_event(
             **CTX.event_fields(),
             block_id="text:id-conflict",
             delta="canonical",
         )
         event_log.append(candidate)
-        conflicting = candidate.model_copy(update={"delta": "different"})
+        conflicting = candidate.model_copy(update={"text": "different"})
 
         with pytest.raises(EventIdConflict):
             await runtime.write_event(conflicting)
@@ -479,11 +483,11 @@ def test_runtime_session_emit_and_emit_many_publish_events(tmp_path) -> None:
     state = LoopState(session_id=runtime.runtime_session_id)
 
     async def run() -> None:
-        first = await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="first"), state=state)
+        first = await runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="first"), state=state)
         many = await runtime.emit_many(
             [
-                TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:2", delta="second"),
-                TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:3", delta="third"),
+                make_text_block_segment_event(**CTX.event_fields(), block_id="text:2", delta="second"),
+                make_text_block_segment_event(**CTX.event_fields(), block_id="text:3", delta="third"),
             ],
             state=state,
         )
@@ -503,13 +507,14 @@ def test_runtime_session_emit_many_uses_event_log_batch_extend(tmp_path) -> None
         event_log=event_log,
         archive=in_memory_runtime_session(tmp_path).archive,
         tool_result_artifacts=in_memory_runtime_session(tmp_path).tool_result_artifacts,
+        allow_unbootstrapped_test_events=True,
     )
 
     async def run() -> None:
         stored = await runtime.emit_many(
             [
-                TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="one"),
-                TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:2", delta="two"),
+                make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="one"),
+                make_text_block_segment_event(**CTX.event_fields(), block_id="text:2", delta="two"),
             ]
         )
         assert [event.sequence for event in stored] == [1, 2]
@@ -524,11 +529,35 @@ def test_runtime_session_emit_from_thread_without_bound_loop_only_appends(tmp_pa
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
 
-    stored = runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="thread"))
+    stored = runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="thread"))
 
     assert stored.sequence == 1
     assert [event.sequence for event in runtime.event_log.iter()] == [1]
     assert subscriber.events == []
+
+
+def test_runtime_session_thread_writer_cannot_bypass_fresh_ledger_genesis(
+    tmp_path,
+) -> None:
+    runtime = in_memory_runtime_session(
+        tmp_path,
+        allow_unbootstrapped_test_events=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="fresh durable ledger genesis must use the async RunStart path",
+    ):
+        runtime.emit_from_thread(
+            make_text_block_segment_event(
+                **CTX.event_fields(),
+                block_id="text:thread-before-genesis",
+                delta="must not commit",
+            )
+        )
+
+    assert runtime.event_log.next_sequence() == 1
+    assert tuple(runtime.event_log.iter()) == ()
 
 
 def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(tmp_path) -> None:
@@ -536,11 +565,11 @@ def test_runtime_session_emit_after_unbound_emit_from_thread_does_not_block(tmp_
     subscriber = RecordingSubscriber()
     runtime.publisher.subscribe(subscriber)
 
-    dropped = runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:0", delta="thread"))
+    dropped = runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:0", delta="thread"))
 
     async def run() -> None:
         stored = await asyncio.wait_for(
-            runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="async")),
+            runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="async")),
             timeout=0.5,
         )
         assert stored.sequence == 2
@@ -558,15 +587,15 @@ def test_runtime_session_publish_stored_events_bridges_direct_event_log_writes(t
     runtime.publisher.subscribe(subscriber)
 
     async def run() -> None:
-        await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="bind"))
+        await runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="bind"))
         stored = runtime.event_log.append(
-            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:2", delta="direct")
+            make_text_block_segment_event(**CTX.event_fields(), block_id="text:2", delta="direct")
         )
         assert stored.sequence == 2
 
         runtime.publish_stored_events([stored])
         final = await asyncio.wait_for(
-            runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:3", delta="after")),
+            runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:3", delta="after")),
             timeout=0.5,
         )
         assert final.sequence == 3
@@ -582,7 +611,7 @@ def test_runtime_session_emit_rejects_preassigned_sequence(tmp_path) -> None:
 
     async def run() -> None:
         with pytest.raises(ValueError, match="sequence=None"):
-            await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="bad", sequence=10))
+            await runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="bad", sequence=10))
 
     asyncio.run(run())
 
@@ -591,7 +620,7 @@ def test_runtime_session_emit_from_thread_rejects_preassigned_sequence(tmp_path)
     runtime = in_memory_runtime_session(tmp_path)
 
     with pytest.raises(ValueError, match="sequence=None"):
-        runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="bad", sequence=10))
+        runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="bad", sequence=10))
 
 
 def test_runtime_session_default_event_metadata_is_merged_on_emit(tmp_path) -> None:
@@ -608,7 +637,7 @@ def test_runtime_session_default_event_metadata_is_merged_on_emit(tmp_path) -> N
 
     async def run() -> None:
         stored = await runtime.emit(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **CTX.event_fields(),
                 block_id="text:1",
                 delta="child",
@@ -634,6 +663,6 @@ def test_runtime_session_default_event_metadata_is_merged_on_emit_from_thread(tm
         default_event_metadata={"subagent": {"subagent_run_id": "subagent:thread"}},
     )
 
-    stored = runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="thread"))
+    stored = runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="thread"))
 
     assert stored.metadata["subagent"]["subagent_run_id"] == "subagent:thread"

@@ -1,4 +1,4 @@
-"""Test adapter for Pulsara LLM events."""
+"""Test adapter for process-local provider stream items."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from typing import AsyncIterator
 
 from uuid import uuid4
 
-from pulsara_agent.event import (
-    AgentEvent,
-    EventContext,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
+from pulsara_agent.event import EventContext
+from pulsara_agent.llm.raw_provider import (
+    RawProviderBlockEnd,
+    RawProviderBlockStart,
+    RawProviderStreamItem,
+    RawProviderTextDelta,
 )
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
@@ -31,12 +31,9 @@ class MockTransport:
         call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[RawProviderStreamItem]:
+        del call, context, event_context
         block_id = f"text:{uuid4()}"
-        yield TextBlockStartEvent(**event_context.event_fields(), block_id=block_id)
-        yield TextBlockDeltaEvent(
-            **event_context.event_fields(),
-            block_id=block_id,
-            delta=self.text,
-        )
-        yield TextBlockEndEvent(**event_context.event_fields(), block_id=block_id)
+        yield RawProviderBlockStart(block_kind="text", block_id=block_id)
+        yield RawProviderTextDelta(block_id=block_id, delta=self.text)
+        yield RawProviderBlockEnd(block_kind="text", block_id=block_id)

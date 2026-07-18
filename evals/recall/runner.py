@@ -341,6 +341,7 @@ def _view_from_fixture(row: dict[str, Any]) -> CanonicalNodeView:
         do_not_apply_when=_optional_str(row.get("do_not_apply_when")),
         created_at=_parse_datetime(row.get("created_at")) or now,
         updated_at=now,
+        node_revision=int(row.get("node_revision", 1)),
         evidence_ids=tuple(row.get("evidence_ids", ())),
         outgoing=tuple(tuple(item) for item in row.get("outgoing", ())),
         incoming=tuple(tuple(item) for item in row.get("incoming", ())),

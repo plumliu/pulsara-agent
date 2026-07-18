@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pulsara_agent.event import EventContext, RunErrorEvent, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext, RunErrorEvent, TextBlockSegmentEvent
 from pulsara_agent.llm import LLMMessage, ModelRole, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.settings import PulsaraSettings
@@ -111,24 +111,48 @@ def probe_cases() -> list[ProbeCase]:
         _memory("preference:likes-cheesecake", "The user likes cheesecake."),
         _memory("preference:hates-durian", "The user hates durian."),
         _memory("preference:prefers-tea", "The user prefers oolong tea."),
-        _memory("preference:concise-summaries", "The user prefers concise final summaries."),
-        _memory("preference:uses-uv", "The user prefers uv for Python project commands."),
+        _memory(
+            "preference:concise-summaries", "The user prefers concise final summaries."
+        ),
+        _memory(
+            "preference:uses-uv", "The user prefers uv for Python project commands."
+        ),
         _memory("preference:dark-theme", "The user prefers dark theme in tools."),
         _memory("preference:likes-egg-tarts", "The user likes egg tarts."),
-        _memory("preference:morning-work", "The user prefers deep work in the morning."),
+        _memory(
+            "preference:morning-work", "The user prefers deep work in the morning."
+        ),
         _memory("preference:markdown", "The user prefers Markdown output for notes."),
-        _memory("preference:avoid-emojis", "The user prefers no emojis in engineering summaries."),
+        _memory(
+            "preference:avoid-emojis",
+            "The user prefers no emojis in engineering summaries.",
+        ),
     )
     summary_distractors = (
         _memory("preference:likes-egg-tarts", "The user likes egg tarts."),
-        _memory("preference:verbose-code-comments", "The user prefers explanatory code comments."),
-        _memory("preference:table-summaries", "The user likes table summaries for comparisons."),
-        _memory("preference:concise-summaries", "The user prefers concise final summaries."),
+        _memory(
+            "preference:verbose-code-comments",
+            "The user prefers explanatory code comments.",
+        ),
+        _memory(
+            "preference:table-summaries",
+            "The user likes table summaries for comparisons.",
+        ),
+        _memory(
+            "preference:concise-summaries", "The user prefers concise final summaries."
+        ),
         _memory("preference:dark-theme", "The user prefers dark theme in tools."),
         _memory("preference:python-uv", "The user prefers uv for Python commands."),
-        _memory("preference:morning-work", "The user prefers deep work in the morning."),
-        _memory("preference:no-emoji", "The user prefers no emojis in engineering summaries."),
-        _memory("preference:tests-first", "The user prefers tests before broad refactors."),
+        _memory(
+            "preference:morning-work", "The user prefers deep work in the morning."
+        ),
+        _memory(
+            "preference:no-emoji",
+            "The user prefers no emojis in engineering summaries.",
+        ),
+        _memory(
+            "preference:tests-first", "The user prefers tests before broad refactors."
+        ),
         _memory("preference:markdown", "The user prefers Markdown output for notes."),
     )
     pytest_distractors = (
@@ -137,15 +161,51 @@ def probe_cases() -> list[ProbeCase]:
             "The user prefers pytest in this project.",
             scope="ctx:workspace/repo_a",
         ),
-        _memory("preference:repo-b-ruff", "The user prefers ruff in this project.", scope="ctx:workspace/repo_b"),
-        _memory("preference:repo-b-pytest", "The user prefers pytest in this project.", scope="ctx:workspace/repo_b"),
-        _memory("preference:repo-b-uv", "The user prefers uv in this project.", scope="ctx:workspace/repo_b"),
-        _memory("preference:user-pytest", "The user usually prefers pytest.", scope="ctx:user"),
-        _memory("preference:repo-a-uv", "The user prefers uv in this project.", scope="ctx:workspace/repo_a"),
-        _memory("preference:repo-b-mypy", "The user prefers mypy in this project.", scope="ctx:workspace/repo_b"),
-        _memory("preference:repo-c-pytest", "The user prefers pytest in this project.", scope="ctx:workspace/repo_c"),
-        _memory("preference:repo-b-vitest", "The user prefers vitest in frontend tests.", scope="ctx:workspace/repo_b"),
-        _memory("preference:repo-a-ruff", "The user prefers ruff in this project.", scope="ctx:workspace/repo_a"),
+        _memory(
+            "preference:repo-b-ruff",
+            "The user prefers ruff in this project.",
+            scope="ctx:workspace/repo_b",
+        ),
+        _memory(
+            "preference:repo-b-pytest",
+            "The user prefers pytest in this project.",
+            scope="ctx:workspace/repo_b",
+        ),
+        _memory(
+            "preference:repo-b-uv",
+            "The user prefers uv in this project.",
+            scope="ctx:workspace/repo_b",
+        ),
+        _memory(
+            "preference:user-pytest",
+            "The user usually prefers pytest.",
+            scope="ctx:user",
+        ),
+        _memory(
+            "preference:repo-a-uv",
+            "The user prefers uv in this project.",
+            scope="ctx:workspace/repo_a",
+        ),
+        _memory(
+            "preference:repo-b-mypy",
+            "The user prefers mypy in this project.",
+            scope="ctx:workspace/repo_b",
+        ),
+        _memory(
+            "preference:repo-c-pytest",
+            "The user prefers pytest in this project.",
+            scope="ctx:workspace/repo_c",
+        ),
+        _memory(
+            "preference:repo-b-vitest",
+            "The user prefers vitest in frontend tests.",
+            scope="ctx:workspace/repo_b",
+        ),
+        _memory(
+            "preference:repo-a-ruff",
+            "The user prefers ruff in this project.",
+            scope="ctx:workspace/repo_a",
+        ),
     )
     return [
         ProbeCase(
@@ -248,7 +308,9 @@ def probe_cases() -> list[ProbeCase]:
                 "status": "active",
                 "is_exact_duplicate": False,
             },
-            candidate=_pref("The user hates pytest in this project.", "ctx:workspace/repo_b"),
+            candidate=_pref(
+                "The user hates pytest in this project.", "ctx:workspace/repo_b"
+            ),
             note="Different scopes must not be contradicted.",
         ),
         ProbeCase(
@@ -256,7 +318,9 @@ def probe_cases() -> list[ProbeCase]:
             expected=("coexist",),
             user_utterance="Please remember: I prefer dark roast coffee for cold brew.",
             old_memory=old_light_roast,
-            candidate=_pref("The user prefers dark roast coffee for cold brew.", "ctx:user"),
+            candidate=_pref(
+                "The user prefers dark roast coffee for cold brew.", "ctx:user"
+            ),
             note="A context-specific coffee preference can coexist with a general light-roast preference.",
         ),
         ProbeCase(
@@ -264,7 +328,9 @@ def probe_cases() -> list[ProbeCase]:
             expected=("coexist",),
             user_utterance="Please remember: I prefer detailed notes for design reviews.",
             old_memory=old_concise,
-            candidate=_pref("The user prefers detailed notes for design reviews.", "ctx:user"),
+            candidate=_pref(
+                "The user prefers detailed notes for design reviews.", "ctx:user"
+            ),
             note="Detailed design-review notes can coexist with concise final summaries.",
         ),
         ProbeCase(
@@ -272,7 +338,10 @@ def probe_cases() -> list[ProbeCase]:
             expected=("skip",),
             user_utterance="While my throat hurts this week, I am avoiding egg tarts.",
             old_memory=old_egg,
-            candidate=_pref("The user is avoiding egg tarts while their throat hurts this week.", "ctx:user"),
+            candidate=_pref(
+                "The user is avoiding egg tarts while their throat hurts this week.",
+                "ctx:user",
+            ),
             note="Temporary health context should not become durable preference or contradiction.",
         ),
         ProbeCase(
@@ -299,7 +368,9 @@ def probe_cases() -> list[ProbeCase]:
             user_utterance="In repo_b, please remember: I hate pytest in this project.",
             related_existing_memories=pytest_distractors,
             expected_target_ids=("preference:repo-b-pytest",),
-            candidate=_pref("The user hates pytest in this project.", "ctx:workspace/repo_b"),
+            candidate=_pref(
+                "The user hates pytest in this project.", "ctx:workspace/repo_b"
+            ),
             note="Must select same-scope repo_b pytest target, not repo_a/user pytest distractors.",
         ),
         ProbeCase(
@@ -382,7 +453,9 @@ async def run_probe(
     }
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     return report
 
 
@@ -415,17 +488,19 @@ async def _run_case(runtime, case: ProbeCase, *, index: int) -> dict[str, Any]:
             ),
         ),
         event_context=event_context,
-        options=LLMOptions(temperature=0, max_output_tokens=384),
+        options=LLMOptions(),
     ):
-        if isinstance(event, TextBlockDeltaEvent):
-            text_parts.append(event.delta)
+        if isinstance(event, TextBlockSegmentEvent):
+            text_parts.append(event.text)
         elif isinstance(event, RunErrorEvent):
             errors.append(event.message)
     raw_text = "".join(text_parts).strip()
     parsed, parse_error = _parse_json_object(raw_text)
     label = parsed.get("label") if isinstance(parsed, dict) else None
     expected_match = label in case.expected
-    target_ids = _target_ids(parsed.get("target_memory_ids") if isinstance(parsed, dict) else None)
+    target_ids = _target_ids(
+        parsed.get("target_memory_ids") if isinstance(parsed, dict) else None
+    )
     target_match = _target_match(target_ids, case.expected_target_ids)
     return {
         "case_id": case.case_id,
@@ -437,7 +512,9 @@ async def _run_case(runtime, case: ProbeCase, *, index: int) -> dict[str, Any]:
         "target_memory_ids": target_ids,
         "target_match": target_match,
         "reason": parsed.get("reason") if isinstance(parsed, dict) else None,
-        "safety_notes": parsed.get("safety_notes") if isinstance(parsed, dict) else None,
+        "safety_notes": parsed.get("safety_notes")
+        if isinstance(parsed, dict)
+        else None,
         "parse_error": parse_error,
         "errors": errors,
         "raw_text": raw_text,
@@ -513,9 +590,13 @@ def _summarize(trajectories: list[dict[str, Any]]) -> dict[str, Any]:
                 }
             )
     return {
-        "expected_match_count": sum(1 for item in trajectories if item.get("expected_match")),
+        "expected_match_count": sum(
+            1 for item in trajectories if item.get("expected_match")
+        ),
         "mismatch_count": len(mismatches),
-        "target_match_count": sum(1 for item in trajectories if item.get("target_match")),
+        "target_match_count": sum(
+            1 for item in trajectories if item.get("target_match")
+        ),
         "target_mismatch_count": len(target_mismatches),
         "parse_error_count": len(parse_errors),
         "labels": by_label,
@@ -554,13 +635,21 @@ async def _main() -> None:
     )
     args = parser.parse_args()
     if not args.force and os.getenv("PULSARA_RUN_REAL_LLM") != "1":
-        raise SystemExit("Set PULSARA_RUN_REAL_LLM=1 or pass --force to spend real LLM calls.")
+        raise SystemExit(
+            "Set PULSARA_RUN_REAL_LLM=1 or pass --force to spend real LLM calls."
+        )
     report = await run_probe(
         output=args.output,
         limit=args.limit,
         case_ids=set(args.case_id) if args.case_id else None,
     )
-    print(json.dumps({"output": str(args.output), **report["summary"]}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {"output": str(args.output), **report["summary"]},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

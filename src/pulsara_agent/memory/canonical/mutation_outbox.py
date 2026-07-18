@@ -248,7 +248,9 @@ class MutationOutboxWriter:
                     payload
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (governance_batch_id, decision_id) DO NOTHING
+                ON CONFLICT (governance_batch_id, decision_id)
+                WHERE governance_batch_id IS NOT NULL AND decision_id IS NOT NULL
+                DO NOTHING
                 """,
                 (
                     outbox_id,

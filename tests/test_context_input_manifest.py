@@ -361,6 +361,36 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         )
         assert replayed.prepared_tool_results.cache_hints == ()
         assert replayed.prepared_candidates == prepared.prepared_candidates
+        assert replayed.manifest.schema_version == "context-input-manifest:v6"
+        frozen_projection = replayed.manifest.transcript_provider_projection
+
+        def reject_timing_recomputation(**_kwargs):
+            raise AssertionError("exact replay recomputed invocation timing")
+
+        import pulsara_agent.runtime.context_input.compiler as compiler_module
+        import pulsara_agent.runtime.context_input.provider_projection as projection_module
+        import pulsara_agent.runtime.authority_materialization.transcript_restore as restore_module
+
+        monkeypatch.setattr(
+            compiler_module,
+            "prepare_transcript_provider_projection",
+            reject_timing_recomputation,
+        )
+        monkeypatch.setattr(
+            projection_module,
+            "_timing_header_text",
+            reject_timing_recomputation,
+        )
+        monkeypatch.setattr(
+            restore_module,
+            "_checkpoint_candidates",
+            reject_timing_recomputation,
+        )
+        monkeypatch.setattr(
+            restore_module,
+            "_latest_run_start",
+            reject_timing_recomputation,
+        )
         exact = replay_compiled_context(
             event=compiled,
             archive=agent.runtime_session.archive,
@@ -369,6 +399,28 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         )
         assert exact.status is ContextInputReplayStatus.EXACT_REPLAY
         assert exact.inputs == replayed
+        assert (
+            exact.compiled_context.transcript_provider_projection
+            == frozen_projection
+        )
+        transcript_sections = {
+            section.id: section
+            for section in exact.compiled_context.sections
+            if section.id.startswith("transcript:")
+        }
+        assert tuple(transcript_sections) == tuple(
+            section.section_id for section in frozen_projection.sections
+        )
+        for projection_section in frozen_projection.sections:
+            timing = projection_section.semantic_identity.timing_semantic
+            compiled_section = transcript_sections[projection_section.section_id]
+            assert (
+                compiled_section.metadata["timing_header_text"]
+                == timing.rendered_timing_header
+            )
+            assert compiled_section.metadata["timing"]["age_seconds"] == (
+                timing.age_seconds
+            )
         assert (
             compiled.provider_neutral_payload_fingerprint
             == provider_neutral_payload_fingerprint(exact.compiled_context.llm_context)

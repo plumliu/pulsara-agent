@@ -343,6 +343,7 @@ class PlanWorkflowStateFact(BaseModel):
 
     workflow_id: str | None
     active: bool
+    pending_entry_audit: bool
     revision: int = Field(ge=0)
     entered_event_id: str | None
     entered_event_sequence: int | None
@@ -362,7 +363,14 @@ class PlanWorkflowStateFact(BaseModel):
             self.entry_turn_id,
             self.entry_reply_id,
         )
-        if self.active:
+        if self.pending_entry_audit:
+            if not self.active:
+                raise ValueError("pending plan entry requires active workflow")
+            if any(value is not None for value in required):
+                raise ValueError(
+                    "pending plan entry cannot carry durable entry attribution"
+                )
+        elif self.active:
             if any(value is None for value in required):
                 raise ValueError("active plan workflow requires entry attribution")
             if int(self.entered_event_sequence or 0) < 1:

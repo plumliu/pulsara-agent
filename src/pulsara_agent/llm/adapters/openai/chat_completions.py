@@ -1,4 +1,4 @@
-"""OpenAI Chat Completions protocol translation to Pulsara AgentEvent."""
+"""OpenAI Chat Completions translation to adapter-private raw items."""
 
 from __future__ import annotations
 
@@ -7,27 +7,27 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator
 
-from pulsara_agent.event import AgentEvent, EventContext
+from pulsara_agent.event import EventContext
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_CHAT_COMPLETIONS_API,
     build_async_openai_client,
-    provider_error_data,
 )
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
-    AgentEventBuilder,
+    RawProviderItemBuilder,
     ReportedModelIdentityObserver,
     chat_completion_reported_model,
     sdk_event_to_dict,
     transport_usage_report_from_mapping,
 )
 from pulsara_agent.llm.adapters.openai.retrying import (
+    build_provider_retry_summary,
     log_retry_attempt,
     make_retry_trace,
-    provider_data_with_retry,
-    retry_event,
+    provider_failure_code_hint,
     sdk_max_retries_for_transport,
 )
+from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.provider import (
     ProviderProfile,
@@ -37,6 +37,7 @@ from pulsara_agent.llm.provider import (
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.raw_provider import RawProviderStreamItem
 from pulsara_agent.llm.runtime_observation import (
     resolve_runtime_observation_binding,
 )
@@ -47,11 +48,10 @@ from pulsara_agent.llm.retry import (
     apply_retry_after_cap,
     compute_retry_delay,
 )
-from pulsara_agent.llm.transport import LLMTransport
 
 
 @dataclass(slots=True)
-class OpenAIChatCompletionsTransport(LLMTransport):
+class OpenAIChatCompletionsTransport:
     """Adapter for OpenAI Chat Completions-compatible APIs."""
 
     api_key: str
@@ -73,11 +73,9 @@ class OpenAIChatCompletionsTransport(LLMTransport):
         call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent | TransportUsageReport]:
+    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
         model = call.target.model_profile
-        builder = AgentEventBuilder(
-            event_context=event_context,
-        )
+        builder = RawProviderItemBuilder()
         thinking_delta_fields = model.provider_profile.thinking.delta_fields
         if self._mock_chunks:
             model_identity = ReportedModelIdentityObserver(
@@ -178,13 +176,6 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                             trace=trace,
                             has_semantic_output=builder.has_semantic_output,
                         )
-                        yield retry_event(
-                            api=self.api,
-                            model=model,
-                            event_context=event_context,
-                            trace=trace,
-                            has_semantic_output=builder.has_semantic_output,
-                        )
                         await self.retry_sleep(delay)
                         attempt += 1
                         continue
@@ -196,10 +187,6 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                         attempt=attempt,
                         max_attempts=max_attempts,
                     )
-                    for event in accumulator.close_active_tool_calls():
-                        yield event
-                    for event in builder.close_active_blocks():
-                        yield event
                     failure_report = accumulator.usage_report
                     if (
                         failure_report is not None
@@ -212,9 +199,8 @@ class OpenAIChatCompletionsTransport(LLMTransport):
                         )
                     yield builder.run_error(
                         message=str(exc),
-                        code="openai_chat_completions_error",
-                        provider_data=provider_data_with_retry(
-                            provider_error_data(exc),
+                        code=provider_failure_code_hint(decision),
+                        retry_summary=build_provider_retry_summary(
                             config=self.retry_config,
                             traces=retry_traces,
                             final_decision=decision,
@@ -362,13 +348,13 @@ def _messages_to_chat_messages(
 def translate_chat_completion_chunk(
     raw_chunk: Any,
     *,
-    builder: AgentEventBuilder,
+    builder: RawProviderItemBuilder,
     accumulator: "ChatToolCallAccumulator",
     thinking_delta_fields: tuple[str, ...] = ("reasoning_content",),
-) -> list[AgentEvent]:
+) -> list[RawProviderStreamItem]:
     chunk = sdk_event_to_dict(raw_chunk)
     accumulator.update_usage(chunk.get("usage"))
-    events: list[AgentEvent] = []
+    events: list[RawProviderStreamItem] = []
     choices = chunk.get("choices")
     if not isinstance(choices, list):
         return events
@@ -406,15 +392,22 @@ class _ChatToolCallState:
 
 @dataclass(slots=True)
 class ChatToolCallAccumulator:
-    builder: AgentEventBuilder
+    builder: RawProviderItemBuilder
     usage_report: TransportUsageReport | None = None
     _states: dict[str, _ChatToolCallState] = field(default_factory=dict)
 
-    def apply_tool_call_delta(self, raw_tool_call: dict[str, Any]) -> list[AgentEvent]:
+    def apply_tool_call_delta(
+        self, raw_tool_call: dict[str, Any]
+    ) -> list[RawProviderStreamItem]:
         key = str(raw_tool_call.get("index", len(self._states)))
         state = self._states.setdefault(key, _ChatToolCallState())
         tool_call_id = raw_tool_call.get("id")
         if isinstance(tool_call_id, str) and tool_call_id:
+            if state.tool_call_id is not None and state.tool_call_id != tool_call_id:
+                raise LLMTransportContractError(
+                    "chat tool-call stream changed its frozen call ID",
+                    reason_code="transport_tool_call_identity_mismatch",
+                )
             state.tool_call_id = tool_call_id
 
         function = raw_tool_call.get("function")
@@ -422,16 +415,23 @@ class ChatToolCallAccumulator:
         if isinstance(function, dict):
             name = function.get("name")
             if isinstance(name, str) and name:
-                state.name += name
+                if state.started:
+                    if name != state.name:
+                        raise LLMTransportContractError(
+                            "chat tool-call stream changed its frozen tool name",
+                            reason_code="transport_tool_call_name_mismatch",
+                        )
+                else:
+                    state.name += name
             arguments = function.get("arguments")
             if isinstance(arguments, str) and arguments:
                 arguments_delta = arguments
 
-        events: list[AgentEvent] = []
+        events: list[RawProviderStreamItem] = []
         if (
             not state.started
             and state.tool_call_id
-            and (state.name or arguments_delta or state.pending_arguments)
+            and state.name
         ):
             events.extend(
                 self.builder.tool_call_start(
@@ -466,14 +466,22 @@ class ChatToolCallAccumulator:
         if report.usage_status == "reported":
             self.usage_report = report
 
-    def close_active_tool_calls(self) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
+    def close_active_tool_calls(self) -> list[RawProviderStreamItem]:
+        if any(
+            not state.started or not state.tool_call_id
+            for state in self._states.values()
+        ):
+            raise LLMTransportContractError(
+                "tool-call stream ended before a named tool-call start",
+                reason_code="transport_tool_call_start_missing",
+            )
+        events: list[RawProviderStreamItem] = []
         for state in self._states.values():
-            if state.started and state.tool_call_id:
-                events.extend(
-                    self.builder.tool_call_end(tool_call_id=state.tool_call_id)
-                )
-                state.started = False
+            assert state.tool_call_id is not None
+            events.extend(
+                self.builder.tool_call_end(tool_call_id=state.tool_call_id)
+            )
+        self._states.clear()
         return events
 
 

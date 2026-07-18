@@ -104,6 +104,39 @@ def test_cli_checkpoint_doctor_uses_privileged_offline_ports(monkeypatch) -> Non
     assert "runtime_session" not in captured
 
 
+def test_cli_transcript_checkpoint_doctor_rejects_partial_high_water(
+    monkeypatch,
+) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "checkpoint",
+            "doctor",
+            "runtime:transcript-checkpoint:cli",
+            "--domain",
+            "transcript",
+            "--through-sequence",
+            "17",
+        ]
+    )
+    monkeypatch.setattr(
+        cli,
+        "_settings_from_inspect_args",
+        lambda _args: SimpleNamespace(
+            storage=SimpleNamespace(postgres_dsn="postgresql://checkpoint-test")
+        ),
+    )
+    monkeypatch.setattr(cli, "PostgresEventLog", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli, "PostgresArtifactStore", lambda _dsn: SimpleNamespace())
+    monkeypatch.setattr(
+        cli,
+        "PostgresCheckpointMaintenanceAuthority",
+        lambda _dsn: SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="--through-sequence is unsupported"):
+        cli._checkpoint_command(args)  # noqa: SLF001
+
+
 def test_cli_checkpoint_gc_uses_exclusive_maintenance_authority(monkeypatch) -> None:
     args = cli.build_parser().parse_args(
         [

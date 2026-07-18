@@ -5,13 +5,17 @@ from dataclasses import replace
 
 import pytest
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextCompiledEvent,
     ContextWindowOpenedEvent,
     EventContext,
     RunStartEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
@@ -51,13 +55,13 @@ from tests.test_agent_runtime_loop import (
 )
 
 
-def _event(index: int) -> TextBlockDeltaEvent:
+def _event(index: int) -> TextBlockSegmentEvent:
     ctx = EventContext(
         run_id="run:context-slice",
         turn_id="turn:context-slice",
         reply_id="reply:context-slice",
     )
-    return TextBlockDeltaEvent(
+    return make_text_block_segment_event(
         id=f"event:{index}",
         **ctx.event_fields(),
         block_id="block:1",
@@ -327,7 +331,7 @@ def test_mid_turn_compaction_keeps_current_run_in_protected_window() -> None:
     run_start, window_open = _run_start(ctx)
     started, _ = log.extend((run_start, window_open))
     current = log.append(
-        TextBlockDeltaEvent(
+        make_text_block_segment_event(
             **ctx.event_fields(), block_id="current", delta="current run"
         )
     )

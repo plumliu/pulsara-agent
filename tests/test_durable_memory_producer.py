@@ -13,16 +13,19 @@ import json
 from pathlib import Path
 from typing import AsyncIterator
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
     EventType,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
 )
 from pulsara_agent.event.candidates import (
     ActionBoundaryCandidate,
@@ -36,17 +39,12 @@ from pulsara_agent.llm import LLMRuntime
 from tests.support import stream_agent_task, test_llm_config
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.hooks.durable import DurableMemoryHooks
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePoolProposal,
     InMemoryCandidatePool,
 )
-from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.runtime import AgentRuntime, LoopState
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.capability.runtime import CapabilityRuntime
@@ -58,20 +56,10 @@ from pulsara_agent.tools.builtins.memory import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ontology import memory
-from tests.support.memory_uow import fake_memory_uow_factory
 from tests.support.runtime_session import in_memory_runtime_session
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
-
-
-def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
-    ledger = ExecutionEvidenceLedger(
-        graph=graph,
-        archive=InMemoryArchiveStore(),
-        gate=MemoryWriteGate(),
-    )
-    return MemoryWriteService(ledger=ledger)
 
 
 def _preference(candidate_id: str = "candidate:pref") -> PreferenceCandidate:
@@ -531,23 +519,23 @@ class _ScriptedTransport:
         del call
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 
@@ -565,7 +553,7 @@ def _make_llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
     return LLMRuntime(config=config, registry=registry)
 
 
-def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) -> None:
+def test_agent_runtime_queues_candidate_without_canonical_write(tmp_path: Path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
     graph = InMemoryGraphStore()
     pool = InMemoryCandidatePool()
@@ -612,32 +600,8 @@ def test_agent_runtime_emits_memory_events_when_tool_proposes(tmp_path: Path) ->
     assert pending[0].payload.candidate.kind == "Preference"
     assert pending[0].user_quote == "Remember that I prefer concise summaries."
     assert graph.find_by_type(memory.PREFERENCE) == []
-    service = _service_on(graph)
-    governance = MemoryGovernanceExecutor(
-        candidate_pool=pool,
-        memory_write_service=service,
-        event_log=runtime_session.event_log,
-        graph=graph,
-        runtime_session_id=runtime_session.runtime_session_id,
-        memory_write_uow_factory=fake_memory_uow_factory(
-            graph=graph,
-            candidate_pool=pool,
-            memory_write_service=service,
-        ),
-    )
-    governance_results = governance.submit_pending_as_is()
-    result = next(
-        e
-        for e in governance_results[0].events
-        if e.type is EventType.MEMORY_WRITE_RESULT
-    )
-    assert result.memory_type == "Preference"
-    assert result.status is memory.NodeStatus.ACTIVE
-    assert graph.has_jsonld(result.memory_id)
     # Sink is drained -- no residue after the run.
     assert runtime_session.memory_proposal_sink.pending_count() == 0
-    # Memory events carry runtime-assigned sequence numbers.
-    assert result.sequence is not None
 
 
 def test_default_agent_runtime_does_not_expose_memory_write_tools(

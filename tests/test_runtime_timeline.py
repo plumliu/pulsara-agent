@@ -9,11 +9,19 @@ from tests.conftest import (
     run_end_contract_fields,
     run_start_permission_fields,
     tool_result_end_contract_fields,
+    tool_result_end_candidate,
 )
 from tests.support import (
     model_call_end_fields,
     model_call_start_fields,
     test_resolved_call_fact,
+)
+
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
 )
 
 from pulsara_agent.event import (
@@ -31,10 +39,6 @@ from pulsara_agent.event import (
     RequireUserConfirmEvent,
     RunEndEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -72,65 +76,79 @@ def _run_start() -> RunStartEvent:
     )
 
 
+async def _emit_tool_terminal_projection(
+    runtime,
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    state: ToolResultState = ToolResultState.SUCCESS,
+) -> None:
+    candidate = tool_result_end_candidate(
+        event_id=f"tool_result_end:{CTX.run_id}:{tool_call_id}",
+        run_id=CTX.run_id,
+        turn_id=CTX.turn_id,
+        reply_id=CTX.reply_id,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        state=state,
+    )
+    prepared = await runtime.tool_terminal_projection_service.prepare_batch((candidate,))
+    await runtime.emit_many(prepared)
+
+
 def test_build_run_timeline_summarizes_model_text_and_tool_activity() -> None:
-    runtime = in_memory_runtime_session(Path("."))
-
-    async def run() -> None:
-        resolved_call = test_resolved_call_fact()
-        for event in [
-            ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            ModelCallStartEvent(
-                **CTX.event_fields(),
-                **model_call_start_fields(resolved_call=resolved_call),
+    resolved_call = test_resolved_call_fact()
+    events = [
+        ReplyStartEvent(**CTX.event_fields(), name="assistant"),
+        ModelCallStartEvent(
+            **CTX.event_fields(),
+            **model_call_start_fields(resolved_call=resolved_call),
+        ),
+        make_text_block_segment_event(
+            **CTX.event_fields(), block_id="text:1", delta="I'll read it."
+        ),
+        ModelCallEndEvent(
+            **CTX.event_fields(),
+            **model_call_end_fields(
+                input_tokens=1,
+                output_tokens=2,
+                resolved_call=resolved_call,
             ),
-            TextBlockDeltaEvent(
-                **CTX.event_fields(), block_id="text:1", delta="I'll read it."
-            ),
-            ModelCallEndEvent(
-                **CTX.event_fields(),
-                **model_call_end_fields(
-                    input_tokens=1,
-                    output_tokens=2,
-                    resolved_call=resolved_call,
-                ),
-            ),
-            ToolCallStartEvent(
-                **CTX.event_fields(),
-                tool_call_id="call:read",
-                tool_call_name="read_file",
-            ),
-            ToolCallDeltaEvent(
-                **CTX.event_fields(),
-                tool_call_id="call:read",
-                delta='{"path":"note.txt"}',
-            ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:read"),
-            ToolResultStartEvent(
-                **CTX.event_fields(),
-                tool_call_id="call:read",
-                tool_call_name="read_file",
-            ),
-            ToolResultTextDeltaEvent(
-                **CTX.event_fields(), tool_call_id="call:read", delta="hello"
-            ),
-            ToolResultEndEvent(
-                **CTX.event_fields(),
-                **tool_result_end_contract_fields("call:read", tool_name="read_file"),
-                tool_call_id="call:read",
-                state=ToolResultState.SUCCESS,
-                metadata={
-                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
-                },
-            ),
-            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
-        ]:
-            await runtime.emit(event)
-
-    asyncio.run(run())
+        ),
+        make_tool_call_start_event(
+            **CTX.event_fields(),
+            tool_call_id="call:read",
+            tool_call_name="read_file",
+        ),
+        make_tool_call_arguments_segment_event(
+            **CTX.event_fields(),
+            tool_call_id="call:read",
+            delta='{"path":"note.txt"}',
+        ),
+        make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:read"),
+        ToolResultStartEvent(
+            **CTX.event_fields(),
+            tool_call_id="call:read",
+            tool_call_name="read_file",
+        ),
+        ToolResultTextDeltaEvent(
+            **CTX.event_fields(), tool_call_id="call:read", delta="hello"
+        ),
+        ToolResultEndEvent(
+            **CTX.event_fields(),
+            **tool_result_end_contract_fields("call:read", tool_name="read_file"),
+            tool_call_id="call:read",
+            state=ToolResultState.SUCCESS,
+            metadata={
+                "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
+            },
+        ),
+        ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
+    ]
 
     timeline = build_run_timeline(
-        runtime.event_log.iter(run_id=CTX.run_id),
-        runtime_session_id=runtime.runtime_session_id,
+        events,
+        runtime_session_id="runtime:timeline:test",
     )
 
     assert timeline.status == "completed"
@@ -155,17 +173,17 @@ def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -
         for event in [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
             ModelCallStartEvent(**CTX.event_fields(), **model_call_start_fields()),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id="call:danger",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(),
                 tool_call_id="call:danger",
                 delta='{"command":"rm -rf build"}',
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:danger"),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:danger"),
             ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
             RequireUserConfirmEvent(
                 **CTX.event_fields(),
@@ -208,15 +226,15 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
     async def run() -> None:
         for event in [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id=tool_call.id,
                 tool_call_name=tool_call.name,
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id=tool_call.id),
             ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
             RequireUserConfirmEvent(**CTX.event_fields(), tool_calls=[tool_call]),
             UserConfirmResultEvent(
@@ -231,19 +249,13 @@ def test_build_run_timeline_clears_waiting_status_after_confirm_result() -> None
             ToolResultTextDeltaEvent(
                 **CTX.event_fields(), tool_call_id=tool_call.id, delta="ok"
             ),
-            ToolResultEndEvent(
-                **CTX.event_fields(),
-                **tool_result_end_contract_fields(
-                    tool_call.id, tool_name=tool_call.name
-                ),
-                tool_call_id=tool_call.id,
-                state=ToolResultState.SUCCESS,
-                metadata={
-                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
-                },
-            ),
         ]:
             await runtime.emit(event)
+        await _emit_tool_terminal_projection(
+            runtime,
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+        )
 
     asyncio.run(run())
 
@@ -350,9 +362,11 @@ def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(
         await runtime.emit(_run_start())
         await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
         await runtime.emit(
-            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="done")
+            make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="done")
         )
-        await runtime.emit(ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"))
+        await runtime.emit(
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed")
+        )
         await runtime.emit(
             RunEndEvent(
                 **run_end_contract_fields(CTX.run_id, status="finished"),
@@ -396,7 +410,9 @@ def test_run_timeline_persistence_preserves_created_at_across_snapshot_updates(
     async def run() -> None:
         await runtime.emit(_run_start())
         await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
-        await runtime.emit(ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"))
+        await runtime.emit(
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed")
+        )
         first = graph.find_by_type(rt.RUN_TIMELINE)[0]
         await runtime.emit(
             RunEndEvent(
@@ -430,20 +446,20 @@ def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
         for event in [
             _run_start(),
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="Reading now."
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id="call:read",
                 tool_call_name="read_file",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(),
                 tool_call_id="call:read",
                 delta='{"path":"probe.txt"}',
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:read"),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:read"),
             ToolResultStartEvent(
                 **CTX.event_fields(),
                 tool_call_id="call:read",
@@ -452,24 +468,24 @@ def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
             ToolResultTextDeltaEvent(
                 **CTX.event_fields(), tool_call_id="call:read", delta="PULSARA_TRACE_OK"
             ),
-            ToolResultEndEvent(
-                **CTX.event_fields(),
-                **tool_result_end_contract_fields("call:read", tool_name="read_file"),
-                tool_call_id="call:read",
-                state=ToolResultState.SUCCESS,
-                metadata={
-                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
-                },
-            ),
-            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
+        ]:
+            await runtime.emit(event)
+        await _emit_tool_terminal_projection(
+            runtime,
+            tool_call_id="call:read",
+            tool_name="read_file",
+        )
+        await runtime.emit(
+            ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed")
+        )
+        await runtime.emit(
             RunEndEvent(
                 **run_end_contract_fields(CTX.run_id, status="finished"),
                 **CTX.event_fields(),
                 status="finished",
                 stop_reason="final",
-            ),
-        ]:
-            await runtime.emit(event)
+            )
+        )
 
     asyncio.run(run())
 
@@ -494,10 +510,10 @@ def test_run_timeline_read_side_loads_summary_and_tool_trace(tmp_path) -> None:
 def test_run_timeline_summary_separates_multiple_assistant_text_items() -> None:
     timeline = build_run_timeline(
         [
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="first", sequence=1
             ),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 run_id=CTX.run_id,
                 turn_id="turn:timeline/002",
                 reply_id="reply:timeline/002",

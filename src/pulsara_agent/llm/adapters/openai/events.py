@@ -7,19 +7,14 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from pulsara_agent.event import (
-    AgentEvent,
-    EventContext,
-    RunErrorEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
-    ThinkingBlockEndEvent,
-    ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
+from pulsara_agent.llm.raw_provider import (
+    RawProviderBlockEnd,
+    RawProviderBlockStart,
+    RawProviderFailure,
+    RawProviderStreamItem,
+    RawProviderTextDelta,
+    RawProviderThinkingDelta,
+    RawProviderToolCallDelta,
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.errors import LLMTransportContractError
@@ -27,73 +22,112 @@ from pulsara_agent.llm.provider import ModelIdentityPolicy
 from pulsara_agent.primitives.model_call import (
     ModelCallDiagnosticFact,
     ModelTokenUsageFact,
+    ProviderRetrySummaryFact,
 )
 
 
 @dataclass(slots=True)
-class AgentEventBuilder:
-    event_context: EventContext
+class RawProviderItemBuilder:
     text_block_id: str | None = None
     thinking_block_id: str | None = None
-    active_tool_call_ids: set[str] = field(default_factory=set)
+    text_parts: list[str] = field(default_factory=list)
+    thinking_parts: list[str] = field(default_factory=list)
+    active_tool_call_ids: dict[str, None] = field(default_factory=dict)
     item_id_to_tool_call_id: dict[str, str] = field(default_factory=dict)
-    tool_call_has_arguments: set[str] = field(default_factory=set)
+    tool_call_names: dict[str, str] = field(default_factory=dict)
+    tool_call_argument_parts: dict[str, list[str]] = field(default_factory=dict)
     has_semantic_output: bool = False
-
-    def event_fields(self) -> dict[str, str]:
-        return self.event_context.event_fields()
 
     def run_error(
         self,
         *,
         message: str,
         code: str,
-        provider_data: dict[str, Any] | None = None,
-    ) -> RunErrorEvent:
+        retry_summary: ProviderRetrySummaryFact | None = None,
+    ) -> RawProviderFailure:
         self.has_semantic_output = True
-        return RunErrorEvent(
-            **self.event_fields(),
+        return RawProviderFailure(
             message=message,
-            code=code,
-            metadata={"provider_data": provider_data or {}},
+            code_hint=code,
+            retry_summary=retry_summary,
         )
 
-    def text_delta(self, delta: str) -> list[AgentEvent]:
+    def text_delta(self, delta: str) -> list[RawProviderStreamItem]:
         if not delta:
             return []
         self.has_semantic_output = True
-        events: list[AgentEvent] = []
+        events: list[RawProviderStreamItem] = []
         if self.text_block_id is None:
             self.text_block_id = f"text:{uuid4()}"
             events.append(
-                TextBlockStartEvent(**self.event_fields(), block_id=self.text_block_id)
-            )
-        events.append(
-            TextBlockDeltaEvent(
-                **self.event_fields(), block_id=self.text_block_id, delta=delta
-            )
-        )
-        return events
-
-    def thinking_delta(self, delta: str) -> list[AgentEvent]:
-        if not delta:
-            return []
-        self.has_semantic_output = True
-        events: list[AgentEvent] = []
-        if self.thinking_block_id is None:
-            self.thinking_block_id = f"thinking:{uuid4()}"
-            events.append(
-                ThinkingBlockStartEvent(
-                    **self.event_fields(), block_id=self.thinking_block_id
+                RawProviderBlockStart(
+                    block_kind="text", block_id=self.text_block_id
                 )
             )
         events.append(
-            ThinkingBlockDeltaEvent(
-                **self.event_fields(),
-                block_id=self.thinking_block_id,
-                delta=delta,
-            )
+            RawProviderTextDelta(block_id=self.text_block_id, delta=delta)
         )
+        self.text_parts.append(delta)
+        return events
+
+    def thinking_delta(self, delta: str) -> list[RawProviderStreamItem]:
+        if not delta:
+            return []
+        self.has_semantic_output = True
+        events: list[RawProviderStreamItem] = []
+        if self.thinking_block_id is None:
+            self.thinking_block_id = f"thinking:{uuid4()}"
+            events.append(
+                RawProviderBlockStart(
+                    block_kind="thinking",
+                    block_id=self.thinking_block_id,
+                )
+            )
+        events.append(
+            RawProviderThinkingDelta(block_id=self.thinking_block_id, delta=delta)
+        )
+        self.thinking_parts.append(delta)
+        return events
+
+    def text_end(self, *, final_text: str | None = None) -> list[RawProviderStreamItem]:
+        events: list[RawProviderStreamItem] = []
+        if final_text is not None:
+            if self.text_block_id is None and final_text:
+                events.extend(self.text_delta(final_text))
+            elif self.text_block_id is not None and "".join(self.text_parts) != final_text:
+                raise LLMTransportContractError(
+                    "provider text done payload differs from its delta prefix",
+                    reason_code="transport_text_done_content_mismatch",
+                )
+        if self.text_block_id is None:
+            return events
+        block_id = self.text_block_id
+        self.text_block_id = None
+        self.text_parts.clear()
+        events.append(RawProviderBlockEnd(block_kind="text", block_id=block_id))
+        return events
+
+    def thinking_end(
+        self, *, final_text: str | None = None
+    ) -> list[RawProviderStreamItem]:
+        events: list[RawProviderStreamItem] = []
+        if final_text is not None:
+            if self.thinking_block_id is None and final_text:
+                events.extend(self.thinking_delta(final_text))
+            elif (
+                self.thinking_block_id is not None
+                and "".join(self.thinking_parts) != final_text
+            ):
+                raise LLMTransportContractError(
+                    "provider thinking done payload differs from its delta prefix",
+                    reason_code="transport_thinking_done_content_mismatch",
+                )
+        if self.thinking_block_id is None:
+            return events
+        block_id = self.thinking_block_id
+        self.thinking_block_id = None
+        self.thinking_parts.clear()
+        events.append(RawProviderBlockEnd(block_kind="thinking", block_id=block_id))
         return events
 
     def tool_call_start(
@@ -102,49 +136,112 @@ class AgentEventBuilder:
         tool_call_id: str,
         tool_call_name: str,
         provider_item_id: str | None = None,
-    ) -> list[AgentEvent]:
+    ) -> list[RawProviderStreamItem]:
+        if not tool_call_id:
+            raise LLMTransportContractError(
+                "tool-call start requires a stable ID",
+                reason_code="transport_tool_call_identity_missing",
+            )
+        existing_call_id = (
+            self.item_id_to_tool_call_id.get(provider_item_id)
+            if provider_item_id
+            else None
+        )
+        if existing_call_id is not None and existing_call_id != tool_call_id:
+            raise LLMTransportContractError(
+                "provider item changed its frozen tool-call identity",
+                reason_code="transport_tool_call_identity_mismatch",
+            )
+        existing_name = self.tool_call_names.get(tool_call_id)
+        if existing_name is not None:
+            if tool_call_name and existing_name != tool_call_name:
+                raise LLMTransportContractError(
+                    "provider changed the frozen tool-call name",
+                    reason_code="transport_tool_call_name_mismatch",
+                )
+            if tool_call_id in self.active_tool_call_ids:
+                if provider_item_id:
+                    self.item_id_to_tool_call_id[provider_item_id] = tool_call_id
+                return []
+            raise LLMTransportContractError(
+                "provider restarted an already closed tool call",
+                reason_code="transport_tool_call_restarted",
+            )
+        if not tool_call_name:
+            raise LLMTransportContractError(
+                "tool-call start requires a non-empty name",
+                reason_code="transport_tool_call_identity_missing",
+            )
         if provider_item_id:
             self.item_id_to_tool_call_id[provider_item_id] = tool_call_id
-        if tool_call_id in self.active_tool_call_ids:
-            return []
         self.has_semantic_output = True
-        self.active_tool_call_ids.add(tool_call_id)
+        self.active_tool_call_ids[tool_call_id] = None
+        self.tool_call_names[tool_call_id] = tool_call_name
+        self.tool_call_argument_parts.setdefault(tool_call_id, [])
         return [
-            ToolCallStartEvent(
-                **self.event_fields(),
-                tool_call_id=tool_call_id,
+            RawProviderBlockStart(
+                block_kind="tool_call",
+                block_id=tool_call_id,
                 tool_call_name=tool_call_name,
             )
         ]
 
-    def tool_call_delta(self, *, tool_call_id: str, delta: str) -> list[AgentEvent]:
+    def tool_call_delta(
+        self, *, tool_call_id: str, delta: str
+    ) -> list[RawProviderStreamItem]:
         if not tool_call_id or not delta:
             return []
         self.has_semantic_output = True
-        events: list[AgentEvent] = []
+        events: list[RawProviderStreamItem] = []
         if tool_call_id not in self.active_tool_call_ids:
-            events.extend(
-                self.tool_call_start(tool_call_id=tool_call_id, tool_call_name="")
+            raise LLMTransportContractError(
+                "tool-call arguments arrived before a named tool-call start",
+                reason_code="transport_tool_call_start_missing",
             )
-        self.tool_call_has_arguments.add(tool_call_id)
+        self.tool_call_argument_parts.setdefault(tool_call_id, []).append(delta)
         events.append(
-            ToolCallDeltaEvent(
-                **self.event_fields(), tool_call_id=tool_call_id, delta=delta
-            )
+            RawProviderToolCallDelta(tool_call_id=tool_call_id, delta=delta)
         )
         return events
 
-    def tool_call_end(self, *, tool_call_id: str) -> list[AgentEvent]:
+    def reconcile_tool_call_arguments(
+        self,
+        *,
+        tool_call_id: str,
+        final_arguments: str,
+    ) -> list[RawProviderStreamItem]:
+        if tool_call_id not in self.active_tool_call_ids:
+            raise LLMTransportContractError(
+                "tool-call final arguments arrived outside a named tool-call start",
+                reason_code="transport_tool_call_start_missing",
+            )
+        parts = self.tool_call_argument_parts.setdefault(tool_call_id, [])
+        accumulated = "".join(parts)
+        if not parts and final_arguments:
+            return self.tool_call_delta(
+                tool_call_id=tool_call_id,
+                delta=final_arguments,
+            )
+        if accumulated != final_arguments:
+            raise LLMTransportContractError(
+                "provider tool-call final arguments differ from their delta prefix",
+                reason_code="transport_tool_arguments_done_content_mismatch",
+            )
+        return []
+
+    def tool_call_end(self, *, tool_call_id: str) -> list[RawProviderStreamItem]:
         if not tool_call_id or tool_call_id not in self.active_tool_call_ids:
             return []
         self.has_semantic_output = True
-        self.active_tool_call_ids.remove(tool_call_id)
-        return [ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id)]
+        self.active_tool_call_ids.pop(tool_call_id)
+        return [
+            RawProviderBlockEnd(block_kind="tool_call", block_id=tool_call_id)
+        ]
 
     def tool_call(
         self, *, tool_call_id: str, tool_call_name: str, arguments: str
-    ) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
+    ) -> list[RawProviderStreamItem]:
+        events: list[RawProviderStreamItem] = []
         events.extend(
             self.tool_call_start(
                 tool_call_id=tool_call_id, tool_call_name=tool_call_name
@@ -158,30 +255,59 @@ class AgentEventBuilder:
         return events
 
     def resolve_tool_call_id(self, item_id_or_call_id: str) -> str:
-        return self.item_id_to_tool_call_id.get(item_id_or_call_id, item_id_or_call_id)
-
-    def has_arguments(self, tool_call_id: str) -> bool:
-        return tool_call_id in self.tool_call_has_arguments
-
-    def close_active_blocks(self) -> list[AgentEvent]:
-        events: list[AgentEvent] = []
-        if self.text_block_id is not None:
-            events.append(
-                TextBlockEndEvent(**self.event_fields(), block_id=self.text_block_id)
+        if not item_id_or_call_id:
+            raise LLMTransportContractError(
+                "tool-call arguments arrived before a named tool-call start",
+                reason_code="transport_tool_call_start_missing",
             )
-            self.text_block_id = None
-        if self.thinking_block_id is not None:
+        resolved = self.item_id_to_tool_call_id.get(
+            item_id_or_call_id, item_id_or_call_id
+        )
+        if resolved not in self.active_tool_call_ids:
+            raise LLMTransportContractError(
+                "tool-call arguments arrived before a named tool-call start",
+                reason_code="transport_tool_call_start_missing",
+            )
+        return resolved
+
+    def resolve_completed_tool_call_id(
+        self,
+        *,
+        provider_item_id: str,
+        tool_call_id: str,
+    ) -> str:
+        mapped = (
+            self.item_id_to_tool_call_id.get(provider_item_id)
+            if provider_item_id
+            else None
+        )
+        if mapped is not None:
+            if tool_call_id and tool_call_id != mapped:
+                raise LLMTransportContractError(
+                    "provider final item changed its frozen tool-call identity",
+                    reason_code="transport_tool_call_identity_mismatch",
+                )
+            return mapped
+        if tool_call_id:
+            return tool_call_id
+        if provider_item_id:
+            return provider_item_id
+        raise LLMTransportContractError(
+            "provider final tool-call item lacks a stable identity",
+            reason_code="transport_tool_call_identity_missing",
+        )
+
+    def close_active_blocks(self) -> list[RawProviderStreamItem]:
+        events: list[RawProviderStreamItem] = []
+        events.extend(self.text_end())
+        events.extend(self.thinking_end())
+        for tool_call_id in tuple(self.active_tool_call_ids):
             events.append(
-                ThinkingBlockEndEvent(
-                    **self.event_fields(), block_id=self.thinking_block_id
+                RawProviderBlockEnd(
+                    block_kind="tool_call", block_id=tool_call_id
                 )
             )
-            self.thinking_block_id = None
-        for tool_call_id in list(self.active_tool_call_ids):
-            events.append(
-                ToolCallEndEvent(**self.event_fields(), tool_call_id=tool_call_id)
-            )
-            self.active_tool_call_ids.remove(tool_call_id)
+            self.active_tool_call_ids.pop(tool_call_id)
         return events
 
 
@@ -312,5 +438,5 @@ def transport_usage_report_from_mapping(raw_usage: Any) -> TransportUsageReport:
     )
 
 
-def event_includes_run_error(events: list[AgentEvent]) -> bool:
-    return any(isinstance(event, RunErrorEvent) for event in events)
+def event_includes_run_error(events: list[RawProviderStreamItem]) -> bool:
+    return any(isinstance(event, RawProviderFailure) for event in events)

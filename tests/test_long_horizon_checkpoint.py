@@ -18,6 +18,10 @@ from psycopg.rows import dict_row
 
 import pulsara_agent.event_log.postgres as postgres_event_log_module
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.event import (
     EventContext,
     EventType,
@@ -25,7 +29,7 @@ from pulsara_agent.event import (
     RunStartEvent,
     SubagentGraphCheckpointCommittedEvent,
     SubagentTaskCreatedEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
 )
 from pulsara_agent.event_log import (
     EventBatchConfirmation,
@@ -113,8 +117,8 @@ CTX = EventContext(
 )
 
 
-def _non_graph(event_id: str, text: str = "x") -> TextBlockDeltaEvent:
-    return TextBlockDeltaEvent(
+def _non_graph(event_id: str, text: str = "x") -> TextBlockSegmentEvent:
+    return make_text_block_segment_event(
         id=event_id,
         created_at="2026-07-13T00:00:00Z",
         **CTX.event_fields(),
@@ -594,16 +598,31 @@ def test_checkpoint_delta_bound_blocks_unbounded_full_fold(tmp_path) -> None:
     assert service.write_states() == {}
 
 
-def test_default_checkpoint_delta_bound_covers_one_maximum_model_call() -> None:
-    policy = default_subagent_graph_checkpoint_policy()
+def test_graph_checkpoint_delta_bound_uses_shared_ledger_hard_horizon() -> None:
+    from pulsara_agent.runtime.authority_materialization import (
+        build_default_authority_materialization_contract_bundle,
+    )
+
+    limits = build_default_authority_materialization_contract_bundle().limits
+    policy = default_subagent_graph_checkpoint_policy(
+        max_unreclaimable_ledger_events=limits.max_unreclaimable_ledger_events,
+        max_unreclaimable_charged_payload_bytes=(
+            limits.max_unreclaimable_charged_payload_bytes
+        ),
+    )
 
     assert (
         policy.checkpoint_max_delta_events
-        >= MAX_MODEL_CALL_MATERIALIZATION_EVENTS * 2
+        == limits.max_unreclaimable_ledger_events
     )
     assert (
         policy.checkpoint_max_delta_bytes
-        >= MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES * 2
+        == limits.max_unreclaimable_charged_payload_bytes
+    )
+    assert policy.checkpoint_max_delta_events > MAX_MODEL_CALL_MATERIALIZATION_EVENTS
+    assert (
+        policy.checkpoint_max_delta_bytes
+        > MAX_MODEL_CALL_MATERIALIZATION_PAYLOAD_BYTES
     )
 
 
@@ -823,7 +842,7 @@ def test_historical_decoder_contract_fingerprint_drift_is_contract_mismatch() ->
     None
 ):
     contract = DEFAULT_EVENT_SCHEMA_REGISTRY.latest_contract_for_type(
-        str(EventType.TEXT_BLOCK_DELTA)
+        str(EventType.TEXT_BLOCK_SEGMENT)
     )
     with pytest.raises(EventSchemaContractMismatch):
         DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_historical_binding(
@@ -836,7 +855,7 @@ def test_historical_decoder_contract_fingerprint_drift_is_contract_mismatch() ->
 
 def test_event_schema_domain_fingerprint_drift_is_contract_mismatch() -> None:
     contract = DEFAULT_EVENT_SCHEMA_REGISTRY.latest_contract_for_type(
-        str(EventType.TEXT_BLOCK_DELTA)
+        str(EventType.TEXT_BLOCK_SEGMENT)
     )
 
     with pytest.raises(EventSchemaContractMismatch):
@@ -1675,7 +1694,7 @@ def test_postgres_raw_snapshot_returns_schema_envelope_without_current_union_dec
     dsn, runtime_session_id, context, log = _postgres_log_or_skip(tmp_path)
     try:
         stored = log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **context.event_fields(),
                 block_id="text:legacy-row",
                 delta="legacy",
@@ -1722,7 +1741,7 @@ def test_row_without_explicit_per_event_schema_identity_fails_closed(
     dsn, runtime_session_id, context, log = _postgres_log_or_skip(tmp_path)
     try:
         stored = log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **context.event_fields(),
                 block_id="text:missing-schema",
                 delta="schema",
@@ -1758,7 +1777,7 @@ def test_confirm_batch_compares_raw_per_event_schema_identity_and_payload_withou
     tmp_path,
 ) -> None:
     dsn, runtime_session_id, context, log = _postgres_log_or_skip(tmp_path)
-    candidate = TextBlockDeltaEvent(
+    candidate = make_text_block_segment_event(
         **context.event_fields(),
         block_id="text:confirm-schema",
         delta="stable",
@@ -1798,7 +1817,7 @@ def test_checkpoint_delta_snapshot_is_one_database_snapshot(
     try:
         log.append(task)
         log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **context.event_fields(),
                 block_id="text:checkpoint-race",
                 delta="padding",

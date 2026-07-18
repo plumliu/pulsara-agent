@@ -397,6 +397,16 @@ class HostCore:
                         )
                     await self.registry.publish(reservation, session)
                     self._session_leases[host_session_id] = lease
+            if (
+                self._governance_coordinator is not None
+                and wiring.runtime_wiring.memory_governance_engine is not None
+            ):
+                # Reopen recovery cannot wait for a future run safe point.  The
+                # coordinator discovers durable Preparing/Prepared ownership
+                # after the Host session itself is visible and fully wired.
+                self._governance_coordinator.notify(
+                    wiring.runtime_wiring.memory_governance_engine
+                )
             return session
         except BaseException as open_error:
             # Rollback exactly once: release the reservation, release the lease

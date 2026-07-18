@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
-from typing import Iterable, Protocol, Sequence
+from typing import Any, Iterable, Protocol, Sequence
 
 from pulsara_agent.event.events import AgentEvent
 from pulsara_agent.event_log.serialization import (
@@ -14,6 +14,10 @@ from pulsara_agent.event_log.serialization import (
     canonical_event_payload_bytes,
 )
 from pulsara_agent.message.message import Msg
+from pulsara_agent.primitives.authority_materialization import (
+    LedgerMaterializationAccountStateFact,
+    PhysicalChargeContractFact,
+)
 from pulsara_agent.primitives.context import canonical_utc_timestamp, context_fingerprint
 
 
@@ -41,6 +45,44 @@ class EventLogWriteConflict(RuntimeError):
             "EventLog conditional write conflict: "
             f"expected last sequence {expected_last_sequence}, actual {actual_last_sequence}"
         )
+
+
+class MaterializationAccountStateConflict(RuntimeError):
+    """The event ledger and its materialization account lost their shared CAS."""
+
+    def __init__(
+        self,
+        *,
+        expected_state_fingerprint: str | None,
+        actual_state_fingerprint: str | None,
+    ) -> None:
+        self.expected_state_fingerprint = expected_state_fingerprint
+        self.actual_state_fingerprint = actual_state_fingerprint
+        super().__init__(
+            "Ledger materialization account CAS conflict: "
+            f"expected {expected_state_fingerprint!r}, "
+            f"actual {actual_state_fingerprint!r}"
+        )
+
+
+class EventLogTransactionCompanion(Protocol):
+    """Typed business mutation committed with one materialization append.
+
+    The PostgreSQL method runs on the EventLog transaction cursor.  The
+    in-memory method must validate and publish atomically from the caller's
+    perspective and must not perform fallible work after mutation.
+    """
+
+    def apply_postgres(
+        self,
+        cursor: Any,
+        stored_events: Sequence[AgentEvent],
+    ) -> None: ...
+
+    def apply_in_memory(
+        self,
+        stored_events: Sequence[AgentEvent],
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,11 +277,114 @@ class RawEventTypeSelectionSnapshot:
 
     def __post_init__(self) -> None:
         sequences = tuple(item.sequence for item in self.events)
-        if sequences != tuple(sorted(sequences)) or len(sequences) != len(set(sequences)):
+        if sequences != tuple(sorted(sequences)) or len(sequences) != len(
+            set(sequences)
+        ):
             raise ValueError("raw event type selection must be ordered and unique")
         if sequences and sequences[-1] > self.through_sequence:
             raise ValueError("raw event type selection exceeds its high-water")
 
+
+@dataclass(frozen=True, slots=True)
+class RawTranscriptDomainPrefixFact:
+    through_sequence: int
+    ledger_payload_bytes: int
+    semantic_event_count: int
+    semantic_accumulator: str
+    ledger_continuity_accumulator: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.through_sequence < 0
+            or self.ledger_payload_bytes < 0
+            or self.semantic_event_count < 0
+        ):
+            raise ValueError("transcript prefix counters must be non-negative")
+        if self.semantic_event_count > self.through_sequence:
+            raise ValueError("transcript semantic count exceeds ledger prefix")
+        if not self.semantic_accumulator or not self.ledger_continuity_accumulator:
+            raise ValueError("transcript prefix accumulators are required")
+
+
+@dataclass(frozen=True, slots=True)
+class RawTranscriptDomainDeltaSnapshot:
+    runtime_session_id: str
+    before: RawTranscriptDomainPrefixFact
+    after: RawTranscriptDomainPrefixFact
+    semantic_events: tuple[RawStoredEventEnvelope, ...]
+    registry_contract_fingerprint: str
+    snapshot_fingerprint: str
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        runtime_session_id: str,
+        before: RawTranscriptDomainPrefixFact,
+        after: RawTranscriptDomainPrefixFact,
+        semantic_events: tuple[RawStoredEventEnvelope, ...],
+        registry_contract_fingerprint: str,
+    ) -> "RawTranscriptDomainDeltaSnapshot":
+        values = {
+            "runtime_session_id": runtime_session_id,
+            "before": before,
+            "after": after,
+            "semantic_events": semantic_events,
+            "registry_contract_fingerprint": registry_contract_fingerprint,
+        }
+        return cls(
+            **values,
+            snapshot_fingerprint=context_fingerprint(
+                "raw-transcript-domain-delta-snapshot:v1",
+                {
+                    "runtime_session_id": runtime_session_id,
+                    "before": asdict(before),
+                    "after": asdict(after),
+                    "semantic_envelopes": tuple(
+                        item.envelope_fingerprint for item in semantic_events
+                    ),
+                    "registry_contract_fingerprint": (
+                        registry_contract_fingerprint
+                    ),
+                },
+            ),
+        )
+
+    def __post_init__(self) -> None:
+        if not self.runtime_session_id or not self.registry_contract_fingerprint:
+            raise ValueError("transcript domain delta identity is required")
+        if self.after.through_sequence < self.before.through_sequence:
+            raise ValueError("transcript domain delta range is reversed")
+        expected_count = (
+            self.after.semantic_event_count - self.before.semantic_event_count
+        )
+        if expected_count != len(self.semantic_events):
+            raise ValueError("transcript semantic delta count proof mismatch")
+        sequences = tuple(item.sequence for item in self.semantic_events)
+        if sequences != tuple(sorted(sequences)) or len(sequences) != len(
+            set(sequences)
+        ):
+            raise ValueError("transcript semantic delta must be ordered and unique")
+        if any(
+            item.sequence <= self.before.through_sequence
+            or item.sequence > self.after.through_sequence
+            for item in self.semantic_events
+        ):
+            raise ValueError("transcript semantic delta exceeds proven range")
+        expected = context_fingerprint(
+            "raw-transcript-domain-delta-snapshot:v1",
+            {
+                "runtime_session_id": self.runtime_session_id,
+                "before": asdict(self.before),
+                "after": asdict(self.after),
+                "semantic_envelopes": tuple(
+                    item.envelope_fingerprint for item in self.semantic_events
+                ),
+                "registry_contract_fingerprint": self.registry_contract_fingerprint,
+            },
+        )
+        if self.snapshot_fingerprint != expected:
+            raise ValueError("transcript semantic delta snapshot fingerprint mismatch")
 
 @dataclass(frozen=True, slots=True)
 class RawEventSelectionBounds:
@@ -249,6 +394,25 @@ class RawEventSelectionBounds:
     def __post_init__(self) -> None:
         if self.max_events < 1 or self.max_payload_bytes < 1:
             raise ValueError("raw event selection bounds must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class RawLedgerUsageSnapshot:
+    """Bounded aggregate used by AP0 physical-account shadow bootstrap."""
+
+    through_sequence: int
+    event_count: int
+    candidate_payload_bytes: int
+
+    def __post_init__(self) -> None:
+        if min(
+            self.through_sequence,
+            self.event_count,
+            self.candidate_payload_bytes,
+        ) < 0:
+            raise ValueError("ledger usage snapshot values must be non-negative")
+        if self.event_count != self.through_sequence:
+            raise ValueError("append-only ledger event count must equal high-water")
 
 
 def _selection_bounds_payload(bounds: RawEventSelectionBounds) -> dict[str, int]:
@@ -631,6 +795,24 @@ class EventLog(Protocol):
         deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]: ...
 
+    def read_materialization_account_state(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> LedgerMaterializationAccountStateFact | None: ...
+
+    def extend_with_materialization_state(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_account_state_fingerprint: str | None,
+        resulting_account_state: LedgerMaterializationAccountStateFact,
+        physical_charge_contract: PhysicalChargeContractFact,
+        transaction_companion: EventLogTransactionCompanion | None = None,
+        expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> list[AgentEvent]: ...
+
     def iter(
         self,
         *,
@@ -648,6 +830,12 @@ class EventLog(Protocol):
         *,
         deadline_monotonic: float | None = None,
     ) -> EventBatchConfirmation: ...
+
+    def read_ledger_usage_snapshot(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawLedgerUsageSnapshot: ...
 
     def read_range_snapshot(
         self,
@@ -686,6 +874,7 @@ class EventLog(Protocol):
         event_type: str,
         *,
         limit: int,
+        through_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> tuple[RawStoredEventEnvelope, ...]: ...
 
@@ -696,10 +885,22 @@ class EventLog(Protocol):
         active_runs_only: bool = False,
         run_ids: tuple[str, ...] | None = None,
         minimum_sequence: int = 1,
+        through_sequence: int | None = None,
         max_events: int = DEFAULT_SPARSE_EVENT_READ_MAX_EVENTS,
         max_payload_bytes: int = DEFAULT_SPARSE_EVENT_READ_MAX_PAYLOAD_BYTES,
         deadline_monotonic: float | None = None,
     ) -> RawEventTypeSelectionSnapshot: ...
+
+    def read_transcript_domain_delta(
+        self,
+        *,
+        after_sequence: int,
+        through_sequence: int | None = None,
+        max_events: int = DEFAULT_SPARSE_EVENT_READ_MAX_EVENTS,
+        max_payload_bytes: int = DEFAULT_SPARSE_EVENT_READ_MAX_PAYLOAD_BYTES,
+        registry_contract_fingerprint: str,
+        deadline_monotonic: float | None = None,
+    ) -> RawTranscriptDomainDeltaSnapshot: ...
 
     def read_context_authority_bundle(
         self,

@@ -115,6 +115,10 @@ class RelatednessExecutionContext:
     governance_batch_id: str
     allowlists: Mapping[str, frozenset[str]]
     availability: Mapping[str, RelatednessAvailability]
+    node_revisions: Mapping[str, Mapping[str, int]]
+    verified_evidence_refs: Mapping[str, frozenset[str]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def allows_lifecycle(self, entry_id: str, memory_id: str) -> bool:
         return (
@@ -131,7 +135,12 @@ class RelatednessBatchResult:
     def for_candidate(self, entry_id: str) -> CandidateRelatedness:
         return self.candidates.get(entry_id, CandidateRelatedness(entry_id=entry_id))
 
-    def execution_context(self, governance_batch_id: str) -> RelatednessExecutionContext:
+    def execution_context(
+        self,
+        governance_batch_id: str,
+        *,
+        verified_evidence_refs: Mapping[str, frozenset[str]] | None = None,
+    ) -> RelatednessExecutionContext:
         return RelatednessExecutionContext(
             governance_batch_id=governance_batch_id,
             allowlists=MappingProxyType(
@@ -139,6 +148,20 @@ class RelatednessBatchResult:
             ),
             availability=MappingProxyType(
                 {entry_id: result.availability for entry_id, result in self.candidates.items()}
+            ),
+            node_revisions=MappingProxyType(
+                {
+                    entry_id: MappingProxyType(
+                        {
+                            item.view.id: item.view.node_revision
+                            for item in result.memories
+                        }
+                    )
+                    for entry_id, result in self.candidates.items()
+                }
+            ),
+            verified_evidence_refs=MappingProxyType(
+                dict(verified_evidence_refs or {})
             ),
         )
 

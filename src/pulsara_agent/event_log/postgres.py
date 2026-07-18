@@ -22,6 +22,7 @@ from pulsara_agent.event.events import (
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     EventSchemaContractMismatch,
+    canonical_event_payload_bytes,
     dump_agent_event,
 )
 from pulsara_agent.event_log.postgres_pool import (
@@ -39,20 +40,37 @@ from pulsara_agent.event_log.protocol import (
     RawEventLogReadSnapshot,
     RawEventIdSelectionSnapshot,
     RawEventTypeSelectionSnapshot,
+    RawLedgerUsageSnapshot,
     RawEventSelectionBounds,
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
     RawStoredEventEnvelope,
+    RawTranscriptDomainDeltaSnapshot,
+    RawTranscriptDomainPrefixFact,
     EventLogWriteConflict,
+    EventLogTransactionCompanion,
+    MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
     same_event_payload,
     same_event_raw_payload,
+)
+from pulsara_agent.event_log.transcript_prefix import (
+    EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+    EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
+    advance_ledger_continuity_accumulator,
+    advance_transcript_semantic_accumulator,
+    classify_transcript_event_type,
 )
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     canonical_utc_timestamp,
     context_fingerprint,
 )
+from pulsara_agent.primitives.authority_materialization import (
+    LedgerMaterializationAccountStateFact,
+    PhysicalChargeContractFact,
+)
+from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import (
     MessageReducer,
@@ -75,6 +93,11 @@ class PostgresEventLog:
     _confirmed_parent_turn_runs: dict[str, str] = field(
         default_factory=dict, init=False, repr=False
     )
+
+    def __post_init__(self) -> None:
+        with postgres_event_connection(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(RUNTIME_TRUTH_SCHEMA_SQL)
 
     def ensure_runtime_session_owner(self) -> None:
         """Create the session row needed by artifacts produced before RunStart."""
@@ -183,6 +206,204 @@ class PostgresEventLog:
                 (turn_id, event.run_id) for turn_id, event in ensured_turns
             )
             return stored_events
+
+    def read_materialization_account_state(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> LedgerMaterializationAccountStateFact | None:
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(
+                    cursor, deadline, include_lock=False
+                )
+                cursor.execute(
+                    """
+                    select state_payload
+                    from ledger_materialization_accounts
+                    where session_id = %s
+                    """,
+                    (self.runtime_session_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            return None
+        return LedgerMaterializationAccountStateFact.model_validate(
+            row["state_payload"]
+        )
+
+    def extend_with_materialization_state(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_account_state_fingerprint: str | None,
+        resulting_account_state: LedgerMaterializationAccountStateFact,
+        physical_charge_contract: PhysicalChargeContractFact,
+        transaction_companion: EventLogTransactionCompanion | None = None,
+        expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> list[AgentEvent]:
+        event_list = list(events)
+        if not event_list:
+            raise ValueError("materialization state commit requires events")
+        _validate_live_batch(event_list)
+        deadline = self._write_deadline(deadline_monotonic)
+        with self._parent_cache_lock:
+            with postgres_event_connection(
+                self.dsn,
+                lane=PostgresConnectionLane.CRITICAL_WRITE,
+                deadline_monotonic=deadline,
+            ) as connection:
+                with connection.cursor(row_factory=dict_row) as cursor:
+                    self._apply_transaction_deadline(cursor, deadline, include_lock=True)
+                    self._lock_session(cursor)
+                    cursor.execute(
+                        """
+                        select account_state_fingerprint
+                        from ledger_materialization_accounts
+                        where session_id = %s
+                        for update
+                        """,
+                        (self.runtime_session_id,),
+                    )
+                    account_row = cursor.fetchone()
+                    actual_account_fingerprint = (
+                        str(account_row["account_state_fingerprint"])
+                        if account_row is not None
+                        else None
+                    )
+                    if (
+                        actual_account_fingerprint
+                        != expected_account_state_fingerprint
+                    ):
+                        raise MaterializationAccountStateConflict(
+                            expected_state_fingerprint=(
+                                expected_account_state_fingerprint
+                            ),
+                            actual_state_fingerprint=actual_account_fingerprint,
+                        )
+
+                    next_sequence = self._next_sequence(cursor)
+                    actual_last_sequence = next_sequence - 1
+                    if (
+                        expected_last_sequence is not None
+                        and expected_last_sequence != actual_last_sequence
+                    ):
+                        raise EventLogWriteConflict(
+                            expected_last_sequence=expected_last_sequence,
+                            actual_last_sequence=actual_last_sequence,
+                        )
+                    expected_result_sequence = actual_last_sequence + len(event_list)
+                    if (
+                        resulting_account_state.runtime_session_id
+                        != self.runtime_session_id
+                        or resulting_account_state.ledger_through_sequence
+                        != expected_result_sequence
+                        or resulting_account_state.ledger_event_count_through
+                        != expected_result_sequence
+                    ):
+                        raise ValueError(
+                            "materialization state does not cover the committed event batch"
+                        )
+
+                    self._ensure_event_ids_available(cursor, event_list)
+                    ensured_runs, ensured_turns = self._ensure_parent_rows_batch(
+                        cursor, event_list
+                    )
+                    stored_events: list[AgentEvent] = []
+                    for event in event_list:
+                        stored, next_sequence = self._with_canonical_sequence(
+                            event, next_sequence
+                        )
+                        stored_events.append(stored)
+                    self._validate_materialization_envelope_charge_bounds(
+                        stored_events,
+                        physical_charge_contract,
+                    )
+                    self._insert_events(cursor, stored_events)
+                    for stored in stored_events:
+                        self._sync_run_projection(cursor, stored)
+
+                    generation = resulting_account_state.generation
+                    cursor.execute(
+                        """
+                        insert into ledger_materialization_accounts (
+                            session_id,
+                            account_state_fingerprint,
+                            ledger_materialization_generation,
+                            consumer_horizon_revision,
+                            ledger_through_sequence,
+                            state_payload,
+                            updated_at
+                        ) values (%s, %s, %s, %s, %s, %s, now())
+                        on conflict (session_id) do update set
+                            account_state_fingerprint = excluded.account_state_fingerprint,
+                            ledger_materialization_generation =
+                                excluded.ledger_materialization_generation,
+                            consumer_horizon_revision =
+                                excluded.consumer_horizon_revision,
+                            ledger_through_sequence = excluded.ledger_through_sequence,
+                            state_payload = excluded.state_payload,
+                            updated_at = now()
+                        """,
+                        (
+                            self.runtime_session_id,
+                            resulting_account_state.account_state_fingerprint,
+                            generation.ledger_materialization_generation,
+                            generation.consumer_horizon_revision,
+                            resulting_account_state.ledger_through_sequence,
+                            Jsonb(resulting_account_state.model_dump(mode="json")),
+                        ),
+                    )
+                    if transaction_companion is not None:
+                        transaction_companion.apply_postgres(
+                            cursor,
+                            stored_events,
+                        )
+            self._session_parent_confirmed = True
+            self._confirmed_parent_run_ids.update(ensured_runs)
+            self._confirmed_parent_turn_runs.update(
+                (turn_id, event.run_id) for turn_id, event in ensured_turns
+            )
+            return stored_events
+
+    def _validate_materialization_envelope_charge_bounds(
+        self,
+        stored_events: list[AgentEvent],
+        contract: PhysicalChargeContractFact,
+    ) -> None:
+        bounds = {
+            (item.event_type, item.event_schema_version): item
+            for item in contract.bookkeeping_event_bounds
+        }
+        for stored in stored_events:
+            binding = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(
+                stored
+            ).schema_contract
+            bound = bounds.get((str(stored.type), binding.event_schema_version))
+            if bound is None:
+                continue
+            actual = len(canonical_event_payload_bytes(stored)) + (
+                contract.fixed_sequence_wrapper_charge_bytes_per_event
+                + contract.fixed_schema_wrapper_charge_bytes_per_event
+            )
+            if (
+                str(stored.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED"
+                and actual
+                > stored.charge.charge_applied_event_charge_payload_bytes
+            ):
+                raise ValueError(
+                    "stored charge-applied envelope exceeds its dynamic charge bound"
+                )
+            if actual > bound.max_stored_envelope_bytes:
+                raise ValueError(
+                    "stored bookkeeping envelope exceeds fixed charge bound"
+                )
 
     def repair_run_projection(self) -> int:
         """Rebuild this session's runs summary rows from canonical events."""
@@ -549,10 +770,13 @@ class PostgresEventLog:
         event_type: str,
         *,
         limit: int,
+        through_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> tuple[RawStoredEventEnvelope, ...]:
         if limit < 1:
             raise ValueError("raw event type read limit must be positive")
+        if through_sequence is not None and through_sequence < 0:
+            raise ValueError("raw event type high-water cannot be negative")
         deadline = self._read_deadline(deadline_monotonic)
         with postgres_event_connection(
             self.dsn,
@@ -561,8 +785,7 @@ class PostgresEventLog:
         ) as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
-                cursor.execute(
-                    """
+                query = """
                     select id, session_id, run_id, turn_id, reply_id, sequence,
                            event_type, event_schema_version,
                            event_schema_fingerprint,
@@ -570,11 +793,14 @@ class PostgresEventLog:
                            created_at, payload
                     from agent_events
                     where session_id = %s and event_type = %s
-                    order by sequence desc
-                    limit %s
-                    """,
-                    (self.runtime_session_id, event_type, limit),
-                )
+                """
+                parameters: list[object] = [self.runtime_session_id, event_type]
+                if through_sequence is not None:
+                    query += " and sequence <= %s"
+                    parameters.append(through_sequence)
+                query += " order by sequence desc limit %s"
+                parameters.append(limit)
+                cursor.execute(query, tuple(parameters))
                 return tuple(self._raw_from_row(row) for row in cursor.fetchall())
 
     def read_raw_model_call_events(
@@ -641,6 +867,7 @@ class PostgresEventLog:
         active_runs_only: bool = False,
         run_ids: tuple[str, ...] | None = None,
         minimum_sequence: int = 1,
+        through_sequence: int | None = None,
         max_events: int = 16_384,
         max_payload_bytes: int = 16 * 1024 * 1024,
         deadline_monotonic: float | None = None,
@@ -667,7 +894,16 @@ class PostgresEventLog:
                     "from agent_events where session_id = %s",
                     (self.runtime_session_id,),
                 )
-                high_water = int(cursor.fetchone()["high_water"])
+                current_high_water = int(cursor.fetchone()["high_water"])
+                high_water = (
+                    current_high_water
+                    if through_sequence is None
+                    else through_sequence
+                )
+                if high_water < 0 or high_water > current_high_water:
+                    raise ValueError(
+                        "requested sparse high-water has not been committed"
+                    )
                 active_run_clause = (
                     """
                       and run_id in (
@@ -683,6 +919,7 @@ class PostgresEventLog:
                     self.runtime_session_id,
                     list(event_types),
                     minimum_sequence,
+                    high_water,
                 ]
                 if run_ids is not None:
                     parameters.append(list(run_ids))
@@ -699,6 +936,7 @@ class PostgresEventLog:
                     from agent_events
                     where session_id = %s and event_type = any(%s)
                       and sequence >= %s
+                      and sequence <= %s
                     {run_id_clause}
                     {active_run_clause}
                     order by sequence asc
@@ -721,6 +959,129 @@ class PostgresEventLog:
                     through_sequence=high_water,
                     events=events,
                 )
+
+    def read_transcript_domain_delta(
+        self,
+        *,
+        after_sequence: int,
+        through_sequence: int | None = None,
+        max_events: int = 16_384,
+        max_payload_bytes: int = 16 * 1024 * 1024,
+        registry_contract_fingerprint: str,
+        deadline_monotonic: float | None = None,
+    ) -> RawTranscriptDomainDeltaSnapshot:
+        if after_sequence < 0 or max_events < 1 or max_payload_bytes < 1:
+            raise ValueError("transcript domain delta bounds are invalid")
+        if not registry_contract_fingerprint:
+            raise ValueError("transcript registry contract fingerprint is required")
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as control:
+                control.execute("set transaction isolation level repeatable read")
+                self._apply_transaction_deadline(
+                    control,
+                    deadline,
+                    include_lock=False,
+                )
+                control.execute(
+                    "select coalesce(max(sequence), 0) as high_water "
+                    "from agent_events where session_id = %s",
+                    (self.runtime_session_id,),
+                )
+                high_water = int(control.fetchone()["high_water"])
+                effective_through = (
+                    high_water if through_sequence is None else through_sequence
+                )
+                if (
+                    effective_through > high_water
+                    or effective_through < after_sequence
+                ):
+                    raise ValueError("transcript domain delta range is invalid")
+                before = self._read_transcript_prefix(
+                    control,
+                    sequence=after_sequence,
+                )
+                after = self._read_transcript_prefix(
+                    control,
+                    sequence=effective_through,
+                )
+            events: list[RawStoredEventEnvelope] = []
+            payload_bytes = 0
+            with connection.cursor(
+                name="pulsara_transcript_domain_delta",
+                row_factory=dict_row,
+            ) as cursor:
+                cursor.execute(
+                    """
+                    select id, session_id, run_id, turn_id, reply_id, sequence,
+                           event_type, event_schema_version,
+                           event_schema_fingerprint,
+                           event_domain_contract_fingerprint,
+                           created_at, payload
+                    from agent_events
+                    where session_id = %s
+                      and transcript_event_domain = 'transcript_semantic'
+                      and sequence > %s
+                      and sequence <= %s
+                    order by sequence asc
+                    """,
+                    (
+                        self.runtime_session_id,
+                        after_sequence,
+                        effective_through,
+                    ),
+                )
+                while row := cursor.fetchone():
+                    if len(events) == max_events:
+                        raise ValueError(
+                            "transcript semantic delta exceeds its event bound"
+                        )
+                    raw = self._raw_from_row(row)
+                    payload_bytes += len(raw.canonical_payload_bytes)
+                    if payload_bytes > max_payload_bytes:
+                        raise ValueError(
+                            "transcript semantic delta exceeds its byte bound"
+                        )
+                    events.append(raw)
+        self._validate_transcript_semantic_delta(
+            before=before,
+            after=after,
+            semantic_events=tuple(events),
+        )
+        return RawTranscriptDomainDeltaSnapshot.build(
+            runtime_session_id=self.runtime_session_id,
+            before=before,
+            after=after,
+            semantic_events=tuple(events),
+            registry_contract_fingerprint=registry_contract_fingerprint,
+        )
+
+    @staticmethod
+    def _validate_transcript_semantic_delta(
+        *,
+        before: RawTranscriptDomainPrefixFact,
+        after: RawTranscriptDomainPrefixFact,
+        semantic_events: tuple[RawStoredEventEnvelope, ...],
+    ) -> None:
+        count = before.semantic_event_count
+        accumulator = before.semantic_accumulator
+        for raw in semantic_events:
+            event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
+            count += 1
+            accumulator = advance_transcript_semantic_accumulator(
+                accumulator,
+                event=event,
+                event_schema_version=raw.event_schema_version,
+                event_schema_fingerprint=raw.event_schema_fingerprint,
+            )
+        if count != after.semantic_event_count:
+            raise ValueError("transcript semantic prefix count is inconsistent")
+        if accumulator != after.semantic_accumulator:
+            raise ValueError("transcript semantic prefix accumulator is inconsistent")
 
     def read_context_authority_bundle(
         self,
@@ -1251,6 +1612,41 @@ class PostgresEventLog:
                 self._apply_transaction_deadline(cursor, deadline, include_lock=False)
                 return self._next_sequence(cursor)
 
+    def read_ledger_usage_snapshot(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawLedgerUsageSnapshot:
+        """Read physical shadow bootstrap totals without decoding the ledger."""
+
+        deadline = self._read_deadline(deadline_monotonic)
+        with postgres_event_connection(
+            self.dsn,
+            lane=PostgresConnectionLane.BOUNDED_READ,
+            deadline_monotonic=deadline,
+        ) as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                self._apply_transaction_deadline(cursor, deadline, include_lock=False)
+                cursor.execute(
+                    """
+                    select coalesce(max(sequence), 0) as through_sequence,
+                           count(*) as event_count,
+                           coalesce(sum(octet_length(payload::text)), 0)
+                               as candidate_payload_bytes
+                    from agent_events
+                    where session_id = %s
+                    """,
+                    (self.runtime_session_id,),
+                )
+                row = cursor.fetchone()
+        if row is None:  # pragma: no cover - aggregate always returns one row
+            raise RuntimeError("ledger usage aggregate returned no row")
+        return RawLedgerUsageSnapshot(
+            through_sequence=int(row["through_sequence"]),
+            event_count=int(row["event_count"]),
+            candidate_payload_bytes=int(row["candidate_payload_bytes"]),
+        )
+
     def _lock_session(self, cursor) -> None:
         cursor.execute(
             "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
@@ -1379,7 +1775,7 @@ class PostgresEventLog:
         row = cursor.fetchone()
         if row is None:
             return
-        session_id = row[0]
+        session_id = row["session_id"] if isinstance(row, dict) else row[0]
         if session_id != self.runtime_session_id:
             raise ValueError(
                 f"run_id {event.run_id!r} already belongs to runtime session {session_id!r}"
@@ -1392,7 +1788,10 @@ class PostgresEventLog:
         row = cursor.fetchone()
         if row is None:
             return
-        session_id, run_id = row
+        if isinstance(row, dict):
+            session_id, run_id = row["session_id"], row["run_id"]
+        else:
+            session_id, run_id = row
         if session_id != self.runtime_session_id or run_id != event.run_id:
             raise ValueError(
                 f"turn_id {event.turn_id!r} already belongs to runtime session {session_id!r} "
@@ -1400,6 +1799,7 @@ class PostgresEventLog:
             )
 
     def _insert_event(self, cursor, stored: AgentEvent) -> None:
+        prefix = self._transcript_prefix_rows(cursor, [stored])[0]
         cursor.execute(
             """
             insert into agent_events (
@@ -1413,33 +1813,48 @@ class PostgresEventLog:
                 event_schema_version,
                 event_schema_fingerprint,
                 event_domain_contract_fingerprint,
+                transcript_event_domain,
+                transcript_semantic_prefix_count,
+                transcript_semantic_prefix_accumulator,
+                ledger_continuity_accumulator,
+                ledger_payload_prefix_bytes,
                 created_at,
                 payload
             )
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)
+            values (
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s
+            )
             """,
-            self._event_insert_params(stored),
+            self._event_insert_params(stored, prefix),
         )
 
     def _insert_events(self, cursor, stored_events: list[AgentEvent]) -> None:
         row_template = (
-            "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)"
+            "(%s, %s, %s, %s, %s, %s, %s, %s, "
+            "%s, %s, %s, %s, %s, %s, %s, %s::timestamptz, %s)"
         )
+        prefix_rows = self._transcript_prefix_rows(cursor, stored_events)
         # Keep well below PostgreSQL's parameter ceiling while preserving one
         # physical INSERT for the normal model-stream/event batch.
         for offset in range(0, len(stored_events), 1_000):
             chunk = stored_events[offset : offset + 1_000]
+            prefix_chunk = prefix_rows[offset : offset + 1_000]
             parameters = tuple(
                 value
-                for stored in chunk
-                for value in self._event_insert_params(stored)
+                for stored, prefix in zip(chunk, prefix_chunk, strict=True)
+                for value in self._event_insert_params(stored, prefix)
             )
             cursor.execute(
                 """
                 insert into agent_events (
                     id, session_id, run_id, turn_id, reply_id, sequence,
                     event_type, event_schema_version, event_schema_fingerprint,
-                    event_domain_contract_fingerprint, created_at, payload
+                    event_domain_contract_fingerprint, transcript_event_domain,
+                    transcript_semantic_prefix_count,
+                    transcript_semantic_prefix_accumulator,
+                    ledger_continuity_accumulator,
+                    ledger_payload_prefix_bytes, created_at, payload
                 )
                 values
                 """
@@ -1447,7 +1862,11 @@ class PostgresEventLog:
                 parameters,
             )
 
-    def _event_insert_params(self, stored: AgentEvent) -> tuple[object, ...]:
+    def _event_insert_params(
+        self,
+        stored: AgentEvent,
+        prefix: tuple[str, RawTranscriptDomainPrefixFact],
+    ) -> tuple[object, ...]:
         payload = dump_agent_event(stored)
         contract = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(
             stored
@@ -1463,8 +1882,116 @@ class PostgresEventLog:
             contract.event_schema_version,
             contract.event_schema_fingerprint,
             contract.domain_contract_fingerprint,
+            prefix[0],
+            prefix[1].semantic_event_count,
+            prefix[1].semantic_accumulator,
+            prefix[1].ledger_continuity_accumulator,
+            prefix[1].ledger_payload_bytes,
             stored.created_at,
             Jsonb(payload),
+        )
+
+    def _transcript_prefix_rows(
+        self,
+        cursor,
+        stored_events: list[AgentEvent],
+    ) -> list[tuple[str, RawTranscriptDomainPrefixFact]]:
+        previous = self._read_transcript_prefix(cursor, sequence=None)
+        rows: list[tuple[str, RawTranscriptDomainPrefixFact]] = []
+        for stored in stored_events:
+            raw = RawStoredEventEnvelope.from_stored_event(
+                event=stored,
+                runtime_session_id=self.runtime_session_id,
+                schema_registry=DEFAULT_EVENT_SCHEMA_REGISTRY,
+            )
+            domain = classify_transcript_event_type(raw.event_type)
+            semantic_count = previous.semantic_event_count
+            semantic_accumulator = previous.semantic_accumulator
+            if domain == "transcript_semantic":
+                semantic_count += 1
+                semantic_accumulator = advance_transcript_semantic_accumulator(
+                    previous.semantic_accumulator,
+                    event=stored,
+                    event_schema_version=raw.event_schema_version,
+                    event_schema_fingerprint=raw.event_schema_fingerprint,
+                )
+            previous = RawTranscriptDomainPrefixFact(
+                through_sequence=raw.sequence,
+                ledger_payload_bytes=(
+                    previous.ledger_payload_bytes
+                    + len(raw.canonical_payload_bytes)
+                ),
+                semantic_event_count=semantic_count,
+                semantic_accumulator=semantic_accumulator,
+                ledger_continuity_accumulator=advance_ledger_continuity_accumulator(
+                    previous.ledger_continuity_accumulator,
+                    envelope_fingerprint=raw.envelope_fingerprint,
+                ),
+            )
+            rows.append((domain, previous))
+        return rows
+
+    def _read_transcript_prefix(
+        self,
+        cursor,
+        *,
+        sequence: int | None,
+    ) -> RawTranscriptDomainPrefixFact:
+        if sequence == 0:
+            return RawTranscriptDomainPrefixFact(
+                through_sequence=0,
+                ledger_payload_bytes=0,
+                semantic_event_count=0,
+                semantic_accumulator=EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
+                ledger_continuity_accumulator=EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+            )
+        if sequence is None:
+            cursor.execute(
+                """
+                select sequence, transcript_semantic_prefix_count,
+                       transcript_semantic_prefix_accumulator,
+                       ledger_continuity_accumulator,
+                       ledger_payload_prefix_bytes
+                from agent_events
+                where session_id = %s
+                order by sequence desc
+                limit 1
+                """,
+                (self.runtime_session_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                select sequence, transcript_semantic_prefix_count,
+                       transcript_semantic_prefix_accumulator,
+                       ledger_continuity_accumulator,
+                       ledger_payload_prefix_bytes
+                from agent_events
+                where session_id = %s and sequence = %s
+                """,
+                (self.runtime_session_id, sequence),
+            )
+        row = cursor.fetchone()
+        if row is None:
+            if sequence is None:
+                return self._read_transcript_prefix(cursor, sequence=0)
+            raise ValueError("transcript prefix sequence is not committed")
+        if isinstance(row, dict):
+            values = (
+                row["sequence"],
+                row["transcript_semantic_prefix_count"],
+                row["transcript_semantic_prefix_accumulator"],
+                row["ledger_continuity_accumulator"],
+                row["ledger_payload_prefix_bytes"],
+            )
+        else:
+            values = row
+        return RawTranscriptDomainPrefixFact(
+            through_sequence=int(values[0]),
+            ledger_payload_bytes=int(values[4]),
+            semantic_event_count=int(values[1]),
+            semantic_accumulator=str(values[2]),
+            ledger_continuity_accumulator=str(values[3]),
         )
 
     def _ensure_event_ids_available(self, cursor, events: list[AgentEvent]) -> None:
@@ -1475,7 +2002,8 @@ class PostgresEventLog:
         )
         row = cursor.fetchone()
         if row is not None:
-            raise ValueError(f"Event id already exists in this session: {row[0]}")
+            event_id = row["id"] if isinstance(row, dict) else row[0]
+            raise ValueError(f"Event id already exists in this session: {event_id}")
 
     def _get_by_id(self, cursor, event_id: str) -> AgentEvent | None:
         raw = self._get_raw_by_id(cursor, event_id)
@@ -1598,13 +2126,14 @@ class PostgresEventLog:
     def _next_sequence(self, cursor) -> int:
         cursor.execute(
             """
-            select coalesce(max(sequence), 0) + 1
+            select coalesce(max(sequence), 0) + 1 as next_sequence
             from agent_events
             where session_id = %s
             """,
             (self.runtime_session_id,),
         )
-        return cursor.fetchone()[0]
+        row = cursor.fetchone()
+        return int(row["next_sequence"] if isinstance(row, dict) else row[0])
 
     def _with_canonical_sequence(
         self, event: AgentEvent, next_sequence: int

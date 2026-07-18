@@ -20,13 +20,25 @@ from pulsara_agent.event_log.protocol import (
     RawEventIdSelectionSnapshot,
     RawEventSelectionBounds,
     RawEventTypeSelectionSnapshot,
+    RawLedgerUsageSnapshot,
     RawReplyEventGroup,
     RawReplySelectionSnapshot,
     RawStoredEventEnvelope,
+    RawTranscriptDomainDeltaSnapshot,
+    RawTranscriptDomainPrefixFact,
     EventLogWriteConflict,
+    EventLogTransactionCompanion,
+    MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
     same_event_payload,
     same_event_raw_payload,
+)
+from pulsara_agent.event_log.transcript_prefix import (
+    EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+    EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
+    advance_ledger_continuity_accumulator,
+    advance_transcript_semantic_accumulator,
+    classify_transcript_event_type,
 )
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
@@ -34,6 +46,10 @@ from pulsara_agent.event_log.serialization import (
     load_agent_event,
 )
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.authority_materialization import (
+    LedgerMaterializationAccountStateFact,
+    PhysicalChargeContractFact,
+)
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import (
     MessageReducer,
@@ -45,7 +61,21 @@ from pulsara_agent.message.reducer import (
 class InMemoryEventLog:
     runtime_session_id: str = "in-memory"
     _raw_events: list[RawStoredEventEnvelope] = field(default_factory=list)
+    _transcript_prefixes: list[RawTranscriptDomainPrefixFact] = field(
+        default_factory=lambda: [
+            RawTranscriptDomainPrefixFact(
+                through_sequence=0,
+                ledger_payload_bytes=0,
+                semantic_event_count=0,
+                semantic_accumulator=EMPTY_TRANSCRIPT_SEMANTIC_ACCUMULATOR,
+                ledger_continuity_accumulator=EMPTY_LEDGER_CONTINUITY_ACCUMULATOR,
+            )
+        ]
+    )
     _next_sequence: int = 1
+    _materialization_account_state: LedgerMaterializationAccountStateFact | None = (
+        None
+    )
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def ensure_runtime_session_owner(self) -> None:
@@ -92,7 +122,9 @@ class InMemoryEventLog:
             stored = _owned_event(
                 event.model_copy(update={"sequence": self._next_sequence})
             )
-            self._raw_events.append(_raw(stored, self.runtime_session_id))
+            raw = _raw(stored, self.runtime_session_id)
+            self._raw_events.append(raw)
+            self._append_transcript_prefix(stored, raw)
             self._next_sequence += 1
             return _owned_event(stored)
 
@@ -132,11 +164,151 @@ class InMemoryEventLog:
                 )
                 for index, event in enumerate(event_list)
             ]
-            self._raw_events.extend(
+            raw_events = tuple(
                 _raw(event, self.runtime_session_id) for event in stored_events
             )
+            self._raw_events.extend(raw_events)
+            for stored, raw in zip(stored_events, raw_events, strict=True):
+                self._append_transcript_prefix(stored, raw)
             self._next_sequence += len(stored_events)
             return [_owned_event(event) for event in stored_events]
+
+    def read_materialization_account_state(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> LedgerMaterializationAccountStateFact | None:
+        del deadline_monotonic
+        with self._lock:
+            state = self._materialization_account_state
+            if state is None:
+                return None
+            return LedgerMaterializationAccountStateFact.model_validate(
+                state.model_dump(mode="json")
+            )
+
+    def adopt_materialization_account_state_for_test(
+        self,
+        state: LedgerMaterializationAccountStateFact,
+    ) -> None:
+        """Install an explicit pytest-only account over legacy fixture events."""
+
+        with self._lock:
+            if self._materialization_account_state is not None:
+                raise ValueError("in-memory materialization account already exists")
+            if (
+                state.runtime_session_id != self.runtime_session_id
+                or state.ledger_through_sequence != self._next_sequence - 1
+            ):
+                raise ValueError("test account does not cover the in-memory ledger")
+            self._materialization_account_state = state
+
+    def extend_with_materialization_state(
+        self,
+        events: Iterable[AgentEvent],
+        *,
+        expected_account_state_fingerprint: str | None,
+        resulting_account_state: LedgerMaterializationAccountStateFact,
+        physical_charge_contract: PhysicalChargeContractFact,
+        transaction_companion: EventLogTransactionCompanion | None = None,
+        expected_last_sequence: int | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> list[AgentEvent]:
+        del deadline_monotonic
+        event_list = list(events)
+        if not event_list:
+            raise ValueError("materialization state commit requires events")
+        _validate_live_batch(event_list)
+        with self._lock:
+            current = self._materialization_account_state
+            actual_fingerprint = (
+                current.account_state_fingerprint if current is not None else None
+            )
+            if actual_fingerprint != expected_account_state_fingerprint:
+                raise MaterializationAccountStateConflict(
+                    expected_state_fingerprint=(
+                        expected_account_state_fingerprint
+                    ),
+                    actual_state_fingerprint=actual_fingerprint,
+                )
+            actual_last_sequence = self._next_sequence - 1
+            if (
+                expected_last_sequence is not None
+                and expected_last_sequence != actual_last_sequence
+            ):
+                raise EventLogWriteConflict(
+                    expected_last_sequence=expected_last_sequence,
+                    actual_last_sequence=actual_last_sequence,
+                )
+            expected_result_sequence = actual_last_sequence + len(event_list)
+            if (
+                resulting_account_state.runtime_session_id
+                != self.runtime_session_id
+                or resulting_account_state.ledger_through_sequence
+                != expected_result_sequence
+                or resulting_account_state.ledger_event_count_through
+                != expected_result_sequence
+            ):
+                raise ValueError(
+                    "materialization state does not cover the committed event batch"
+                )
+            existing_ids = {event.event_id for event in self._raw_events}
+            if any(event.id in existing_ids for event in event_list):
+                raise ValueError("materialization state batch cannot contain existing IDs")
+            stored_events = [
+                _owned_event(
+                    event.model_copy(update={"sequence": self._next_sequence + index})
+                )
+                for index, event in enumerate(event_list)
+            ]
+            raw_events = tuple(
+                _raw(event, self.runtime_session_id) for event in stored_events
+            )
+            self._validate_stored_envelope_charge_bounds(
+                stored_events,
+                raw_events,
+                physical_charge_contract,
+            )
+            if transaction_companion is not None:
+                transaction_companion.apply_in_memory(stored_events)
+            self._raw_events.extend(raw_events)
+            for stored, raw in zip(stored_events, raw_events, strict=True):
+                self._append_transcript_prefix(stored, raw)
+            self._next_sequence += len(stored_events)
+            self._materialization_account_state = resulting_account_state
+            return [_owned_event(event) for event in stored_events]
+
+    @staticmethod
+    def _validate_stored_envelope_charge_bounds(
+        stored_events: list[AgentEvent],
+        raw_events: tuple[RawStoredEventEnvelope, ...],
+        contract: PhysicalChargeContractFact,
+    ) -> None:
+        bounds = {
+            (item.event_type, item.event_schema_version): item
+            for item in contract.bookkeeping_event_bounds
+        }
+        for stored, raw in zip(stored_events, raw_events, strict=True):
+            binding = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(
+                stored
+            ).schema_contract
+            bound = bounds.get((str(stored.type), binding.event_schema_version))
+            actual = len(raw.canonical_payload_bytes) + (
+                contract.fixed_sequence_wrapper_charge_bytes_per_event
+                + contract.fixed_schema_wrapper_charge_bytes_per_event
+            )
+            if (
+                str(stored.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED"
+                and actual
+                > stored.charge.charge_applied_event_charge_payload_bytes
+            ):
+                raise ValueError(
+                    "stored charge-applied envelope exceeds its dynamic charge bound"
+                )
+            if bound is not None and actual > bound.max_stored_envelope_bytes:
+                raise ValueError(
+                    "stored bookkeeping envelope exceeds fixed charge bound"
+                )
 
     def iter(
         self,
@@ -212,6 +384,21 @@ class InMemoryEventLog:
                 committed_events=tuple(committed),
                 missing_event_ids=tuple(missing),
                 actual_last_sequence=self._next_sequence - 1,
+            )
+
+    def read_ledger_usage_snapshot(
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> RawLedgerUsageSnapshot:
+        del deadline_monotonic
+        with self._lock:
+            return RawLedgerUsageSnapshot(
+                through_sequence=self._next_sequence - 1,
+                event_count=len(self._raw_events),
+                candidate_payload_bytes=sum(
+                    len(item.canonical_payload_bytes) for item in self._raw_events
+                ),
             )
 
     def read_range_snapshot(
@@ -326,14 +513,23 @@ class InMemoryEventLog:
         event_type: str,
         *,
         limit: int,
+        through_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> tuple[RawStoredEventEnvelope, ...]:
         del deadline_monotonic
         if limit < 1:
             raise ValueError("raw event type read limit must be positive")
+        if through_sequence is not None and through_sequence < 0:
+            raise ValueError("raw event type high-water cannot be negative")
         with self._lock:
             matches = [
-                event for event in self._raw_events if event.event_type == event_type
+                event
+                for event in self._raw_events
+                if event.event_type == event_type
+                and (
+                    through_sequence is None
+                    or event.sequence <= through_sequence
+                )
             ]
             return tuple(_owned_raw(event) for event in reversed(matches[-limit:]))
 
@@ -369,6 +565,7 @@ class InMemoryEventLog:
         active_runs_only: bool = False,
         run_ids: tuple[str, ...] | None = None,
         minimum_sequence: int = 1,
+        through_sequence: int | None = None,
         max_events: int = 16_384,
         max_payload_bytes: int = 16 * 1024 * 1024,
         deadline_monotonic: float | None = None,
@@ -384,6 +581,14 @@ class InMemoryEventLog:
             raise ValueError("sparse event read bounds are invalid")
         selected = frozenset(event_types)
         with self._lock:
+            current_high_water = self._next_sequence - 1
+            effective_through = (
+                current_high_water
+                if through_sequence is None
+                else through_sequence
+            )
+            if effective_through < 0 or effective_through > current_high_water:
+                raise ValueError("requested sparse high-water has not been committed")
             active_run_ids: frozenset[str] | None = None
             if active_runs_only:
                 started_run_ids = {
@@ -401,6 +606,7 @@ class InMemoryEventLog:
                 _owned_raw(event)
                 for event in self._raw_events
                 if event.sequence >= minimum_sequence
+                and event.sequence <= effective_through
                 and event.event_type in selected
                 and (active_run_ids is None or event.run_id in active_run_ids)
                 and (run_ids is None or event.run_id in run_ids)
@@ -410,9 +616,83 @@ class InMemoryEventLog:
             if sum(len(item.canonical_payload_bytes) for item in events) > max_payload_bytes:
                 raise ValueError("sparse event selection exceeds its byte bound")
             return RawEventTypeSelectionSnapshot(
-                through_sequence=self._next_sequence - 1,
+                through_sequence=effective_through,
                 events=events,
             )
+
+    def read_transcript_domain_delta(
+        self,
+        *,
+        after_sequence: int,
+        through_sequence: int | None = None,
+        max_events: int = 16_384,
+        max_payload_bytes: int = 16 * 1024 * 1024,
+        registry_contract_fingerprint: str,
+        deadline_monotonic: float | None = None,
+    ) -> RawTranscriptDomainDeltaSnapshot:
+        del deadline_monotonic
+        if after_sequence < 0 or max_events < 1 or max_payload_bytes < 1:
+            raise ValueError("transcript domain delta bounds are invalid")
+        if not registry_contract_fingerprint:
+            raise ValueError("transcript registry contract fingerprint is required")
+        with self._lock:
+            high_water = self._next_sequence - 1
+            effective_through = high_water if through_sequence is None else through_sequence
+            if effective_through > high_water or effective_through < after_sequence:
+                raise ValueError("transcript domain delta range is invalid")
+            before = self._transcript_prefixes[after_sequence]
+            after = self._transcript_prefixes[effective_through]
+            semantic_events = tuple(
+                _owned_raw(event)
+                for event in self._raw_events[after_sequence:effective_through]
+                if classify_transcript_event_type(event.event_type)
+                == "transcript_semantic"
+            )
+        if len(semantic_events) > max_events:
+            raise ValueError("transcript semantic delta exceeds its event bound")
+        if sum(
+            len(item.canonical_payload_bytes) for item in semantic_events
+        ) > max_payload_bytes:
+            raise ValueError("transcript semantic delta exceeds its byte bound")
+        return RawTranscriptDomainDeltaSnapshot.build(
+            runtime_session_id=self.runtime_session_id,
+            before=before,
+            after=after,
+            semantic_events=semantic_events,
+            registry_contract_fingerprint=registry_contract_fingerprint,
+        )
+
+    def _append_transcript_prefix(
+        self,
+        stored: AgentEvent,
+        raw: RawStoredEventEnvelope,
+    ) -> None:
+        previous = self._transcript_prefixes[-1]
+        semantic_count = previous.semantic_event_count
+        semantic_accumulator = previous.semantic_accumulator
+        if classify_transcript_event_type(raw.event_type) == "transcript_semantic":
+            semantic_count += 1
+            semantic_accumulator = advance_transcript_semantic_accumulator(
+                previous.semantic_accumulator,
+                event=stored,
+                event_schema_version=raw.event_schema_version,
+                event_schema_fingerprint=raw.event_schema_fingerprint,
+            )
+        self._transcript_prefixes.append(
+            RawTranscriptDomainPrefixFact(
+                through_sequence=raw.sequence,
+                ledger_payload_bytes=(
+                    previous.ledger_payload_bytes
+                    + len(raw.canonical_payload_bytes)
+                ),
+                semantic_event_count=semantic_count,
+                semantic_accumulator=semantic_accumulator,
+                ledger_continuity_accumulator=advance_ledger_continuity_accumulator(
+                    previous.ledger_continuity_accumulator,
+                    envelope_fingerprint=raw.envelope_fingerprint,
+                ),
+            )
+        )
 
     def read_context_authority_bundle(
         self,

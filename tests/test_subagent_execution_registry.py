@@ -133,6 +133,8 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
     backing = InMemoryEventLog()
 
     class FailingCommitEventLog:
+        fail_writes = False
+
         def append(
             self,
             event,
@@ -153,8 +155,18 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
             expected_last_sequence=None,
             deadline_monotonic=None,
         ):
-            del events, expected_last_sequence, deadline_monotonic
-            raise RuntimeError("synthetic event commit failure")
+            if self.fail_writes:
+                raise RuntimeError("synthetic event commit failure")
+            return backing.extend(
+                events,
+                expected_last_sequence=expected_last_sequence,
+                deadline_monotonic=deadline_monotonic,
+            )
+
+        def extend_with_materialization_state(self, events, **kwargs):
+            if self.fail_writes:
+                raise RuntimeError("synthetic event commit failure")
+            return backing.extend_with_materialization_state(events, **kwargs)
 
         def iter(self, **kwargs):
             return backing.iter(**kwargs)
@@ -167,13 +179,15 @@ def test_reservation_released_when_event_commit_fails(tmp_path) -> None:
             # complete EventLog contract provided by the backing store.
             return getattr(backing, name)
 
+    faulting_log = FailingCommitEventLog()
     parent = in_memory_runtime_session(
         tmp_path,
         runtime_session_id="runtime:parent",
-        event_log=backing,
+        event_log=faulting_log,
+        allow_unbootstrapped_test_events=False,
     )
     asyncio.run(_start_parent_run(parent))
-    parent.event_log = FailingCommitEventLog()  # type: ignore[assignment]
+    faulting_log.fail_writes = True
     runtime = SubagentRuntime(
         parent_runtime_session=parent,
         child_event_log_factory=lambda _runtime_session_id: InMemoryEventLog(),

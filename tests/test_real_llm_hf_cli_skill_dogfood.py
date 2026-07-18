@@ -11,7 +11,7 @@ import psycopg
 import pytest
 
 from pulsara_agent.event import (
-    ToolCallDeltaEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallStartEvent,
     ToolResultTextDeltaEvent,
 )
@@ -256,8 +256,10 @@ def _terminal_commands(events) -> list[str]:
     for event in events:
         if isinstance(event, ToolCallStartEvent):
             names_by_call[event.tool_call_id] = event.tool_call_name
-        elif isinstance(event, ToolCallDeltaEvent):
-            deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
+        elif isinstance(event, ToolCallArgumentsSegmentEvent):
+            deltas_by_call.setdefault(event.tool_call_id, []).append(
+                event.arguments_json_fragment
+            )
     commands: list[str] = []
     for tool_call_id, deltas in deltas_by_call.items():
         if names_by_call.get(tool_call_id) != "terminal":

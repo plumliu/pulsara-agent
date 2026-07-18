@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime, timezone
+from enum import StrEnum
 from hashlib import sha256
 from typing import Any, TypeAlias
 
@@ -18,6 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 class FrozenContextFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class ToolArgumentsParseErrorCode(StrEnum):
+    INVALID_JSON_SYNTAX = "invalid_json_syntax"
+    JSON_ROOT_NOT_OBJECT = "json_root_not_object"
 
 
 FrozenJsonScalar: TypeAlias = str | int | float | bool | None

@@ -1,0 +1,169 @@
+{
+  "benchmark_run_id": "benchmark:0d9d951c1c3a649678b458a0",
+  "case_aggregates": [
+    {
+      "case_contract_fingerprint": "sha256:fbbc25df8308a21cc8f195110c4dc757f25c8f78a77028c79873f9ff346a8055",
+      "case_id": "single-long-compaction:default:process_cold",
+      "metrics": [
+        {
+          "maximum": 0.4853929999517277,
+          "median": 0.415888145507779,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.4005365000339225,
+          "p95_nearest_rank": 0.4809385420521721,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.21449683347600512,
+          "median": 0.20916484923509415,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.18918885453604162,
+          "p95_nearest_rank": 0.21373862499604002,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.8579873339040205,
+          "median": 0.8366593969403766,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 0.7567554181441665,
+          "p95_nearest_rank": 0.8549544999841601,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 76,
+          "median": 76.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 76,
+          "p95_nearest_rank": 76,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 2,
+          "median": 2.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 2,
+          "p95_nearest_rank": 2,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.028148207115009427,
+          "median": 0.027364625479094684,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.02700137486681342,
+          "p95_nearest_rank": 0.027841833885759115,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    },
+    {
+      "case_contract_fingerprint": "sha256:7f12b5e2341b9376ddb2b7e882193f21c554e86d2d011b33e0da08d2a0e2511e",
+      "case_id": "single-long-compaction:default:steady_state",
+      "metrics": [
+        {
+          "maximum": 0.30415254191029817,
+          "median": 0.29798910446697846,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.29095745796803385,
+          "p95_nearest_rank": 0.303167250007391,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.17137886452837847,
+          "median": 0.16635506249440368,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.15968217724002898,
+          "p95_nearest_rank": 0.16934021870838478,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.6855154581135139,
+          "median": 0.6654202499776147,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 0.6387287089601159,
+          "p95_nearest_rank": 0.6773608748335391,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 76,
+          "median": 76.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 76,
+          "p95_nearest_rank": 76,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 2,
+          "median": 2.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 2,
+          "p95_nearest_rank": 2,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.028089750092476606,
+          "median": 0.02763637457974255,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.026656582136638463,
+          "p95_nearest_rank": 0.028034876100718975,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    }
+  ],
+  "case_contract_fingerprints": [
+    "sha256:fbbc25df8308a21cc8f195110c4dc757f25c8f78a77028c79873f9ff346a8055",
+    "sha256:7f12b5e2341b9376ddb2b7e882193f21c554e86d2d011b33e0da08d2a0e2511e"
+  ],
+  "counterfactual_samples_excluded": true,
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "environment": {
+    "git": {
+      "commit": "df869e93df0bca4eb58ce87c6a97ac960cb0706d",
+      "dirty": false
+    },
+    "postgres": {
+      "configuration_fingerprint": "sha256:1babd816a44e245de601de61f9db2a11eb04b3903e9f7c42474a40a3e29cf358",
+      "connection_pool_fingerprint": "sha256:874e657a39df00365d9d647cea45f7143fee98c53618629c77d0ce75d7e643a7",
+      "server_version": "17.9 (Homebrew)"
+    },
+    "python": {
+      "implementation": "CPython",
+      "machine": "arm64",
+      "platform": "macOS-26.2-arm64-arm-64bit",
+      "version": "3.12.12"
+    },
+    "runner_build_fingerprint": "sha256:b5b44c31d7dec2834255b4c21f14fd6ba28f3c134f88702cdec297de9614d8e7",
+    "runtime_capacity": {
+      "auxiliary_io_workers": 12,
+      "configuration_fingerprint": "sha256:393aa28a338fc8484f804286baf6cc604a6bb8f9a51aaef03197233b0e8a45bd",
+      "critical_ledger_workers": 4,
+      "postgres_bounded_read_capacity": 12,
+      "postgres_critical_write_reserve": 4,
+      "postgres_default_lease_timeout_seconds": 30.0,
+      "postgres_pool_max_connections": 16
+    },
+    "schema_version": "pulsara.durable-runtime.environment.v1"
+  },
+  "manifest_contract_fingerprint": "sha256:8751b64a6778c81c05c5d07d4213a1ff04626193a3202121ff1d08ebf4e484b2",
+  "measurement_contract_adhered": true,
+  "percentile_contract": "nearest_rank_v1",
+  "production_acceptance_passed": true,
+  "raw_sample_vector_sha256": "sha256:56842fca1eade576d8508edcdea12c909c27fd943a76c4ded03f3a24cbd3053c",
+  "sample_count": 40,
+  "scenario_id": "single-long-compaction",
+  "schema_version": "pulsara.durable-runtime.run-summary.v1"
+}

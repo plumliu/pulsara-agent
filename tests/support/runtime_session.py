@@ -17,4 +17,5 @@ def in_memory_runtime_session(workspace_root: Path, **kwargs: Any) -> RuntimeSes
     kwargs.setdefault("event_log", InMemoryEventLog())
     kwargs.setdefault("archive", InMemoryArchiveStore())
     kwargs.setdefault("tool_result_artifacts", InMemoryToolResultArtifactIndex())
+    kwargs.setdefault("allow_unbootstrapped_test_events", True)
     return RuntimeSession(workspace_root, **kwargs)

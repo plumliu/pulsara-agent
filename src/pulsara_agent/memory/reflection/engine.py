@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -39,12 +40,26 @@ from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory.candidates.pool import (
     CandidateOrigin,
     CandidatePool,
-    CandidatePoolProposal,
+    PooledMemoryCandidate,
+    candidate_payload_fingerprint,
+)
+from pulsara_agent.memory.candidates.projection_outbox import (
+    CandidateProjectionOutboxRow,
+    MemoryCandidateProjectionCommitPort,
 )
 from pulsara_agent.memory.scope import format_scope_list
 from pulsara_agent.message import Msg, TextBlock, ToolCallBlock, ToolResultBlock
 from pulsara_agent.ontology import runtime as rt
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.governance_evidence import (
+    CandidateProjectionOutboxItemFact,
+    CandidateProjectionProducerKind,
+    CandidateQuotedEvidenceLocatorFact,
+    ReflectionCandidateAttributionFact,
+)
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 
 if TYPE_CHECKING:
     from pulsara_agent.runtime.session import RuntimeSession
@@ -202,6 +217,7 @@ class MemoryReflectionEngine:
     graph_id: str | None = None
     allowed_scopes: frozenset[str] | None = None
     options: MemoryReflectionOptions = field(default_factory=MemoryReflectionOptions)
+    candidate_projection_commit_port: MemoryCandidateProjectionCommitPort | None = None
 
     async def reflect(
         self,
@@ -255,7 +271,8 @@ class MemoryReflectionEngine:
             output = _parse_reflection_output(call_result.text)
             skipped = list(output.skipped_candidates)
             raw_candidates = output.candidates if output.should_reflect else []
-            queued_count = 0
+            pooled_candidates: list[PooledMemoryCandidate] = []
+            candidate_attributions: list[ReflectionCandidateAttributionFact] = []
 
             if not output.should_reflect and output.candidates:
                 skipped.extend(
@@ -264,24 +281,80 @@ class MemoryReflectionEngine:
                 )
 
             failure_stage = "candidate_append"
-            for raw_candidate in raw_candidates:
-                normalized = _candidate_with_id(raw_candidate)
-                proposal = CandidatePoolProposal(
-                    payload=ValidCandidatePayload(candidate=normalized),
-                    origin=CandidateOrigin.REFLECTION,
-                    user_quote=_first_quote(output.quoted_evidence),
+            quote_indices = tuple(
+                index
+                for index, value in enumerate(output.quoted_evidence)
+                if value
+            )
+            quote_index = quote_indices[0] if quote_indices else None
+            quote = (
+                output.quoted_evidence[quote_index]
+                if quote_index is not None
+                else None
+            )
+            for candidate_index, raw_candidate in enumerate(raw_candidates):
+                normalized = _candidate_with_id(
+                    raw_candidate,
+                    reflection_id=reflection_id,
+                    candidate_index=candidate_index,
                 )
-                self.candidate_pool.append_candidate(
-                    proposal.to_pooled(
+                payload = ValidCandidatePayload(candidate=normalized)
+                payload_fingerprint = candidate_payload_fingerprint(payload)
+                entry_id = _reflection_candidate_entry_id(
+                    reflection_id=reflection_id,
+                    candidate_index=candidate_index,
+                    payload_fingerprint=payload_fingerprint,
+                )
+                locator = (
+                    build_frozen_fact(
+                        CandidateQuotedEvidenceLocatorFact,
+                        schema_version="candidate_quoted_evidence_locator.v1",
+                        locator_kind="reflection_quote_index",
+                        source_message_id=None,
+                        source_event_reference=None,
+                        source_artifact_reference=None,
+                        source_quote_index=quote_index,
+                        start_char=None,
+                        end_char=None,
+                        quoted_text_sha256=hashlib.sha256(
+                            (quote or "").encode("utf-8")
+                        ).hexdigest(),
+                    )
+                    if quote_index is not None
+                    else None
+                )
+                attribution = build_frozen_fact(
+                    ReflectionCandidateAttributionFact,
+                    schema_version="reflection_candidate_attribution.v1",
+                    candidate_entry_id=entry_id,
+                    candidate_index=candidate_index,
+                    candidate_payload=payload,
+                    candidate_payload_fingerprint=payload_fingerprint,
+                    intent_fingerprint=None,
+                    ordered_quoted_evidence_indices=quote_indices,
+                )
+                candidate_attributions.append(attribution)
+                pooled_candidates.append(
+                    PooledMemoryCandidate(
+                        entry_id=entry_id,
+                        payload=payload,
+                        origin=CandidateOrigin.REFLECTION,
                         source_session_id=state.session_id,
                         source_run_id=state.run_id,
                         source_turn_id=state.turn_id,
                         source_reply_id=state.reply_id,
+                        user_quote=quote,
+                        quoted_evidence_locator=locator,
+                        source_event_id=f"{reflection_id}:completed",
+                        metadata={
+                            "reflection_id": reflection_id,
+                            "candidate_index": candidate_index,
+                        },
                     )
                 )
-                queued_count += 1
 
             completed = MemoryReflectionCompletedEvent(
+                id=f"{reflection_id}:completed",
                 **_event_context(state).event_fields(),
                 reflection_id=reflection_id,
                 trigger_reason=trigger_reasons[0],
@@ -290,9 +363,11 @@ class MemoryReflectionEngine:
                 should_reflect=output.should_reflect,
                 decision_reason=output.reason,
                 quoted_evidence=output.quoted_evidence,
-                candidate_kinds=output.candidate_kinds
-                or _candidate_kinds(raw_candidates),
-                proposed_count=queued_count,
+                candidate_kinds=[
+                    item.candidate.kind
+                    for item in (candidate.payload for candidate in pooled_candidates)
+                ],
+                proposed_count=len(pooled_candidates),
                 skipped_count=len(skipped),
                 written_count=0,
                 failed_count=0,
@@ -302,9 +377,53 @@ class MemoryReflectionEngine:
                 usage=call_result.usage,
                 estimated_input_tokens=call_result.estimated_input_tokens,
                 reported_model_id=call_result.reported_model_id,
+                reflection_model_call_end_event_identity=(
+                    call_result.model_call_end_event_identity
+                ),
+                reflection_model_result_semantic_fingerprint=context_fingerprint(
+                    "reflection-model-result-semantic:v1",
+                    {"text": call_result.text},
+                ),
+                reflection_policy_contract_fingerprint=(
+                    _reflection_policy_contract_fingerprint(self.options)
+                ),
+                ordered_candidate_attributions=tuple(candidate_attributions),
                 metadata={"skipped_candidates": skipped},
             )
-            return [completed]
+            if self.candidate_projection_commit_port is None:
+                raise RuntimeError(
+                    "memory reflection requires candidate projection commit ownership"
+                )
+            producer_identity = stable_event_identity(
+                completed,
+                runtime_session_id=state.session_id,
+            )
+            outbox_rows = tuple(
+                CandidateProjectionOutboxRow(
+                    item=build_frozen_fact(
+                        CandidateProjectionOutboxItemFact,
+                        schema_version="candidate_projection_outbox_item.v1",
+                        producer_kind=CandidateProjectionProducerKind.REFLECTION,
+                        producer_event_identity=producer_identity,
+                        candidate_entry_id=candidate.entry_id,
+                        candidate_index=index,
+                        candidate_payload=candidate.payload,
+                        candidate_payload_fingerprint=(
+                            candidate_payload_fingerprint(candidate.payload)
+                        ),
+                        candidate_attribution_fingerprint=(
+                            candidate_attributions[index].attribution_fingerprint
+                        ),
+                    ),
+                    candidate=candidate,
+                )
+                for index, candidate in enumerate(pooled_candidates)
+            )
+            await self.candidate_projection_commit_port.commit_producer_bundle(
+                producer_event=completed,
+                rows=outbox_rows,
+            )
+            return []
         except Exception as exc:
             if failure_stage == "model_stream" and isinstance(
                 exc,
@@ -440,7 +559,11 @@ class MemoryReflectionEngine:
             ),
             execution_registry=self.runtime_session.model_stream_execution_registry,
         )
-        return await collect_direct_model_call_handle(handle, expected_call=call)
+        return await collect_direct_model_call_handle(
+            handle,
+            expected_call=call,
+            runtime_session_id=self.runtime_session.runtime_session_id,
+        )
 
 
 def _parse_reflection_output(text: str) -> MemoryReflectionOutput:
@@ -477,10 +600,54 @@ def cheap_memory_hints(text: str) -> list[MemoryReflectionHint]:
     return [hint for _, hint in sorted(matches, key=lambda match: match[0])]
 
 
-def _candidate_with_id(candidate: dict[str, Any]) -> MemoryCandidate:
+def _candidate_with_id(
+    candidate: dict[str, Any],
+    *,
+    reflection_id: str,
+    candidate_index: int,
+) -> MemoryCandidate:
     payload = dict(candidate)
-    payload.setdefault("candidate_id", f"candidate:reflection:{uuid4().hex}")
+    identity = context_fingerprint(
+        "reflection-candidate-id:v1",
+        {
+            "reflection_id": reflection_id,
+            "candidate_index": candidate_index,
+            "candidate": {
+                key: value for key, value in payload.items() if key != "candidate_id"
+            },
+        },
+    ).removeprefix("sha256:")
+    payload["candidate_id"] = f"candidate:reflection:{identity}"
     return _CANDIDATE_ADAPTER.validate_python(payload)
+
+
+def _reflection_candidate_entry_id(
+    *,
+    reflection_id: str,
+    candidate_index: int,
+    payload_fingerprint: str,
+) -> str:
+    digest = context_fingerprint(
+        "reflection-candidate-entry:v1",
+        (reflection_id, candidate_index, payload_fingerprint),
+    ).removeprefix("sha256:")
+    return f"pool:reflection:{digest}"
+
+
+def _reflection_policy_contract_fingerprint(
+    options: MemoryReflectionOptions,
+) -> str:
+    return context_fingerprint(
+        "memory-reflection-policy-contract:v1",
+        {
+            "model_role": options.model_role.value,
+            "max_summary_chars": options.max_summary_chars,
+            "tool_call_threshold": options.tool_call_threshold,
+            "turn_threshold": options.turn_threshold,
+            "token_delta_threshold": options.token_delta_threshold,
+            "min_runs_between_reflections": options.min_runs_between_reflections,
+        },
+    )
 
 
 def _json_object_text(text: str) -> str:
@@ -663,10 +830,6 @@ def _event_context(state: "LoopState") -> EventContext:
     return EventContext(
         run_id=state.run_id, turn_id=state.turn_id, reply_id=state.reply_id
     )
-
-
-def _first_quote(quotes: list[str]) -> str | None:
-    return next((quote for quote in quotes if quote), None)
 
 
 def _excerpt_around(text: str, index: int, radius: int = 80) -> str:

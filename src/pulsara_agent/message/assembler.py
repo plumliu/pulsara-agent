@@ -6,19 +6,19 @@ from dataclasses import dataclass
 
 from pulsara_agent.event.events import (
     AgentEvent,
-    DataBlockDeltaEvent,
+    DataBlockSegmentEvent,
     DataBlockEndEvent,
     DataBlockStartEvent,
     EventType,
     ExternalExecutionResultEvent,
     HintBlockEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
+    ThinkingBlockSegmentEvent,
     ThinkingBlockEndEvent,
     ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultDataDeltaEvent,
@@ -100,11 +100,11 @@ class BlockAssembler:
                 self._start(event, "text", event.block_id, block)
                 return BlockAssemblyUpdate(started=[block], completed=[])
 
-            case EventType.TEXT_BLOCK_DELTA:
-                assert isinstance(event, TextBlockDeltaEvent)
+            case EventType.TEXT_BLOCK_SEGMENT:
+                assert isinstance(event, TextBlockSegmentEvent)
                 active = self._get(event, "text", event.block_id)
                 if active is not None and isinstance(active.block, TextBlock):
-                    active.block.text += event.delta
+                    active.block.text += event.text
 
             case EventType.TEXT_BLOCK_END:
                 assert isinstance(event, TextBlockEndEvent)
@@ -123,11 +123,11 @@ class BlockAssembler:
                 )
                 return BlockAssemblyUpdate(started=[block], completed=[])
 
-            case EventType.THINKING_BLOCK_DELTA:
-                assert isinstance(event, ThinkingBlockDeltaEvent)
+            case EventType.THINKING_BLOCK_SEGMENT:
+                assert isinstance(event, ThinkingBlockSegmentEvent)
                 active = self._get(event, "thinking", event.block_id)
                 if active is not None and isinstance(active.block, ThinkingBlock):
-                    active.block.thinking += event.delta
+                    active.block.thinking += event.thinking
 
             case EventType.THINKING_BLOCK_END:
                 assert isinstance(event, ThinkingBlockEndEvent)
@@ -150,8 +150,8 @@ class BlockAssembler:
                 )
                 return BlockAssemblyUpdate(started=[block], completed=[])
 
-            case EventType.DATA_BLOCK_DELTA:
-                assert isinstance(event, DataBlockDeltaEvent)
+            case EventType.DATA_BLOCK_SEGMENT:
+                assert isinstance(event, DataBlockSegmentEvent)
                 active = self._get(event, "data", event.block_id)
                 if (
                     active is not None
@@ -203,11 +203,11 @@ class BlockAssembler:
                 )
                 return BlockAssemblyUpdate(started=[block], completed=[])
 
-            case EventType.TOOL_CALL_DELTA:
-                assert isinstance(event, ToolCallDeltaEvent)
+            case EventType.TOOL_CALL_ARGUMENTS_SEGMENT:
+                assert isinstance(event, ToolCallArgumentsSegmentEvent)
                 active = self._get(event, "tool_call", event.tool_call_id)
                 if active is not None and isinstance(active.block, ToolCallBlock):
-                    active.block.input += event.delta
+                    active.block.input += event.arguments_json_fragment
 
             case EventType.TOOL_CALL_END:
                 assert isinstance(event, ToolCallEndEvent)

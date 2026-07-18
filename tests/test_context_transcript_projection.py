@@ -4,6 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.model_stream import (
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     ContextWindowOpenedEvent,
     EventContext,
@@ -13,9 +19,6 @@ from pulsara_agent.event import (
     ReplyEndEvent,
     ReplyStartEvent,
     RunStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -65,7 +68,11 @@ from tests.conftest import (
     run_start_permission_fields,
     tool_result_end_contract_fields,
 )
-from tests.support.model_call import model_call_end_fields, model_call_start_fields
+from tests.support.model_call import (
+    model_call_end_fields,
+    model_call_start_fields,
+    model_terminal_projection_end_reference_fixture,
+)
 
 
 def _projection_fixture(
@@ -129,6 +136,12 @@ def _projection_fixture(
     )
     model_end_payload = model_call_end_fields(resolved_call=model_start.resolved_call)
     model_end_payload["outcome"] = model_outcome
+    model_end_payload["terminal_projection"] = (
+        model_terminal_projection_end_reference_fixture(
+            model_start.resolved_call.resolved_model_call_id,
+            outcome=model_outcome,
+        )
+    )
     model_end = ModelCallEndEvent(
         id=model_start.recovery_plan.stable_model_call_end_event_id,
         **ctx.event_fields(),
@@ -186,17 +199,17 @@ def _projection_fixture(
                 name="assistant",
             ),
         model_start,
-        ToolCallStartEvent(
+        make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 tool_call_name=tool_name,
             ),
-        ToolCallDeltaEvent(
+        make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 delta=raw_arguments_json,
             ),
-        ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:projection"),
+        make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:projection"),
         model_end,
         ReplyEndEvent(
                 id=model_start.recovery_plan.stable_reply_end_event_id,

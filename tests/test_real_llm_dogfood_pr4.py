@@ -13,7 +13,11 @@ from uuid import uuid4
 
 import pytest
 
-from tests.conftest import run_end_contract_fields, run_start_permission_fields
+from tests.conftest import (
+    persist_test_run_transcript_seed,
+    run_end_contract_fields,
+    run_start_permission_fields,
+)
 from tests.support import (
     bind_test_context,
     start_test_direct_model_stream,
@@ -27,13 +31,17 @@ from pulsara_agent.capability import (
 )
 from pulsara_agent.event import (
     AgentEvent,
+    ContextWindowClosedEvent,
+    ContextWindowOpenedEvent,
     EventContext,
     ModelCallEndEvent,
+    RolloutBudgetAccountClosedEvent,
+    RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     ToolCallStartEvent,
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
@@ -55,6 +63,13 @@ from pulsara_agent.runtime.permission import (
     TerminalAccess,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.runtime.authority_materialization import RunSeedSourceStale
+from pulsara_agent.runtime.long_horizon.rollout import apply_rollout_event
+from pulsara_agent.runtime.long_horizon.run_contract import (
+    empty_projection_state_fingerprint,
+    prepare_root_long_horizon_run,
+)
+from pulsara_agent.runtime.session import EventCommitError
 from pulsara_agent.settings import PulsaraSettings
 
 
@@ -188,9 +203,9 @@ class RealLLMUserSimulator:
                 if isinstance(event, RunErrorEvent)
             ]
             raw_text = "".join(
-                event.delta
+                event.text
                 for event in events
-                if isinstance(event, TextBlockDeltaEvent)
+                if isinstance(event, TextBlockSegmentEvent)
             )
             diagnostic = {
                 "attempt": attempt,
@@ -1828,43 +1843,154 @@ async def _inject_controlled_failed_run(session, user_input: str) -> None:
         reply_id=f"reply:dogfood-controlled-failure:{uuid4().hex}",
     )
     runtime_session = session.wiring.runtime_wiring.runtime_session
-    events = (
-        RunStartEvent(
-            **ctx.event_fields(),
-            **run_start_permission_fields(
-                ctx.run_id,
-                turn_id=ctx.turn_id,
-                reply_id=ctx.reply_id,
-                user_input=user_input,
-                mcp_installation_id=runtime_session.mcp_installation_id,
-                mcp_installation_owner_runtime_session_id=(
-                    runtime_session.mcp_installation_owner_runtime_session_id
-                ),
-                model_target=session.wiring.agent_runtime.resolve_run_model_target().fact,
+    target = session.wiring.agent_runtime.resolve_run_model_target().fact
+    stored_start: RunStartEvent | None = None
+    for _attempt in range(3):
+        seed = persist_test_run_transcript_seed(runtime_session, run_id=ctx.run_id)
+        source_through_sequence = seed.seed_reference.source_ledger_through_sequence
+        run_start_event_id = f"run_start:dogfood-controlled-failure:{ctx.run_id}"
+        fields = run_start_permission_fields(
+            ctx.run_id,
+            turn_id=ctx.turn_id,
+            reply_id=ctx.reply_id,
+            user_input=user_input,
+            mcp_installation_id=runtime_session.mcp_installation_id,
+            mcp_installation_owner_runtime_session_id=(
+                runtime_session.mcp_installation_owner_runtime_session_id
             ),
-            user_input_chars=len(user_input),
-        ),
-        RunEndEvent(
-            **run_end_contract_fields(
-                ctx.run_id,
-                status="failed",
-                error_message="controlled dogfood provider failure",
+            model_target=target,
+            transcript_source_through_sequence=source_through_sequence,
+        )
+        prepared = prepare_root_long_horizon_run(
+            runtime_session_id=runtime_session.runtime_session_id,
+            run_id=ctx.run_id,
+            run_start_event_id=run_start_event_id,
+            primary_target=target,
+            summarizer_target=target,
+            graph_reducer_contract=fields["subagent_graph_reducer_contract"],
+            source_through_sequence_at_open=source_through_sequence,
+            initial_projection_unit_count=0,
+            initial_projection_state_fingerprint=empty_projection_state_fingerprint(),
+        )
+        fields.update(
+            long_horizon=prepared.contract,
+            run_transcript_seed_semantic=seed.seed_semantic,
+            run_transcript_seed_reference=seed.seed_reference,
+        )
+        account = prepared.root_account
+        assert account is not None
+        opening_events = (
+            RunStartEvent(
+                id=run_start_event_id,
+                **ctx.event_fields(),
+                **fields,
+                user_input_chars=len(user_input),
             ),
-            **ctx.event_fields(),
+            ContextWindowOpenedEvent(
+                id=prepared.contract.initial_window_open_event_id,
+                **ctx.event_fields(),
+                window=prepared.initial_window,
+                opening_batch_id=prepared.opening_batch_id,
+            ),
+            RolloutBudgetAccountOpenedEvent(
+                id=f"rollout_budget_account_opened:{account.account_id}",
+                **ctx.event_fields(),
+                account=account,
+            ),
+        )
+        try:
+            opening = await runtime_session.write_events(opening_events)
+        except EventCommitError as exc:
+            if exc.commit_outcome == "none" and _caused_by(exc, RunSeedSourceStale):
+                continue
+            raise
+        stored_start = next(
+            event
+            for event in opening.committed_events
+            if isinstance(event, RunStartEvent)
+        )
+        runtime_session.transcript_projection_checkpoint_service.adopt_committed_run_seed(
+            stored_start
+        )
+        break
+    if stored_start is None:
+        raise RuntimeError("controlled failure run seed remained stale")
+
+    store = runtime_session.long_horizon_state_store
+    window_state = store.window_state(ctx.run_id)
+    assert window_state is not None and window_state.active_window_id is not None
+    window = window_state.windows[window_state.active_window_id]
+    projection_state = store.projection_state(window.window_id)
+    assert projection_state is not None
+    account = store.rollout_account(stored_start.long_horizon.rollout_account_id)
+    rollout_state = store.rollout_state(stored_start.long_horizon.rollout_account_id)
+    assert account is not None and rollout_state is not None
+    assert not rollout_state.active_reservations
+    source_through_sequence = runtime_session.event_log.next_sequence() - 1
+    run_end = RunEndEvent(
+        **run_end_contract_fields(
+            ctx.run_id,
             status="failed",
-            stop_reason="model_error",
+            error_message="controlled dogfood provider failure",
         ),
+        **ctx.event_fields(),
+        status="failed",
+        stop_reason="model_error",
+    )
+    window_close = ContextWindowClosedEvent(
+        id=window.stable_close_event_id,
+        **ctx.event_fields(),
+        window_id=window.window_id,
+        window_generation=window.generation,
+        close_reason="run_failed",
+        final_projection_generation=projection_state.projection_generation,
+        final_projection_state_fingerprint=(
+            projection_state.state_semantic_fingerprint
+        ),
+        source_through_sequence=source_through_sequence,
+        next_window_id=None,
+        compaction_terminal_event_id=None,
+    )
+    _, state_before_close = apply_rollout_event(
+        account=account,
+        state=rollout_state,
+        event=window_close.model_copy(
+            update={"sequence": source_through_sequence + 1}
+        ),
+    )
+    assert state_before_close is not None
+    rollout_close = RolloutBudgetAccountClosedEvent(
+        id=f"rollout_budget_account_closed:{account.account_id}",
+        **ctx.event_fields(),
+        account_id=account.account_id,
+        final_state_fingerprint=state_before_close.state_fingerprint,
+        charged_milliunits=state_before_close.charged_milliunits,
+        model_call_count=state_before_close.model_call_count,
+        tool_call_count=state_before_close.tool_call_count,
+        active_reservation_count=0,
+        run_end_event_id=run_end.id,
     )
     # This synthetic failure is still part of the runtime ledger.  Commit and
     # publish it through the same ordered writer as ordinary runtime events so
     # the next real run cannot catch up stale, already-discarded sequences and
     # wait forever on their delivery futures.
-    result = await runtime_session.write_events(events)
+    result = await runtime_session.write_events(
+        (window_close, rollout_close, run_end)
+    )
     if result.publication_errors:
         raise RuntimeError(
             "controlled failure events were committed but not published: "
             f"{result.publication_errors}"
         )
+
+
+def _caused_by(exc: BaseException, expected: type[BaseException]) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, expected):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _verify_latest_terminal_note(

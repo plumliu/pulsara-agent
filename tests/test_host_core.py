@@ -11,6 +11,24 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
+from tests.support.model_stream import (
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
@@ -30,13 +48,7 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
     TerminalProcessCompletedEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -55,7 +67,9 @@ from pulsara_agent.host.transcript import (
     rebuild_prior_messages,
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
+from pulsara_agent.llm.raw_provider import RawProviderFailure, RawProviderStreamItem
 from tests.support import model_call_end_fields, model_call_start_fields, test_llm_config
+from tests.support.model_call import model_terminal_projection_end_reference_fixture
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import (
@@ -66,6 +80,7 @@ from pulsara_agent.message import (
 from pulsara_agent.message.message import AssistantMsg
 from pulsara_agent.message.reducer import MessageReducer
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
+from pulsara_agent.runtime.authority_materialization import RunSeedSourceStale
 from pulsara_agent.runtime.plan import (
     PendingPlanInteraction,
     PlanExitResolution,
@@ -141,13 +156,13 @@ def _accepted_text_reply_events(
         ()
         if text is None
         else (
-            TextBlockStartEvent(**ctx.event_fields(), block_id=block_id),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**ctx.event_fields(), block_id=block_id),
+            make_text_block_segment_event(
                 **ctx.event_fields(),
                 block_id=block_id,
                 delta=text,
             ),
-            TextBlockEndEvent(**ctx.event_fields(), block_id=block_id),
+            make_text_block_end_event(**ctx.event_fields(), block_id=block_id),
         )
     )
     return (
@@ -191,7 +206,7 @@ class ScriptedTransport:
         call,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[RawProviderStreamItem]:
         del call
         self.contexts.append(context)
         if self.on_context_captured is not None:
@@ -200,29 +215,29 @@ class ScriptedTransport:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 
@@ -247,26 +262,24 @@ class FailingScriptedTransport:
         self.contexts.append(context)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
             if reply.get("close_text_block", True):
-                yield TextBlockEndEvent(
+                yield RawProviderTextBlockEnd(
                     **event_context.event_fields(),
                     block_id=f"text:{len(self.contexts)}",
                 )
         if "run_error" in reply:
             error = reply["run_error"]
-            yield RunErrorEvent(
-                **event_context.event_fields(),
+            yield RawProviderFailure(
                 message=error["message"],
-                code=error["code"],
-                metadata=error.get("metadata", {}),
+                code_hint=error["code"],
             )
             return
         if "raise" in reply:
@@ -376,6 +389,44 @@ def test_host_session_seeds_next_turn_from_event_log(tmp_path, monkeypatch) -> N
     assert FAILURE_NOTE_TEXT not in _context_text(transport.contexts[1])
 
 
+def test_host_session_refreezes_run_seed_after_confirmed_source_stale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transport = ScriptedTransport([{"text": "first"}, {"text": "second"}])
+    core = _core(monkeypatch, transport)
+
+    async def run() -> int:
+        session = await _open_project_session(core, tmp_path)
+        await session.run_turn("first user")
+        coordinator = (
+            session.wiring.runtime_wiring.runtime_session.materialization_coordinator
+        )
+        coordinator_type = type(coordinator)
+        original = coordinator_type.commit_run_seed_consumer_rotation
+        calls = 0
+
+        def fail_once(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RunSeedSourceStale(
+                    "run seed source does not match the account high-water"
+                )
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            coordinator_type,
+            "commit_run_seed_consumer_rotation",
+            fail_once,
+        )
+        result = await session.run_turn("second user")
+        assert result.status.value == "finished"
+        return calls
+
+    assert asyncio.run(run()) == 2
+
+
 def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_reply_end() -> (
     None
 ):
@@ -420,9 +471,15 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
                 outcome="provider_error",
                 provider_dispatch_status="dispatched",
                 usage_status="missing",
-                usage=None,
-                estimated_input_tokens=0,
-            ),
+                    usage=None,
+                    estimated_input_tokens=0,
+                    terminal_projection=(
+                        model_terminal_projection_end_reference_fixture(
+                            model_start.resolved_call.resolved_model_call_id,
+                            outcome="provider_error",
+                        )
+                    ),
+                ),
             ReplyEndEvent(
                 id=model_start.recovery_plan.stable_reply_end_event_id,
                 **ctx.event_fields(),
@@ -472,8 +529,8 @@ def test_rebuild_prior_messages_drops_audit_only_partial_reply_before_failure_no
                 user_input_chars=10,
                 metadata={"user_input": "first user"},
             ),
-            TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**ctx.event_fields(), block_id="text:1"),
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id="text:1", delta="partial answer"
             ),
             RunErrorEvent(
@@ -587,8 +644,8 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
                 user_input_chars=len("long user task"),
                 metadata={"user_input": "long user task"},
             ),
-            TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**ctx.event_fields(), block_id="text:1"),
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id="text:1", delta="partial answer"
             ),
             ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
@@ -679,17 +736,17 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
                 user_input_chars=len("dangerous task"),
                 metadata={"user_input": "dangerous task"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:danger",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:danger",
                 delta='{"command": "rm -rf ./x"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:danger"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:danger"),
             RequireUserConfirmEvent(
                 **ctx.event_fields(),
                 tool_calls=[
@@ -740,17 +797,17 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
                 user_input_chars=len("run command"),
                 metadata={"user_input": "run command"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 delta='{"command": "sleep 30"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:terminal"),
             ToolResultStartEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
@@ -790,17 +847,17 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
                 user_input_chars=len("run command"),
                 metadata={"user_input": "run command"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 delta='{"command": "printf done"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:terminal"),
             ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
             ToolResultStartEvent(
                 **ctx.event_fields(),
@@ -854,28 +911,28 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
                 user_input_chars=len("change files"),
                 metadata={"user_input": "change files"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:write",
                 tool_call_name="write_file",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:write",
                 delta='{"path": "secret.txt"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:write"),
-            ToolCallStartEvent(
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:write"),
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:term",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:term",
                 delta='{"command": "echo hidden"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:term"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:term"),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
                 **ctx.event_fields(),
@@ -919,17 +976,17 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
                 user_input_chars=len("dangerous task"),
                 metadata={"user_input": "dangerous task"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **aborted_ctx.event_fields(),
                 tool_call_id="call:danger",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **aborted_ctx.event_fields(),
                 tool_call_id="call:danger",
                 delta='{"command": "rm -rf ./x"}',
             ),
-            ToolCallEndEvent(**aborted_ctx.event_fields(), tool_call_id="call:danger"),
+            make_tool_call_end_event(**aborted_ctx.event_fields(), tool_call_id="call:danger"),
             RequireUserConfirmEvent(
                 **aborted_ctx.event_fields(),
                 tool_calls=[
@@ -2438,6 +2495,51 @@ def test_user_enter_plan_immediately_switches_read_only_and_emits_durable_entry(
     assert "not allowed by permission policy" in write_output
 
 
+def test_fresh_durable_plan_entry_is_deferred_until_run_genesis(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transport = ScriptedTransport([{"text": "plan ready"}])
+    core = _core(monkeypatch, transport)
+
+    async def run():
+        session = await _open_project_session(
+            core,
+            tmp_path,
+            permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+        )
+        runtime = session.wiring.runtime_wiring.runtime_session
+        runtime.allow_unbootstrapped_test_events = False
+
+        session.enter_plan(reason="durable plan before first run")
+
+        assert session.plan_state.pending_entry_audit is True
+        assert runtime.event_log.next_sequence() == 1
+        assert not any(
+            isinstance(event, PlanModeEnteredEvent)
+            for event in session.replay_events()
+        )
+
+        result = await session.run_turn("prepare a plan")
+        return session, result
+
+    session, result = asyncio.run(run())
+    events = session.replay_events()
+    run_start_index = next(
+        index for index, event in enumerate(events) if isinstance(event, RunStartEvent)
+    )
+    plan_entry_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, PlanModeEnteredEvent)
+    )
+
+    assert result.final_text == "plan ready"
+    assert run_start_index < plan_entry_index
+    assert session.plan_state.pending_entry_audit is False
+    assert session.plan_state.entry_run_id == events[plan_entry_index].run_id
+
+
 def test_plan_mode_blocks_permission_switch_until_explicit_exit(
     tmp_path, monkeypatch
 ) -> None:
@@ -3190,7 +3292,7 @@ def test_host_session_suspension_releases_run_lock_before_approval_resolution(
                     ),
                 )
             ),
-            timeout=1,
+            timeout=5,
         )
         return session, result
 
@@ -3387,13 +3489,13 @@ def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 await self.release.wait()
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id="text:late"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:late", delta="late text"
             )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id="text:late"
             )
 

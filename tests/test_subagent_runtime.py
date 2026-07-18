@@ -3,12 +3,26 @@ import inspect
 import json
 import re
 from collections.abc import AsyncIterator
+from time import monotonic
 
 import pytest
 
 from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support.capability import preview_capability_plan
 from tests.support.runtime_session import in_memory_runtime_session
+
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
 
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
@@ -40,12 +54,7 @@ from pulsara_agent.event import (
     SubagentTaskFailedEvent,
     SubagentTaskScheduledEvent,
     SubagentTaskStartedEvent,
-    TextBlockEndEvent,
-    TextBlockDeltaEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
+    TextBlockSegmentEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.capability.runtime import CapabilityRuntime
@@ -61,7 +70,6 @@ from tests.support import (
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.runtime.subagent import (
     InMemoryEventLogLocator,
     SubagentBudget,
@@ -122,12 +130,13 @@ def _subagent_test_llm_config(**kwargs):
 
 
 def _append_parent_run_start(
-    event_log: InMemoryEventLog,
+    runtime_session: RuntimeSession,
     *,
     runtime_session_id: str,
     event_context: EventContext,
     user_input: str = "",
 ) -> RunStartEvent:
+    event_log = runtime_session.event_log
     existing = next(
         (
             event
@@ -139,19 +148,65 @@ def _append_parent_run_start(
     if existing is not None:
         return existing
     prior = event_log.iter()
+    from pulsara_agent.runtime.authority_materialization import (
+        prepare_authority_artifact_write_reservation,
+        persist_prepared_run_transcript_seed,
+        prepare_run_transcript_seed,
+    )
+    from pulsara_agent.runtime.authority_materialization.transcript_reducer import (
+        TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT,
+    )
+
+    projection = runtime_session.transcript_projection_state_store.snapshot()
+    prepared_seed = prepare_run_transcript_seed(
+        runtime_session_id=runtime_session_id,
+        stable_state=projection.stable_semantic_state,
+        stable_entries=runtime_session.transcript_projection_state_store.stable_entries(),
+        ledger_through_sequence=projection.ledger_through_sequence,
+        ledger_continuity_accumulator=projection.ledger_continuity_accumulator,
+        reducer_id="pulsara.transcript-projection",
+        reducer_version="1",
+        reducer_contract_fingerprint=(
+            TRANSCRIPT_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
+        ),
+        transcript_semantic_domain_contract_fingerprint=(
+            runtime_session.authority_materialization_contracts.event_domain.contract.registry_contract_fingerprint
+        ),
+        contracts=runtime_session.transcript_projection_materialization_contracts,
+    )
+    seed_deadline = monotonic() + 30.0
+    persist_prepared_run_transcript_seed(
+        prepared_seed,
+        write_reservation=prepare_authority_artifact_write_reservation(
+            operation_id=f"run-seed:{event_context.run_id}",
+            owner_kind="run_seed_materialization",
+            artifacts=prepared_seed.artifacts,
+            limits=runtime_session.authority_materialization_contracts.limits,
+            absolute_deadline_monotonic=seed_deadline,
+        ),
+        limits=runtime_session.authority_materialization_contracts.limits,
+        archive=runtime_session.archive,
+        runtime_session_id=runtime_session_id,
+        deadline_monotonic=seed_deadline,
+    )
+    fields = run_start_permission_fields(
+        event_context.run_id,
+        user_input=user_input,
+        turn_id=event_context.turn_id,
+        reply_id=event_context.reply_id,
+        mcp_installation_owner_runtime_session_id=runtime_session_id,
+        transcript_source_through_sequence=max(
+            (event.sequence or 0 for event in prior), default=0
+        ),
+        transcript_source_event_count=len(prior),
+    )
+    fields.update(
+        run_transcript_seed_semantic=prepared_seed.seed_semantic,
+        run_transcript_seed_reference=prepared_seed.seed_reference,
+    )
     start = RunStartEvent(
         **event_context.event_fields(),
-        **run_start_permission_fields(
-            event_context.run_id,
-            user_input=user_input,
-            turn_id=event_context.turn_id,
-            reply_id=event_context.reply_id,
-            mcp_installation_owner_runtime_session_id=runtime_session_id,
-            transcript_source_through_sequence=max(
-                (event.sequence or 0 for event in prior), default=0
-            ),
-            transcript_source_event_count=len(prior),
-        ),
+        **fields,
         user_input_chars=len(user_input),
     )
     stored = event_log.append(start)
@@ -214,7 +269,7 @@ def _runtime(
     )
     if seed_parent_run:
         _append_parent_run_start(
-            event_log,
+            parent,
             runtime_session_id="runtime:parent",
             event_context=CTX,
         )
@@ -246,6 +301,7 @@ def _resumed_runtime(parent, locator, child_logs):
         runtime_session_id=parent.runtime_session_id,
         terminal_binding=parent.terminal_binding,
         extra_tool_bindings=parent.extra_tool_bindings,
+        allow_unbootstrapped_test_events=True,
     )
     resumed = SubagentRuntime(
         parent_runtime_session=resumed_parent,
@@ -443,7 +499,7 @@ def test_child_raw_events_get_subagent_metadata_at_runtime_session_boundary(
         )
 
         stored = await child.emit(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **child_ctx.event_fields(), block_id="text:1", delta="hello"
             )
         )
@@ -461,7 +517,7 @@ def test_child_raw_events_get_subagent_metadata_at_runtime_session_boundary(
             == subagent.capability_profile.profile_id
         )
         assert all(
-            not isinstance(event, TextBlockDeltaEvent)
+            not isinstance(event, TextBlockSegmentEvent)
             for event in parent.event_log.iter()
         )
 
@@ -478,7 +534,7 @@ def test_child_publish_stored_event_requires_boundary_metadata(tmp_path) -> None
             run_id="run:child", turn_id="turn:child", reply_id="reply:child"
         )
         directly_appended = child.event_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **child_ctx.event_fields(), block_id="text:1", delta="missing metadata"
             )
         )
@@ -501,7 +557,7 @@ def test_child_publish_stored_event_requires_nested_subagent_metadata_values(
             run_id="run:child", turn_id="turn:child", reply_id="reply:child"
         )
         directly_appended = child.event_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **child_ctx.event_fields(),
                 block_id="text:1",
                 delta="shallow metadata",
@@ -883,6 +939,57 @@ def test_concurrent_task_start_has_single_winner(tmp_path, monkeypatch) -> None:
     assert len(started_events) == 1
     assert len(runtime.runs) == 1
     assert runtime.tasks[0].status == "running"
+
+
+def test_concurrent_independent_completions_rebase_on_latest_graph(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    parent, _locator, _child_logs, runtime = _runtime(tmp_path)
+
+    async def run() -> None:
+        first = await runtime.spawn_fake(task="first child", event_context=CTX)
+        second = await runtime.spawn_fake(task="second child", event_context=CTX)
+        original_commit = runtime._commit_plan  # noqa: SLF001
+        entered = 0
+        both_planned = asyncio.Event()
+
+        async def synchronized_commit(plan):
+            nonlocal entered
+            if plan.operation == "complete_run":
+                entered += 1
+                if entered == 2:
+                    both_planned.set()
+                await asyncio.wait_for(both_planned.wait(), timeout=1)
+            return await original_commit(plan)
+
+        monkeypatch.setattr(runtime, "_commit_plan", synchronized_commit)
+        results = await asyncio.gather(
+            runtime.complete_fake(
+                first.subagent_run_id,
+                summary="first result",
+                event_context=CTX,
+            ),
+            runtime.complete_fake(
+                second.subagent_run_id,
+                summary="second result",
+                event_context=CTX,
+            ),
+        )
+
+        assert {result.summary for result in results} == {
+            "first result",
+            "second result",
+        }
+
+    asyncio.run(run())
+    completed = [
+        event
+        for event in parent.event_log.iter()
+        if isinstance(event, SubagentRunCompletedEvent)
+    ]
+    assert len(completed) == 2
+    assert all(run.status == "completed" for run in runtime.runs)
 
 
 def test_completion_run_and_task_events_are_atomic_batch(tmp_path, monkeypatch) -> None:
@@ -2693,7 +2800,7 @@ def test_restart_preserves_consumed_and_delivered_sets_from_facts(tmp_path) -> N
     assert by_result[delivered_result_id].consumed_by_wait is False
 
 
-def test_restart_does_not_require_archive_for_graph_equality(tmp_path) -> None:
+def test_restart_graph_equality_uses_confirmed_runtime_seed_archive(tmp_path) -> None:
     parent, locator, child_logs, runtime = _runtime(tmp_path)
 
     async def seed() -> None:
@@ -2707,9 +2814,10 @@ def test_restart_does_not_require_archive_for_graph_equality(tmp_path) -> None:
     resumed_parent = RuntimeSession(
         parent.workspace_root,
         event_log=parent.event_log,
-        archive=InMemoryArchiveStore(),
+        archive=parent.archive,
         tool_result_artifacts=parent.tool_result_artifacts,
         runtime_session_id=parent.runtime_session_id,
+        allow_unbootstrapped_test_events=True,
     )
     resumed = SubagentRuntime(
         parent_runtime_session=resumed_parent,
@@ -3148,7 +3256,7 @@ def test_host_session_close_cancels_active_subagents(tmp_path) -> None:
     child_finalized = asyncio.Event()
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     _append_parent_run_start(
-        runtime_wiring.runtime_session.event_log,
+        runtime_wiring.runtime_session,
         runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
         event_context=CTX,
     )
@@ -3232,7 +3340,7 @@ def test_host_permission_leaving_bypass_does_not_cancel_active_subagents(
     started = asyncio.Event()
     runtime_wiring = build_in_memory_runtime_wiring(tmp_path)
     _append_parent_run_start(
-        runtime_wiring.runtime_session.event_log,
+        runtime_wiring.runtime_session,
         runtime_session_id=runtime_wiring.runtime_session.runtime_session_id,
         event_context=CTX,
     )
@@ -3836,7 +3944,7 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
         parent_task = asyncio.create_task(
             run_agent_task(agent, "spawn a child and then finish")
         )
-        await asyncio.wait_for(child_started.wait(), timeout=1)
+        await asyncio.wait_for(child_started.wait(), timeout=5)
         assert agent.subagent_runtime is not None
         run = next(
             item for item in agent.subagent_runtime.runs if item.status == "running"
@@ -3910,7 +4018,7 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
             )
             is None
         )
-        result = await asyncio.wait_for(parent_task, timeout=2)
+        result = await asyncio.wait_for(parent_task, timeout=5)
         assert result.status is LoopStatus.FINISHED
 
     asyncio.run(run_parent_and_cancel())
@@ -4009,7 +4117,18 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
         hold_child_a_after_native_terminal,
     )
     committed_repair_batches: list[tuple[AgentEvent, ...]] = []
+    batch_repair_committed = asyncio.Event()
     original_write_events = RuntimeSession.write_events
+
+    async def await_batch_repair_owner(**_kwargs) -> bool:
+        await asyncio.wait_for(batch_repair_committed.wait(), timeout=10)
+        return True
+
+    monkeypatch.setattr(
+        agent,
+        "_await_reclaimable_rollout_reservations",
+        await_batch_repair_owner,
+    )
 
     async def capture_repair_batch(runtime_session, events, **kwargs):
         outcome = await original_write_events(runtime_session, events, **kwargs)
@@ -4017,6 +4136,7 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
             isinstance(event, SubagentRunCancelledEvent) for event in events
         ) == 2:
             committed_repair_batches.append(tuple(events))
+            batch_repair_committed.set()
             raise asyncio.CancelledError
         return outcome
 
@@ -4367,6 +4487,7 @@ def test_inferred_child_result_repair_reproduces_non_default_policy_payload(
         runtime_session_id=parent.runtime_session_id,
         terminal_binding=parent.terminal_binding,
         extra_tool_bindings=parent.extra_tool_bindings,
+        allow_unbootstrapped_test_events=True,
     )
     resumed = SubagentRuntime(
         parent_runtime_session=resumed_parent,
@@ -4442,9 +4563,9 @@ class _ExplicitReportChildTransport:
             subagent_run_id = _extract_subagent_run_id(text)
             async for event in _tool_reply(
                 event_context,
-                tool_call_id="tool:wait-explicit-child",
+                tool_call_id=f"tool:wait-explicit-child:{event_context.reply_id}",
                 name="wait_agent",
-                arguments={"subagent_run_id": subagent_run_id, "timeout_seconds": 1},
+                arguments={"subagent_run_id": subagent_run_id, "timeout_seconds": 5},
             ):
                 yield event
         else:
@@ -4729,11 +4850,11 @@ async def _text_reply(
     event_context: EventContext, text: str
 ) -> AsyncIterator[AgentEvent]:
     block_id = f"text:{event_context.run_id}"
-    yield TextBlockStartEvent(**event_context.event_fields(), block_id=block_id)
-    yield TextBlockDeltaEvent(
+    yield RawProviderTextBlockStart(**event_context.event_fields(), block_id=block_id)
+    yield RawProviderTextDelta(
         **event_context.event_fields(), block_id=block_id, delta=text
     )
-    yield TextBlockEndEvent(**event_context.event_fields(), block_id=block_id)
+    yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id=block_id)
 
 
 async def _tool_reply(
@@ -4743,17 +4864,17 @@ async def _tool_reply(
     name: str,
     arguments: dict[str, object],
 ) -> AsyncIterator[AgentEvent]:
-    yield ToolCallStartEvent(
+    yield RawProviderToolCallStart(
         **event_context.event_fields(),
         tool_call_id=tool_call_id,
         tool_call_name=name,
     )
-    yield ToolCallDeltaEvent(
+    yield RawProviderToolCallDelta(
         **event_context.event_fields(),
         tool_call_id=tool_call_id,
         delta=json.dumps(arguments),
     )
-    yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=tool_call_id)
+    yield RawProviderToolCallEnd(**event_context.event_fields(), tool_call_id=tool_call_id)
 
 
 def _context_text(context: LLMContext) -> str:

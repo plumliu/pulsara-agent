@@ -7,13 +7,19 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
-from uuid import uuid4
 
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event.events import ContextCompactionCompletedEvent
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePool, PooledMemoryCandidate
+from pulsara_agent.memory.candidates.pool import candidate_payload_fingerprint
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
 from pulsara_agent.ontology import memory
+from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.governance_evidence import (
+    CompactionCandidateAttributionFact,
+    CompactionMemoryCandidateExtractorContractFact,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +74,8 @@ class CompactionCandidateAppendResult:
     duplicate_count: int = 0
     skipped: tuple[CompactionCandidateSkippedItem, ...] = ()
     diagnostics: tuple[CompactionCandidateDiagnostic, ...] = ()
+    candidates: tuple[PooledMemoryCandidate, ...] = ()
+    attributions: tuple[CompactionCandidateAttributionFact, ...] = ()
 
 
 class CompactionMemoryCandidateSink(Protocol):
@@ -77,7 +85,7 @@ class CompactionMemoryCandidateSink(Protocol):
     @property
     def workspace_kind(self) -> str: ...
 
-    def append_compaction_candidates(
+    def prepare_compaction_candidates(
         self,
         *,
         completed_event: ContextCompactionCompletedEvent,
@@ -105,7 +113,7 @@ class CandidatePoolCompactionMemoryCandidateSink:
     def workspace_kind(self) -> str:
         return self.memory_domain.workspace_kind
 
-    def append_compaction_candidates(
+    def prepare_compaction_candidates(
         self,
         *,
         completed_event: ContextCompactionCompletedEvent,
@@ -136,7 +144,8 @@ class CandidatePoolCompactionMemoryCandidateSink:
             and candidate.source_session_id == self.runtime_session_id
             and candidate.intent_fingerprint
         }
-        entry_ids: list[str] = []
+        candidates: list[PooledMemoryCandidate] = []
+        attributions: list[CompactionCandidateAttributionFact] = []
         skipped: list[CompactionCandidateSkippedItem] = []
         duplicate_count = 0
         for normalized in parse_result.candidates:
@@ -154,7 +163,14 @@ class CandidatePoolCompactionMemoryCandidateSink:
                 "intent_fingerprint": normalized.intent_fingerprint,
                 "raw_candidate_index": normalized.raw_index,
             }
+            payload_fingerprint = candidate_payload_fingerprint(normalized.payload)
+            entry_id = _compaction_candidate_entry_id(
+                completed_event=completed_event,
+                raw_index=normalized.raw_index,
+                intent_fingerprint=normalized.intent_fingerprint,
+            )
             pooled = PooledMemoryCandidate(
+                entry_id=entry_id,
                 payload=normalized.payload,
                 origin=CandidateOrigin.COMPACTION,
                 source_session_id=self.runtime_session_id,
@@ -166,35 +182,29 @@ class CandidatePoolCompactionMemoryCandidateSink:
                 intent_fingerprint=normalized.intent_fingerprint,
                 metadata=metadata,
             )
-            try:
-                stored = self.candidate_pool.append_candidate(pooled)
-            except Exception as exc:
-                diagnostics.append(
-                    CompactionCandidateDiagnostic(
-                        code="compaction_candidate_append_failed",
-                        field=f"candidates[{normalized.raw_index}]",
-                        message=type(exc).__name__,
-                        redacted=True,
-                    )
-                )
-                skipped.append(
-                    CompactionCandidateSkippedItem(
-                        code="compaction_candidate_append_failed",
-                        reason="Candidate append failed; details were redacted.",
-                        redacted=True,
-                    )
-                )
-                continue
             pending_fingerprints.add(normalized.intent_fingerprint)
-            entry_ids.append(stored.entry_id)
+            candidates.append(pooled)
+            attributions.append(
+                build_frozen_fact(
+                    CompactionCandidateAttributionFact,
+                    schema_version="compaction_candidate_attribution.v1",
+                    candidate_entry_id=entry_id,
+                    raw_candidate_index=normalized.raw_index,
+                    candidate_payload=normalized.payload,
+                    candidate_payload_fingerprint=payload_fingerprint,
+                    intent_fingerprint=normalized.intent_fingerprint,
+                )
+            )
         return CompactionCandidateAppendResult(
             source_event_id=completed_event.id,
             source_event_sequence=source_event_sequence,
             source_artifact_id=summary_artifact_id,
-            entry_ids=tuple(entry_ids),
+            entry_ids=tuple(candidate.entry_id for candidate in candidates),
             duplicate_count=duplicate_count,
             skipped=tuple(skipped),
             diagnostics=tuple(diagnostics),
+            candidates=tuple(candidates),
+            attributions=tuple(attributions),
         )
 
 
@@ -353,7 +363,11 @@ def parse_compaction_memory_candidates(
             continue
         payload = ValidCandidatePayload(
             candidate=PreferenceCandidate(
-                candidate_id=f"candidate:compaction:{uuid4().hex}",
+                candidate_id=_compaction_payload_candidate_id(
+                    raw_index=index,
+                    item=raw_candidate,
+                    extractor_version=effective_policy.extractor_version,
+                ),
                 statement=statement,
                 scope=workspace_scope,
                 evidence_ids=(),
@@ -385,6 +399,64 @@ def parse_compaction_memory_candidates(
 
 def _looks_secret_like(value: str) -> bool:
     return bool(_SECRET_LIKE_RE.search(value))
+
+
+def compaction_extractor_contract(
+    policy: ContextCompactionMemoryCandidatePolicy,
+) -> CompactionMemoryCandidateExtractorContractFact:
+    return build_frozen_fact(
+        CompactionMemoryCandidateExtractorContractFact,
+        schema_version="compaction_memory_candidate_extractor_contract.v1",
+        extractor_id="pulsara.compaction_memory_candidates",
+        extractor_version=policy.extractor_version,
+        accepted_input_schema_fingerprint=context_fingerprint(
+            "compaction-memory-candidate-input-schema:v1",
+            "summary_memory_candidates_json",
+        ),
+        output_candidate_schema_fingerprint=context_fingerprint(
+            "compaction-memory-candidate-output-schema:v1",
+            "valid_preference_candidate",
+        ),
+        parsing_rules_fingerprint=context_fingerprint(
+            "compaction-memory-candidate-parsing:v1",
+            {
+                "kind": "Preference",
+                "secret_filter": "secret-like-v1",
+                "max_candidates": policy.max_candidates_per_compaction,
+            },
+        ),
+        normalization_rules_fingerprint=context_fingerprint(
+            "compaction-memory-candidate-normalization:v1",
+            "trim+conversation_evidence+inferred",
+        ),
+    )
+
+
+def _compaction_payload_candidate_id(
+    *,
+    raw_index: int,
+    item: dict[str, Any],
+    extractor_version: str,
+) -> str:
+    payload = {key: value for key, value in item.items() if key != "candidate_id"}
+    digest = context_fingerprint(
+        "compaction-candidate-id:v1",
+        (extractor_version, raw_index, payload),
+    ).removeprefix("sha256:")
+    return f"candidate:compaction:{digest}"
+
+
+def _compaction_candidate_entry_id(
+    *,
+    completed_event: ContextCompactionCompletedEvent,
+    raw_index: int,
+    intent_fingerprint: str,
+) -> str:
+    digest = context_fingerprint(
+        "compaction-candidate-entry:v1",
+        (completed_event.compaction_id, raw_index, intent_fingerprint),
+    ).removeprefix("sha256:")
+    return f"pool:compaction:{digest}"
 
 
 def _intent_fingerprint(

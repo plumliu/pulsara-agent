@@ -1,9 +1,21 @@
 import pytest
 
+from tests.support.model_stream import (
+    make_data_block_end_event,
+    make_data_block_segment_event,
+    make_data_block_start_event,
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+    make_thinking_block_end_event,
+    make_thinking_block_segment_event,
+    make_thinking_block_start_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
-    DataBlockDeltaEvent,
-    DataBlockEndEvent,
-    DataBlockStartEvent,
     EventContext,
     ExternalExecutionResultEvent,
     ModelCallEndEvent,
@@ -11,15 +23,6 @@ from pulsara_agent.event import (
     RequireExternalExecutionEvent,
     ReplyEndEvent,
     ReplyStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
-    ThinkingBlockEndEvent,
-    ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -39,6 +42,7 @@ from pulsara_agent.message import (
 from pulsara_agent.message.reducer import MessageReducer
 from tests.support import model_call_end_fields
 from tests.conftest import (
+    external_terminal_projection_references,
     external_tool_call_requirement_fact,
     external_tool_result_ingress_fact,
     tool_result_end_contract_fields,
@@ -47,6 +51,16 @@ from pulsara_agent.primitives.tool_observation import ToolObservationTimingFact
 
 
 CTX = EventContext(run_id="run:test", turn_id="turn:test", reply_id="reply:test")
+
+
+def _external_result_event(*ingresses, sequence=None):
+    values = tuple(ingresses)
+    return ExternalExecutionResultEvent(
+        **CTX.event_fields(),
+        external_results=values,
+        terminal_projections=external_terminal_projection_references(values),
+        sequence=sequence,
+    )
 
 
 def _reduce_message_events(event_log: InMemoryEventLog):
@@ -67,44 +81,81 @@ def _reduce_message_events(event_log: InMemoryEventLog):
     return reducer.message
 
 
+def test_terminal_projection_carriers_are_required_by_durable_schema() -> None:
+    model_payload = ModelCallEndEvent(
+        **CTX.event_fields(),
+        **model_call_end_fields(),
+    ).model_dump(mode="json")
+    model_payload.pop("terminal_projection")
+    with pytest.raises(ValueError, match="terminal_projection"):
+        ModelCallEndEvent.model_validate(model_payload)
+
+    tool_payload = ToolResultEndEvent(
+        **CTX.event_fields(),
+        **tool_result_end_contract_fields("call:required", tool_name="lookup"),
+        tool_call_id="call:required",
+        state=ToolResultState.SUCCESS,
+    ).model_dump(mode="json")
+    tool_payload.pop("terminal_projection")
+    with pytest.raises(ValueError, match="terminal_projection"):
+        ToolResultEndEvent.model_validate(tool_payload)
+
+    ingress = external_tool_result_ingress_fact(
+        ToolResultBlock(
+            id="call:external-required",
+            name="external_lookup",
+            output=[TextBlock(text="done")],
+            state=ToolResultState.SUCCESS,
+        )
+    )
+    external_payload = _external_result_event(ingress).model_dump(mode="json")
+    external_payload.pop("terminal_projections")
+    with pytest.raises(ValueError, match="terminal_projections"):
+        ExternalExecutionResultEvent.model_validate(external_payload)
+    with pytest.raises(ValueError, match="terminal projections differ"):
+        ExternalExecutionResultEvent.model_validate(
+            {**external_payload, "terminal_projections": []}
+        )
+
+
 def test_message_reducer_replays_text_thinking_tool_events() -> None:
     event_log = InMemoryEventLog()
     event_log.extend(
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            TextBlockStartEvent(**CTX.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**CTX.event_fields(), block_id="text:1"),
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="hello "
             ),
-            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="world"),
-            TextBlockEndEvent(**CTX.event_fields(), block_id="text:1"),
-            ThinkingBlockStartEvent(**CTX.event_fields(), block_id="thinking:1"),
-            ThinkingBlockDeltaEvent(
+            make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="world"),
+            make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
+            make_thinking_block_start_event(**CTX.event_fields(), block_id="thinking:1"),
+            make_thinking_block_segment_event(
                 **CTX.event_fields(), block_id="thinking:1", delta="plan"
             ),
-            ThinkingBlockEndEvent(**CTX.event_fields(), block_id="thinking:1"),
-            DataBlockStartEvent(
+            make_thinking_block_end_event(**CTX.event_fields(), block_id="thinking:1"),
+            make_data_block_start_event(
                 **CTX.event_fields(), block_id="data:1", media_type="image/png"
             ),
-            DataBlockDeltaEvent(
+            make_data_block_segment_event(
                 **CTX.event_fields(),
                 block_id="data:1",
                 data="abc",
                 media_type="image/png",
             ),
-            DataBlockEndEvent(**CTX.event_fields(), block_id="data:1"),
-            ToolCallStartEvent(
+            make_data_block_end_event(**CTX.event_fields(), block_id="data:1"),
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id="call:1",
                 tool_call_name="lookup",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id="call:1", delta='{"q"'
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id="call:1", delta=':"x"}'
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:1"),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:1"),
             ToolResultStartEvent(
                 **CTX.event_fields(),
                 tool_call_id="call:1",
@@ -122,9 +173,7 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
                     "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
                 },
             ),
-            ExternalExecutionResultEvent(
-                **CTX.event_fields(),
-                external_results=(
+            _external_result_event(
                     external_tool_result_ingress_fact(
                         ToolResultBlock(
                             id="call:external",
@@ -132,8 +181,7 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
                             output=[TextBlock(text="external result")],
                             state=ToolResultState.SUCCESS,
                         )
-                    ),
-                ),
+                    )
             ),
             ModelCallEndEvent(
                 **CTX.event_fields(),
@@ -219,6 +267,7 @@ def test_external_execution_result_requires_typed_non_empty_ingress() -> None:
         ExternalExecutionResultEvent(
             **CTX.event_fields(),
             external_results=(),
+            terminal_projections=(),
         )
 
 
@@ -271,6 +320,9 @@ def test_external_execution_result_rejects_duplicate_result_ids() -> None:
         ExternalExecutionResultEvent(
             **CTX.event_fields(),
             external_results=(ingress, ingress),
+            terminal_projections=external_terminal_projection_references(
+                (ingress, ingress)
+            ),
         )
 
 
@@ -279,18 +331,18 @@ def test_message_reducer_preserves_block_start_order_for_interleaved_events() ->
     event_log.extend(
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            TextBlockStartEvent(**CTX.event_fields(), block_id="text:first"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**CTX.event_fields(), block_id="text:first"),
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:first", delta="before tool"
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(), tool_call_id="call:later", tool_call_name="lookup"
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id="call:later", delta="{}"
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:later"),
-            TextBlockEndEvent(**CTX.event_fields(), block_id="text:first"),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:later"),
+            make_text_block_end_event(**CTX.event_fields(), block_id="text:first"),
             ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
@@ -314,23 +366,21 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
     event_log.extend(
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id=tool_call.id,
                 tool_call_name=tool_call.name,
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id=tool_call.id),
             RequireExternalExecutionEvent(
                 id=require_event_id,
                 **CTX.event_fields(),
                 external_tool_calls=(requirement,),
             ),
-            ExternalExecutionResultEvent(
-                **CTX.event_fields(),
-                external_results=(
+            _external_result_event(
                     external_tool_result_ingress_fact(
                         ToolResultBlock(
                             id=tool_call.id,
@@ -340,8 +390,7 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
                         ),
                         requirement=requirement,
                         require_event_id=require_event_id,
-                    ),
-                ),
+                    )
             ),
             ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]

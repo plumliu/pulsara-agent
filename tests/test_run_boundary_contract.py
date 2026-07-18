@@ -383,6 +383,7 @@ def test_plan_workflow_inactive_cannot_carry_entry_attribution() -> None:
         PlanWorkflowStateFact(
             workflow_id="plan:1",
             active=False,
+            pending_entry_audit=False,
             revision=1,
             entered_event_id=None,
             entered_event_sequence=None,

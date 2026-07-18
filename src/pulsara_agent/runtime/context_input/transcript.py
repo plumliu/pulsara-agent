@@ -18,7 +18,7 @@ from pulsara_agent.event.events import (
     ContextCompactionCompletedEvent,
     ContextWindowCompactionCompletedEvent,
     ContextWindowCompactionStartedEvent,
-    DataBlockDeltaEvent,
+    DataBlockSegmentEvent,
     DataBlockEndEvent,
     DataBlockStartEvent,
     ExternalExecutionResultEvent,
@@ -28,13 +28,13 @@ from pulsara_agent.event.events import (
     RunEndEvent,
     RunStartEvent,
     TerminalProcessCompletedEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
+    ThinkingBlockSegmentEvent,
     ThinkingBlockEndEvent,
     ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultDataDeltaEvent,
@@ -654,16 +654,16 @@ def _is_model_reply_stream_event(event: AgentEvent) -> bool:
         ReplyStartEvent
         | ReplyEndEvent
         | TextBlockStartEvent
-        | TextBlockDeltaEvent
+        | TextBlockSegmentEvent
         | TextBlockEndEvent
         | ThinkingBlockStartEvent
-        | ThinkingBlockDeltaEvent
+        | ThinkingBlockSegmentEvent
         | ThinkingBlockEndEvent
         | DataBlockStartEvent
-        | DataBlockDeltaEvent
+        | DataBlockSegmentEvent
         | DataBlockEndEvent
         | ToolCallStartEvent
-        | ToolCallDeltaEvent
+        | ToolCallArgumentsSegmentEvent
         | ToolCallEndEvent
         | HintBlockEvent,
     )
@@ -959,7 +959,7 @@ def _event_matches_block(event: AgentEvent, completion: BlockCompletion) -> bool
     if completion.block_type == "text":
         return (
             isinstance(
-                event, TextBlockStartEvent | TextBlockDeltaEvent | TextBlockEndEvent
+                event, TextBlockStartEvent | TextBlockSegmentEvent | TextBlockEndEvent
             )
             and event.block_id == completion.block_id
         )
@@ -968,7 +968,7 @@ def _event_matches_block(event: AgentEvent, completion: BlockCompletion) -> bool
             isinstance(
                 event,
                 ThinkingBlockStartEvent
-                | ThinkingBlockDeltaEvent
+                | ThinkingBlockSegmentEvent
                 | ThinkingBlockEndEvent,
             )
             and event.block_id == completion.block_id
@@ -976,14 +976,17 @@ def _event_matches_block(event: AgentEvent, completion: BlockCompletion) -> bool
     if completion.block_type == "data":
         return (
             isinstance(
-                event, DataBlockStartEvent | DataBlockDeltaEvent | DataBlockEndEvent
+                event, DataBlockStartEvent | DataBlockSegmentEvent | DataBlockEndEvent
             )
             and event.block_id == completion.block_id
         )
     if completion.block_type == "tool_call":
         return (
             isinstance(
-                event, ToolCallStartEvent | ToolCallDeltaEvent | ToolCallEndEvent
+                event,
+                ToolCallStartEvent
+                | ToolCallArgumentsSegmentEvent
+                | ToolCallEndEvent,
             )
             and event.tool_call_id == completion.block_id
         )

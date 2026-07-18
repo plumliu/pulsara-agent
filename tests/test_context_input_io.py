@@ -48,6 +48,39 @@ def test_context_input_io_timeout_retains_physical_owner_until_worker_exit() -> 
     asyncio.run(scenario())
 
 
+def test_owned_context_input_io_handle_survives_waiter_cancellation() -> None:
+    async def scenario() -> None:
+        service = ContextInputIoService(max_pending=1, max_workers=1)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking() -> str:
+            entered.set()
+            release.wait()
+            return "physically-complete"
+
+        handle = await service.start_owned(
+            operation_name="owned-blocking-probe",
+            operation=blocking,
+            deadline_monotonic=monotonic() + 1,
+        )
+        await asyncio.to_thread(entered.wait, 1)
+        waiter = asyncio.create_task(handle.wait_physical_completion())
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert service.pending_count() == 1
+        assert not handle.physically_complete
+        release.set()
+        assert await handle.wait_physical_completion() == "physically-complete"
+        await service.drain_pending(deadline_monotonic=monotonic() + 1)
+        assert service.pending_count() == 0
+        service.close_if_idle()
+
+    asyncio.run(scenario())
+
+
 def test_event_slice_reader_uses_session_owned_deadline_aware_io() -> None:
     class RecordingLog(InMemoryEventLog):
         observed_deadline: float | None = None

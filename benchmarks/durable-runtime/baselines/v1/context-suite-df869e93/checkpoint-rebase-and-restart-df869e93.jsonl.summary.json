@@ -1,0 +1,231 @@
+{
+  "benchmark_run_id": "benchmark:64af817ad119b0327296f2be",
+  "case_aggregates": [
+    {
+      "case_contract_fingerprint": "sha256:34d59cffa2dfb96a15340785793ab717377adcb195de8da69f979aa5fc8c5266",
+      "case_id": "checkpoint-rebase-and-restart:preferred-hit:default",
+      "metrics": [
+        {
+          "maximum": 0.11262250004801899,
+          "median": 0.10750212502898648,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.09914995799772441,
+          "p95_nearest_rank": 0.11148645810317248,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.09132922498974949,
+          "median": 0.08856175849214196,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.08196601660456508,
+          "p95_nearest_rank": 0.09037651659455151,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.45664612494874746,
+          "median": 0.4428087924607098,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 0.4098300830228254,
+          "p95_nearest_rank": 0.4518825829727575,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 99,
+          "median": 99.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 99,
+          "p95_nearest_rank": 99,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 10,
+          "median": 10.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 10,
+          "p95_nearest_rank": 10,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.01715695799794048,
+          "median": 0.01618272840278223,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.015635209041647613,
+          "p95_nearest_rank": 0.016962458146736026,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    },
+    {
+      "case_contract_fingerprint": "sha256:77e37cc94c781a3aa312553598963bf6c35b5143a6d71a0efcf0d382050726a5",
+      "case_id": "checkpoint-rebase-and-restart:preferred-missing-rebase:default",
+      "metrics": [
+        {
+          "maximum": 0.1798343340633437,
+          "median": 0.11620310449507087,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.11181183403823525,
+          "p95_nearest_rank": 0.11938620801083744,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.10966257522813976,
+          "median": 0.09909827081719413,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.09492428340017796,
+          "p95_nearest_rank": 0.10314226639457047,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.5483128761406988,
+          "median": 0.49549135408597067,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 0.4746214170008898,
+          "p95_nearest_rank": 0.5157113319728523,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 121,
+          "median": 121.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 121,
+          "p95_nearest_rank": 121,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 12,
+          "median": 12.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 12,
+          "p95_nearest_rank": 12,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.017514083068817854,
+          "median": 0.01603560510557145,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.015522585134021938,
+          "p95_nearest_rank": 0.016779292025603354,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    },
+    {
+      "case_contract_fingerprint": "sha256:5263cecddd0b35e59e64179e99f42e691e9702b6e4b0bb7767a81fd3bf507ab7",
+      "case_id": "checkpoint-rebase-and-restart:process-cold-no-cache:default",
+      "metrics": [
+        {
+          "maximum": 0.14739850000478327,
+          "median": 0.10812341648852453,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.09700466704089195,
+          "p95_nearest_rank": 0.1344332080334425,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.0987419500015676,
+          "median": 0.08897924171760678,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.08359403340145946,
+          "p95_nearest_rank": 0.09587729980703444,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.493709750007838,
+          "median": 0.4448962085880339,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 0.4179701670072973,
+          "p95_nearest_rank": 0.47938649903517216,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 99,
+          "median": 99.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 99,
+          "p95_nearest_rank": 99,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 10,
+          "median": 10.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 10,
+          "p95_nearest_rank": 10,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.019983708974905312,
+          "median": 0.016180833568796515,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.015780957997776568,
+          "p95_nearest_rank": 0.016796124982647598,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    }
+  ],
+  "case_contract_fingerprints": [
+    "sha256:34d59cffa2dfb96a15340785793ab717377adcb195de8da69f979aa5fc8c5266",
+    "sha256:77e37cc94c781a3aa312553598963bf6c35b5143a6d71a0efcf0d382050726a5",
+    "sha256:5263cecddd0b35e59e64179e99f42e691e9702b6e4b0bb7767a81fd3bf507ab7"
+  ],
+  "counterfactual_samples_excluded": true,
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "environment": {
+    "git": {
+      "commit": "df869e93df0bca4eb58ce87c6a97ac960cb0706d",
+      "dirty": false
+    },
+    "postgres": {
+      "configuration_fingerprint": "sha256:1babd816a44e245de601de61f9db2a11eb04b3903e9f7c42474a40a3e29cf358",
+      "connection_pool_fingerprint": "sha256:874e657a39df00365d9d647cea45f7143fee98c53618629c77d0ce75d7e643a7",
+      "server_version": "17.9 (Homebrew)"
+    },
+    "python": {
+      "implementation": "CPython",
+      "machine": "arm64",
+      "platform": "macOS-26.2-arm64-arm-64bit",
+      "version": "3.12.12"
+    },
+    "runner_build_fingerprint": "sha256:b5b44c31d7dec2834255b4c21f14fd6ba28f3c134f88702cdec297de9614d8e7",
+    "runtime_capacity": {
+      "auxiliary_io_workers": 12,
+      "configuration_fingerprint": "sha256:393aa28a338fc8484f804286baf6cc604a6bb8f9a51aaef03197233b0e8a45bd",
+      "critical_ledger_workers": 4,
+      "postgres_bounded_read_capacity": 12,
+      "postgres_critical_write_reserve": 4,
+      "postgres_default_lease_timeout_seconds": 30.0,
+      "postgres_pool_max_connections": 16
+    },
+    "schema_version": "pulsara.durable-runtime.environment.v1"
+  },
+  "manifest_contract_fingerprint": "sha256:8751b64a6778c81c05c5d07d4213a1ff04626193a3202121ff1d08ebf4e484b2",
+  "measurement_contract_adhered": true,
+  "percentile_contract": "nearest_rank_v1",
+  "production_acceptance_passed": true,
+  "raw_sample_vector_sha256": "sha256:99aa41fdb63d4b13862d7aaf0dd52ddba68b34b55b63deef3b72b729548c3f1d",
+  "sample_count": 60,
+  "scenario_id": "checkpoint-rebase-and-restart",
+  "schema_version": "pulsara.durable-runtime.run-summary.v1"
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from threading import BoundedSemaphore, Lock
 from time import monotonic
@@ -18,6 +19,25 @@ _READ_LEASES: dict[str, BoundedSemaphore] = {}
 _MAX_CONNECTIONS = 16
 _CRITICAL_WRITE_RESERVE = 4
 _DEFAULT_LEASE_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresEventPoolCapacity:
+    max_connections: int
+    critical_write_reserve: int
+    bounded_read_capacity: int
+    default_lease_timeout_seconds: float
+
+
+def postgres_event_pool_capacity() -> PostgresEventPoolCapacity:
+    """Return the process-owned pool configuration for diagnostics."""
+
+    return PostgresEventPoolCapacity(
+        max_connections=_MAX_CONNECTIONS,
+        critical_write_reserve=_CRITICAL_WRITE_RESERVE,
+        bounded_read_capacity=_MAX_CONNECTIONS - _CRITICAL_WRITE_RESERVE,
+        default_lease_timeout_seconds=_DEFAULT_LEASE_TIMEOUT_SECONDS,
+    )
 
 
 class PostgresConnectionLane(StrEnum):
@@ -44,6 +64,16 @@ def postgres_event_pool(dsn: str) -> ConnectionPool:
                 _MAX_CONNECTIONS - _CRITICAL_WRITE_RESERVE
             )
         return pool
+
+
+def close_postgres_event_pool(dsn: str) -> None:
+    """Close and forget one process-owned pool after an isolated database run."""
+
+    with _POOL_LOCK:
+        pool = _POOLS.pop(dsn, None)
+        _READ_LEASES.pop(dsn, None)
+    if pool is not None:
+        pool.close()
 
 
 @contextmanager
@@ -86,6 +116,9 @@ def _remaining_seconds(deadline_monotonic: float | None) -> float:
 
 __all__ = [
     "PostgresConnectionLane",
+    "PostgresEventPoolCapacity",
+    "close_postgres_event_pool",
     "postgres_event_connection",
     "postgres_event_pool",
+    "postgres_event_pool_capacity",
 ]
