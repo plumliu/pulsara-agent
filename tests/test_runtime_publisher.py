@@ -6,7 +6,11 @@ import types
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
 
-from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
+from pulsara_agent.event import EventContext
 from pulsara_agent.runtime import RuntimeEventPublisher, RuntimePublishedEvent
 from pulsara_agent.runtime.state import LoopState
 
@@ -45,17 +49,17 @@ def test_runtime_publisher_orders_thread_events_by_canonical_sequence(tmp_path) 
     release = threading.Event()
 
     async def run() -> tuple[int | None, list[int | None]]:
-        await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:0", delta="bind"))
+        await runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:0", delta="bind"))
 
         def second_thread() -> None:
             ready.set()
             release.wait(timeout=1)
-            runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:2", delta="second"))
+            runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:2", delta="second"))
 
         worker = threading.Thread(target=second_thread)
         worker.start()
         ready.wait(timeout=1)
-        first = runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="first"))
+        first = runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="first"))
         release.set()
         worker.join(timeout=1)
         await asyncio.sleep(0.05)
@@ -75,8 +79,8 @@ def test_emit_from_thread_preserves_loop_state_for_subscribers(tmp_path) -> None
     state = LoopState(session_id=runtime.runtime_session_id)
 
     async def run() -> None:
-        await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:0", delta="bind"), state=state)
-        runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="thread"), state=state)
+        await runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:0", delta="bind"), state=state)
+        runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="thread"), state=state)
         await asyncio.sleep(0.05)
 
     asyncio.run(run())
@@ -90,14 +94,14 @@ def test_emit_from_thread_does_not_wait_for_slow_subscribers(tmp_path) -> None:
     runtime.publisher.subscribe(slow)
 
     async def run() -> float:
-        await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:0", delta="bind"))
+        await runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:0", delta="bind"))
 
         elapsed = 0.0
 
         def worker() -> None:
             nonlocal elapsed
             started = time.monotonic()
-            runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="thread"))
+            runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="thread"))
             elapsed = time.monotonic() - started
 
         thread = threading.Thread(target=worker)
@@ -117,8 +121,8 @@ def test_emit_from_thread_eventually_publishes_after_slow_subscriber(tmp_path) -
     runtime.publisher.subscribe(slow)
 
     async def run() -> list[int | None]:
-        await runtime.emit(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:0", delta="bind"))
-        runtime.emit_from_thread(TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="thread"))
+        await runtime.emit(make_text_block_segment_event(**CTX.event_fields(), block_id="text:0", delta="bind"))
+        runtime.emit_from_thread(make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="thread"))
 
         deadline = time.monotonic() + 1
         while len(slow.events) < 2 and time.monotonic() < deadline:
@@ -156,7 +160,7 @@ def test_runtime_publisher_reschedules_if_mailbox_receives_item_while_drainer_ex
         await publisher.publish(
             RuntimePublishedEvent(
                 runtime_session_id="runtime:publisher",
-                event=TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="first", sequence=1),
+                event=make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="first", sequence=1),
             )
         )
         release_exit.set()
@@ -172,7 +176,7 @@ def test_runtime_publisher_reschedules_if_mailbox_receives_item_while_drainer_ex
             publisher.publish_from_thread(
                 RuntimePublishedEvent(
                     runtime_session_id="runtime:publisher",
-                    event=TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:2", delta="second", sequence=2),
+                    event=make_text_block_segment_event(**CTX.event_fields(), block_id="text:2", delta="second", sequence=2),
                 )
             )
 
@@ -206,7 +210,7 @@ def test_runtime_publisher_publish_raises_when_subscriber_fails_but_continues_de
             await publisher.publish(
                 RuntimePublishedEvent(
                     runtime_session_id="runtime:publisher",
-                    event=TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="first", sequence=1),
+                    event=make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="first", sequence=1),
                 )
             )
 
@@ -225,7 +229,7 @@ def test_runtime_publisher_can_resume_after_existing_history_sequence() -> None:
         await publisher.publish(
             RuntimePublishedEvent(
                 runtime_session_id="runtime:publisher",
-                event=TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:4", delta="resumed", sequence=4),
+                event=make_text_block_segment_event(**CTX.event_fields(), block_id="text:4", delta="resumed", sequence=4),
             )
         )
 

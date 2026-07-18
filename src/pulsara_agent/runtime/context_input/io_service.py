@@ -50,6 +50,10 @@ class ContextInputIoOperationHandle(Generic[T]):
     def physically_complete(self) -> bool:
         return self._task.done()
 
+    @property
+    def physical_task_cancelled(self) -> bool:
+        return self._task.cancelled()
+
 
 class ContextInputIoService:
     """Own physical blocking operations independently from cancelled waiters."""

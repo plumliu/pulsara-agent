@@ -21,6 +21,14 @@ from tests.support import (
     model_call_start_fields,
     test_resolved_call_fact,
 )
+from tests.support.model_stream import (
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.primitives.long_horizon import default_child_rollout_policy
 
 from pulsara_agent.event import (
@@ -53,11 +61,6 @@ from pulsara_agent.event import (
     SubagentTaskCreatedEvent,
     SubagentTaskFailedEvent,
     SubagentTaskStartedEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -636,11 +639,11 @@ def _simple_run_events(
             else []
         ),
         ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-        TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
-        TextBlockDeltaEvent(
+        make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_segment_event(
             **ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta=text
         ),
-        TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_end_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
         ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
         RunEndEvent(
             **run_end_contract_fields(ctx.run_id, status="finished"),
@@ -1273,13 +1276,13 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
                     ),
                 ),
                 ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-                TextBlockStartEvent(
+                make_text_block_start_event(
                     **ctx.event_fields(), block_id=f"text:{ctx.run_id}"
                 ),
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(), block_id=f"text:{ctx.run_id}", delta="done"
                 ),
-                TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+                make_text_block_end_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
                 ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
                 RunEndEvent(
                     **run_end_contract_fields(ctx.run_id, status="finished"),
@@ -1585,11 +1588,11 @@ def test_inspect_run_reports_only_projections_seen_by_that_run(tmp_path: Path) -
                     summary="TARGET_PROJECTION_AS_SEEN",
                 ),
                 ReplyStartEvent(**target.event_fields(), name="assistant"),
-                TextBlockStartEvent(**target.event_fields(), block_id="text:target"),
-                TextBlockDeltaEvent(
+                make_text_block_start_event(**target.event_fields(), block_id="text:target"),
+                make_text_block_segment_event(
                     **target.event_fields(), block_id="text:target", delta="target done"
                 ),
-                TextBlockEndEvent(**target.event_fields(), block_id="text:target"),
+                make_text_block_end_event(**target.event_fields(), block_id="text:target"),
                 ReplyEndEvent(**target.event_fields(), model_terminal_outcome="completed"),
                 RunEndEvent(
                     **run_end_contract_fields(target.run_id, status="finished"),
@@ -2220,12 +2223,12 @@ def test_inspect_run_reports_missing_artifact_ref(tmp_path: Path) -> None:
                     user_input_chars=len("tool"),
                     metadata={"user_input": "tool"},
                 ),
-                ToolCallStartEvent(
+                make_tool_call_start_event(
                     **ctx.event_fields(),
                     tool_call_id=call_id,
                     tool_call_name="read_file",
                 ),
-                ToolCallEndEvent(**ctx.event_fields(), tool_call_id=call_id),
+                make_tool_call_end_event(**ctx.event_fields(), tool_call_id=call_id),
                 ToolResultStartEvent(
                     **ctx.event_fields(),
                     tool_call_id=call_id,

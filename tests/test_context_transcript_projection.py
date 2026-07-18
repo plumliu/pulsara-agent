@@ -4,6 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.model_stream import (
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     ContextWindowOpenedEvent,
     EventContext,
@@ -13,9 +19,6 @@ from pulsara_agent.event import (
     ReplyEndEvent,
     ReplyStartEvent,
     RunStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -196,17 +199,17 @@ def _projection_fixture(
                 name="assistant",
             ),
         model_start,
-        ToolCallStartEvent(
+        make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 tool_call_name=tool_name,
             ),
-        ToolCallDeltaEvent(
+        make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:projection",
                 delta=raw_arguments_json,
             ),
-        ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:projection"),
+        make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:projection"),
         model_end,
         ReplyEndEvent(
                 id=model_start.recovery_plan.stable_reply_end_event_id,

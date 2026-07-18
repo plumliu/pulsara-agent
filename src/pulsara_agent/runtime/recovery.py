@@ -165,32 +165,23 @@ def classify_unfinished_tool_calls(events: Iterable[AgentEvent]) -> list[Unfinis
     proposed: dict[str, str] = {}
     completed: set[str] = set()
     attempted: set[str] = set()
-    pending: dict[str, str] = {}
-    result_start_names: dict[str, str] = {}
+    pending: set[str] = set()
 
     for event in events:
         if isinstance(event, ToolCallStartEvent):
-            if event.tool_call_id not in proposed or not proposed[event.tool_call_id]:
-                proposed[event.tool_call_id] = event.tool_call_name
+            proposed.setdefault(event.tool_call_id, event.tool_call_name)
         elif isinstance(event, ToolResultStartEvent):
             attempted.add(event.tool_call_id)
-            if event.tool_call_name:
-                result_start_names[event.tool_call_id] = event.tool_call_name
         elif isinstance(event, ToolResultEndEvent):
             completed.add(event.tool_call_id)
         elif isinstance(event, RequireUserConfirmEvent):
             for block in event.tool_calls:
-                pending[block.id] = block.name
+                pending.add(block.id)
 
     unfinished_ids = [tool_call_id for tool_call_id in proposed if tool_call_id not in completed]
     unfinished: list[UnfinishedToolCall] = []
     for tool_call_id in unfinished_ids:
-        tool_name = _resolve_name(
-            tool_call_id,
-            proposed=proposed,
-            pending=pending,
-            result_start_names=result_start_names,
-        )
+        tool_name = proposed[tool_call_id]
         if tool_name in PLAN_WORKFLOW_TOOL_NAMES:
             continue
         state = _classify_state(tool_call_id, attempted=attempted, pending=pending)
@@ -318,28 +309,11 @@ def _plan_active_from_state(state: LoopState) -> bool:
     return bool(state.scratchpad.get("plan_active"))
 
 
-def _resolve_name(
-    tool_call_id: str,
-    *,
-    proposed: dict[str, str],
-    pending: dict[str, str],
-    result_start_names: dict[str, str],
-) -> str:
-    for candidate in (
-        proposed.get(tool_call_id, ""),
-        pending.get(tool_call_id, ""),
-        result_start_names.get(tool_call_id, ""),
-    ):
-        if candidate:
-            return candidate
-    return ""
-
-
 def _classify_state(
     tool_call_id: str,
     *,
     attempted: set[str],
-    pending: dict[str, str],
+    pending: set[str],
 ) -> UnfinishedState:
     if tool_call_id in attempted:
         return UnfinishedState.STARTED

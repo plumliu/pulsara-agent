@@ -11,6 +11,19 @@ from tests.conftest import run_end_contract_fields, run_start_permission_fields
 from tests.support.capability import preview_capability_plan
 from tests.support.runtime_session import in_memory_runtime_session
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     AgentEvent,
@@ -41,12 +54,7 @@ from pulsara_agent.event import (
     SubagentTaskFailedEvent,
     SubagentTaskScheduledEvent,
     SubagentTaskStartedEvent,
-    TextBlockEndEvent,
-    TextBlockDeltaEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
+    TextBlockSegmentEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, dump_agent_event, load_agent_event
 from pulsara_agent.capability.runtime import CapabilityRuntime
@@ -491,7 +499,7 @@ def test_child_raw_events_get_subagent_metadata_at_runtime_session_boundary(
         )
 
         stored = await child.emit(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **child_ctx.event_fields(), block_id="text:1", delta="hello"
             )
         )
@@ -509,7 +517,7 @@ def test_child_raw_events_get_subagent_metadata_at_runtime_session_boundary(
             == subagent.capability_profile.profile_id
         )
         assert all(
-            not isinstance(event, TextBlockDeltaEvent)
+            not isinstance(event, TextBlockSegmentEvent)
             for event in parent.event_log.iter()
         )
 
@@ -526,7 +534,7 @@ def test_child_publish_stored_event_requires_boundary_metadata(tmp_path) -> None
             run_id="run:child", turn_id="turn:child", reply_id="reply:child"
         )
         directly_appended = child.event_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **child_ctx.event_fields(), block_id="text:1", delta="missing metadata"
             )
         )
@@ -549,7 +557,7 @@ def test_child_publish_stored_event_requires_nested_subagent_metadata_values(
             run_id="run:child", turn_id="turn:child", reply_id="reply:child"
         )
         directly_appended = child.event_log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **child_ctx.event_fields(),
                 block_id="text:1",
                 delta="shallow metadata",
@@ -4842,11 +4850,11 @@ async def _text_reply(
     event_context: EventContext, text: str
 ) -> AsyncIterator[AgentEvent]:
     block_id = f"text:{event_context.run_id}"
-    yield TextBlockStartEvent(**event_context.event_fields(), block_id=block_id)
-    yield TextBlockDeltaEvent(
+    yield RawProviderTextBlockStart(**event_context.event_fields(), block_id=block_id)
+    yield RawProviderTextDelta(
         **event_context.event_fields(), block_id=block_id, delta=text
     )
-    yield TextBlockEndEvent(**event_context.event_fields(), block_id=block_id)
+    yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id=block_id)
 
 
 async def _tool_reply(
@@ -4856,17 +4864,17 @@ async def _tool_reply(
     name: str,
     arguments: dict[str, object],
 ) -> AsyncIterator[AgentEvent]:
-    yield ToolCallStartEvent(
+    yield RawProviderToolCallStart(
         **event_context.event_fields(),
         tool_call_id=tool_call_id,
         tool_call_name=name,
     )
-    yield ToolCallDeltaEvent(
+    yield RawProviderToolCallDelta(
         **event_context.event_fields(),
         tool_call_id=tool_call_id,
         delta=json.dumps(arguments),
     )
-    yield ToolCallEndEvent(**event_context.event_fields(), tool_call_id=tool_call_id)
+    yield RawProviderToolCallEnd(**event_context.event_fields(), tool_call_id=tool_call_id)
 
 
 def _context_text(context: LLMContext) -> str:

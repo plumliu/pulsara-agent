@@ -379,6 +379,14 @@ class PostgresEventLog:
                 contract.fixed_sequence_wrapper_charge_bytes_per_event
                 + contract.fixed_schema_wrapper_charge_bytes_per_event
             )
+            if (
+                str(stored.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED"
+                and actual
+                > stored.charge.charge_applied_event_charge_payload_bytes
+            ):
+                raise ValueError(
+                    "stored charge-applied envelope exceeds its dynamic charge bound"
+                )
             if actual > bound.max_stored_envelope_bytes:
                 raise ValueError(
                     "stored bookkeeping envelope exceeds fixed charge bound"
@@ -846,6 +854,7 @@ class PostgresEventLog:
         active_runs_only: bool = False,
         run_ids: tuple[str, ...] | None = None,
         minimum_sequence: int = 1,
+        through_sequence: int | None = None,
         max_events: int = 16_384,
         max_payload_bytes: int = 16 * 1024 * 1024,
         deadline_monotonic: float | None = None,
@@ -872,7 +881,16 @@ class PostgresEventLog:
                     "from agent_events where session_id = %s",
                     (self.runtime_session_id,),
                 )
-                high_water = int(cursor.fetchone()["high_water"])
+                current_high_water = int(cursor.fetchone()["high_water"])
+                high_water = (
+                    current_high_water
+                    if through_sequence is None
+                    else through_sequence
+                )
+                if high_water < 0 or high_water > current_high_water:
+                    raise ValueError(
+                        "requested sparse high-water has not been committed"
+                    )
                 active_run_clause = (
                     """
                       and run_id in (
@@ -888,6 +906,7 @@ class PostgresEventLog:
                     self.runtime_session_id,
                     list(event_types),
                     minimum_sequence,
+                    high_water,
                 ]
                 if run_ids is not None:
                     parameters.append(list(run_ids))
@@ -904,6 +923,7 @@ class PostgresEventLog:
                     from agent_events
                     where session_id = %s and event_type = any(%s)
                       and sequence >= %s
+                      and sequence <= %s
                     {run_id_clause}
                     {active_run_clause}
                     order by sequence asc

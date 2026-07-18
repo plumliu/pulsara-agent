@@ -48,12 +48,13 @@ Tool result artifact refs 必须使用 `ToolResultArtifactRef`。如果 artifact
 
 ## 3. Block assembly
 
-`BlockAssembler` 将 event stream 增量折叠为 completed content blocks。
+`BlockAssembler`将durable model stream singleton/segment events增量折叠为completed content blocks。Provider delta不是token边界，也不是durable semantic边界；text/thinking/data/tool-call arguments分别从对应`*_SEGMENT`正文lossless拼接。
 
 规则：
 
-- start/delta/end 正常成对组装。
-- orphan delta/end 是 recoverable stream problem，assembler 忽略，而不是崩溃。
+- start/segment/end正常成对组装；相邻segment可以跨transaction，但source span与durable index必须连续。
+- orphan segment/end是recoverable stream problem，diagnostic assembler可以忽略并报告；terminal projection producer必须fail closed。
+- segment layout、seal reason与source receipt只属于provenance/fact identity。Canonical transcript、checkpoint semantic identity与control result只消费hydrated terminal projection，不按当前policy重新切segment，也不把segment schedule写入provider semantic fingerprint。
 - `ToolResultEndEvent` 负责写入 final state 与 artifact refs。
 - `ExternalExecutionResultEvent` 可以作为已完成 tool result block 输入。
 
@@ -236,7 +237,7 @@ Model context 中不得直接内联任意 binary/data body。
 
 最低测试门槛：
 
-- event stream folds into text/thinking/tool call/tool result blocks。
+- singleton/segment event stream folds into text/thinking/data/tool call/tool result blocks。
 - usage from multiple model calls aggregates on reply message。
 - missing start event does not crash assembler。
 - prior transcript injects user messages from required

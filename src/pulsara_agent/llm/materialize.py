@@ -4,20 +4,20 @@ from __future__ import annotations
 
 from pulsara_agent.event import (
     AgentEvent,
-    DataBlockDeltaEvent,
+    DataBlockSegmentEvent,
     DataBlockEndEvent,
     DataBlockStartEvent,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ModelCallTerminalProjectionCommittedEvent,
     ProviderModelStreamErrorEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
+    ThinkingBlockSegmentEvent,
     ThinkingBlockEndEvent,
     ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
@@ -122,7 +122,7 @@ def _materialize_committed_model_call_result_from_raw_events(
         == start.id
     )
     indexes = tuple(
-        event.model_stream_attribution.transport_sequence_index  # type: ignore[union-attr]
+        event.model_stream_attribution.durable_semantic_event_index  # type: ignore[union-attr]
         for event in semantic
     )
     if indexes != tuple(range(len(semantic))):
@@ -138,19 +138,19 @@ def _materialize_committed_model_call_result_from_raw_events(
     for event in semantic:
         if isinstance(event, TextBlockStartEvent):
             text.start(event.block_id, _sequence(event))
-        elif isinstance(event, TextBlockDeltaEvent):
-            text.delta(event.block_id, event.delta)
+        elif isinstance(event, TextBlockSegmentEvent):
+            text.delta(event.block_id, event.text)
         elif isinstance(event, TextBlockEndEvent):
             text.end(event.block_id, _sequence(event))
         elif isinstance(event, ThinkingBlockStartEvent):
             thinking.start(event.block_id, _sequence(event))
-        elif isinstance(event, ThinkingBlockDeltaEvent):
-            thinking.delta(event.block_id, event.delta)
+        elif isinstance(event, ThinkingBlockSegmentEvent):
+            thinking.delta(event.block_id, event.thinking)
         elif isinstance(event, ThinkingBlockEndEvent):
             thinking.end(event.block_id, _sequence(event))
         elif isinstance(event, DataBlockStartEvent):
             data.start(event.block_id, event.media_type, _sequence(event))
-        elif isinstance(event, DataBlockDeltaEvent):
+        elif isinstance(event, DataBlockSegmentEvent):
             data.delta(event.block_id, event.media_type, event.data)
         elif isinstance(event, DataBlockEndEvent):
             data.end(event.block_id, _sequence(event))
@@ -158,8 +158,8 @@ def _materialize_committed_model_call_result_from_raw_events(
             tools.start(
                 event.tool_call_id, event.tool_call_name, _sequence(event)
             )
-        elif isinstance(event, ToolCallDeltaEvent):
-            tools.delta(event.tool_call_id, event.delta)
+        elif isinstance(event, ToolCallArgumentsSegmentEvent):
+            tools.delta(event.tool_call_id, event.arguments_json_fragment)
         elif isinstance(event, ToolCallEndEvent):
             tools.end(event.tool_call_id, _sequence(event))
         elif isinstance(event, ProviderModelStreamErrorEvent):
@@ -196,7 +196,10 @@ def _materialize_committed_model_call_result_from_raw_events(
         "usage_status": end.usage_status,
         "usage": end.usage,
         "reported_model_id": end.reported_model_id,
-        "semantic_item_count": len(semantic),
+        "semantic_item_count": sum(
+            event.model_stream_attribution.source_span.source_item_count  # type: ignore[union-attr]
+            for event in semantic
+        ),
         "source_through_sequence": end.sequence,
     }
     canonical = {

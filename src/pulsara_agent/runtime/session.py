@@ -137,6 +137,7 @@ class EventWriteResult:
     publication_status: Literal["completed", "enqueued", "unavailable"]
     publisher_enqueued_through_sequence: int | None
     publication_errors: tuple[EventPublicationError, ...] = ()
+    accounting_events: tuple[AgentEvent, ...] = ()
 
     def require_reduced(self, reducer_id: str) -> tuple[AgentEvent, ...]:
         last_sequence = max(
@@ -2087,6 +2088,7 @@ class RuntimeSession:
         *,
         reservation: PhysicalOperationReservationFact,
         terminal_outcome: str,
+        model_stream_measurement_fingerprint: str | None = None,
         state: LoopState | None = None,
     ) -> EventWriteResult:
         """Commit a stable terminal batch and remove its exact reserve."""
@@ -2110,6 +2112,9 @@ class RuntimeSession:
                     reservation=reservation,
                     business_events=prepared,
                     terminal_outcome=terminal_outcome,
+                    model_stream_measurement_fingerprint=(
+                        model_stream_measurement_fingerprint
+                    ),
                     deadline_monotonic=deadline,
                 )
             except BaseException as exc:
@@ -2244,6 +2249,11 @@ class RuntimeSession:
             result=replace(
                 full_attempt.result,
                 committed_events=committed_business,
+                accounting_events=tuple(
+                    event
+                    for event in stored_events
+                    if event.id not in {item.id for item in business_events}
+                ),
             ),
             delivery_futures=full_attempt.delivery_futures,
             published_events=full_attempt.published_events,

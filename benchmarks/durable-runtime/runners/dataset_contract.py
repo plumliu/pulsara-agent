@@ -506,9 +506,12 @@ def _validate_binding_contracts(contract: ScenarioContract) -> None:
             "pulsara.context.checkpoint-rebase-and-restart"
         ),
     }[contract.scenario_id]
+    expected_generator_version = (
+        "2" if contract.scenario_id == "model-semantic-batch-matrix" else "1"
+    )
     if (
         contract.generator_contract.generator_id != expected_generator
-        or contract.generator_contract.generator_version != "1"
+        or contract.generator_contract.generator_version != expected_generator_version
     ):
         raise DatasetContractError(
             f"generator binding drifted for {contract.scenario_id}"

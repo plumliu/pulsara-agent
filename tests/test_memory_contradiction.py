@@ -8,8 +8,12 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.entities.memory import Claim, Preference
-from pulsara_agent.event import EventContext, EventType, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext, EventType
 from pulsara_agent.event.candidates import ClaimCandidate, PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
@@ -78,7 +82,7 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
     query = PostgresMemoryQuery(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
@@ -211,7 +215,7 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     active_old = "preference:test-contradiction-gates-active"
     inactive_old = "preference:test-contradiction-gates-inactive"
     workspace_old = "preference:test-contradiction-gates-workspace"
@@ -320,7 +324,7 @@ def test_postgres_contradiction_downgrades_when_new_node_is_not_active(tmp_path)
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-non-active-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
@@ -373,7 +377,7 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-write-failed-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)
@@ -431,7 +435,7 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-contradiction-rollback-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user likes egg tarts."), graph_id=graph_id)

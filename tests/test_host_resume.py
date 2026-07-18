@@ -13,6 +13,12 @@ from tests.conftest import (
     run_start_permission_fields,
 )
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     ContextWindowOpenedEvent,
@@ -20,9 +26,6 @@ from pulsara_agent.event import (
     RolloutBudgetAccountOpenedEvent,
     RunEndEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
@@ -74,15 +77,15 @@ class ScriptedTransport:
         del call
         self.contexts.append(context)
         text = self.replies.pop(0)
-        yield TextBlockStartEvent(
+        yield RawProviderTextBlockStart(
             **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
         )
-        yield TextBlockDeltaEvent(
+        yield RawProviderTextDelta(
             **event_context.event_fields(),
             block_id=f"text:{len(self.contexts)}",
             delta=text,
         )
-        yield TextBlockEndEvent(
+        yield RawProviderTextBlockEnd(
             **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
         )
 

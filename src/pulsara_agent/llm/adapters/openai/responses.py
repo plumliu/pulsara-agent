@@ -1,4 +1,4 @@
-"""OpenAI Responses protocol translation to Pulsara AgentEvent."""
+"""OpenAI Responses translation to adapter-private raw items."""
 
 from __future__ import annotations
 
@@ -6,17 +6,15 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator
-from uuid import uuid4
 
-from pulsara_agent.event import AgentEvent, EventContext
+from pulsara_agent.event import EventContext
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_RESPONSES_API,
     build_async_openai_client,
-    provider_error_data,
 )
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
-    AgentEventBuilder,
+    RawProviderItemBuilder,
     ReportedModelIdentityObserver,
     arguments_to_json_string,
     event_includes_run_error,
@@ -25,10 +23,10 @@ from pulsara_agent.llm.adapters.openai.events import (
     transport_usage_report_from_mapping,
 )
 from pulsara_agent.llm.adapters.openai.retrying import (
+    build_provider_retry_summary,
     log_retry_attempt,
     make_retry_trace,
-    provider_data_with_retry,
-    retry_event,
+    provider_failure_code_hint,
     sdk_max_retries_for_transport,
 )
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
@@ -37,6 +35,10 @@ from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.provider import mutable_provider_value
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.raw_provider import (
+    RawProviderStreamItem,
+    is_raw_provider_stream_item,
+)
 from pulsara_agent.llm.runtime_observation import resolve_runtime_observation_binding
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
@@ -45,11 +47,10 @@ from pulsara_agent.llm.retry import (
     apply_retry_after_cap,
     compute_retry_delay,
 )
-from pulsara_agent.llm.transport import LLMTransport
 
 
 @dataclass(slots=True)
-class OpenAIResponsesTransport(LLMTransport):
+class OpenAIResponsesTransport:
     """Adapter for OpenAI Responses-compatible APIs."""
 
     api_key: str
@@ -71,11 +72,9 @@ class OpenAIResponsesTransport(LLMTransport):
         call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent | TransportUsageReport]:
+    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
         model = call.target.model_profile
-        builder = AgentEventBuilder(
-            event_context=event_context,
-        )
+        builder = RawProviderItemBuilder()
         if self._mock_events:
             model_identity = ReportedModelIdentityObserver(
                 requested_model_id=model.id,
@@ -85,7 +84,7 @@ class OpenAIResponsesTransport(LLMTransport):
             for raw_event in self._mock_events:
                 model_identity.observe(responses_reported_model(raw_event))
                 items = translate_responses_event(raw_event, builder=builder)
-                events = [item for item in items if isinstance(item, AgentEvent)]
+                events = [item for item in items if is_raw_provider_stream_item(item)]
                 run_error_emitted = event_includes_run_error(events)
                 for item in items:
                     if isinstance(item, TransportUsageReport):
@@ -143,7 +142,7 @@ class OpenAIResponsesTransport(LLMTransport):
                         model_identity.observe(responses_reported_model(raw_event))
                         items = translate_responses_event(raw_event, builder=builder)
                         events = [
-                            item for item in items if isinstance(item, AgentEvent)
+                            item for item in items if is_raw_provider_stream_item(item)
                         ]
                         run_error_emitted = event_includes_run_error(events)
                         for item in items:
@@ -200,13 +199,6 @@ class OpenAIResponsesTransport(LLMTransport):
                             trace=trace,
                             has_semantic_output=builder.has_semantic_output,
                         )
-                        yield retry_event(
-                            api=self.api,
-                            model=model,
-                            event_context=event_context,
-                            trace=trace,
-                            has_semantic_output=builder.has_semantic_output,
-                        )
                         await self.retry_sleep(delay)
                         attempt += 1
                         continue
@@ -218,8 +210,6 @@ class OpenAIResponsesTransport(LLMTransport):
                         attempt=attempt,
                         max_attempts=max_attempts,
                     )
-                    for event in builder.close_active_blocks():
-                        yield event
                     report = _report_with_model_identity(
                         attempt_usage_report,
                         model_identity.reported_model_id,
@@ -228,9 +218,8 @@ class OpenAIResponsesTransport(LLMTransport):
                         yield report
                     yield builder.run_error(
                         message=str(exc),
-                        code="openai_responses_error",
-                        provider_data=provider_data_with_retry(
-                            provider_error_data(exc),
+                        code=provider_failure_code_hint(decision),
+                        retry_summary=build_provider_retry_summary(
                             config=self.retry_config,
                             traces=retry_traces,
                             final_decision=decision,
@@ -326,9 +315,9 @@ def build_responses_payload(
 def response_to_agent_events(
     *,
     response: dict[str, Any],
-    builder: AgentEventBuilder,
-) -> list[AgentEvent | TransportUsageReport]:
-    events: list[AgentEvent | TransportUsageReport] = []
+    builder: RawProviderItemBuilder,
+) -> list[RawProviderStreamItem | TransportUsageReport]:
+    events: list[RawProviderStreamItem | TransportUsageReport] = []
     thinking = _extract_reasoning_summary(response)
     if thinking:
         events.extend(builder.thinking_delta(thinking))
@@ -351,22 +340,40 @@ def response_to_agent_events(
 def translate_responses_event(
     raw_event: Any,
     *,
-    builder: AgentEventBuilder,
-) -> list[AgentEvent | TransportUsageReport]:
+    builder: RawProviderItemBuilder,
+) -> list[RawProviderStreamItem | TransportUsageReport]:
     event = sdk_event_to_dict(raw_event)
     event_type = event.get("type")
     if event_type == "response.output_text.delta":
         return builder.text_delta(str(event.get("delta", "")))
+    if event_type == "response.output_text.done":
+        final_text = event.get("text")
+        return builder.text_end(
+            final_text=final_text if isinstance(final_text, str) else None
+        )
     if event_type in {
         "response.reasoning_summary_text.delta",
         "response.reasoning_text.delta",
     }:
         return builder.thinking_delta(str(event.get("delta", "")))
+    if event_type in {
+        "response.reasoning_summary_text.done",
+        "response.reasoning_text.done",
+    }:
+        final_text = event.get("text")
+        return builder.thinking_end(
+            final_text=final_text if isinstance(final_text, str) else None
+        )
     if event_type == "response.output_item.added":
         item = event.get("item")
         if isinstance(item, dict) and item.get("type") == "function_call":
             provider_item_id = str(item.get("id") or "")
-            tool_call_id = str(item.get("call_id") or item.get("id") or uuid4())
+            tool_call_id = str(item.get("call_id") or item.get("id") or "")
+            if not tool_call_id:
+                raise LLMTransportContractError(
+                    "provider function call is missing a stable identity",
+                    reason_code="transport_tool_call_identity_missing",
+                )
             return builder.tool_call_start(
                 tool_call_id=tool_call_id,
                 tool_call_name=str(item.get("name") or ""),
@@ -382,18 +389,21 @@ def translate_responses_event(
         item = event.get("item")
         if isinstance(item, dict) and item.get("type") == "function_call":
             provider_item_id = str(item.get("id") or "")
-            tool_call_id = str(item.get("call_id") or item.get("id") or "")
+            tool_call_id = builder.resolve_completed_tool_call_id(
+                provider_item_id=provider_item_id,
+                tool_call_id=str(item.get("call_id") or ""),
+            )
             events = builder.tool_call_start(
                 tool_call_id=tool_call_id,
                 tool_call_name=str(item.get("name") or ""),
                 provider_item_id=provider_item_id,
             )
             arguments = item.get("arguments")
-            if arguments and not builder.has_arguments(tool_call_id):
+            if arguments is not None:
                 events.extend(
-                    builder.tool_call_delta(
+                    builder.reconcile_tool_call_arguments(
                         tool_call_id=tool_call_id,
-                        delta=arguments_to_json_string(arguments),
+                        final_arguments=arguments_to_json_string(arguments),
                     )
                 )
             events.extend(builder.tool_call_end(tool_call_id=tool_call_id))
@@ -412,15 +422,12 @@ def translate_responses_event(
         response = event.get("response")
         provider_data = response if isinstance(response, dict) else event
         message = _response_error_message(provider_data)
-        events = builder.close_active_blocks()
-        events.append(
+        return [
             builder.run_error(
                 message=message,
-                code="openai_responses_error",
-                provider_data=provider_data,
+                code="provider_transport_error",
             )
-        )
-        return events
+        ]
     return []
 
 

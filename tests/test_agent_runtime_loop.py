@@ -15,6 +15,19 @@ from tests.conftest import (
 )
 from tests.support.runtime_session import in_memory_runtime_session
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     CapabilityGateDecisionEvent,
@@ -41,12 +54,6 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultDataDeltaEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
@@ -205,29 +212,29 @@ class ScriptedTransport:
         self.contexts.append(context)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 
@@ -1690,7 +1697,7 @@ def test_agent_runtime_finishes_text_only_reply(tmp_path) -> None:
     assert result.stop_reason == "final"
     assert result.final_text == "done"
     assert any(
-        event.type is EventType.TEXT_BLOCK_DELTA
+        event.type is EventType.TEXT_BLOCK_SEGMENT
         for event in agent.runtime_session.event_log.iter()
     )
     assert (
@@ -1833,7 +1840,7 @@ def test_agent_runtime_dispatches_event_and_completed_text_block_hooks(
     result = asyncio.run(run_agent_task(agent, "Say done"))
 
     assert result.status is LoopStatus.FINISHED
-    assert EventType.TEXT_BLOCK_DELTA in seen_events
+    assert EventType.TEXT_BLOCK_SEGMENT in seen_events
     assert "text" in seen_blocks
 
 
@@ -2023,7 +2030,7 @@ def test_agent_runtime_hook_error_does_not_break_run(tmp_path) -> None:
     runtime_session = in_memory_runtime_session(tmp_path)
 
     def failing_hook(context, event) -> None:
-        if event.type is EventType.TEXT_BLOCK_DELTA:
+        if event.type is EventType.TEXT_BLOCK_SEGMENT:
             raise RuntimeError("observer failed")
 
     runtime_session.hook_manager.register_event(None, failing_hook)
@@ -3618,7 +3625,7 @@ class FailingHook(NoopMemoryHooks):
 class InvalidEventHook(NoopMemoryHooks):
     async def after_model_reply(self, state: LoopState, assistant) -> list[AgentEvent]:
         return [
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 run_id=state.run_id,
                 turn_id=state.turn_id,
                 reply_id=state.reply_id,

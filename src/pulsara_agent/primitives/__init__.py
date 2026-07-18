@@ -27,7 +27,7 @@ from pulsara_agent.primitives.authority_materialization import (
     TranscriptProjectionLiveAssemblyState,
     TranscriptProjectionStableSemanticStateFact,
     TranscriptSemanticEventContractFact,
-    TransportFragmentedBurstContractFact,
+    TransportSegmentedBurstContractFact,
 )
 from pulsara_agent.primitives.context import (
     ContextAuthoritySlicePlan,
@@ -273,7 +273,7 @@ __all__ = [
     "TranscriptProjectionStableSemanticStateFact",
     "TranscriptProjectionWindowFact",
     "TranscriptSemanticEventContractFact",
-    "TransportFragmentedBurstContractFact",
+    "TransportSegmentedBurstContractFact",
     "canonical_json_bytes",
     "canonical_utc_timestamp",
     "context_fingerprint",

@@ -12,6 +12,15 @@ from tests.conftest import (
 )
 from tests.support.runtime_session import in_memory_runtime_session
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
 from pulsara_agent.capability import (
     LocalSkillCapabilityProvider,
     LocalSkillProvider,
@@ -57,12 +66,6 @@ from pulsara_agent.event import (
     PlanModeEnteredEvent,
     RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
 )
 from pulsara_agent.llm import LLMRuntime
@@ -1115,23 +1118,23 @@ class _ScriptedTransport:
         self.contexts.append(context)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 

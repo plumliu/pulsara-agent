@@ -7,8 +7,12 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.entities.memory import Claim, Preference
-from pulsara_agent.event import EventContext, EventType, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext, EventType
 from pulsara_agent.event.candidates import ClaimCandidate, PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
@@ -63,7 +67,7 @@ def test_explicit_fake_uow_supersedes_with_full_relatedness() -> None:
     batch_id = "governance:test:fake-supersede"
     source_ctx = _source_context("fake-supersede")
     source_event = log.append(
-        TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed")
+        make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed")
     )
     old_id = "preference:test-fake-supersede-old"
     graph.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."))
@@ -116,7 +120,7 @@ def test_postgres_governance_supersede_writes_new_retires_old_and_records_outcom
     store = PostgresGraphStore(dsn=dsn)
     query = PostgresMemoryQuery(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
     old_id = "preference:test-supersede-old"
     try:
@@ -199,7 +203,7 @@ def test_postgres_superseded_old_memory_is_filtered_from_recall(tmp_path) -> Non
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-supersede-recall-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
@@ -259,7 +263,7 @@ def test_executor_rejects_legal_active_target_outside_candidate_allowlist(tmp_pa
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
     source_event = log.append(
-        TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="replace it")
+        make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="replace it")
     )
     surfaced_id = "preference:test-surfaced"
     hidden_id = "preference:test-valid-but-hidden"
@@ -347,7 +351,7 @@ def test_executor_transactionally_rereads_drifted_target_and_requests_regovernan
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
     source_event = log.append(
-        TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="replace it")
+        make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="replace it")
     )
     old_id = "preference:test-drifted-after-snapshot"
     try:
@@ -410,7 +414,7 @@ def test_postgres_supersede_downgrades_on_scope_mismatch_and_skips_audit_candida
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-scope-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries.", scope="ctx:workspace/test_project"), graph_id=graph_id)
@@ -461,7 +465,7 @@ def test_postgres_supersede_downgrades_non_preference_multi_target_missing_and_i
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     active_old = "preference:test-gates-active"
     inactive_old = "preference:test-gates-inactive"
     claim_old = "claim:test-gates-claim"
@@ -550,7 +554,7 @@ def test_postgres_supersede_downgrades_when_new_node_is_not_active(tmp_path) -> 
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-non-active-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
@@ -601,7 +605,7 @@ def test_postgres_supersede_write_failure_does_not_retire_old_or_record_supersed
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-write-failed-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
@@ -657,7 +661,7 @@ def test_postgres_supersede_rolls_back_when_lifecycle_fails_before_commit(tmp_pa
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-rollback-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user prefers verbose summaries."), graph_id=graph_id)
@@ -713,7 +717,7 @@ def test_postgres_supersede_dedupe_skip_happens_before_retirement(tmp_path) -> N
     store = PostgresGraphStore(dsn=dsn)
     pool = PostgresCandidatePool(dsn=dsn)
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     old_id = "preference:test-dedupe-old"
     try:
         store.put_jsonld(_preference_doc(old_id, "The user prefers concise summaries."), graph_id=graph_id)

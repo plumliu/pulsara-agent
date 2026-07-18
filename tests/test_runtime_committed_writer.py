@@ -5,11 +5,15 @@ import threading
 
 import pytest
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
     SubagentRunFailedEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
 )
 from pulsara_agent.runtime import (
     EventPublicationAfterCommitError,
@@ -27,8 +31,8 @@ from tests.support.runtime_session import in_memory_runtime_session
 CTX = EventContext(run_id="run:writer", turn_id="turn:writer", reply_id="reply:writer")
 
 
-def _event(label: str) -> TextBlockDeltaEvent:
-    return TextBlockDeltaEvent(**CTX.event_fields(), block_id=f"text:{label}", delta=label)
+def _event(label: str) -> TextBlockSegmentEvent:
+    return make_text_block_segment_event(**CTX.event_fields(), block_id=f"text:{label}", delta=label)
 
 
 class _RecordingSubscriber:
@@ -117,7 +121,7 @@ def test_write_conflict_catches_reducer_and_publisher_to_actual_high_water(tmp_p
     assert applied == [1]
     assert [item.event.sequence for item in recording.events] == [1]
     assert runtime.publisher.enqueued_through_sequence == 1
-    assert [event.delta for event in runtime.event_log.iter()] == ["external"]
+    assert [event.text for event in runtime.event_log.iter()] == ["external"]
 
 
 def test_async_and_thread_writes_share_session_write_coordinator(tmp_path) -> None:

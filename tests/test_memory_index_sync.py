@@ -8,8 +8,12 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.entities.memory import Preference
-from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore, PostgresGraphStore
@@ -124,7 +128,7 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
     )
     batch_id = f"governance:test:index-sync:{uuid4().hex}"
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
     query = PostgresMemoryQuery(dsn=dsn)
     try:
@@ -225,7 +229,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
     batch_id = f"governance:test:index-sync-supersede:{uuid4().hex}"
     old_id = "preference:index-sync-supersede-old"
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
     store = PostgresGraphStore(dsn=dsn)
     query = PostgresMemoryQuery(dsn=dsn)

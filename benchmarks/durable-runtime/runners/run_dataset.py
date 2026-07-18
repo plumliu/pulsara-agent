@@ -151,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     benchmark = subparsers.add_parser(
         "benchmark-writer",
-        help="run the model semantic batching matrix on local PostgreSQL",
+        help="run the production model-stream segment scenario on local PostgreSQL",
     )
     benchmark.set_defaults(
         group="writer",
@@ -160,12 +160,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     benchmark.add_argument(
         "--case-kind",
-        choices=("production_valid", "sensitivity_analysis"),
+        choices=("production_valid",),
         default="production_valid",
-        help=(
-            "run the batch-16 production baseline or the batch-4/8 "
-            "sensitivity matrix"
-        ),
+        help="run the production segment-v1 case",
     )
     benchmark.add_argument(
         "--case-id",
@@ -726,20 +723,11 @@ def _run_writer_benchmark(
                     observations[case.case_id] = observation
                 if phase == "warmup":
                     continue
-                reference = observations.get(
-                    scenario.semantic_reference_case_id
-                )
-                if reference is None:
-                    reference = _reference_for_selected_cases(
-                        cases,
-                        observations,
-                    )
                 for case in cases:
                     observation = observations[case.case_id]
                     semantic_grade = _grade_batch_observation(
                         case=case,
                         observation=observation,
-                        reference=reference,
                     )
                     sample_rows.append(
                         _writer_sample_result(
@@ -1661,7 +1649,7 @@ def _writer_sample_result(
     environment: BenchmarkEnvironmentFact,
 ) -> WriterBenchmarkSampleResultFact:
     batch_sizes = observation.semantic_batch_sizes
-    source_item_count = sum(batch_sizes)
+    source_item_count = observation.source_item_count
     average_batch_size = sum(batch_sizes) / len(batch_sizes)
     metric_values = (
         BenchmarkMetricValueFact(
@@ -1697,6 +1685,11 @@ def _writer_sample_result(
         BenchmarkMetricValueFact(
             metric_id="source_item_count",
             value=source_item_count,
+            unit="events",
+        ),
+        BenchmarkMetricValueFact(
+            metric_id="durable_text_segment_count",
+            value=observation.durable_text_segment_count,
             unit="events",
         ),
         BenchmarkMetricValueFact(
@@ -1828,7 +1821,6 @@ def _grade_batch_observation(
     *,
     case: ResolvedBenchmarkCase,
     observation: ModelSemanticBatchObservation,
-    reference: ModelSemanticBatchObservation,
 ):
     contract = case.grader_contract
     return grade_semantic_assertions(
@@ -1838,41 +1830,26 @@ def _grade_batch_observation(
         observed_assertions={
             "ordered_semantic_content_equal": (
                 observation.ordered_semantic_content_fingerprint
-                == reference.ordered_semantic_content_fingerprint
+                == observation.raw_reference_semantic_content_fingerprint
             ),
             "terminal_projection_equal": (
-                observation.terminal_projection_semantic_fingerprint
-                == reference.terminal_projection_semantic_fingerprint
+                observation.terminal_projection_content_fingerprint
+                == observation.raw_reference_semantic_content_fingerprint
             ),
             "physical_settlement_valid": observation.physical_settlement_valid,
             "accounted_writer_path_only": (
                 observation.accounted_writer_path_only
             ),
+            "segment_layout_within_contract": (
+                observation.source_item_count == 8_194
+                and 4 <= observation.durable_text_segment_count <= 8
+            ),
+            "durable_cost_acceptance": (
+                observation.logical_semantic_batch_count <= 8
+                and observation.ledger_event_delta <= 64
+            ),
         },
     )
-
-
-def _reference_for_selected_cases(
-    cases: tuple[ResolvedBenchmarkCase, ...],
-    observations: dict[str, ModelSemanticBatchObservation],
-) -> ModelSemanticBatchObservation:
-    production = tuple(
-        case for case in cases if case.case_kind == "production_valid"
-    )
-    selected = production or cases
-    reference_case = max(
-        selected,
-        key=lambda item: (
-            getattr(
-                item.execution_case,
-                "max_business_events_per_commit",
-                0,
-            ),
-            item.case_id,
-        ),
-    )
-    return observations[reference_case.case_id]
-
 
 _AGGREGATED_WRITER_METRIC_IDS = frozenset(
     {

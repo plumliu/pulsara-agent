@@ -17,6 +17,16 @@ from tests.conftest import (
 from tests.support import model_call_end_fields, model_call_start_fields
 from tests.support.context_input import render_event_log_transcript
 
+from tests.support.model_stream import (
+    make_model_stream_attribution,
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     ContextCompactionCompletedEvent,
     ContextWindowClosedEvent,
@@ -31,10 +41,10 @@ from pulsara_agent.event import (
     RunStartEvent,
     RolloutBudgetAccountOpenedEvent,
     RolloutBudgetAccountClosedEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
-    ToolCallDeltaEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultStartEvent,
@@ -72,8 +82,8 @@ from pulsara_agent.runtime.session import RuntimeSession
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopTransition
 from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
 from pulsara_agent.primitives.model_call import (
+    DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT,
     ModelCallControlDisposition,
-    ModelStreamSemanticAttributionFact,
     sha256_fingerprint,
 )
 from pulsara_agent.runtime.long_horizon.run_contract import (
@@ -103,8 +113,8 @@ class _CapturingLLMRuntime:
         async def capture_committed() -> None:
             completion = await handle.wait_completed()
             for event in completion.committed_events:
-                if isinstance(event, TextBlockDeltaEvent):
-                    self.raw_parts.append(event.delta)
+                if isinstance(event, TextBlockSegmentEvent):
+                    self.raw_parts.append(event.text)
                 elif isinstance(event, ModelCallEndEvent):
                     self.model_ends.append(event)
 
@@ -314,7 +324,7 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
             completed.summary_artifact_id, session_id=runtime_session_id
         )
         summary_lower = summary.casefold()
-        assert "pr4" in summary_lower
+        assert "pulsara_long_compaction_pr4_sentinel" in summary_lower
         assert "skill" in summary_lower
         assert "controlled" in summary_lower or "provider failure" in summary_lower
         assert (
@@ -455,21 +465,21 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
                 runtime_session,
                 current_context,
                 (
-                    ToolCallStartEvent(
+                    make_tool_call_start_event(
                         run_id=state.run_id,
                         turn_id=state.turn_id,
                         reply_id=state.reply_id,
                         tool_call_id="call:current",
                         tool_call_name="terminal",
                     ),
-                    ToolCallDeltaEvent(
+                    make_tool_call_arguments_segment_event(
                         run_id=state.run_id,
                         turn_id=state.turn_id,
                         reply_id=state.reply_id,
                         tool_call_id="call:current",
                         delta='{"command":"printf current"}',
                     ),
-                    ToolCallEndEvent(
+                    make_tool_call_end_event(
                         run_id=state.run_id,
                         turn_id=state.turn_id,
                         reply_id=state.reply_id,
@@ -647,13 +657,13 @@ def _root_run_open_events(
 def _semantic_draft_kind(event: object) -> str:
     if isinstance(event, TextBlockStartEvent):
         return "text_block_start"
-    if isinstance(event, TextBlockDeltaEvent):
+    if isinstance(event, TextBlockSegmentEvent):
         return "text_block_delta"
     if isinstance(event, TextBlockEndEvent):
         return "text_block_end"
     if isinstance(event, ToolCallStartEvent):
         return "tool_call_start"
-    if isinstance(event, ToolCallDeltaEvent):
+    if isinstance(event, ToolCallArgumentsSegmentEvent):
         return "tool_call_delta"
     if isinstance(event, ToolCallEndEvent):
         return "tool_call_end"
@@ -667,42 +677,32 @@ def _bind_model_semantic_events(
     semantic_events: tuple,
 ) -> tuple:
     bound = []
+    source_accumulator = sha256_fingerprint(
+        "model-stream-sanitized-source:v2", "empty"
+    )
     for index, event in enumerate(semantic_events):
         draft_kind = _semantic_draft_kind(event)
-        draft_fingerprint = sha256_fingerprint(
-            "real-compaction-model-semantic-draft:v1",
-            {
-                "transport_sequence_index": index,
-                "draft_kind": draft_kind,
-                "event": event.model_dump(
-                    mode="json",
-                    exclude={"id", "sequence", "model_stream_attribution"},
-                ),
-            },
+        fixture_attribution = event.model_stream_attribution
+        event_id = (
+            f"model_segment:{start.resolved_call.resolved_model_call_id}:"
+            f"{index}:{fixture_attribution.durable_kind.value}"
         )
-        attribution_payload = {
-            "schema_version": "model_stream_semantic_attribution.v1",
-            "resolved_model_call_id": start.resolved_call.resolved_model_call_id,
-            "model_call_start_event_id": start.id,
-            "transport_sequence_index": index,
-            "draft_schema_version": "provider_transport_semantic_draft.v1",
-            "draft_kind": draft_kind,
-            "draft_fingerprint": draft_fingerprint,
-        }
-        attribution = ModelStreamSemanticAttributionFact(
-            **attribution_payload,
-            attribution_fingerprint=sha256_fingerprint(
-                "model-stream-semantic-attribution:v1",
-                attribution_payload,
-            ),
+        attribution = make_model_stream_attribution(
+            durable_kind=fixture_attribution.durable_kind,
+            draft_kind=draft_kind,
+            event_id=event_id,
+            resolved_model_call_id=start.resolved_call.resolved_model_call_id,
+            model_call_start_event_id=start.id,
+            durable_semantic_event_index=index,
+            first_transport_sequence_index=index,
+            source_accumulator_before=source_accumulator,
+            segment_seal_reason=fixture_attribution.segment_seal_reason,
         )
+        source_accumulator = attribution.source_span.source_accumulator_after
         bound.append(
             event.model_copy(
                 update={
-                    "id": (
-                        f"model_semantic:{start.resolved_call.resolved_model_call_id}:"
-                        f"{index}:{draft_fingerprint[7:23]}"
-                    ),
+                    "id": event_id,
                     "model_stream_attribution": attribution,
                     "sequence": None,
                 },
@@ -786,6 +786,9 @@ async def _append_accepted_reply(
         contracts=runtime_session.terminal_projection_contracts,
         model_stream_semantic_domain_contract_fingerprint=(
             runtime_session.authority_materialization_contracts.event_domain.contract.transcript_semantic_domain_contract_fingerprint
+        ),
+        segment_policy_contract_fingerprint=(
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.contract_fingerprint
         ),
     )
     reducer.apply_committed(tuple(committed_semantic))
@@ -924,13 +927,13 @@ def _append_turn(
             runtime_session,
             ctx,
             (
-                TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{label}"),
-                TextBlockDeltaEvent(
+                make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{label}"),
+                make_text_block_segment_event(
                     **ctx.event_fields(),
                     block_id=f"text:{label}",
                     delta=assistant_text,
                 ),
-                TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{label}"),
+                make_text_block_end_event(**ctx.event_fields(), block_id=f"text:{label}"),
             ),
         )
         await _append_finished_run(runtime_session, ctx)
@@ -1001,11 +1004,17 @@ def _append_pr4_style_long_dogfood_transcript(
     rounds = [
         (
             "long_round1_orientation",
-            "Inspect this project by reading files, not by running commands.",
+            (
+                "Inspect this project by reading files, not by running commands. "
+                "The durable trajectory identity is "
+                "PULSARA_LONG_COMPACTION_PR4_SENTINEL; preserve it verbatim in "
+                "future compaction summaries."
+            ),
             (
                 "Read pyproject.toml, src/pulsara_agent/runtime/agent.py, and host/session.py. "
                 "Identified Pulsara as an agent runtime with HostSession, tool execution, approval gates, "
-                "durable event logs, memory recall, and plan workflow support. "
+                "durable event logs, memory recall, and plan workflow support. Preserved the durable "
+                "trajectory identity PULSARA_LONG_COMPACTION_PR4_SENTINEL. "
             ),
         ),
         (

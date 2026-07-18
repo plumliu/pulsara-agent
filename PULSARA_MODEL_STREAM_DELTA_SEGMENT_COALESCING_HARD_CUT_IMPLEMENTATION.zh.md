@@ -1,6 +1,6 @@
 # Pulsara Model Stream Delta Segment Coalescing Hard Cut 实施规格
 
-> 状态：实施前冻结稿；尚未修改生产代码
+> 状态：SEG0A、SEG0B、SEG1、SEG2、SEG3 已完成；write-behind 判定为跳过
 >
 > 日期：2026-07-18
 >
@@ -61,6 +61,72 @@ RawProviderStreamItem
 - PostgreSQL 直接重置，不读取、不迁移旧 raw-delta ledger。
 
 正式 writer baseline 已证明当前 `batch-16` 接近满载：`8192` 个、每个 `16` characters 的 text delta 形成 `514` 个 semantic commit、`8717` 条 ledger events，median semantic commit-port wall 为 `20.907s`。继续把 16 条 event 放进同一 transaction 只能减少 transaction 固定成本，不能消除 8192 条 durable rows、wrapper charge、reducer fold 和后续 evidence decode。Segment hard cut 直接改变这个根因。
+
+### 0.1 实施结果
+
+2026-07-18 已按本规格完成一次性 hard cut：
+
+- provider adapters、mock 与 benchmark fixture 只产生 adapter-private `RawProviderStreamItem`；
+- sanitizer 使用单一 outstanding envelope 的 prepare/adopt/discard 协议；
+- `ModelStreamCoalescingCoordinator` 成为 read/timer/cancel、open segment、sealed batch 与 foreground commit 的唯一 owner；
+- 四类旧 durable DeltaEvent、EventType、decoder 与 production reducer 分支已物理删除；
+- text、thinking、data 与 tool-call arguments 全部落为 bounded segment，Start/End/error 保持 typed singleton；
+- live cursor、commit guard、terminal projection、recovery、assembler、timeline、physical quote/accounting 与 transcript event-domain registry 已同步迁移；
+- segment 继续属于 `non_transcript`，Context Evidence Cursor 只消费 terminal projection/control 等 transcript-semantic facts；
+- PostgreSQL 使用新 schema 重新开始，不保留旧 ledger 兼容 reader/writer。
+
+最终复审继续收紧了以下实现边界：read stamp使用sanitizer冻结的`accepted_at_monotonic_ns`，cancel stamp在`request_cancel()`线性化点同步安装；singleton candidate必须在seal旧segment前完整构造并验证，任何构造失败不得推进source/durable cursor；一次adopt transition产生的全部candidate必须在sanitizer acknowledgement与任何await之前同步移交Coordinator；普通writer异常经stable confirmation得到`NONE`时仍重试原candidate bytes；terminal document的source count、accumulator、durable count、actual stream measurement以及segment/domain/reducer contract必须与live cursor、physical charge/settlement和当前composition-root binding精确join。Projection artifact的caller cancellation与owned physical task cancellation被明确区分；Responses缺失tool-call identity时fail closed；provider retry只在最终durable provider-error中保存bounded、脱敏summary，不再产生per-attempt durable event或raw provider-data trace。
+
+正式 deterministic writer 结果保存于：
+
+```text
+benchmarks/durable-runtime/baselines/v1/model-stream-segment-v1-df869e93.jsonl
+benchmarks/durable-runtime/baselines/v1/model-stream-segment-v1-df869e93.jsonl.summary.json
+```
+
+该结果来自 clean validation worktree、空 template database、5 次 warmup 与 30 次 measured，`measurement_contract_adhered=true`、`production_acceptance_passed=true`：
+
+| 指标 | batch-16 baseline | segment-v1 | 变化 |
+|---|---:|---:|---:|
+| durable text events | 8192 raw delta | 5 segments | age bound 额外 seal 1 次；pure content boundary 为 4 |
+| logical semantic commits median | 514 | 2 | -99.61% |
+| ledger events median | 8717 | 18 | -99.79% |
+| semantic commit-port wall median | 20.907s | 0.049s | -99.77% |
+| semantic commit-port wall p95 | 65.010s | 0.056s | -99.91% |
+| model stream wall median | 24.248s | 1.947s | -91.97% |
+
+完整 Context suite 保存于：
+
+```text
+benchmarks/durable-runtime/baselines/v1/context-suite-df869e93/
+```
+
+六个场景、340 条 trajectory 全部通过，suite 与每个 scenario 均为 `production_acceptance_passed=true`，总墙钟 `4460.5s`。相对 `context-suite-7e9a484d`：
+
+- 各 mode 的 context prepare total median 下降 `44.87%–93.00%`；
+- `artifact-heavy-tools` authority events 从 `1959` 降到 `118`；
+- `incremental-active-window` 从 `5003` 降到 `621`，transcript semantic delta count 保持 `82`；
+- `long-plan-prefix-growth` 从 `4964` 降到 `563`，transcript semantic delta count 保持 `80`；
+- `subagent-two-children` 从 `2987` 降到 `319`，transcript semantic delta count 保持 `38`；
+- checkpoint hit/rebase、compaction、Cursor/exact path 与 provider semantic graders 全部通过。
+
+全量 Real LLM + dogfood 为 `74 passed`。三条代表轨迹的三次样本为：
+
+| 轨迹 | median | range |
+|---|---:|---:|
+| Long Plan | 95.41s | 89.40–112.65s |
+| Long Compaction | 24.51s | 23.3–36.63s |
+| Subagent System | 约29.7s | 29.65–31.23s |
+
+最终复审后的 non-real 全量为 `2236 passed, 77 skipped, 160 warnings`；SEG3 全量 Real LLM + 全部 dogfood 开关为 `74 passed`。最终源码又定向重跑 Long Plan、Subagent spawn/wait 与 Context compaction，结果为 `3 passed`（`115.61s`）。全量和定向结果都来自对应修复之后的实际执行，不沿用修复前结果。
+
+正式 writer 中 foreground semantic commit wait median 只占 model stream wall 约 `2.52%`，单 call 累计约 `0.049s`，p95约 `56ms`，均低于第18.3节的三个 write-behind gate，且未观察到critical writer queue持续积压。因此冻结：
+
+```text
+write_behind_decision = skip_after_segment_coalescing
+```
+
+后续若新的provider interarrival、并发session或远程PostgreSQL证据重新越过量化gate，必须另立bounded one-inflight write-behind规格；不得在本实现中留下休眠兼容路径。
 
 ---
 
@@ -680,6 +746,10 @@ discard_unadopted(envelope_id)
 
 然后关闭transport；terminal source count/accumulator只使用adopted prefix。这样不存在“sanitizer已经推进、durable/live cursor却永远看不到该item”的状态。
 
+`acknowledge_adopted()`之前，Coordinator必须同步接管该transition生成的完整candidate tuple。结构边界允许一次transition同时产生“旧segment + singleton”或“旧segment + 新segment”；即使第一项恰好填满当前16-event batch，第二项也必须已经进入Coordinator的bounded pending queue。若随后commit发生caller cancellation、`UNKNOWN/PARTIAL`或reconciliation latch，execution handle必须同时保留attempted batch与全部pending candidates；禁止任何candidate只存在于worker局部变量或栈帧。
+
+read signal的monotonic stamp必须复用该envelope在sanitizer完成validation时冻结的`accepted_at_monotonic_ns`，不能在`read_next()`返回到worker后重新取时钟。cancel signal则必须在`ModelStreamExecutionHandle.request_cancel()`内、设置cancel event之前同步签发；waiter只能读取该既有stamp，不能在被调度唤醒后补签。
+
 ### 7.3 Input Arbiter与唯一winner
 
 `ModelStreamInputArbiter`使用同步linearization lock与单调递增ordinal为read completion、cancel intent安装唯一：
@@ -723,11 +793,14 @@ if E is one of four delta kinds:
     if hard content/source bound reached:
         seal open segment
 else:
+    build and fully validate singleton durable candidate for E
     seal open segment(reason=structural_boundary)
-    build singleton durable event for E
+    install the already-frozen singleton candidate
 ```
 
 Content使用list/rope-like parts累积，seal时只 `join()` 一次；禁止每个delta执行 `current + delta` 形成O(n²) allocation。`ModelStreamSegmentAccumulator`是pure state machine；I/O、timer与commit只能由Coordinator调用。
+
+singleton必须先按预测的next durable index完成Event DTO、canonical bytes、hard-cap与fingerprint验证，再允许seal已有open segment。singleton构造失败、segment最终hard-cap验证失败或candidate freeze失败时，open segment、source cursor与durable event index必须保持原值。
 
 ### 7.5 Durable batch accumulator
 
@@ -751,6 +824,14 @@ FULL            -> fold, advance both cursors, publish
 UNKNOWN/PARTIAL -> retain owner and latch
 cancel-after-FULL -> adopt typed FULL result before propagating cancellation
 ```
+
+`NONE`不只包括writer主动返回的typed pre-commit outcome。任意普通数据库/writer异常都必须先对同一stable event-ID batch执行confirmation；确认`NONE`后转换成同一个retry outcome，确认`FULL`则adopt该winner，只有`UNKNOWN/PARTIAL`才latch。外层不得因异常类型不同而重建segment或改写terminal outcome。
+
+`RuntimeEventWriteCancelled`必须在commit port内消费其writer-owned physical result：`FULL`返回confirmed batch，queued/pre-commit `NONE`转换为`ModelStreamCommitNotCommitted`，其他physical error保留原错误，缺失physical result则latch。它不得以裸`CancelledError`穿出并被runtime误判为transport worker cancellation。
+
+Provider terminal draft一旦确定，terminal projection document、artifact ID、terminal events与outcome也成为同一份stable candidate。Projection artifact的caller cancellation必须等待原physical operation；瞬时pre-commit failure只允许用相同document bytes重试。Content conflict、confirmation drift或无法证明的physical outcome必须latch，禁止把已经确定的`completed`/`provider_error`改写成`runtime_error`。
+
+Projection artifact waiter收到`CancelledError`时必须检查owned physical task本身是否被取消，不能用`physically_complete`替代。Caller cancellation与physical success同时发生时，waiter先`uncancel()`并消费原operation的成功值或原始异常；只有owned task的`cancelled()`为真时才属于physical cancellation。
 
 Foreground commit未terminal前，Coordinator不得产生第二个commit owner或无界读取provider。这仍不是write-behind。
 
@@ -823,6 +904,10 @@ pending segment
 ```
 
 已观察、已确认的 segment只用于 audit/UI；不得执行其中 tool call或交付成功 reply。
+
+Adapter必须尊重provider显式block终止信号。OpenAI Responses的`response.output_text.done`、`response.reasoning_summary_text.done`与`response.reasoning_text.done`分别生成对应typed End；随后`response.completed`只关闭仍然active的block。`done`携带的完整text/reasoning/tool-arguments也是lossless reconciliation authority：此前没有delta且final payload非空时，adapter必须补发唯一typed delta；此前已有delta时，累计内容必须与final payload逐字节相等，否则以稳定protocol error fail closed。禁止忽略final payload、重复附加完整内容或静默接受drift。`response.failed/error/incomplete`以及SDK/network异常不得调用`close_active_blocks()`或合成正常End，terminal projection必须把当时仍open的block标记为`interrupted`。Tool arguments在具有非空tool name的Start之前到达时直接以稳定protocol error fail closed，禁止用空name补造Start。Provider item ID、tool call ID与tool name在首个named Start时冻结；Responses的function-call item同时缺少`call_id`与`item.id`时以`transport_tool_call_identity_missing` fail closed，禁止生成Pulsara-owned随机UUID。后续delta/done或Chat chunk发生identity/name drift必须fail closed。并行active tool call使用provider start order关闭，禁止依赖hash/set iteration产生不确定的End顺序。
+
+Provider retry永久属于adapter-private operational loop。每次attempt可以写脱敏日志，但不得产生`CustomEvent(name="llm.retry")`，也不得保存raw exception message/repr、URL、response body或`provider_data`。最终失败的唯一durable provenance是`ProviderSanitizedErrorFact.retry_summary: ProviderRetrySummaryFact`：保存最多32次attempt的稳定reason/status/delay/retry-after、final reason、exhausted与semantic-output skipped状态，并由声明式contract fingerprint校验。已经有semantic output时必须写`skipped_reason="semantic_output_started"`。成功retry不产生durable retry history；本章不恢复per-attempt event。
 
 ### 8.3 Cancel
 
@@ -901,6 +986,8 @@ model_stream_semantic_domain_contract_fingerprint
 reducer_contract_fingerprint
 ```
 
+terminal commit必须hydrate同一个content-addressed document，并在写入前验证：source call/Start identity、source item count、final source accumulator、durable event count分别等于live commit guard；`segment_policy_contract_fingerprint`、`model_stream_semantic_domain_contract_fingerprint`与`reducer_contract_fingerprint`分别等于当前run-frozen binding。任一不一致均为contract failure，不能只依赖document自报的outer fingerprint。
+
 Provider semantic identity只由 ordered normalized terminal items决定；source/durable grouping进入 outer fact fingerprint与audit，不污染 semantic fingerprint。
 
 ### 9.3 Canonical result
@@ -956,7 +1043,8 @@ class TransportSegmentedBurstContractFact(PhysicalBurstContractBase):
     max_terminal_commit_batches: int
     max_recovery_commit_batches: int
     max_bookkeeping_events_per_commit: int
-    max_bookkeeping_payload_bytes_per_commit: int
+    max_bookkeeping_base_payload_bytes_per_commit: int
+    max_bookkeeping_payload_bytes_per_business_event: int
     segment_policy_contract_fingerprint: Fingerprint
     sanitization_contract_fingerprint: Fingerprint
 ```
@@ -997,6 +1085,12 @@ max_commit_batches =
 max_bookkeeping_events =
     max_commit_batches * max_bookkeeping_events_per_commit
 
+max_bookkeeping_payload_bytes =
+    max_commit_batches
+        * max_bookkeeping_base_payload_bytes_per_commit
+    + max_durable_semantic_events
+        * max_bookkeeping_payload_bytes_per_business_event
+
 max_total_reserved_events =
     max_durable_semantic_events
     + max_bookkeeping_events
@@ -1008,8 +1102,7 @@ max_total_reserved_payload_bytes =
     + max_synthetic_semantic_tail_payload_bytes
     + max_durable_semantic_events
         * max_durable_event_wrapper_overhead_bytes
-    + max_commit_batches
-        * max_bookkeeping_payload_bytes_per_commit
+    + max_bookkeeping_payload_bytes
     + max_structural_tail_payload_bytes
     + max_terminal_recovery_payload_bytes
 ```
@@ -1023,6 +1116,17 @@ canonical_candidate_bytes
 ```
 
 Sequence位数、ID长度、fingerprint、seal reason与所有bookkeeping字段都必须有schema max length和maximal fixture。Start、normal terminal、recovery terminal分别由三个显式batch上界覆盖；因为1秒age可能让最坏情况下每个durable semantic event独立commit，`max_commit_batches`必须由上式导出，禁止沿用经验值。性能收益体现在actual settlement，而不是通过低估reservation获得。
+
+`PhysicalOperationChargeAppliedEvent`不能使用与batch大小无关的固定byte charge。该event会内嵌本批全部business candidate的charge identity；maximal fixture实测从单business event约`6.6 KiB`增长到16 events约`30.2 KiB`。SEG1因此同步hard cut `PhysicalChargeContractFact`：
+
+```text
+charge_applied_payload_quote =
+    charge_applied_bookkeeping_base_charge_bytes
+    + business_event_count
+        * charge_applied_bookkeeping_per_business_event_charge_bytes
+```
+
+V1冻结为保守的`7,680 + 2,048 * business_event_count` bytes，并保留`256 KiB`作为该schema本身的absolute stored-envelope cap。Writer必须在同一transaction内分配sequence并构造stored envelope后、commit前验证actual bytes不超过本次dynamic quote；低估必须rollback，禁止post-commit observation后再latch。Replay/doctor从durable charge event中的同一quote结算，不从当前process policy重算。Start/terminal/recovery等非semantic business events的per-event charge由对应structural/recovery tail覆盖，不能重复计入semantic source payload。
 
 V1 contract还必须强制：
 
@@ -1049,6 +1153,8 @@ Settlement同时保存：
 - actual commit batch count；
 - charged candidate/wrapper/bookkeeping totals；
 - released reservation。
+
+具体durable carrier为`ModelStreamSettlementMeasurementFact`，由terminal projection的`ModelCallSemanticSourceFact`持有；每个semantic batch使用`ModelStreamSemanticCommitMeasurementFact`保存ordered semantic stable identities、writer-prepared actual candidate bytes与对应`PhysicalOperationChargeAppliedEvent` identity/fingerprint。这里的actual bytes必须直接取自同批charge fact的`business_candidate_charge_payload_bytes`，它覆盖RuntimeSession default metadata等write-boundary overlay；不得使用Coordinator在overlay前计算、仅用于segment/commit admission的prospective candidate bytes冒充actual measurement。Terminal commit guard精确join measurement fingerprint，`PhysicalOperationSettlementFact.model_stream_measurement_fingerprint`再次join同一值。Inspector只投影bounded aggregate counts/bytes/batch count与measurement fingerprint，不展开全部batch identity列表。
 
 ### 10.4 Doctor
 
@@ -1274,6 +1380,7 @@ segment policy fingerprint
 - transaction batch boundary不改变segment layout；
 - list parts只在seal时join，large fixture非O(n²)；
 - empty Start/End不产生空segment。
+- singleton准备失败不seal已有segment、不推进source/durable cursor；segment最终验证失败也不推进durable cursor。
 
 ### 16.2 四种内容
 
@@ -1295,6 +1402,7 @@ segment policy fingerprint
 - terminal accumulator mismatch拒绝；
 - durable event index drift拒绝；
 - segment policy fingerprint mismatch拒绝；
+- terminal source/live cursor与segment/domain/reducer contract任一漂移均在commit前拒绝；
 - retry candidate bytes稳定。
 
 ### 16.4 Physical quote与settlement
@@ -1305,6 +1413,7 @@ segment policy fingerprint
 - Start、每个semantic event、normal terminal与recovery terminal的最坏batch排列全部进入`max_commit_batches`；
 - candidate wrapper、bookkeeping、structural与recovery maximal fixture均不超过quote；
 - actual settlement按真实segment/event/commit数闭合并释放未用余额；
+- source adapter/synthetic counts、singleton/segment counts、candidate bytes与semantic batch identities逐项闭合；terminal source、charge events与physical settlement join同一measurement fingerprint；
 - quote不足在dispatch前拒绝，不能等durable commit后才发现hard-cap breach。
 
 ### 16.5 Lifecycle/failure
@@ -1313,12 +1422,17 @@ segment policy fingerprint
 - read+cancel分别覆盖read先赢与cancel先赢；
 - read+timer+cancel三者同时ready使用stable signal stamp；
 - 任何时刻最多一个completed-but-not-adopted envelope；
+- 同一次adopt transition产生两个candidate且第一项触发flush时，两项均已由Coordinator/handle持有；
 - cancel先赢时discard unadopted且terminal只使用adopted prefix；
 - cancel linearization后迟到read completion不生成envelope、不推进index/accumulator；
 - commit `NONE`重试同一segment；
 - `FULL`后caller cancel仍adopt/fold/cursor advance；
 - `UNKNOWN/PARTIAL`保留owner并latch；
+- projection artifact caller cancel-after-physical-FULL消费原成功结果，owned physical task真正cancel才报physical cancellation；
 - provider error在open text/thinking/data/tool block后生成interrupted projection；
+- Responses显式text/thinking done各生成唯一End，completed不重复End；done-only完整内容会生成唯一delta，已有delta与final payload不一致时fail closed；failure路径不伪造End；
+- tool arguments先于具有非空name的Start时fail closed；
+- Responses tool-call同时缺少call/item identity时fail closed且不生成随机ID；
 - cancel physical drain后提交已接受tail；
 - worker crash丢失未确认tail后recovered-interrupted；
 - terminal不得越过sealed-unconfirmed segment；
@@ -1326,6 +1440,7 @@ segment policy fingerprint
 - slow subscriber只detach；
 - Host close drain active commit和physical operation；
 - BLOCKED_UNTRUSTED禁止terminal/teardown。
+- final provider error的bounded retry summary可历史恢复，raw trace/provider data与per-attempt durable event保持为零。
 
 ### 16.6 Semantic equality
 
@@ -1409,10 +1524,13 @@ AsyncIterator[AgentEvent | TransportUsageReport]
 
 ### 18.1 Deterministic writer
 
-对现有 `8192 deltas * 16 chars = 131072 chars ~= 32768 V1 estimated tokens` fixture，V1 content target应产生4个text segments；允许额外singleton structural/terminal events，但必须满足：
+对现有 `8192 deltas * 16 chars = 131072 chars ~= 32768 V1 estimated tokens` fixture，关闭wall-clock age pressure的pure/reference assembler必须由V1 content target精确产生4个text segments。完整production runtime还同时执行`1s` oldest-unconfirmed-age hard bound；当source-item sanitize/coalescing本身跨过该deadline时，允许在相同content boundary之外多产生bounded age segment。该差异只改变non-transcript物理layout，不得改变terminal projection或provider semantic identity。
+
+完整production benchmark必须满足：
 
 ```text
-durable text segment count = 4
+pure content-boundary text segment count = 4
+production durable text segment count = 4..8
 semantic commit count <= 8
 ledger event delta <= 64
 ordered semantic content grade = pass

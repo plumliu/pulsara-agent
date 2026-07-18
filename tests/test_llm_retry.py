@@ -112,6 +112,8 @@ def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
 
 
 def test_retry_config_rejects_invalid_delay_values() -> None:
+    with pytest.raises(ValueError, match="attempts must be <= 32"):
+        LLMRetryConfig(attempts=33)
     with pytest.raises(ValueError, match="base_delay_seconds"):
         LLMRetryConfig(base_delay_seconds=0)
     with pytest.raises(ValueError, match="max_delay_seconds"):

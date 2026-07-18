@@ -7,7 +7,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
+from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.llm import ModelRole
 from tests.support import test_llm_config
@@ -130,7 +134,7 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
             incoming_run_id=source_ctx.run_id
         )
         source = await runtime.emit(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **source_ctx.event_fields(), block_id="text:1", delta="bind"
             )
         )
@@ -151,7 +155,7 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
 
         final = await asyncio.wait_for(
             runtime.emit(
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **source_ctx.event_fields(), block_id="text:2", delta="after"
                 )
             ),

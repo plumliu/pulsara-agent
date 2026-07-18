@@ -6,17 +6,24 @@ from pathlib import Path
 from typing import AsyncIterator
 from uuid import uuid4
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+)
+
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
     EventType,
     MemoryWriteResultEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -82,11 +89,11 @@ class _ScriptedTransport:
     ) -> AsyncIterator[AgentEvent]:
         self.contexts.append(context)
         text = self.replies.pop(0)
-        yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-        yield TextBlockDeltaEvent(
+        yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+        yield RawProviderTextDelta(
             **event_context.event_fields(), block_id="text:1", delta=text
         )
-        yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
+        yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
         if self.usage is not None:
             yield TransportUsageReport(
                 usage_status="reported",
@@ -245,14 +252,14 @@ def test_governance_compaction_candidate_uses_bounded_window_evidence_view() -> 
         reply_id="reply:source:compaction",
     )
     first = log.append(
-        TextBlockDeltaEvent(
+        make_text_block_segment_event(
             **source_ctx.event_fields(),
             block_id="text:one",
             delta="The user asks to sync release.",
         )
     )
     log.append(
-        TextBlockDeltaEvent(
+        make_text_block_segment_event(
             **source_ctx.event_fields(),
             block_id="text:two",
             delta="The user asks to push GitHub.",
@@ -400,21 +407,21 @@ def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
     )
     log.extend(
         [
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 run_id="run:source:audit",
                 turn_id=candidate.source_turn_id,
                 reply_id=candidate.source_reply_id,
                 tool_call_id="call:remember",
                 tool_call_name="remember_preference",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 run_id="run:source:audit",
                 turn_id=candidate.source_turn_id,
                 reply_id=candidate.source_reply_id,
                 tool_call_id="call:remember",
                 delta='{"statement":"The user prefers concise summaries."}',
             ),
-            ToolCallEndEvent(
+            make_tool_call_end_event(
                 run_id="run:source:audit",
                 turn_id=candidate.source_turn_id,
                 reply_id=candidate.source_reply_id,

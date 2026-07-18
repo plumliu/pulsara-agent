@@ -1,6 +1,6 @@
 # Pulsara Stage 4.5 Durable Runtime 性能稳定化计划
 
-> 状态：基于 real-LLM dogfood 实测形成的下一步优化计划；尚未实施
+> 状态：correctness、baseline、Context Evidence Cursor 与 Model Stream Segment 已完成；write-behind 已判定跳过
 >
 > 日期：2026-07-16
 >
@@ -62,6 +62,29 @@ provider-visible semantic identity。
 ```
 
 所需的物理 I/O、transaction、CPU 与 allocation 成本。
+
+### 0.1 2026-07-18 完成状态
+
+本计划中影响 Stage 5 前置正确性与主要墙钟瓶颈的路径已经闭环：
+
+- governance outbox、control disposition owner、critical writer lane与bounded PostgreSQL I/O已完成；
+- deterministic writer/context dataset、production adapters、semantic graders与formal baseline已完成；
+- Context Evidence Cursor EC0–EC3已完成；
+- Model Stream Segment SEG0A–SEG3已按`PULSARA_MODEL_STREAM_DELTA_SEGMENT_COALESCING_HARD_CUT_IMPLEMENTATION.zh.md`完成；
+- 旧四类durable model delta已删除，provider fragmentation不再一比一放大ledger；
+- clean writer与clean context suite均通过production acceptance；
+- segment后同步semantic wait已低于write-behind量化gate，`PERF1C`正式跳过。
+
+权威结果位于：
+
+```text
+benchmarks/durable-runtime/baselines/v1/model-semantic-batch-16-a2ae6726.jsonl.summary.json
+benchmarks/durable-runtime/baselines/v1/model-stream-segment-v1-df869e93.jsonl.summary.json
+benchmarks/durable-runtime/baselines/v1/context-suite-7e9a484d/context-suite.summary.json
+benchmarks/durable-runtime/baselines/v1/context-suite-df869e93/context-suite.summary.json
+```
+
+Writer median从`514`个semantic commits、`8717`条ledger events、`20.907s` commit-port wait降至`2`、`18`与`0.049s`。优化后context suite为`340/340`通过，各mode的context prepare total median下降`44.87%–93.00%`。这组结果否定了当前继续引入one-inflight write-behind的必要性；剩余可选的artifact/prepared-context缓存只能在Stage 5后由新证据重新排序，不再阻塞Stage 5。
 
 ---
 
@@ -2059,23 +2082,17 @@ Stage 4.5只有同时满足以下条件才完成。
 
 > 2026-07-18 更新：`PULSARA_MODEL_STREAM_DELTA_SEGMENT_COALESCING_HARD_CUT_IMPLEMENTATION.zh.md`已经成为model-stream writer下一步唯一实施规格。Cursor保留，但segment先消除producer fragmentation；write-behind改为segment完成后的条件分支。
 
-下一步建议暂停扩大Stage 5改动面，先实施：
+本轮性能稳定化已经完成，下一步恢复Stage 5改动面：
 
 ```text
-已完成的correctness/baseline/Cursor工作
-    ->
-SEG0A adapter-private raw DTO
-    -> SEG0B pure Coordinator/arbiter/segment contracts
-    -> SEG1 durable segment hard cut + DB reset
-    ->
-SEG2 deterministic writer + SEG3 real dogfood re-measure
-    + justified: PERF1C one-inflight write-behind
-    + not justified: skip PERF1C
-    ->
-Stage 5 ContextSource Ownership
+completed correctness/baseline/Cursor
+    -> completed SEG0A/SEG0B/SEG1
+    -> completed SEG2/SEG3
+    -> PERF1C skipped by measured gate
+    -> Stage 5 ContextSource Ownership
 ```
 
-`PERF1C`仍是条件分支，不是默认必做步骤。Segment hard cut如果已经把durable critical path压低到目标范围，直接跳过write-behind并回到Stage 5。
+`PERF1C`仍是未来可重新评估的条件分支，不是保留在production中的休眠路径。当前Segment hard cut已经把durable critical path压低到目标范围，因此直接跳过write-behind并回到Stage 5。
 
 最终如果：
 

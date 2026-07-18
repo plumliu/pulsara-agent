@@ -17,7 +17,7 @@ from pulsara_agent.event import (
     PhysicalOperationReservationCreatedEvent,
     PhysicalOperationReservationSettledEvent,
     RolloutBudgetReservationSettledEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
 )
@@ -37,16 +37,22 @@ from pulsara_agent.llm.provider import ProviderProfile
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
-from pulsara_agent.llm.runtime import LLMRuntime, SemanticBatchTargetPolicy
-from pulsara_agent.llm.sanitizing_transport import (
+from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.runtime import LLMRuntime
+from pulsara_agent.llm.raw_provider import (
     RawLLMTransport,
-    SanitizingLLMTransport,
+    RawProviderBlockEnd,
+    RawProviderBlockStart,
+    RawProviderStreamItem,
+    RawProviderTextDelta,
 )
+from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
 from pulsara_agent.memory.artifacts.postgres_archive import (
     PostgresArtifactStore,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.model_call import (
+    CommittedModelCallResult,
     ModelCallPurpose,
     ModelContextMode,
     ResolvedModelCallFact,
@@ -73,10 +79,14 @@ class ModelSemanticBatchObservation:
     terminal_commit_port_wall_seconds: float
     logical_semantic_batch_count: int
     semantic_batch_sizes: tuple[int, ...]
+    source_item_count: int
+    durable_text_segment_count: int
     ledger_event_delta: int
     ledger_candidate_payload_byte_delta: int
     postgres_cluster_wal_lsn_delta_bytes: int
     ordered_semantic_content_fingerprint: str
+    raw_reference_semantic_content_fingerprint: str
+    terminal_projection_content_fingerprint: str
     terminal_projection_semantic_fingerprint: str
     physical_settlement_valid: bool
     physical_charged_candidate_events: int
@@ -125,29 +135,21 @@ class DeterministicTextStreamTransport(RawLLMTransport):
         call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent]:
-        del call, context
+    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
+        del call, context, event_context
         block_id = "benchmark-text-block"
-        common = {
-            **event_context.event_fields(),
-            "created_at": "2026-01-01T00:00:00Z",
-        }
-        yield TextBlockStartEvent(
-            id="raw-text-start",
-            **common,
+        yield RawProviderBlockStart(
+            block_kind="text",
             block_id=block_id,
         )
         for index in range(self._delta_events):
             payload = _fixed_width_ascii(index, self._characters_per_delta)
-            yield TextBlockDeltaEvent(
-                id=f"raw-text-delta:{index}",
-                **common,
+            yield RawProviderTextDelta(
                 block_id=block_id,
                 delta=payload,
             )
-        yield TextBlockEndEvent(
-            id="raw-text-end",
-            **common,
+        yield RawProviderBlockEnd(
+            block_kind="text",
             block_id=block_id,
         )
 
@@ -235,13 +237,7 @@ async def run_model_semantic_batch_sample(
             )
         )
         config = _benchmark_llm_config()
-        runtime = LLMRuntime(
-            config=config,
-            registry=registry,
-            semantic_batch_policy=SemanticBatchTargetPolicy(
-                max_events=execution_case.max_business_events_per_commit,
-            ),
-        )
+        runtime = LLMRuntime(config=config, registry=registry)
         target = runtime.resolve_target(role=ModelRole.PRO)
         call_id = f"model_call:{_hex_identity(sample_identity + ':model-call')}"
         call = ResolvedModelCall(
@@ -303,6 +299,14 @@ async def run_model_semantic_batch_sample(
         if result.terminal_outcome != "completed":
             raise RuntimeError("benchmark materialized model result did not complete")
         ledger_events = tuple(event_log.iter())
+        raw_reference_content = "".join(
+            _fixed_width_ascii(index, block.characters_per_delta)
+            for index in range(block.delta_events_per_block)
+        )
+        text_segment_count = sum(
+            isinstance(event, TextBlockSegmentEvent)
+            for event in completion.committed_events
+        )
         account = runtime_session.materialization_account_store.snapshot()
         physical_settlement = _physical_settlement_observation(ledger_events)
         return ModelSemanticBatchObservation(
@@ -319,6 +323,8 @@ async def run_model_semantic_batch_sample(
             ),
             logical_semantic_batch_count=len(port.semantic_batch_sizes),
             semantic_batch_sizes=tuple(port.semantic_batch_sizes),
+            source_item_count=block.delta_events_per_block + 2,
+            durable_text_segment_count=text_segment_count,
             ledger_event_delta=after.event_count - before.event_count,
             ledger_candidate_payload_byte_delta=(
                 after.candidate_payload_bytes - before.candidate_payload_bytes
@@ -331,6 +337,18 @@ async def run_model_semantic_batch_sample(
             ordered_semantic_content_fingerprint=(
                 _ordered_semantic_content_fingerprint(
                     completion.committed_events
+                )
+            ),
+            raw_reference_semantic_content_fingerprint=(
+                _semantic_content_fingerprint(
+                    block_id="benchmark-text-block",
+                    content=raw_reference_content,
+                )
+            ),
+            terminal_projection_content_fingerprint=(
+                _semantic_content_fingerprint(
+                    block_id="benchmark-text-block",
+                    content=_terminal_projection_text(result),
                 )
             ),
             terminal_projection_semantic_fingerprint=(
@@ -369,9 +387,6 @@ async def run_model_semantic_batch_sample(
                 and not account.reconciliation_required
                 and not account.active_reservations
                 and account.ledger_through_sequence == after.through_sequence
-                and len(port.semantic_batch_sizes) > 0
-                and sum(port.semantic_batch_sizes)
-                == block.delta_events_per_block + 2
             ),
         )
     finally:
@@ -397,24 +412,42 @@ def _benchmark_llm_config() -> LLMConfig:
 def _ordered_semantic_content_fingerprint(
     events: tuple[AgentEvent, ...],
 ) -> str:
-    semantic_payload: list[dict[str, str]] = []
-    for event in events:
-        if isinstance(event, TextBlockStartEvent):
-            semantic_payload.append({"kind": "text_start", "block_id": event.block_id})
-        elif isinstance(event, TextBlockDeltaEvent):
-            semantic_payload.append(
-                {
-                    "kind": "text_delta",
-                    "block_id": event.block_id,
-                    "delta": event.delta,
-                }
-            )
-        elif isinstance(event, TextBlockEndEvent):
-            semantic_payload.append({"kind": "text_end", "block_id": event.block_id})
-    return sha256_fingerprint(
-        "durable-runtime-benchmark-semantic-content:v1",
-        semantic_payload,
+    starts = tuple(event for event in events if isinstance(event, TextBlockStartEvent))
+    ends = tuple(event for event in events if isinstance(event, TextBlockEndEvent))
+    segments = tuple(
+        event for event in events if isinstance(event, TextBlockSegmentEvent)
     )
+    if len(starts) != 1 or len(ends) != 1 or not segments:
+        raise RuntimeError("benchmark requires one completed text block")
+    block_id = starts[0].block_id
+    if ends[0].block_id != block_id or any(
+        segment.block_id != block_id for segment in segments
+    ):
+        raise RuntimeError("benchmark text block identity drifted")
+    return _semantic_content_fingerprint(
+        block_id=block_id,
+        content="".join(segment.text for segment in segments),
+    )
+
+
+def _semantic_content_fingerprint(*, block_id: str, content: str) -> str:
+    return sha256_fingerprint(
+        "durable-runtime-benchmark-semantic-content:v2",
+        {"kind": "text", "block_id": block_id, "content": content},
+    )
+
+
+def _terminal_projection_text(result: CommittedModelCallResult) -> str:
+    if len(result.text_blocks) != 1:
+        raise RuntimeError("benchmark requires one terminal text block")
+    block = result.text_blocks[0]
+    if (
+        block.block_id != "benchmark-text-block"
+        or block.completion_status != "completed"
+        or result.combined_text != block.text
+    ):
+        raise RuntimeError("benchmark terminal text projection drifted")
+    return result.combined_text
 
 
 def _terminal_projection_semantic_fingerprint(

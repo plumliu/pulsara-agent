@@ -22,9 +22,9 @@ from pulsara_agent.event import (
     RunErrorEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    ThinkingBlockDeltaEvent,
-    ToolCallDeltaEvent,
+    TextBlockSegmentEvent,
+    ThinkingBlockSegmentEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
     ToolResultDataDeltaEvent,
@@ -264,24 +264,24 @@ def build_run_timeline(
                     }
                 )
             continue
-        if isinstance(event, TextBlockDeltaEvent):
+        if isinstance(event, TextBlockSegmentEvent):
             key = (event.reply_id, event.block_id)
             item = text_blocks.get(key)
             if item is None:
                 item = _item("assistant_text", "Assistant text", event)
                 text_blocks[key] = item
                 items.append(item)
-            _append_summary(item, event.delta)
+            _append_summary(item, event.text)
             _finish(item, event)
             continue
-        if isinstance(event, ThinkingBlockDeltaEvent):
+        if isinstance(event, ThinkingBlockSegmentEvent):
             key = (event.reply_id, event.block_id)
             item = thinking_blocks.get(key)
             if item is None:
                 item = _item("assistant_thinking", "Assistant thinking", event)
                 thinking_blocks[key] = item
                 items.append(item)
-            _append_summary(item, event.delta)
+            _append_summary(item, event.thinking)
             _finish(item, event)
             continue
         if isinstance(event, ToolCallStartEvent):
@@ -299,7 +299,7 @@ def build_run_timeline(
             tool_calls[event.tool_call_id] = item
             items.append(item)
             continue
-        if isinstance(event, ToolCallDeltaEvent):
+        if isinstance(event, ToolCallArgumentsSegmentEvent):
             item = tool_calls.get(event.tool_call_id)
             if item is None:
                 item = _item(
@@ -311,7 +311,8 @@ def build_run_timeline(
                 tool_calls[event.tool_call_id] = item
                 items.append(item)
             item.metadata["arguments"] = (
-                str(item.metadata.get("arguments", "")) + event.delta
+                str(item.metadata.get("arguments", ""))
+                + event.arguments_json_fragment
             )
             _finish(item, event)
             continue

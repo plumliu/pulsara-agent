@@ -1,9 +1,21 @@
 import pytest
 
+from tests.support.model_stream import (
+    make_data_block_end_event,
+    make_data_block_segment_event,
+    make_data_block_start_event,
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+    make_thinking_block_end_event,
+    make_thinking_block_segment_event,
+    make_thinking_block_start_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
-    DataBlockDeltaEvent,
-    DataBlockEndEvent,
-    DataBlockStartEvent,
     EventContext,
     ExternalExecutionResultEvent,
     ModelCallEndEvent,
@@ -11,15 +23,6 @@ from pulsara_agent.event import (
     RequireExternalExecutionEvent,
     ReplyEndEvent,
     ReplyStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
-    ThinkingBlockEndEvent,
-    ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -120,39 +123,39 @@ def test_message_reducer_replays_text_thinking_tool_events() -> None:
     event_log.extend(
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            TextBlockStartEvent(**CTX.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**CTX.event_fields(), block_id="text:1"),
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:1", delta="hello "
             ),
-            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="world"),
-            TextBlockEndEvent(**CTX.event_fields(), block_id="text:1"),
-            ThinkingBlockStartEvent(**CTX.event_fields(), block_id="thinking:1"),
-            ThinkingBlockDeltaEvent(
+            make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="world"),
+            make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
+            make_thinking_block_start_event(**CTX.event_fields(), block_id="thinking:1"),
+            make_thinking_block_segment_event(
                 **CTX.event_fields(), block_id="thinking:1", delta="plan"
             ),
-            ThinkingBlockEndEvent(**CTX.event_fields(), block_id="thinking:1"),
-            DataBlockStartEvent(
+            make_thinking_block_end_event(**CTX.event_fields(), block_id="thinking:1"),
+            make_data_block_start_event(
                 **CTX.event_fields(), block_id="data:1", media_type="image/png"
             ),
-            DataBlockDeltaEvent(
+            make_data_block_segment_event(
                 **CTX.event_fields(),
                 block_id="data:1",
                 data="abc",
                 media_type="image/png",
             ),
-            DataBlockEndEvent(**CTX.event_fields(), block_id="data:1"),
-            ToolCallStartEvent(
+            make_data_block_end_event(**CTX.event_fields(), block_id="data:1"),
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id="call:1",
                 tool_call_name="lookup",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id="call:1", delta='{"q"'
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id="call:1", delta=':"x"}'
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:1"),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:1"),
             ToolResultStartEvent(
                 **CTX.event_fields(),
                 tool_call_id="call:1",
@@ -328,18 +331,18 @@ def test_message_reducer_preserves_block_start_order_for_interleaved_events() ->
     event_log.extend(
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            TextBlockStartEvent(**CTX.event_fields(), block_id="text:first"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**CTX.event_fields(), block_id="text:first"),
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:first", delta="before tool"
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(), tool_call_id="call:later", tool_call_name="lookup"
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id="call:later", delta="{}"
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id="call:later"),
-            TextBlockEndEvent(**CTX.event_fields(), block_id="text:first"),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id="call:later"),
+            make_text_block_end_event(**CTX.event_fields(), block_id="text:first"),
             ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed"),
         ]
     )
@@ -363,15 +366,15 @@ def test_message_reducer_marks_external_tool_call_finished_when_result_arrives()
     event_log.extend(
         [
             ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id=tool_call.id,
                 tool_call_name=tool_call.name,
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **CTX.event_fields(), tool_call_id=tool_call.id, delta=tool_call.input
             ),
-            ToolCallEndEvent(**CTX.event_fields(), tool_call_id=tool_call.id),
+            make_tool_call_end_event(**CTX.event_fields(), tool_call_id=tool_call.id),
             RequireExternalExecutionEvent(
                 id=require_event_id,
                 **CTX.event_fields(),

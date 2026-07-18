@@ -864,6 +864,7 @@ class EventLog(Protocol):
         active_runs_only: bool = False,
         run_ids: tuple[str, ...] | None = None,
         minimum_sequence: int = 1,
+        through_sequence: int | None = None,
         max_events: int = DEFAULT_SPARSE_EVENT_READ_MAX_EVENTS,
         max_payload_bytes: int = DEFAULT_SPARSE_EVENT_READ_MAX_PAYLOAD_BYTES,
         deadline_monotonic: float | None = None,

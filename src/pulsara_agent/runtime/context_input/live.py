@@ -1906,6 +1906,18 @@ async def _child_named_context_slices(
         raise ContextEventSliceError("child context requires a parent EventLogLocator")
     parent_log = locator.event_log_for_runtime_session(entry.parent_runtime_session_id)
     deadline = monotonic() + 30.0
+    owner_store = runtime_session.rollout_account_owner_state_store
+    if owner_store is None:
+        raise ContextEventSliceError(
+            "child context lacks its parent rollout state store"
+        )
+    owner_through_sequence, rollout_state = owner_store.rollout_state_snapshot(
+        run_start.long_horizon.rollout_account_id
+    )
+    if rollout_state is None:
+        raise ContextEventSliceError(
+            "child context parent rollout account is unavailable"
+        )
 
     def read_parent_authority() -> _ChildAuthorityRead:
         sparse_key = (
@@ -1929,6 +1941,7 @@ async def _child_named_context_slices(
             minimum_sequence=(
                 cursor.observed_ledger_high_water + 1 if cursor is not None else 1
             ),
+            through_sequence=owner_through_sequence,
             max_events=_MAX_LIVE_AUTHORITY_EVENTS,
             max_payload_bytes=_MAX_LIVE_AUTHORITY_PAYLOAD_BYTES,
             deadline_monotonic=deadline,
@@ -2008,19 +2021,6 @@ async def _child_named_context_slices(
                 relevant_events=frozen_relevant,
             ),
         )
-        owner_store = runtime_session.rollout_account_owner_state_store
-        if owner_store is None:
-            raise ContextEventSliceError(
-                "child context lacks its parent rollout state store"
-            )
-        rollout_state = owner_store.rollout_state_at(
-            run_start.long_horizon.rollout_account_id,
-            through_sequence=relevant.through_sequence,
-        )
-        if rollout_state is None:
-            raise ContextEventSliceError(
-                "child context parent rollout account is unavailable"
-            )
         return _ChildAuthorityRead(
             slices=_contiguous_exact_slices(
                 runtime_session_id=entry.parent_runtime_session_id,

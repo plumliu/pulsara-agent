@@ -6,7 +6,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from pulsara_agent.event import EventContext, TextBlockDeltaEvent
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
+from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import InvalidAttemptPayload, PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory import (
@@ -40,7 +44,7 @@ def pool_case(request, tmp_path) -> _PoolCase:
     ctx = _ctx("postgres")
     _connect_or_skip(dsn).close()
     log = PostgresEventLog(dsn=dsn, runtime_session_id=session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:parent", delta="seed"))
+    log.append(make_text_block_segment_event(**ctx.event_fields(), block_id="text:parent", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
 
     def cleanup() -> None:
@@ -214,7 +218,7 @@ def test_memory_write_unit_of_work_preserves_compaction_candidate_metadata(tmp_p
     ctx = _ctx("uow")
     _connect_or_skip(dsn).close()
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**ctx.event_fields(), block_id="text:seed", delta="seed"))
     candidate = _pooled_valid(
         _PoolCase(pool=PostgresCandidatePool(dsn), session_id=runtime_session_id, ctx=ctx),
         entry_id=f"pool:test:{uuid4().hex}",

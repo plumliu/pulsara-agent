@@ -49,10 +49,10 @@ def test_dataset_runner_validates_all_offline_scenarios() -> None:
 
     assert "writer_scenarios=5" in completed.stdout
     assert "context_scenarios=6" in completed.stdout
-    assert "expanded_cases=33" in completed.stdout
+    assert "expanded_cases=28" in completed.stdout
     assert "production_valid_cases=27" in completed.stdout
-    assert "sensitivity_analysis_cases=2" in completed.stdout
-    assert "counterfactual_analysis_cases=4" in completed.stdout
+    assert "sensitivity_analysis_cases=0" in completed.stdout
+    assert "counterfactual_analysis_cases=1" in completed.stdout
     assert "external_network_access=forbidden" in completed.stdout
     assert "allowed_local_services=postgresql" in completed.stdout
     assert "status=valid" in completed.stdout
@@ -82,7 +82,7 @@ def test_dataset_runner_expands_context_cases_deterministically() -> None:
     assert counterfactual == set()
 
 
-def test_dataset_runner_marks_over_production_batch_cases_counterfactual() -> None:
+def test_dataset_runner_exposes_only_the_production_segment_case() -> None:
     completed = _run(
         "plan",
         "--scenario",
@@ -92,18 +92,9 @@ def test_dataset_runner_marks_over_production_batch_cases_counterfactual() -> No
     payload = json.loads(completed.stdout)
     by_case = {case["case_id"]: case for case in payload["cases"]}
 
-    assert by_case["batch-1"]["case_kind"] == "counterfactual_analysis"
-    assert by_case["batch-1"]["production_acceptance_eligible"] is False
-    assert by_case["batch-4"]["case_kind"] == "sensitivity_analysis"
-    assert by_case["batch-4"]["production_acceptance_eligible"] is False
-    assert by_case["batch-8"]["case_kind"] == "sensitivity_analysis"
-    assert by_case["batch-8"]["production_acceptance_eligible"] is False
-    assert by_case["batch-16"]["case_kind"] == "production_valid"
-    assert by_case["batch-16"]["production_acceptance_eligible"] is True
-    assert by_case["batch-32"]["case_kind"] == "counterfactual_analysis"
-    assert by_case["batch-32"]["production_acceptance_eligible"] is False
-    assert by_case["batch-64"]["case_kind"] == "counterfactual_analysis"
-    assert by_case["batch-64"]["production_acceptance_eligible"] is False
+    assert set(by_case) == {"segment-v1"}
+    assert by_case["segment-v1"]["case_kind"] == "production_valid"
+    assert by_case["segment-v1"]["production_acceptance_eligible"] is True
 
     acceptance = _run(
         "plan",
@@ -116,20 +107,7 @@ def test_dataset_runner_marks_over_production_batch_cases_counterfactual() -> No
     acceptance_payload = json.loads(acceptance.stdout)
     assert {
         case["case_id"] for case in acceptance_payload["cases"]
-    } == {"batch-16"}
-
-    sensitivity = _run(
-        "plan",
-        "--scenario",
-        "model-semantic-batch-matrix",
-        "--case-kind",
-        "sensitivity_analysis",
-        "--json",
-    )
-    sensitivity_payload = json.loads(sensitivity.stdout)
-    assert {
-        case["case_id"] for case in sensitivity_payload["cases"]
-    } == {"batch-4", "batch-8"}
+    } == {"segment-v1"}
 
 
 def test_dataset_runner_parallel_smoke_uses_isolated_processes(
@@ -152,9 +130,9 @@ def test_dataset_runner_parallel_smoke_uses_isolated_processes(
         for line in output.read_text(encoding="utf-8").splitlines()
     ]
 
-    assert "expanded_cases=19" in completed.stdout
-    assert "result_rows=38" in completed.stdout
-    assert len(rows) == 38
+    assert "expanded_cases=14" in completed.stdout
+    assert "result_rows=28" in completed.stdout
+    assert len(rows) == 28
     assert all(row["execution_kind"] == "contract_smoke" for row in rows)
     assert all(row["external_network_access"] == "forbidden" for row in rows)
     assert all(row["allowed_local_services"] == ["postgresql"] for row in rows)
@@ -165,7 +143,7 @@ def test_dataset_runner_parallel_smoke_uses_isolated_processes(
         for row in rows
     ] == [
         (case_ordinal, iteration)
-        for case_ordinal in range(19)
+        for case_ordinal in range(14)
         for iteration in range(2)
     ]
 

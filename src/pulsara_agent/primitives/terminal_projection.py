@@ -16,6 +16,7 @@ from pulsara_agent.primitives.frozen import (
     register_durable_fact,
 )
 from pulsara_agent.primitives.model_call import (
+    ModelStreamSettlementMeasurementFact,
     ModelTokenUsageFact,
     ProviderSanitizedErrorFact,
 )
@@ -287,15 +288,19 @@ class ModelProjectionItemFact(FrozenFactBase):
 
 
 class ModelCallSemanticSourceFact(FrozenFactBase):
-    schema_version: Literal["model_call_semantic_source.v1"]
+    schema_version: Literal["model_call_semantic_source.v3"]
     resolved_model_call_id: str = Field(min_length=1, max_length=128)
     model_call_start_event_identity: StableEventIdentityFact
     source_semantic_item_count: NonNegativeInt
     source_first_transport_index: int | None = Field(default=None, ge=0)
     source_last_transport_index: int | None = Field(default=None, ge=0)
     source_semantic_accumulator: Fingerprint
+    durable_semantic_event_count: NonNegativeInt
+    durable_event_accumulator: Fingerprint
+    segment_policy_contract_fingerprint: Fingerprint
     model_stream_semantic_domain_contract_fingerprint: Fingerprint
     reducer_contract_fingerprint: Fingerprint
+    stream_settlement_measurement: ModelStreamSettlementMeasurementFact
     source_fingerprint: Fingerprint
 
     @model_validator(mode="after")
@@ -305,10 +310,25 @@ class ModelCallSemanticSourceFact(FrozenFactBase):
         if self.source_semantic_item_count == 0:
             if first is not None or last is not None:
                 raise ValueError("empty model source cannot carry transport range")
-        elif first is None or last is None or last - first + 1 != (
-            self.source_semantic_item_count
+            if self.durable_semantic_event_count != 0:
+                raise ValueError("empty model source cannot carry durable events")
+        elif (
+            first != 0
+            or last != self.source_semantic_item_count - 1
+            or self.durable_semantic_event_count == 0
+            or self.durable_semantic_event_count
+            > self.source_semantic_item_count
         ):
-            raise ValueError("model source transport range mismatch")
+            raise ValueError("model source transport/durable range mismatch")
+        measurement = self.stream_settlement_measurement
+        if (
+            measurement.source_item_count != self.source_semantic_item_count
+            or measurement.durable_semantic_event_count
+            != self.durable_semantic_event_count
+            or measurement.segment_policy_contract_fingerprint
+            != self.segment_policy_contract_fingerprint
+        ):
+            raise ValueError("model source settlement measurement join mismatch")
         return self
 
 
@@ -672,7 +692,7 @@ _OWN: tuple[tuple[str, str | None, str], ...] = (
     ("model_tool_call_block_semantic.v1", "semantic_fingerprint", "model-tool-call-block-semantic:v1"),
     ("model_provider_error_semantic.v1", "semantic_fingerprint", "model-provider-error-semantic:v1"),
     ("model_projection_item.v2", "fact_fingerprint", "model-projection-item:v2"),
-    ("model_call_semantic_source.v1", "source_fingerprint", "model-call-semantic-source:v1"),
+    ("model_call_semantic_source.v3", "source_fingerprint", "model-call-semantic-source:v3"),
     ("model_terminal_projection_semantic.v1", "semantic_fingerprint", "model-terminal-projection-semantic:v1"),
     ("canonical_tool_result_text_block_semantic.v1", "semantic_fingerprint", "canonical-tool-result-text-block-semantic:v1"),
     ("canonical_tool_result_data_block_semantic.v2", "semantic_fingerprint", "canonical-tool-result-data-block-semantic:v2"),

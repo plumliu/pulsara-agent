@@ -11,6 +11,24 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
+from tests.support.model_stream import (
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     ConfirmResult,
@@ -30,13 +48,7 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunErrorEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
     TerminalProcessCompletedEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -55,6 +67,7 @@ from pulsara_agent.host.transcript import (
     rebuild_prior_messages,
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
+from pulsara_agent.llm.raw_provider import RawProviderFailure, RawProviderStreamItem
 from tests.support import model_call_end_fields, model_call_start_fields, test_llm_config
 from tests.support.model_call import model_terminal_projection_end_reference_fixture
 from pulsara_agent.llm.registry import LLMTransportRegistry
@@ -143,13 +156,13 @@ def _accepted_text_reply_events(
         ()
         if text is None
         else (
-            TextBlockStartEvent(**ctx.event_fields(), block_id=block_id),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**ctx.event_fields(), block_id=block_id),
+            make_text_block_segment_event(
                 **ctx.event_fields(),
                 block_id=block_id,
                 delta=text,
             ),
-            TextBlockEndEvent(**ctx.event_fields(), block_id=block_id),
+            make_text_block_end_event(**ctx.event_fields(), block_id=block_id),
         )
     )
     return (
@@ -193,7 +206,7 @@ class ScriptedTransport:
         call,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[RawProviderStreamItem]:
         del call
         self.contexts.append(context)
         if self.on_context_captured is not None:
@@ -202,29 +215,29 @@ class ScriptedTransport:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 
@@ -249,26 +262,24 @@ class FailingScriptedTransport:
         self.contexts.append(context)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
             if reply.get("close_text_block", True):
-                yield TextBlockEndEvent(
+                yield RawProviderTextBlockEnd(
                     **event_context.event_fields(),
                     block_id=f"text:{len(self.contexts)}",
                 )
         if "run_error" in reply:
             error = reply["run_error"]
-            yield RunErrorEvent(
-                **event_context.event_fields(),
+            yield RawProviderFailure(
                 message=error["message"],
-                code=error["code"],
-                metadata=error.get("metadata", {}),
+                code_hint=error["code"],
             )
             return
         if "raise" in reply:
@@ -518,8 +529,8 @@ def test_rebuild_prior_messages_drops_audit_only_partial_reply_before_failure_no
                 user_input_chars=10,
                 metadata={"user_input": "first user"},
             ),
-            TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**ctx.event_fields(), block_id="text:1"),
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id="text:1", delta="partial answer"
             ),
             RunErrorEvent(
@@ -633,8 +644,8 @@ def test_rebuild_prior_messages_injects_system_note_for_aborted_last_run() -> No
                 user_input_chars=len("long user task"),
                 metadata={"user_input": "long user task"},
             ),
-            TextBlockStartEvent(**ctx.event_fields(), block_id="text:1"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**ctx.event_fields(), block_id="text:1"),
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id="text:1", delta="partial answer"
             ),
             ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
@@ -725,17 +736,17 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_aborted_run() -
                 user_input_chars=len("dangerous task"),
                 metadata={"user_input": "dangerous task"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:danger",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:danger",
                 delta='{"command": "rm -rf ./x"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:danger"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:danger"),
             RequireUserConfirmEvent(
                 **ctx.event_fields(),
                 tool_calls=[
@@ -786,17 +797,17 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
                 user_input_chars=len("run command"),
                 metadata={"user_input": "run command"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 delta='{"command": "sleep 30"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:terminal"),
             ToolResultStartEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
@@ -836,17 +847,17 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
                 user_input_chars=len("run command"),
                 metadata={"user_input": "run command"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
                 delta='{"command": "printf done"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:terminal"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:terminal"),
             ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
             ToolResultStartEvent(
                 **ctx.event_fields(),
@@ -900,28 +911,28 @@ def test_rebuild_prior_messages_note_mentions_failed_proposed_only_tools() -> No
                 user_input_chars=len("change files"),
                 metadata={"user_input": "change files"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:write",
                 tool_call_name="write_file",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:write",
                 delta='{"path": "secret.txt"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:write"),
-            ToolCallStartEvent(
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:write"),
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:term",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:term",
                 delta='{"command": "echo hidden"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:term"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:term"),
             RunEndEvent(
                 **run_end_contract_fields(ctx.run_id, status="failed"),
                 **ctx.event_fields(),
@@ -965,17 +976,17 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
                 user_input_chars=len("dangerous task"),
                 metadata={"user_input": "dangerous task"},
             ),
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **aborted_ctx.event_fields(),
                 tool_call_id="call:danger",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **aborted_ctx.event_fields(),
                 tool_call_id="call:danger",
                 delta='{"command": "rm -rf ./x"}',
             ),
-            ToolCallEndEvent(**aborted_ctx.event_fields(), tool_call_id="call:danger"),
+            make_tool_call_end_event(**aborted_ctx.event_fields(), tool_call_id="call:danger"),
             RequireUserConfirmEvent(
                 **aborted_ctx.event_fields(),
                 tool_calls=[
@@ -3478,13 +3489,13 @@ def test_host_session_stop_remains_busy_when_transport_swallows_cancellation(
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 await self.release.wait()
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id="text:late"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:late", delta="late text"
             )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id="text:late"
             )
 

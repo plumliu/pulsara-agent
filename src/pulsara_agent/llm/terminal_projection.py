@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from hashlib import sha256
@@ -10,21 +11,22 @@ from typing import TYPE_CHECKING, Literal
 
 from pulsara_agent.event import (
     AgentEvent,
-    DataBlockDeltaEvent,
+    DataBlockSegmentEvent,
     DataBlockEndEvent,
     DataBlockStartEvent,
     EventContext,
     ModelCallEndEvent,
     ModelCallStartEvent,
     ModelCallTerminalProjectionCommittedEvent,
+    PhysicalOperationChargeAppliedEvent,
     ProviderModelStreamErrorEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
+    ThinkingBlockSegmentEvent,
     ThinkingBlockEndEvent,
     ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
@@ -42,6 +44,11 @@ from pulsara_agent.primitives.context import (
 from pulsara_agent.primitives.frozen import (
     StableEventIdentityFact,
     build_frozen_fact,
+)
+from pulsara_agent.primitives.model_call import (
+    ModelStreamSemanticCommitMeasurementFact,
+    ModelStreamSettlementMeasurementFact,
+    sha256_fingerprint,
 )
 from pulsara_agent.primitives.terminal_projection import (
     DataMediaTypeNormalizationContractFact,
@@ -73,13 +80,20 @@ if TYPE_CHECKING:
 TERMINAL_PROJECTION_MEDIA_TYPE = (
     "application/vnd.pulsara.terminal-projection+json; version=2"
 )
+
+
+class TerminalProjectionPersistenceContractError(RuntimeError):
+    """A content-addressed terminal document failed deterministic confirmation."""
+
+
 MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT = context_fingerprint(
-    "model-terminal-projection-reducer-contract:v1",
+    "model-terminal-projection-reducer-contract:v2",
     {
-        "cursor": "transport-sequence-index-contiguous:v1",
-        "block_assembly": "typed-start-delta-end-interrupted:v1",
+        "cursor": "source-span+durable-index-contiguous:v2",
+        "block_assembly": "typed-start-segment-end-interrupted:v2",
         "projection_order": "first-source-item-order:v1",
-        "source_accumulator": "committed-semantic-event-chain:v1",
+        "source_accumulator": "sanitized-source-receipt-chain:v2",
+        "durable_accumulator": "canonical-segment-event-chain:v1",
     },
 )
 
@@ -200,6 +214,7 @@ class ModelTerminalProjectionReducer:
         start_event: ModelCallStartEvent,
         contracts: TerminalProjectionContractBundle,
         model_stream_semantic_domain_contract_fingerprint: str,
+        segment_policy_contract_fingerprint: str,
     ) -> None:
         if start_event.sequence is None:
             raise ValueError("model projection reducer requires committed Start")
@@ -211,8 +226,25 @@ class ModelTerminalProjectionReducer:
         )
         self._semantic_count = 0
         self._source_accumulator = context_fingerprint(
-            "model-terminal-source-accumulator:v1", "empty"
+            "model-stream-sanitized-source:v2", "empty"
         )
+        self._durable_event_count = 0
+        self._durable_event_accumulator = context_fingerprint(
+            "model-terminal-durable-event-accumulator:v1", "empty"
+        )
+        self._segment_policy_contract_fingerprint = (
+            segment_policy_contract_fingerprint
+        )
+        self._semantic_event_identities: list[StableEventIdentityFact] = []
+        self._adapter_source_item_count = 0
+        self._adapter_source_payload_bytes = 0
+        self._synthetic_source_item_count = 0
+        self._synthetic_source_payload_bytes = 0
+        self._singleton_event_count = 0
+        self._segment_event_count = 0
+        self._segment_content_utf8_bytes = 0
+        self._segment_candidate_payload_bytes = 0
+        self._singleton_candidate_payload_bytes = 0
         self._blocks: dict[tuple[str, str], dict[str, object]] = {}
         self._ordered_keys: list[tuple[str, str]] = []
         self._kind_counts: dict[str, int] = {}
@@ -232,22 +264,62 @@ class ModelTerminalProjectionReducer:
                 attribution.resolved_model_call_id
                 != self._start.resolved_call.resolved_model_call_id
                 or attribution.model_call_start_event_id != self._start.id
-                or attribution.transport_sequence_index != self._semantic_count
+                or attribution.durable_semantic_event_index
+                != self._durable_event_count
             ):
                 raise ValueError("model projection semantic cursor drifted")
-            self._source_accumulator = context_fingerprint(
-                "model-terminal-source-accumulator:v1",
+            span = attribution.source_span
+            if (
+                span.first_transport_sequence_index != self._semantic_count
+                or span.source_accumulator_before != self._source_accumulator
+            ):
+                raise ValueError("model projection source span continuity drifted")
+            if self._segment_policy_contract_fingerprint != (
+                attribution.segment_policy_contract_fingerprint
+            ):
+                raise ValueError("model projection segment policy drifted")
+            self._durable_event_accumulator = context_fingerprint(
+                "model-terminal-durable-event-accumulator:v1",
                 {
-                    "previous": self._source_accumulator,
+                    "previous": self._durable_event_accumulator,
                     "event_type": str(event.type),
-                    "draft_fingerprint": attribution.draft_fingerprint,
+                    "durable_semantic_event_index": (
+                        attribution.durable_semantic_event_index
+                    ),
+                    "source_span_fingerprint": span.source_span_fingerprint,
                     "canonical_event": canonical_event_payload_bytes(
                         event.model_copy(update={"sequence": None})
                     ).decode("utf-8"),
                 },
             )
             self._apply_one(event)
-            self._semantic_count += 1
+            self._semantic_event_identities.append(
+                stable_event_identity(
+                    event,
+                    runtime_session_id=self._runtime_session_id,
+                )
+            )
+            self._adapter_source_item_count += span.adapter_source_item_count
+            self._adapter_source_payload_bytes += span.adapter_source_payload_bytes
+            self._synthetic_source_item_count += span.synthetic_source_item_count
+            self._synthetic_source_payload_bytes += (
+                span.synthetic_source_payload_bytes
+            )
+            candidate_bytes = len(
+                canonical_event_payload_bytes(event.model_copy(update={"sequence": None}))
+            )
+            if attribution.segment_seal_reason is None:
+                self._singleton_event_count += 1
+                self._singleton_candidate_payload_bytes += candidate_bytes
+            else:
+                self._segment_event_count += 1
+                self._segment_content_utf8_bytes += int(
+                    getattr(event, "content_utf8_bytes", 0)
+                )
+                self._segment_candidate_payload_bytes += candidate_bytes
+            self._semantic_count += span.source_item_count
+            self._source_accumulator = span.source_accumulator_after
+            self._durable_event_count += 1
 
     def prepare_terminal(
         self,
@@ -257,6 +329,12 @@ class ModelTerminalProjectionReducer:
             "completed", "provider_error", "cancelled", "runtime_error"
         ],
         usage_report: TransportUsageReport,
+        semantic_commit_measurements: tuple[
+            ModelStreamSemanticCommitMeasurementFact, ...
+        ] = (),
+        physical_accounting_mode: Literal[
+            "accounted", "unbootstrapped_test"
+        ] = "unbootstrapped_test",
     ) -> PreparedModelTerminalProjection:
         items = self._projection_items(terminal_outcome=terminal_outcome)
         semantic = build_frozen_fact(
@@ -275,7 +353,7 @@ class ModelTerminalProjectionReducer:
         )
         source = build_frozen_fact(
             ModelCallSemanticSourceFact,
-            schema_version="model_call_semantic_source.v1",
+            schema_version="model_call_semantic_source.v3",
             resolved_model_call_id=(
                 self._start.resolved_call.resolved_model_call_id
             ),
@@ -289,11 +367,20 @@ class ModelTerminalProjectionReducer:
                 self._semantic_count - 1 if self._semantic_count else None
             ),
             source_semantic_accumulator=self._source_accumulator,
+            durable_semantic_event_count=self._durable_event_count,
+            durable_event_accumulator=self._durable_event_accumulator,
+            segment_policy_contract_fingerprint=(
+                self._segment_policy_contract_fingerprint
+            ),
             model_stream_semantic_domain_contract_fingerprint=(
                 self._domain_fingerprint
             ),
             reducer_contract_fingerprint=(
                 MODEL_TERMINAL_PROJECTION_REDUCER_CONTRACT_FINGERPRINT
+            ),
+            stream_settlement_measurement=self.build_settlement_measurement(
+                semantic_commit_measurements=semantic_commit_measurements,
+                physical_accounting_mode=physical_accounting_mode,
             ),
         )
         document = build_frozen_fact(
@@ -363,19 +450,83 @@ class ModelTerminalProjectionReducer:
             end_reference=end_reference,
         )
 
+    def build_settlement_measurement(
+        self,
+        *,
+        semantic_commit_measurements: tuple[
+            ModelStreamSemanticCommitMeasurementFact, ...
+        ],
+        physical_accounting_mode: Literal[
+            "accounted", "unbootstrapped_test"
+        ],
+    ) -> ModelStreamSettlementMeasurementFact:
+        if physical_accounting_mode == "accounted":
+            measured = tuple(
+                identity
+                for batch in semantic_commit_measurements
+                for identity in batch.semantic_event_identities
+            )
+            if measured != tuple(self._semantic_event_identities):
+                raise ValueError("model stream commit measurement coverage drifted")
+        payload = {
+            "segment_policy_contract_fingerprint": (
+                self._segment_policy_contract_fingerprint
+            ),
+            "physical_accounting_mode": physical_accounting_mode,
+            "adapter_source_item_count": self._adapter_source_item_count,
+            "adapter_source_payload_bytes": self._adapter_source_payload_bytes,
+            "synthetic_source_item_count": self._synthetic_source_item_count,
+            "synthetic_source_payload_bytes": self._synthetic_source_payload_bytes,
+            "source_item_count": self._semantic_count,
+            "source_payload_bytes": (
+                self._adapter_source_payload_bytes
+                + self._synthetic_source_payload_bytes
+            ),
+            "singleton_event_count": self._singleton_event_count,
+            "segment_event_count": self._segment_event_count,
+            "durable_semantic_event_count": self._durable_event_count,
+            "segment_content_utf8_bytes": self._segment_content_utf8_bytes,
+            "segment_candidate_payload_bytes": self._segment_candidate_payload_bytes,
+            "singleton_candidate_payload_bytes": (
+                self._singleton_candidate_payload_bytes
+            ),
+            "durable_candidate_payload_bytes": (
+                self._segment_candidate_payload_bytes
+                + self._singleton_candidate_payload_bytes
+            ),
+            "semantic_commit_batches": semantic_commit_measurements,
+            "actual_semantic_commit_batch_count": (
+                len(semantic_commit_measurements)
+                if physical_accounting_mode == "accounted"
+                else None
+            ),
+        }
+        provisional = ModelStreamSettlementMeasurementFact.model_construct(
+            **payload, measurement_fingerprint="pending"
+        )
+        canonical = provisional.model_dump(
+            mode="json", exclude={"measurement_fingerprint"}
+        )
+        return ModelStreamSettlementMeasurementFact(
+            **canonical,
+            measurement_fingerprint=sha256_fingerprint(
+                "model-stream-settlement-measurement:v1", canonical
+            ),
+        )
+
     def _apply_one(self, event: AgentEvent) -> None:
         if isinstance(event, TextBlockStartEvent):
             self._start_block("text", event.block_id, source_start_sequence=event.sequence)
-        elif isinstance(event, TextBlockDeltaEvent):
-            self._append_block("text", event.block_id, event.delta)
+        elif isinstance(event, TextBlockSegmentEvent):
+            self._append_block("text", event.block_id, event.text)
         elif isinstance(event, TextBlockEndEvent):
             self._end_block("text", event.block_id, source_end_sequence=event.sequence)
         elif isinstance(event, ThinkingBlockStartEvent):
             self._start_block(
                 "thinking", event.block_id, source_start_sequence=event.sequence
             )
-        elif isinstance(event, ThinkingBlockDeltaEvent):
-            self._append_block("thinking", event.block_id, event.delta)
+        elif isinstance(event, ThinkingBlockSegmentEvent):
+            self._append_block("thinking", event.block_id, event.thinking)
         elif isinstance(event, ThinkingBlockEndEvent):
             self._end_block(
                 "thinking", event.block_id, source_end_sequence=event.sequence
@@ -387,11 +538,11 @@ class ModelTerminalProjectionReducer:
                 media_type=event.media_type,
                 source_start_sequence=event.sequence,
             )
-        elif isinstance(event, DataBlockDeltaEvent):
+        elif isinstance(event, DataBlockSegmentEvent):
             value = self._require_open("data", event.block_id)
             if value["media_type"] != event.media_type:
                 raise ValueError("model data media type drifted")
-            value["content"] = str(value["content"]) + event.data
+            self._append_block("data", event.block_id, event.data)
         elif isinstance(event, DataBlockEndEvent):
             self._end_block("data", event.block_id, source_end_sequence=event.sequence)
         elif isinstance(event, ToolCallStartEvent):
@@ -401,8 +552,10 @@ class ModelTerminalProjectionReducer:
                 tool_name=event.tool_call_name,
                 source_start_sequence=event.sequence,
             )
-        elif isinstance(event, ToolCallDeltaEvent):
-            self._append_block("tool_call", event.tool_call_id, event.delta)
+        elif isinstance(event, ToolCallArgumentsSegmentEvent):
+            self._append_block(
+                "tool_call", event.tool_call_id, event.arguments_json_fragment
+            )
         elif isinstance(event, ToolCallEndEvent):
             self._end_block(
                 "tool_call",
@@ -438,7 +591,7 @@ class ModelTerminalProjectionReducer:
         self._blocks[key] = {
             "projection_order": len(self._ordered_keys) - 1,
             "block_index": block_index,
-            "content": "",
+            "parts": [],
             "ended": False,
             **extra,
         }
@@ -451,7 +604,10 @@ class ModelTerminalProjectionReducer:
 
     def _append_block(self, kind: str, block_id: str, delta: str) -> None:
         value = self._require_open(kind, block_id)
-        value["content"] = str(value["content"]) + delta
+        parts = value["parts"]
+        if not isinstance(parts, list):
+            raise RuntimeError("model projection block parts state drifted")
+        parts.append(delta)
 
     def _end_block(
         self, kind: str, block_id: str, *, source_end_sequence: int | None
@@ -502,7 +658,7 @@ class ModelTerminalProjectionReducer:
                 continue
             completion_status = "completed" if completed else "interrupted"
             if kind == "tool_call":
-                raw = str(value["content"])
+                raw = _join_projection_parts(value)
                 parsed: FrozenJsonObjectFact | None = None
                 try:
                     decoded = json.loads(raw)
@@ -551,7 +707,7 @@ class ModelTerminalProjectionReducer:
                     )
                 )
                 continue
-            text = str(value["content"])
+            text = _join_projection_parts(value)
             media_type = (
                 self._contracts.content_canonicalization.text_media_type
                 if kind == "text"
@@ -615,6 +771,13 @@ class ModelTerminalProjectionReducer:
         return tuple(output)
 
 
+def _join_projection_parts(value: dict[str, object]) -> str:
+    parts = value.get("parts")
+    if not isinstance(parts, list) or any(not isinstance(part, str) for part in parts):
+        raise RuntimeError("model projection block parts state drifted")
+    return "".join(parts)
+
+
 def stable_event_identity(
     event: AgentEvent,
     *,
@@ -631,6 +794,129 @@ def stable_event_identity(
         event_schema_fingerprint=candidate.event_schema_fingerprint,
         payload_fingerprint=candidate.payload_fingerprint,
     )
+
+
+def build_model_stream_semantic_commit_measurement(
+    *,
+    runtime_session_id: str,
+    commit_batch_index: int,
+    committed_semantic_events: tuple[AgentEvent, ...],
+    accounting_events: tuple[AgentEvent, ...],
+) -> ModelStreamSemanticCommitMeasurementFact | None:
+    charge_events = tuple(
+        event
+        for event in accounting_events
+        if isinstance(event, PhysicalOperationChargeAppliedEvent)
+    )
+    if not charge_events:
+        if accounting_events:
+            raise ValueError("model semantic commit lacks its physical charge event")
+        return None
+    if len(charge_events) != 1:
+        raise ValueError("model semantic commit has ambiguous physical charge events")
+    charge_event = charge_events[0]
+    semantic_identities = tuple(
+        stable_event_identity(event, runtime_session_id=runtime_session_id)
+        for event in committed_semantic_events
+    )
+    charged = charge_event.charge
+    if (
+        charged.owner_kind.value != "model_call"
+        or tuple(
+            sorted(
+                charged.charged_business_event_identities,
+                key=lambda item: (item.runtime_session_id, item.event_id),
+            )
+        )
+        != tuple(
+            sorted(
+                semantic_identities,
+                key=lambda item: (item.runtime_session_id, item.event_id),
+            )
+        )
+    ):
+        raise ValueError("model semantic commit/physical charge join mismatch")
+    semantic_candidate_payload_bytes = (
+        charged.business_candidate_charge_payload_bytes
+    )
+    payload = {
+        "commit_batch_index": commit_batch_index,
+        "semantic_event_identities": semantic_identities,
+        "semantic_candidate_payload_bytes": semantic_candidate_payload_bytes,
+        "physical_charge_event_identity": stable_event_identity(
+            charge_event,
+            runtime_session_id=runtime_session_id,
+        ),
+        "physical_charge_fingerprint": charged.charge_fingerprint,
+    }
+    provisional = ModelStreamSemanticCommitMeasurementFact.model_construct(
+        **payload, batch_measurement_fingerprint="pending"
+    )
+    canonical = provisional.model_dump(
+        mode="json", exclude={"batch_measurement_fingerprint"}
+    )
+    return ModelStreamSemanticCommitMeasurementFact(
+        **canonical,
+        batch_measurement_fingerprint=sha256_fingerprint(
+            "model-stream-semantic-commit-measurement:v1", canonical
+        ),
+    )
+
+
+def rebuild_model_stream_semantic_commit_measurements(
+    *,
+    runtime_session_id: str,
+    resolved_model_call_id: str,
+    semantic_events: tuple[AgentEvent, ...],
+    ledger_events: tuple[AgentEvent, ...],
+) -> tuple[ModelStreamSemanticCommitMeasurementFact, ...]:
+    by_id = {event.id: event for event in semantic_events}
+    output: list[ModelStreamSemanticCommitMeasurementFact] = []
+    covered: set[str] = set()
+    charges = sorted(
+        (
+            event
+            for event in ledger_events
+            if isinstance(event, PhysicalOperationChargeAppliedEvent)
+            and event.charge.owner_kind.value == "model_call"
+            and event.charge.owner_id == resolved_model_call_id
+            and any(
+                identity.event_id in by_id
+                for identity in event.charge.charged_business_event_identities
+            )
+        ),
+        key=lambda event: event.sequence or 0,
+    )
+    for charge_event in charges:
+        batch_events = tuple(
+            event
+            for event in semantic_events
+            if event.id
+            in {
+                identity.event_id
+                for identity in charge_event.charge.charged_business_event_identities
+            }
+        )
+        measurement = build_model_stream_semantic_commit_measurement(
+            runtime_session_id=runtime_session_id,
+            commit_batch_index=len(output),
+            committed_semantic_events=batch_events,
+            accounting_events=(charge_event,),
+        )
+        if measurement is None:
+            raise AssertionError("recovered model stream charge measurement vanished")
+        overlap = covered.intersection(
+            identity.event_id for identity in measurement.semantic_event_identities
+        )
+        if overlap:
+            raise ValueError("model stream semantic events were charged twice")
+        covered.update(
+            identity.event_id for identity in measurement.semantic_event_identities
+        )
+        output.append(measurement)
+    if covered != set(by_id):
+        raise ValueError("model stream semantic charge history is incomplete")
+    return tuple(output)
 
 
 def bind_model_terminal_projection_to_session(
@@ -669,7 +955,7 @@ async def persist_model_terminal_projection(
 ) -> None:
     deadline = deadline_monotonic or monotonic() + 30.0
     reference = prepared.projection_reference
-    confirmation = await runtime_session.context_input_io_service.execute(
+    operation = await runtime_session.context_input_io_service.start_owned(
         operation_name="model-terminal-projection-write",
         operation=lambda: runtime_session.archive.put_text_if_absent_or_confirm_identical(
             reference.document_artifact_id,
@@ -688,12 +974,26 @@ async def persist_model_terminal_projection(
         ),
         deadline_monotonic=deadline,
     )
+    while True:
+        try:
+            confirmation = await operation.wait_physical_completion()
+            break
+        except asyncio.CancelledError:
+            if operation.physical_task_cancelled:
+                raise TerminalProjectionPersistenceContractError(
+                    "model terminal projection physical write was cancelled"
+                ) from None
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
     if (
         confirmation.result.id != reference.document_artifact_id
         or confirmation.result.digest != reference.document_sha256
         or confirmation.result.size_bytes != reference.document_byte_count
     ):
-        raise RuntimeError("model terminal projection artifact confirmation drifted")
+        raise TerminalProjectionPersistenceContractError(
+            "model terminal projection artifact confirmation drifted"
+        )
 
 
 async def hydrate_terminal_projection(
@@ -860,6 +1160,7 @@ __all__ = [
     "PreparedModelTerminalProjection",
     "TERMINAL_PROJECTION_MEDIA_TYPE",
     "TerminalProjectionContractBundle",
+    "TerminalProjectionPersistenceContractError",
     "build_default_terminal_projection_contract_bundle",
     "build_terminal_inline_content",
     "bind_model_terminal_projection_to_session",

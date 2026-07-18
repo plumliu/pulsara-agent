@@ -17,6 +17,7 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallStartEvent,
     ModelCallTerminalProjectionCommittedEvent,
+    PhysicalOperationReservationCreatedEvent,
     ProviderModelStreamErrorEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -32,7 +33,10 @@ from pulsara_agent.llm.terminal_projection import (
     TERMINAL_PROJECTION_MEDIA_TYPE,
     ModelTerminalProjectionReducer,
     build_default_terminal_projection_contract_bundle,
+    hydrate_terminal_projection_text,
+    rebuild_model_stream_semantic_commit_measurements,
 )
+from pulsara_agent.llm.segment import MODEL_STREAM_SEGMENT_POLICY
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.runtime.authority_materialization import (
     LedgerMaterializationAccountStore,
@@ -238,6 +242,27 @@ class ModelStreamRecoveryService:
             charge_contract=self._materialization_contracts.charge_contract,
             limits=self._materialization_contracts.limits,
         )
+        projection_event = next(
+            (
+                event
+                for event in batch
+                if isinstance(event, ModelCallTerminalProjectionCommittedEvent)
+            ),
+            None,
+        )
+        if projection_event is None:
+            raise ModelStreamRecoveryStructuralError(
+                "model recovery terminal batch lacks projection"
+            )
+        projection_text = self._archive.get_text(
+            projection_event.projection_reference.document_artifact_id,
+            session_id=self._event_log.runtime_session_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+        projection_document = hydrate_terminal_projection_text(
+            projection_event.projection_reference,
+            projection_text,
+        )
         try:
             committed = coordinator.commit_reserved_settlement(
                 context=EventContext(
@@ -248,6 +273,9 @@ class ModelStreamRecoveryService:
                 reservation=reservation,
                 business_events=batch,
                 terminal_outcome=terminal_outcome,
+                model_stream_measurement_fingerprint=(
+                    projection_document.source_fact.stream_settlement_measurement.measurement_fingerprint
+                ),
                 deadline_monotonic=deadline_monotonic,
             )
         except BaseException as exc:
@@ -302,6 +330,9 @@ class ModelStreamRecoveryService:
             model_stream_semantic_domain_contract_fingerprint=(
                 self._domain_fingerprint
             ),
+            segment_policy_contract_fingerprint=(
+                MODEL_STREAM_SEGMENT_POLICY.contract_fingerprint
+            ),
         )
         reducer.apply_committed(semantic)
         prepared = reducer.prepare_terminal(
@@ -314,6 +345,37 @@ class ModelStreamRecoveryService:
             usage_report=TransportUsageReport(
                 usage_status="missing",
                 usage=None,
+            ),
+            semantic_commit_measurements=(
+                rebuild_model_stream_semantic_commit_measurements(
+                    runtime_session_id=self._event_log.runtime_session_id,
+                    resolved_model_call_id=(
+                        start.resolved_call.resolved_model_call_id
+                    ),
+                    semantic_events=semantic,
+                    ledger_events=events,
+                )
+                if any(
+                    isinstance(event, PhysicalOperationReservationCreatedEvent)
+                    and event.reservation.owner_kind
+                    is PhysicalOperationKind.MODEL_CALL
+                    and event.reservation.owner_id
+                    == start.resolved_call.resolved_model_call_id
+                    for event in events
+                )
+                else ()
+            ),
+            physical_accounting_mode=(
+                "accounted"
+                if any(
+                    isinstance(event, PhysicalOperationReservationCreatedEvent)
+                    and event.reservation.owner_kind
+                    is PhysicalOperationKind.MODEL_CALL
+                    and event.reservation.owner_id
+                    == start.resolved_call.resolved_model_call_id
+                    for event in events
+                )
+                else "unbootstrapped_test"
             ),
         )
         reference = prepared.projection_reference
@@ -576,7 +638,7 @@ def _recovery_terminal_outcome(
         and event.model_stream_attribution.model_call_start_event_id == start.id  # type: ignore[union-attr]
     )
     indexes = tuple(
-        event.model_stream_attribution.transport_sequence_index  # type: ignore[union-attr]
+        event.model_stream_attribution.durable_semantic_event_index  # type: ignore[union-attr]
         for event in semantic
     )
     if indexes != tuple(range(len(semantic))):

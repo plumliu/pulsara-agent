@@ -7,13 +7,16 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 
+from tests.support.model_stream import (
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     EventContext,
     PlanModeEnteredEvent,
     ReplyEndEvent,
     RunEndEvent,
     RunStartEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
 )
@@ -55,7 +58,7 @@ def test_project_recovery_from_events_failed_run_uses_run_failed_guidance() -> N
             user_input_chars=len("do work"),
             metadata={"user_input": "do work"},
         ),
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(), tool_call_id="call:write", tool_call_name="write_file"
         ),
         ToolResultStartEvent(
@@ -133,7 +136,7 @@ def test_project_recovery_from_events_late_tool_result_preserves_completed_seman
             user_input_chars=len("run command"),
             metadata={"user_input": "run command"},
         ),
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:terminal",
             tool_call_name="terminal",
@@ -239,7 +242,7 @@ def test_classify_unfinished_tool_calls_omits_completed_terminal_after_late_resu
     None
 ):
     events = [
-        ToolCallStartEvent(
+        make_tool_call_start_event(
             **CTX.event_fields(),
             tool_call_id="call:terminal",
             tool_call_name="terminal",

@@ -9,6 +9,15 @@ import pytest
 
 from tests.support.runtime_session import in_memory_runtime_session
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
@@ -16,17 +25,12 @@ from pulsara_agent.event import (
     MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
     RunErrorEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
 )
 from pulsara_agent.event.candidates import InvalidAttemptPayload, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog
 from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMRuntime
+from pulsara_agent.llm.raw_provider import RawProviderFailure
 from tests.support import (
     stream_agent_task,
     test_llm_config,
@@ -72,42 +76,41 @@ class _ScriptedTransport:
         self.contexts.append(context)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 **event_context.event_fields(),
                 block_id=f"text:{len(self.contexts)}",
                 delta=reply["text"],
             )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id=f"text:{len(self.contexts)}"
             )
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
-            )
-        if "run_error" in reply:
-            yield RunErrorEvent(
-                **event_context.event_fields(),
-                code="provider_error",
-                message=reply["run_error"],
             )
         if "usage" in reply:
             yield TransportUsageReport(
                 usage_status="reported",
                 usage=ModelTokenUsageFact.model_validate(reply["usage"]),
                 reported_model_id=reported_model_id,
+            )
+        if "run_error" in reply:
+            yield RawProviderFailure(
+                message=reply["run_error"],
+                code_hint="provider_error",
             )
 
 

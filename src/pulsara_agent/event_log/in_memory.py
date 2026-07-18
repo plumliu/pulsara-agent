@@ -293,6 +293,14 @@ class InMemoryEventLog:
                 contract.fixed_sequence_wrapper_charge_bytes_per_event
                 + contract.fixed_schema_wrapper_charge_bytes_per_event
             )
+            if (
+                str(stored.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED"
+                and actual
+                > stored.charge.charge_applied_event_charge_payload_bytes
+            ):
+                raise ValueError(
+                    "stored charge-applied envelope exceeds its dynamic charge bound"
+                )
             if bound is not None and actual > bound.max_stored_envelope_bytes:
                 raise ValueError(
                     "stored bookkeeping envelope exceeds fixed charge bound"
@@ -553,6 +561,7 @@ class InMemoryEventLog:
         active_runs_only: bool = False,
         run_ids: tuple[str, ...] | None = None,
         minimum_sequence: int = 1,
+        through_sequence: int | None = None,
         max_events: int = 16_384,
         max_payload_bytes: int = 16 * 1024 * 1024,
         deadline_monotonic: float | None = None,
@@ -568,6 +577,14 @@ class InMemoryEventLog:
             raise ValueError("sparse event read bounds are invalid")
         selected = frozenset(event_types)
         with self._lock:
+            current_high_water = self._next_sequence - 1
+            effective_through = (
+                current_high_water
+                if through_sequence is None
+                else through_sequence
+            )
+            if effective_through < 0 or effective_through > current_high_water:
+                raise ValueError("requested sparse high-water has not been committed")
             active_run_ids: frozenset[str] | None = None
             if active_runs_only:
                 started_run_ids = {
@@ -585,6 +602,7 @@ class InMemoryEventLog:
                 _owned_raw(event)
                 for event in self._raw_events
                 if event.sequence >= minimum_sequence
+                and event.sequence <= effective_through
                 and event.event_type in selected
                 and (active_run_ids is None or event.run_id in active_run_ids)
                 and (run_ids is None or event.run_id in run_ids)
@@ -594,7 +612,7 @@ class InMemoryEventLog:
             if sum(len(item.canonical_payload_bytes) for item in events) > max_payload_bytes:
                 raise ValueError("sparse event selection exceeds its byte bound")
             return RawEventTypeSelectionSnapshot(
-                through_sequence=self._next_sequence - 1,
+                through_sequence=effective_through,
                 events=events,
             )
 

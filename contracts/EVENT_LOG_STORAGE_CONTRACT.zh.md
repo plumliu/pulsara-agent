@@ -87,8 +87,11 @@ Start/semantic/End facts；PostgreSQL必须使用`session_id + resolved_model_ca
 索引，不能先扫描session再在Python中过滤。Model control attribution使用一次exact-ID bounded read取得Start/End，I/O必须发生在
 control linearization lock外。Model stream subscription默认从handle安装时冻结的cursor观察process-local bounded committed history；
 不得为每个subscriber读取历史ledger，超出retained history时返回typed lagged状态并由bounded materializer恢复。
-正常semantic stream commit必须使用handle-owned confirmed cursor，并按bounded event/char/time窗口合并delta；不得逐chunk查询Start、End或已提交
-semantic history，也不得在successful append后按ID回读同一event。只有reopen、UNKNOWN或recovery允许一次bounded per-call reconstruction。
+正常model stream commit必须使用handle-owned confirmed source/durable cursors。Adapter-private raw delta先由唯一Coordinator按kind/block/media continuity聚合为bounded segment，再按durable event/candidate bytes/oldest age组成transaction batch；四类旧durable DeltaEvent已删除。Segment是`non_transcript`，其wall-clock布局不得进入transcript semantic accumulator。不得逐source item查询Start、End或已提交semantic history，也不得在successful append后按ID回读同一event。只有reopen、UNKNOWN或recovery允许一次bounded per-call reconstruction。
+
+一次sanitizer adoption产生的完整candidate tuple必须在acknowledgement与任何await前归Coordinator/handle所有。Model stream terminal projection持久化`ModelStreamSettlementMeasurementFact`：adapter/synthetic source count/bytes、singleton/segment count、segment/candidate bytes和actual semantic batch count；每个batch引用exact `PhysicalOperationChargeAppliedEvent` identity。Durable actual candidate bytes唯一取自writer-prepared charge fact，包含RuntimeSession metadata overlay；Coordinator的pre-overlay prospective bytes只用于admission，不是历史measurement真源。Terminal source与`PhysicalOperationSettlementFact.model_stream_measurement_fingerprint`必须一致，历史Inspector只输出bounded aggregate。
+
+`PhysicalOperationChargeAppliedEvent`的stored charge必须使用`base + business_event_count * per_event`确定公式。Writer在transaction内分配sequence并构造stored envelope后、commit前验证actual bytes不超过本次quote；低估必须rollback。禁止固定小常量、post-commit才发现低估，或让retry重算出不同candidate payload。
 
 LongHorizon live store启动使用
 `read_raw_events_by_types(..., active_runs_only=True)`在同一数据库快照中取得尚无`RunEndEvent`的run所拥有的

@@ -15,22 +15,12 @@ from pulsara_agent.capability.result_semantics import (
 )
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.event import (
-    AgentEvent,
     ContextWindowCompactionCompletedEvent,
     ContextWindowCompactionStartedEvent,
     EventContext,
     RunEndEvent,
     SubagentRunCompletedEvent,
     SubagentRunStartedEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
-    ThinkingBlockEndEvent,
-    ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.llm.commit import RuntimeSessionModelStreamEventCommitPort
@@ -48,10 +38,8 @@ from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.resolution import ResolvedModelCall, ResolvedModelTarget
 from pulsara_agent.llm.runtime import LLMRuntime
-from pulsara_agent.llm.sanitizing_transport import (
-    RawLLMTransport,
-    SanitizingLLMTransport,
-)
+from pulsara_agent.llm.raw_provider import RawLLMTransport, RawProviderStreamItem
+from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
 from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.primitives.context import (
@@ -129,6 +117,17 @@ from generators.runtime_fixture import (
     BenchmarkContextRun,
     bootstrap_benchmark_context_run,
     rebind_benchmark_context_run,
+)
+from generators.raw_provider_fixture import (
+    text_delta as RawProviderTextDelta,
+    text_end as RawProviderTextBlockEnd,
+    text_start as RawProviderTextBlockStart,
+    thinking_delta as RawProviderThinkingDelta,
+    thinking_end as RawProviderThinkingBlockEnd,
+    thinking_start as RawProviderThinkingBlockStart,
+    tool_call_delta as RawProviderToolCallDelta,
+    tool_call_end as RawProviderToolCallEnd,
+    tool_call_start as RawProviderToolCallStart,
 )
 from scenario_contracts import (
     ArtifactHeavyToolsScenario,
@@ -251,20 +250,20 @@ class DeterministicContextStreamTransport(RawLLMTransport):
         call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent | TransportUsageReport]:
+    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
         del call, context
         common = {
             **event_context.event_fields(),
             "created_at": "2026-01-01T00:00:00.000000Z",
         }
         block_id = f"benchmark-text:{self._call_ordinal}"
-        yield TextBlockStartEvent(
+        yield RawProviderTextBlockStart(
             id=f"raw-text-start:{self._call_ordinal}",
             **common,
             block_id=block_id,
         )
         for index in range(self._semantic_delta_events):
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextDelta(
                 id=f"raw-text-delta:{self._call_ordinal}:{index}",
                 **common,
                 block_id=block_id,
@@ -274,20 +273,20 @@ class DeterministicContextStreamTransport(RawLLMTransport):
                     self._characters_per_delta,
                 ),
             )
-        yield TextBlockEndEvent(
+        yield RawProviderTextBlockEnd(
             id=f"raw-text-end:{self._call_ordinal}",
             **common,
             block_id=block_id,
         )
         for tool_ordinal in range(1, self._tool_call_count + 1):
             tool_call_id = _tool_call_id(self._call_ordinal, tool_ordinal)
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 id=f"raw-tool-start:{tool_call_id}",
                 **common,
                 tool_call_id=tool_call_id,
                 tool_call_name=f"benchmark_tool_{tool_ordinal}",
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 id=f"raw-tool-delta:{tool_call_id}",
                 **common,
                 tool_call_id=tool_call_id,
@@ -299,7 +298,7 @@ class DeterministicContextStreamTransport(RawLLMTransport):
                     "}"
                 ),
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 id=f"raw-tool-end:{tool_call_id}",
                 **common,
                 tool_call_id=tool_call_id,
@@ -331,7 +330,7 @@ class DeterministicWindowSummaryTransport(RawLLMTransport):
         call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent | TransportUsageReport]:
+    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
         del call
         if not context.messages or not context.messages[-1].content:
             raise RuntimeError("window summary benchmark lacks source input")
@@ -351,18 +350,18 @@ class DeterministicWindowSummaryTransport(RawLLMTransport):
             "created_at": "2026-01-01T00:00:00.000000Z",
         }
         block_id = f"benchmark-window-summary:{source_entry_id}"
-        yield TextBlockStartEvent(
+        yield RawProviderTextBlockStart(
             id=f"raw-window-summary-start:{source_entry_id}",
             **common,
             block_id=block_id,
         )
-        yield TextBlockDeltaEvent(
+        yield RawProviderTextDelta(
             id=f"raw-window-summary-delta:{source_entry_id}",
             **common,
             block_id=block_id,
             delta=summary,
         )
-        yield TextBlockEndEvent(
+        yield RawProviderTextBlockEnd(
             id=f"raw-window-summary-end:{source_entry_id}",
             **common,
             block_id=block_id,
@@ -395,7 +394,7 @@ class DeterministicSubagentTransport(RawLLMTransport):
         call: ResolvedModelCall,
         context: LLMContext,
         event_context: EventContext,
-    ) -> AsyncIterator[AgentEvent | TransportUsageReport]:
+    ) -> AsyncIterator[RawProviderStreamItem | TransportUsageReport]:
         del call
         context_text = "\n".join(
             (
@@ -435,13 +434,13 @@ class DeterministicSubagentTransport(RawLLMTransport):
             "created_at": "2026-01-01T00:00:00.000000Z",
         }
         block_id = f"benchmark-child-thinking:{spec.child_id}:{call_ordinal}"
-        yield ThinkingBlockStartEvent(
+        yield RawProviderThinkingBlockStart(
             id=f"raw-child-thinking-start:{spec.child_id}:{call_ordinal}",
             **common,
             block_id=block_id,
         )
         for delta_ordinal in range(delta_count):
-            yield ThinkingBlockDeltaEvent(
+            yield RawProviderThinkingDelta(
                 id=(
                     f"raw-child-thinking-delta:{spec.child_id}:"
                     f"{call_ordinal}:{delta_ordinal}"
@@ -454,7 +453,7 @@ class DeterministicSubagentTransport(RawLLMTransport):
                     24,
                 ),
             )
-        yield ThinkingBlockEndEvent(
+        yield RawProviderThinkingBlockEnd(
             id=f"raw-child-thinking-end:{spec.child_id}:{call_ordinal}",
             **common,
             block_id=block_id,
@@ -477,19 +476,19 @@ class DeterministicSubagentTransport(RawLLMTransport):
                 ),
             }
         )
-        yield ToolCallStartEvent(
+        yield RawProviderToolCallStart(
             id=f"raw-child-tool-start:{spec.child_id}:{call_ordinal}",
             **common,
             tool_call_id=tool_call_id,
             tool_call_name=tool_name,
         )
-        yield ToolCallDeltaEvent(
+        yield RawProviderToolCallDelta(
             id=f"raw-child-tool-delta:{spec.child_id}:{call_ordinal}",
             **common,
             tool_call_id=tool_call_id,
             delta=json.dumps(arguments, sort_keys=True, separators=(",", ":")),
         )
-        yield ToolCallEndEvent(
+        yield RawProviderToolCallEnd(
             id=f"raw-child-tool-end:{spec.child_id}:{call_ordinal}",
             **common,
             tool_call_id=tool_call_id,

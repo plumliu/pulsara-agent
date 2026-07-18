@@ -181,24 +181,15 @@ class ModelSemanticBatchMatrixScenario(ScenarioBase):
         if self.workload.model_stream.usage_status != "missing":
             raise ValueError("batch matrix freezes missing usage")
         _require_unique_case_ids(self.execution_matrix)
-        by_size = {
-            case.max_business_events_per_commit: case
-            for case in self.execution_matrix
-        }
-        if set(by_size) != {1, 4, 8, 16, 32, 64}:
-            raise ValueError("batch matrix must contain exactly 1/4/8/16/32/64")
-        if by_size[1].case_kind != "counterfactual_analysis":
-            raise ValueError(
-                "batch-1 exceeds the fixture's model commit-batch reservation bound"
-            )
-        for size in (4, 8):
-            if by_size[size].case_kind != "sensitivity_analysis":
-                raise ValueError("batch 4/8 must remain sensitivity cases")
-        if by_size[16].case_kind != "production_valid":
-            raise ValueError("batch-16 must remain the production baseline")
-        for size in (32, 64):
-            if by_size[size].case_kind != "counterfactual_analysis":
-                raise ValueError("batch 32/64 must remain counterfactual")
+        if len(self.execution_matrix) != 1:
+            raise ValueError("segment-v1 scenario has exactly one production case")
+        only_case = self.execution_matrix[0]
+        if (
+            only_case.case_id != "segment-v1"
+            or only_case.case_kind != "production_valid"
+            or only_case.max_business_events_per_commit != 16
+        ):
+            raise ValueError("segment-v1 must use the production durable batch bound")
         reference = tuple(
             case
             for case in self.execution_matrix
@@ -212,10 +203,10 @@ class ModelSemanticBatchMatrixScenario(ScenarioBase):
         if (
             len(baseline) != 1
             or baseline[0].case_kind != "production_valid"
-            or baseline[0].max_business_events_per_commit != 16
+            or baseline[0].case_id != "segment-v1"
         ):
             raise ValueError(
-                "production baseline must identify the batch-16 case"
+                "production baseline must identify the segment-v1 case"
             )
         if len(reference) != 1 or reference[0].case_kind != "production_valid":
             raise ValueError(

@@ -16,6 +16,24 @@ from tests.conftest import (
     tool_result_end_contract_fields,
 )
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+)
+
+from tests.support.model_stream import (
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+    make_thinking_block_end_event,
+    make_thinking_block_segment_event,
+    make_thinking_block_start_event,
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     CapabilityExposureResolvedEvent,
     ContextCompiledEvent,
@@ -31,17 +49,7 @@ from pulsara_agent.event import (
     ReplyEndEvent,
     ReplyStartEvent,
     RunEndEvent,
-    RunErrorEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
-    ThinkingBlockEndEvent,
-    ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -74,6 +82,7 @@ from pulsara_agent.llm.errors import (
 )
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.raw_provider import RawProviderFailure
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.memory import InMemoryCandidatePool, MemoryDomainContext
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
@@ -170,13 +179,13 @@ class CompactScriptedTransport:
         event_context: EventContext,
     ) -> AsyncIterator:
         self.contexts.append(context)
-        yield TextBlockStartEvent(
+        yield RawProviderTextBlockStart(
             **event_context.event_fields(), block_id="text:compact"
         )
-        yield TextBlockDeltaEvent(
+        yield RawProviderTextDelta(
             **event_context.event_fields(), block_id="text:compact", delta=self.text
         )
-        yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:compact")
+        yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:compact")
         yield TransportUsageReport(
             usage_status="missing",
             usage=None,
@@ -194,16 +203,15 @@ class CompactErrorAfterTextTransport(CompactScriptedTransport):
     ) -> AsyncIterator:
         del call
         self.contexts.append(context)
-        yield TextBlockStartEvent(
+        yield RawProviderTextBlockStart(
             **event_context.event_fields(), block_id="text:compact"
         )
-        yield TextBlockDeltaEvent(
+        yield RawProviderTextDelta(
             **event_context.event_fields(), block_id="text:compact", delta=self.text
         )
-        yield RunErrorEvent(
-            **event_context.event_fields(),
+        yield RawProviderFailure(
             message="provider failed mid-summary",
-            code="provider_error",
+            code_hint="provider_error",
         )
 
 
@@ -359,13 +367,13 @@ def _accepted_reply_events(
             name="assistant",
         ),
         model_start,
-        TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
-        TextBlockDeltaEvent(
+        make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_segment_event(
             **ctx.event_fields(),
             block_id=f"text:{ctx.run_id}",
             delta=assistant_text,
         ),
-        TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_end_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
         model_end,
         ReplyEndEvent(
             id=model_start.recovery_plan.stable_reply_end_event_id,
@@ -475,13 +483,13 @@ def _suppressed_reply_events(
             name="assistant",
         ),
         model_start,
-        TextBlockStartEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
-        TextBlockDeltaEvent(
+        make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_segment_event(
             **ctx.event_fields(),
             block_id=f"text:{ctx.run_id}",
             delta=assistant_text,
         ),
-        TextBlockEndEvent(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
+        make_text_block_end_event(**ctx.event_fields(), block_id=f"text:{ctx.run_id}"),
         model_end,
         ReplyEndEvent(
             id=model_start.recovery_plan.stable_reply_end_event_id,
@@ -1125,18 +1133,18 @@ def test_compaction_metadata_only_input_is_smaller_than_full_observation_input()
     ctx = _ctx("dense")
     log.extend(
         [
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(), tool_call_id="call:one", tool_call_name="terminal"
             ),
             *[
-                ToolCallDeltaEvent(
+                make_tool_call_arguments_segment_event(
                     **ctx.event_fields(),
                     tool_call_id="call:one",
                     delta='{"cmd":"echo hi"}'[:1],
                 )
                 for _ in range(50)
             ],
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:one"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:one"),
         ]
     )
     service = _compaction_service(
@@ -2514,22 +2522,22 @@ def test_auto_context_compaction_uses_model_visible_messages_not_raw_streaming_e
                 metadata={"user_input": "short"},
             ),
             ReplyStartEvent(**ctx.event_fields(), name="assistant"),
-            TextBlockStartEvent(**ctx.event_fields(), block_id="text:streamy"),
+            make_text_block_start_event(**ctx.event_fields(), block_id="text:streamy"),
             *[
-                TextBlockDeltaEvent(
+                make_text_block_segment_event(
                     **ctx.event_fields(), block_id="text:streamy", delta="x"
                 )
                 for _ in range(500)
             ],
-            TextBlockEndEvent(**ctx.event_fields(), block_id="text:streamy"),
-            ThinkingBlockStartEvent(**ctx.event_fields(), block_id="thinking:streamy"),
+            make_text_block_end_event(**ctx.event_fields(), block_id="text:streamy"),
+            make_thinking_block_start_event(**ctx.event_fields(), block_id="thinking:streamy"),
             *[
-                ThinkingBlockDeltaEvent(
+                make_thinking_block_segment_event(
                     **ctx.event_fields(), block_id="thinking:streamy", delta="private"
                 )
                 for _ in range(500)
             ],
-            ThinkingBlockEndEvent(**ctx.event_fields(), block_id="thinking:streamy"),
+            make_thinking_block_end_event(**ctx.event_fields(), block_id="thinking:streamy"),
             ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
         ]
     )
@@ -2799,25 +2807,25 @@ def test_compaction_input_coalesces_deltas_and_clips_large_tool_result() -> None
                 name="assistant",
             ),
             model_start,
-            TextBlockStartEvent(**ctx.event_fields(), block_id="text:coalesce"),
-            TextBlockDeltaEvent(
+            make_text_block_start_event(**ctx.event_fields(), block_id="text:coalesce"),
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id="text:coalesce", delta="hello "
             ),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id="text:coalesce", delta="world"
             ),
-            TextBlockEndEvent(**ctx.event_fields(), block_id="text:coalesce"),
-            ToolCallStartEvent(
+            make_text_block_end_event(**ctx.event_fields(), block_id="text:coalesce"),
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:search",
                 tool_call_name="terminal",
             ),
-            ToolCallDeltaEvent(
+            make_tool_call_arguments_segment_event(
                 **ctx.event_fields(),
                 tool_call_id="call:search",
                 delta='{"cmd":"search"}',
             ),
-            ToolCallEndEvent(**ctx.event_fields(), tool_call_id="call:search"),
+            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:search"),
             model_end,
             ReplyEndEvent(
                 id=model_start.recovery_plan.stable_reply_end_event_id,

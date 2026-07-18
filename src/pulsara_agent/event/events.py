@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from hashlib import sha256
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -32,6 +33,7 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelTokenUsageFact,
     ModelCallControlDisposition,
+    ModelStreamDurableSemanticKind,
     ModelStreamSemanticAttributionFact,
     ProviderSanitizedErrorFact,
     RunTerminationIntentAttributionFact,
@@ -260,21 +262,21 @@ class EventType(StrEnum):
     )
 
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
-    TEXT_BLOCK_DELTA = "TEXT_BLOCK_DELTA"
+    TEXT_BLOCK_SEGMENT = "TEXT_BLOCK_SEGMENT"
     TEXT_BLOCK_END = "TEXT_BLOCK_END"
 
     DATA_BLOCK_START = "DATA_BLOCK_START"
-    DATA_BLOCK_DELTA = "DATA_BLOCK_DELTA"
+    DATA_BLOCK_SEGMENT = "DATA_BLOCK_SEGMENT"
     DATA_BLOCK_END = "DATA_BLOCK_END"
 
     THINKING_BLOCK_START = "THINKING_BLOCK_START"
-    THINKING_BLOCK_DELTA = "THINKING_BLOCK_DELTA"
+    THINKING_BLOCK_SEGMENT = "THINKING_BLOCK_SEGMENT"
     THINKING_BLOCK_END = "THINKING_BLOCK_END"
 
     HINT_BLOCK = "HINT_BLOCK"
 
     TOOL_CALL_START = "TOOL_CALL_START"
-    TOOL_CALL_DELTA = "TOOL_CALL_DELTA"
+    TOOL_CALL_ARGUMENTS_SEGMENT = "TOOL_CALL_ARGUMENTS_SEGMENT"
     TOOL_CALL_END = "TOOL_CALL_END"
 
     TOOL_RESULT_START = "TOOL_RESULT_START"
@@ -1314,7 +1316,10 @@ class ProviderModelStreamErrorEvent(EventBase):
 
     @model_validator(mode="after")
     def _validate_attribution(self) -> "ProviderModelStreamErrorEvent":
-        if self.model_stream_attribution.draft_kind != "provider_error":
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.PROVIDER_ERROR
+        ):
             raise ValueError("provider stream error requires provider_error attribution")
         return self
 
@@ -1405,63 +1410,190 @@ class ModelCallRejectedEvent(EventBase):
         return self
 
 
+def _validate_model_stream_segment_content(
+    *,
+    content: str,
+    content_utf8_bytes: int,
+    content_sha256: str,
+    estimated_tokens_v1: int | None,
+) -> None:
+    encoded = content.encode("utf-8")
+    if content_utf8_bytes != len(encoded):
+        raise ValueError("model stream segment UTF-8 byte count mismatch")
+    if content_sha256 != f"sha256:{sha256(encoded).hexdigest()}":
+        raise ValueError("model stream segment content SHA mismatch")
+    if estimated_tokens_v1 is not None and estimated_tokens_v1 != max(
+        1, (len(content) + 3) // 4
+    ):
+        raise ValueError("model stream segment V1 token estimate mismatch")
+
+
+def _require_model_stream_durable_kind(
+    attribution: ModelStreamSemanticAttributionFact,
+    expected: ModelStreamDurableSemanticKind,
+) -> None:
+    if attribution.durable_kind is not expected:
+        raise ValueError("model stream singleton attribution kind mismatch")
+
+
 class TextBlockStartEvent(EventBase):
     type: Literal[EventType.TEXT_BLOCK_START] = EventType.TEXT_BLOCK_START
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "TextBlockStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TEXT_BLOCK_START,
+        )
+        return self
 
 
-class TextBlockDeltaEvent(EventBase):
-    type: Literal[EventType.TEXT_BLOCK_DELTA] = EventType.TEXT_BLOCK_DELTA
-    block_id: str
-    delta: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class TextBlockSegmentEvent(EventBase):
+    type: Literal[EventType.TEXT_BLOCK_SEGMENT] = EventType.TEXT_BLOCK_SEGMENT
+    block_id: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    estimated_tokens_v1: int = Field(ge=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "TextBlockSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.text,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=self.estimated_tokens_v1,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.TEXT_BLOCK_SEGMENT
+        ):
+            raise ValueError("text segment attribution kind mismatch")
+        return self
 
 
 class TextBlockEndEvent(EventBase):
     type: Literal[EventType.TEXT_BLOCK_END] = EventType.TEXT_BLOCK_END
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "TextBlockEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TEXT_BLOCK_END,
+        )
+        return self
 
 
 class DataBlockStartEvent(EventBase):
     type: Literal[EventType.DATA_BLOCK_START] = EventType.DATA_BLOCK_START
-    block_id: str
-    media_type: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    media_type: str = Field(min_length=1, max_length=256)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "DataBlockStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.DATA_BLOCK_START,
+        )
+        return self
 
 
-class DataBlockDeltaEvent(EventBase):
-    type: Literal[EventType.DATA_BLOCK_DELTA] = EventType.DATA_BLOCK_DELTA
-    block_id: str
-    data: str
-    media_type: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class DataBlockSegmentEvent(EventBase):
+    type: Literal[EventType.DATA_BLOCK_SEGMENT] = EventType.DATA_BLOCK_SEGMENT
+    block_id: str = Field(min_length=1, max_length=128)
+    media_type: str = Field(min_length=1, max_length=256)
+    data: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "DataBlockSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.data,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=None,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.DATA_BLOCK_SEGMENT
+        ):
+            raise ValueError("data segment attribution kind mismatch")
+        return self
 
 
 class DataBlockEndEvent(EventBase):
     type: Literal[EventType.DATA_BLOCK_END] = EventType.DATA_BLOCK_END
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "DataBlockEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.DATA_BLOCK_END,
+        )
+        return self
 
 
 class ThinkingBlockStartEvent(EventBase):
     type: Literal[EventType.THINKING_BLOCK_START] = EventType.THINKING_BLOCK_START
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ThinkingBlockStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.THINKING_BLOCK_START,
+        )
+        return self
 
 
-class ThinkingBlockDeltaEvent(EventBase):
-    type: Literal[EventType.THINKING_BLOCK_DELTA] = EventType.THINKING_BLOCK_DELTA
-    block_id: str
-    delta: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class ThinkingBlockSegmentEvent(EventBase):
+    type: Literal[EventType.THINKING_BLOCK_SEGMENT] = EventType.THINKING_BLOCK_SEGMENT
+    block_id: str = Field(min_length=1, max_length=128)
+    thinking: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    estimated_tokens_v1: int = Field(ge=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "ThinkingBlockSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.thinking,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=self.estimated_tokens_v1,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.THINKING_BLOCK_SEGMENT
+        ):
+            raise ValueError("thinking segment attribution kind mismatch")
+        return self
 
 
 class ThinkingBlockEndEvent(EventBase):
     type: Literal[EventType.THINKING_BLOCK_END] = EventType.THINKING_BLOCK_END
-    block_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    block_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ThinkingBlockEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.THINKING_BLOCK_END,
+        )
+        return self
 
 
 class HintBlockEvent(EventBase):
@@ -1473,22 +1605,58 @@ class HintBlockEvent(EventBase):
 
 class ToolCallStartEvent(EventBase):
     type: Literal[EventType.TOOL_CALL_START] = EventType.TOOL_CALL_START
-    tool_call_id: str
-    tool_call_name: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    tool_call_name: str = Field(min_length=1, max_length=256)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ToolCallStartEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TOOL_CALL_START,
+        )
+        return self
 
 
-class ToolCallDeltaEvent(EventBase):
-    type: Literal[EventType.TOOL_CALL_DELTA] = EventType.TOOL_CALL_DELTA
-    tool_call_id: str
-    delta: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+class ToolCallArgumentsSegmentEvent(EventBase):
+    type: Literal[EventType.TOOL_CALL_ARGUMENTS_SEGMENT] = (
+        EventType.TOOL_CALL_ARGUMENTS_SEGMENT
+    )
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    arguments_json_fragment: str = Field(min_length=1)
+    content_utf8_bytes: int = Field(ge=1)
+    content_sha256: str = Field(min_length=1)
+    estimated_tokens_v1: int = Field(ge=1)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> "ToolCallArgumentsSegmentEvent":
+        _validate_model_stream_segment_content(
+            content=self.arguments_json_fragment,
+            content_utf8_bytes=self.content_utf8_bytes,
+            content_sha256=self.content_sha256,
+            estimated_tokens_v1=self.estimated_tokens_v1,
+        )
+        if (
+            self.model_stream_attribution.durable_kind
+            is not ModelStreamDurableSemanticKind.TOOL_CALL_ARGUMENTS_SEGMENT
+        ):
+            raise ValueError("tool-call segment attribution kind mismatch")
+        return self
 
 
 class ToolCallEndEvent(EventBase):
     type: Literal[EventType.TOOL_CALL_END] = EventType.TOOL_CALL_END
-    tool_call_id: str
-    model_stream_attribution: ModelStreamSemanticAttributionFact | None = None
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    model_stream_attribution: ModelStreamSemanticAttributionFact
+
+    @model_validator(mode="after")
+    def _kind(self) -> "ToolCallEndEvent":
+        _require_model_stream_durable_kind(
+            self.model_stream_attribution,
+            ModelStreamDurableSemanticKind.TOOL_CALL_END,
+        )
+        return self
 
 
 class ToolResultStartEvent(EventBase):
@@ -3311,17 +3479,17 @@ AgentEvent: TypeAlias = (
     | ModelCallControlDispositionResolvedEvent
     | ModelCallRejectedEvent
     | TextBlockStartEvent
-    | TextBlockDeltaEvent
+    | TextBlockSegmentEvent
     | TextBlockEndEvent
     | DataBlockStartEvent
-    | DataBlockDeltaEvent
+    | DataBlockSegmentEvent
     | DataBlockEndEvent
     | ThinkingBlockStartEvent
-    | ThinkingBlockDeltaEvent
+    | ThinkingBlockSegmentEvent
     | ThinkingBlockEndEvent
     | HintBlockEvent
     | ToolCallStartEvent
-    | ToolCallDeltaEvent
+    | ToolCallArgumentsSegmentEvent
     | ToolCallEndEvent
     | ToolResultStartEvent
     | ToolResultTextDeltaEvent

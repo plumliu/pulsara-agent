@@ -5,7 +5,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from pulsara_agent.event import EventContext, EventType, TextBlockDeltaEvent
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
+from pulsara_agent.event import EventContext, EventType
 from pulsara_agent.event.candidates import InvalidAttemptPayload, PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog
 from pulsara_agent.graph import InMemoryGraphStore
@@ -369,7 +373,7 @@ def test_postgres_governance_correct_and_submit_has_valid_governance_candidate_f
     batch_id = f"governance:test:postgres-correct:{uuid4().hex}"
     graph_id = f"graph:test/{uuid4().hex}"
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
     graph = InMemoryGraphStore()
     try:
@@ -465,7 +469,7 @@ def test_postgres_governance_uow_writes_graph_decision_outbox_and_audit_candidat
     )
     batch_id = f"governance:test:uow:{uuid4().hex}"
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
-    log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+    log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
     pool = PostgresCandidatePool(dsn=dsn)
     query = PostgresMemoryQuery(dsn=dsn)
     try:
@@ -581,7 +585,7 @@ def test_postgres_governance_uow_failed_write_records_decision_but_not_mutation_
     log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path)
     pool = PostgresCandidatePool(dsn=dsn)
     try:
-        log.append(TextBlockDeltaEvent(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
+        log.append(make_text_block_segment_event(**source_ctx.event_fields(), block_id="text:seed", delta="seed"))
         candidate = pool.append_candidate(
             PooledMemoryCandidate(
                 payload=ValidCandidatePayload(
@@ -718,7 +722,7 @@ def test_postgres_governance_event_outbox_retries_after_memory_uow_commit(
 
     try:
         log.append(
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **source_ctx.event_fields(),
                 block_id="text:seed",
                 delta="seed",

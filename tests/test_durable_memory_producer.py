@@ -13,16 +13,19 @@ import json
 from pathlib import Path
 from typing import AsyncIterator
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
     EventType,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
 )
 from pulsara_agent.event.candidates import (
     ActionBoundaryCandidate,
@@ -531,23 +534,23 @@ class _ScriptedTransport:
         del call
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 

@@ -4,11 +4,25 @@ from pathlib import Path
 import subprocess
 import sys
 from threading import Event, Lock
+from typing import get_args
 
 import pytest
 
 from pulsara_agent.primitives.authority_materialization import (
     LedgerWriteAdmissionClass,
+)
+from pulsara_agent.event.events import AgentEvent, EventBase
+from pulsara_agent.llm.raw_provider import (
+    RawProviderBlockEnd,
+    RawProviderBlockStart,
+    RawProviderDataDelta,
+    RawProviderFailure,
+    RawProviderTextDelta,
+    RawProviderThinkingDelta,
+    RawProviderToolCallDelta,
+)
+from pulsara_agent.runtime.authority_materialization.contracts import (
+    build_default_transcript_event_domain_registry_binding,
 )
 from pulsara_agent.runtime.authority_materialization.dispatch_barrier import (
     CheckpointDispatchBarrierCoordinator,
@@ -27,6 +41,107 @@ TOOLS_DIR = REPO_ROOT / "src" / "pulsara_agent" / "tools"
 MEMORY_GOVERNANCE_DIR = (
     REPO_ROOT / "src" / "pulsara_agent" / "memory" / "governance"
 )
+
+
+def test_model_stream_delta_events_are_physically_deleted() -> None:
+    forbidden = (
+        "TextBlockDeltaEvent",
+        "ThinkingBlockDeltaEvent",
+        "DataBlockDeltaEvent",
+        "ToolCallDeltaEvent",
+        "EventType.TEXT_BLOCK_DELTA",
+        "EventType.THINKING_BLOCK_DELTA",
+        "EventType.DATA_BLOCK_DELTA",
+        "EventType.TOOL_CALL_DELTA",
+    )
+    violations: list[str] = []
+    source_root = REPO_ROOT / "src" / "pulsara_agent"
+    for path in sorted(source_root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for symbol in forbidden:
+            if symbol in source:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{symbol}"
+                )
+    assert violations == []
+
+
+def test_provider_adapters_only_emit_adapter_private_raw_items() -> None:
+    adapter_root = REPO_ROOT / "src" / "pulsara_agent" / "llm" / "adapters"
+    forbidden = (
+        "AgentEvent",
+        "TextBlockSegmentEvent",
+        "ThinkingBlockSegmentEvent",
+        "DataBlockSegmentEvent",
+        "ToolCallArgumentsSegmentEvent",
+    )
+    violations: list[str] = []
+    for path in sorted(adapter_root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for symbol in forbidden:
+            if symbol in source:
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{symbol}"
+                )
+    assert violations == []
+
+    raw_types = (
+        RawProviderBlockStart,
+        RawProviderTextDelta,
+        RawProviderThinkingDelta,
+        RawProviderDataDelta,
+        RawProviderToolCallDelta,
+        RawProviderBlockEnd,
+        RawProviderFailure,
+    )
+    durable_types = set(get_args(AgentEvent))
+    for raw_type in raw_types:
+        assert not issubclass(raw_type, EventBase)
+        assert raw_type not in durable_types
+
+
+def test_responses_adapter_never_synthesizes_tool_call_identity() -> None:
+    source = (
+        REPO_ROOT
+        / "src"
+        / "pulsara_agent"
+        / "llm"
+        / "adapters"
+        / "openai"
+        / "responses.py"
+    ).read_text(encoding="utf-8")
+    assert "uuid4" not in source
+    assert "transport_tool_call_identity_missing" in source
+
+
+def test_retry_provenance_has_no_legacy_durable_trace_path() -> None:
+    adapter_root = (
+        REPO_ROOT
+        / "src"
+        / "pulsara_agent"
+        / "llm"
+        / "adapters"
+        / "openai"
+    )
+    events_source = (adapter_root / "events.py").read_text(encoding="utf-8")
+    assert "provider_data" not in events_source
+    assert 'name="llm.retry"' not in "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(adapter_root.glob("*.py"))
+    )
+    assert "ProviderRetrySummaryFact" in events_source
+
+
+def test_model_stream_segments_are_non_transcript_events() -> None:
+    registry = build_default_transcript_event_domain_registry_binding().contract
+    by_type = {entry.event_type: entry for entry in registry.supported_events}
+    for event_type in (
+        "TEXT_BLOCK_SEGMENT",
+        "THINKING_BLOCK_SEGMENT",
+        "DATA_BLOCK_SEGMENT",
+        "TOOL_CALL_ARGUMENTS_SEGMENT",
+    ):
+        assert by_type[event_type].event_domain == "non_transcript"
 
 
 def test_runtime_wiring_imports_in_clean_interpreter() -> None:

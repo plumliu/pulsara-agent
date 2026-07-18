@@ -28,6 +28,17 @@ GRADER_ASSERTION_REGISTRY: dict[tuple[str, str], tuple[str, ...]] = {
         "accounted_writer_path_only",
     ),
     (
+        "pulsara.writer.model-semantic-equivalence",
+        "2",
+    ): (
+        "ordered_semantic_content_equal",
+        "terminal_projection_equal",
+        "physical_settlement_valid",
+        "accounted_writer_path_only",
+        "segment_layout_within_contract",
+        "durable_cost_acceptance",
+    ),
+    (
         "pulsara.writer.structural-semantic-equivalence",
         "1",
     ): (

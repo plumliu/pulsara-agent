@@ -1,14 +1,18 @@
 import asyncio
 
+from tests.support.model_stream import (
+    make_text_block_end_event,
+    make_text_block_segment_event,
+    make_text_block_start_event,
+)
+
 from pulsara_agent.event import (
     EventContext,
     EventType,
     ReplyStartEvent,
     ReplyEndEvent,
     RunErrorEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
+    TextBlockSegmentEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -46,12 +50,12 @@ def test_event_hooks_support_all_and_specific_subscriptions() -> None:
         calls.append(("delta", event.type))
 
     manager.register_event(None, all_events)
-    manager.register_event(EventType.TEXT_BLOCK_DELTA, text_delta)
+    manager.register_event(EventType.TEXT_BLOCK_SEGMENT, text_delta)
 
     asyncio.run(
         manager.dispatch_observer_event(
             _ctx(),
-            TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="hi"),
+            make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="hi"),
         )
     )
     asyncio.run(
@@ -61,8 +65,8 @@ def test_event_hooks_support_all_and_specific_subscriptions() -> None:
     )
 
     assert calls == [
-        ("all", EventType.TEXT_BLOCK_DELTA),
-        ("delta", EventType.TEXT_BLOCK_DELTA),
+        ("all", EventType.TEXT_BLOCK_SEGMENT),
+        ("delta", EventType.TEXT_BLOCK_SEGMENT),
         ("all", EventType.REPLY_START),
     ]
 
@@ -93,7 +97,7 @@ def test_hooks_support_sync_async_order_and_nonfatal_errors() -> None:
     asyncio.run(
         manager.dispatch_observer_event(
             _ctx(),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:orphan", delta="hi"
             ),
         )
@@ -112,12 +116,12 @@ def test_event_hooks_receive_isolated_event_copies() -> None:
     completed_text: list[str] = []
 
     def mutating_hook(context, event) -> None:
-        if isinstance(event, TextBlockDeltaEvent):
-            event.delta = "MUTATED"
+        if isinstance(event, TextBlockSegmentEvent):
+            event.text = "MUTATED"
 
     def observing_hook(context, event) -> None:
-        if isinstance(event, TextBlockDeltaEvent):
-            observed_deltas.append(event.delta)
+        if isinstance(event, TextBlockSegmentEvent):
+            observed_deltas.append(event.text)
 
     manager.register_event(None, mutating_hook)
     manager.register_event(None, observing_hook)
@@ -125,17 +129,17 @@ def test_event_hooks_receive_isolated_event_copies() -> None:
         "text", lambda context, completion: completed_text.append(completion.block.text)
     )
 
-    delta_event = TextBlockDeltaEvent(
+    delta_event = make_text_block_segment_event(
         **CTX.event_fields(), block_id="text:1", delta="original"
     )
     for event in [
-        TextBlockStartEvent(**CTX.event_fields(), block_id="text:1"),
+        make_text_block_start_event(**CTX.event_fields(), block_id="text:1"),
         delta_event,
-        TextBlockEndEvent(**CTX.event_fields(), block_id="text:1"),
+        make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
     ]:
         asyncio.run(manager.dispatch_observer_event(_ctx(), event))
 
-    assert delta_event.delta == "original"
+    assert delta_event.text == "original"
     assert observed_deltas == ["original"]
     assert completed_text == ["original"]
 
@@ -154,9 +158,9 @@ def test_block_hooks_fire_on_completed_text_and_tool_result_blocks() -> None:
     manager.register_block("text", text_blocks)
 
     for event in [
-        TextBlockStartEvent(**CTX.event_fields(), block_id="text:1"),
-        TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="hello"),
-        TextBlockEndEvent(**CTX.event_fields(), block_id="text:1"),
+        make_text_block_start_event(**CTX.event_fields(), block_id="text:1"),
+        make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="hello"),
+        make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
         ToolResultStartEvent(
             **CTX.event_fields(), tool_call_id="call:1", tool_call_name="lookup"
         ),
@@ -196,7 +200,7 @@ def test_orphan_events_do_not_trigger_block_hooks() -> None:
     asyncio.run(
         manager.dispatch_observer_event(
             _ctx(),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **CTX.event_fields(), block_id="text:missing", delta="orphan"
             ),
         )
@@ -204,7 +208,7 @@ def test_orphan_events_do_not_trigger_block_hooks() -> None:
     asyncio.run(
         manager.dispatch_observer_event(
             _ctx(),
-            TextBlockEndEvent(**CTX.event_fields(), block_id="text:missing"),
+            make_text_block_end_event(**CTX.event_fields(), block_id="text:missing"),
         )
     )
 
@@ -226,22 +230,22 @@ def test_block_hooks_isolate_reused_block_ids_across_replies() -> None:
     for context, event in [
         (
             _ctx("reply:a"),
-            TextBlockStartEvent(**ctx_a.event_fields(), block_id="text:1"),
+            make_text_block_start_event(**ctx_a.event_fields(), block_id="text:1"),
         ),
         (
             _ctx("reply:a"),
-            TextBlockDeltaEvent(**ctx_a.event_fields(), block_id="text:1", delta="A"),
+            make_text_block_segment_event(**ctx_a.event_fields(), block_id="text:1", delta="A"),
         ),
         (
             _ctx("reply:b"),
-            TextBlockStartEvent(**ctx_b.event_fields(), block_id="text:1"),
+            make_text_block_start_event(**ctx_b.event_fields(), block_id="text:1"),
         ),
         (
             _ctx("reply:b"),
-            TextBlockDeltaEvent(**ctx_b.event_fields(), block_id="text:1", delta="B"),
+            make_text_block_segment_event(**ctx_b.event_fields(), block_id="text:1", delta="B"),
         ),
-        (_ctx("reply:a"), TextBlockEndEvent(**ctx_a.event_fields(), block_id="text:1")),
-        (_ctx("reply:b"), TextBlockEndEvent(**ctx_b.event_fields(), block_id="text:1")),
+        (_ctx("reply:a"), make_text_block_end_event(**ctx_a.event_fields(), block_id="text:1")),
+        (_ctx("reply:b"), make_text_block_end_event(**ctx_b.event_fields(), block_id="text:1")),
     ]:
         asyncio.run(manager.dispatch_observer_event(context, event))
 
@@ -256,10 +260,10 @@ def test_runtime_hook_manager_cleans_unfinished_blocks_on_run_error() -> None:
     )
 
     for event in [
-        TextBlockStartEvent(**CTX.event_fields(), block_id="text:1"),
-        TextBlockDeltaEvent(**CTX.event_fields(), block_id="text:1", delta="partial"),
+        make_text_block_start_event(**CTX.event_fields(), block_id="text:1"),
+        make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="partial"),
         RunErrorEvent(**CTX.event_fields(), message="stream failed"),
-        TextBlockEndEvent(**CTX.event_fields(), block_id="text:1"),
+        make_text_block_end_event(**CTX.event_fields(), block_id="text:1"),
     ]:
         asyncio.run(manager.dispatch_observer_event(_ctx(), event))
 
@@ -281,23 +285,23 @@ def test_runtime_hook_manager_cleans_only_finished_reply_on_reply_end() -> None:
     for context, event in [
         (
             _ctx("reply:a"),
-            TextBlockStartEvent(**ctx_a.event_fields(), block_id="text:1"),
+            make_text_block_start_event(**ctx_a.event_fields(), block_id="text:1"),
         ),
         (
             _ctx("reply:a"),
-            TextBlockDeltaEvent(**ctx_a.event_fields(), block_id="text:1", delta="A"),
+            make_text_block_segment_event(**ctx_a.event_fields(), block_id="text:1", delta="A"),
         ),
         (
             _ctx("reply:b"),
-            TextBlockStartEvent(**ctx_b.event_fields(), block_id="text:1"),
+            make_text_block_start_event(**ctx_b.event_fields(), block_id="text:1"),
         ),
         (
             _ctx("reply:b"),
-            TextBlockDeltaEvent(**ctx_b.event_fields(), block_id="text:1", delta="B"),
+            make_text_block_segment_event(**ctx_b.event_fields(), block_id="text:1", delta="B"),
         ),
         (_ctx("reply:a"), ReplyEndEvent(**ctx_a.event_fields(), model_terminal_outcome="completed")),
-        (_ctx("reply:a"), TextBlockEndEvent(**ctx_a.event_fields(), block_id="text:1")),
-        (_ctx("reply:b"), TextBlockEndEvent(**ctx_b.event_fields(), block_id="text:1")),
+        (_ctx("reply:a"), make_text_block_end_event(**ctx_a.event_fields(), block_id="text:1")),
+        (_ctx("reply:b"), make_text_block_end_event(**ctx_b.event_fields(), block_id="text:1")),
     ]:
         asyncio.run(manager.dispatch_observer_event(context, event))
 

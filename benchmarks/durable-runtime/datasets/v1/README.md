@@ -44,7 +44,7 @@ expanded case can be loaded deterministically by isolated worker processes and
 that only the coordinator writes the result file. PostgreSQL writer and context
 adapters are separate bindings built on top of this runner protocol.
 
-The first executable production adapter is the model semantic batching matrix:
+The first executable production adapter is the model stream segment scenario:
 
 ```bash
 uv run python benchmarks/durable-runtime/runners/run_dataset.py \
@@ -55,8 +55,8 @@ uv run python benchmarks/durable-runtime/runners/run_dataset.py \
   --output .benchmarks/model-semantic-batch.jsonl
 ```
 
-This command is serial by contract and runs only the `batch-16` production
-baseline. Every sample clones a clean PostgreSQL
+This command is serial by contract and runs only the `segment-v1` production
+case. Every sample clones a clean PostgreSQL
 database before the timed region, runs the real
 `LLMRuntime -> RuntimeSession -> PostgreSQL` path, and drops the clone after
 grading. The manifest's 5 warmups and 30 measured iterations define the
@@ -78,27 +78,18 @@ overrides:
 ```bash
 uv run python benchmarks/durable-runtime/runners/run_dataset.py \
   benchmark-writer \
-  --case-id batch-16 \
+  --case-id segment-v1 \
   --diagnostic-warmup-iterations 0 \
   --diagnostic-measured-iterations 1 \
   --output .benchmarks/model-semantic-batch-diagnostic.jsonl
 ```
 
 Diagnostic iteration or case filters are recorded and cannot pass production
-acceptance. Batch 16 is the only production-valid baseline. Batch 4 and 8 are
-executable sensitivity cases:
-
-```bash
-uv run python benchmarks/durable-runtime/runners/run_dataset.py \
-  benchmark-writer \
-  --case-kind sensitivity_analysis \
-  --output .benchmarks/model-semantic-batch-sensitivity.jsonl
-```
-
-Sensitivity results can explain batching behavior but can never pass production
-acceptance. Batch sizes 1, 32, and 64 are counterfactual analysis only and are
-not executable through the production writer adapter. The runner writes one
-JSONL row per measured case and a sibling `.summary.json` with
+acceptance. `segment-v1` always uses the production coalescing and transaction
+batch contracts; the benchmark exposes no injectable batch-size bypass. The
+historical batch-16 baseline remains immutable under `baselines/v1/` for the
+before/after comparison. The runner writes one JSONL row per measured case and
+a sibling `.summary.json` with
 environment identity, the raw-vector hash, and per-case median, nearest-rank
 p95, minimum, and maximum.
 
@@ -106,6 +97,16 @@ The primary timing metrics are `model_stream_wall_seconds` and
 `semantic_commit_port_wall_seconds`. Counts are explicitly logical commit-port
 batches, not claimed PostgreSQL transaction counts. The cluster WAL LSN delta
 is retained as a diagnostic trend only and is not an acceptance metric.
+
+The immutable before/after formal writer evidence is stored at:
+
+```text
+baselines/v1/model-semantic-batch-16-a2ae6726.jsonl.summary.json
+baselines/v1/model-stream-segment-v1-df869e93.jsonl.summary.json
+```
+
+Both summaries passed production acceptance. The second result uses the
+production segment policy, not a benchmark-only batching override.
 
 The executable context-preparation adapter covers all six context scenario
 families:
@@ -152,6 +153,16 @@ The specialized adapters preserve their defining lifecycle:
   optionally removes the preferred checkpoint's newly written COW artifacts,
   closes the process-local session, and measures deterministic restore or
   rebase from the same runtime session.
+
+The complete pre/post-segment context suites are stored at:
+
+```text
+baselines/v1/context-suite-7e9a484d/
+baselines/v1/context-suite-df869e93/
+```
+
+Each suite contains six scenarios and 340 trajectories. Both suite summaries
+and every scenario summary passed production acceptance.
 
 For a quick production-wiring diagnostic:
 

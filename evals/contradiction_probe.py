@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pulsara_agent.event import EventContext, RunErrorEvent, TextBlockDeltaEvent
+from pulsara_agent.event import EventContext, RunErrorEvent, TextBlockSegmentEvent
 from pulsara_agent.llm import LLMMessage, ModelRole, build_llm_runtime
 from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.settings import PulsaraSettings
@@ -490,8 +490,8 @@ async def _run_case(runtime, case: ProbeCase, *, index: int) -> dict[str, Any]:
         event_context=event_context,
         options=LLMOptions(),
     ):
-        if isinstance(event, TextBlockDeltaEvent):
-            text_parts.append(event.delta)
+        if isinstance(event, TextBlockSegmentEvent):
+            text_parts.append(event.text)
         elif isinstance(event, RunErrorEvent):
             errors.append(event.message)
     raw_text = "".join(text_parts).strip()

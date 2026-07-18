@@ -15,6 +15,10 @@ from tests.conftest import (
     run_start_permission_fields,
 )
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
 from pulsara_agent.event import (
     EventContext,
     LedgerMaterializationAccountGenesisEvent,
@@ -25,7 +29,6 @@ from pulsara_agent.event import (
     SubagentPhaseReportedEvent,
     SubagentResultSubmittedEvent,
     SubagentRunStartedEvent,
-    TextBlockDeltaEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog, PostgresEventLog, dump_agent_event
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
@@ -279,7 +282,7 @@ def test_event_log_deterministic_contract_matches_in_memory_and_postgres(
         reply_id=f"reply:event-log-parity:{uuid4().hex}",
     )
     events = tuple(
-        TextBlockDeltaEvent(
+        make_text_block_segment_event(
             **context.event_fields(),
             block_id="text:parity",
             delta=label,

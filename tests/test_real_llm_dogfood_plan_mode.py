@@ -24,7 +24,7 @@ from pulsara_agent.event import (
     PlanQuestionAskedEvent,
     RunEndEvent,
     RunErrorEvent,
-    ToolCallDeltaEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallStartEvent,
     ToolResultTextDeltaEvent,
 )
@@ -567,8 +567,10 @@ def _tool_calls(events: list[AgentEvent]) -> list[dict[str, object]]:
     deltas_by_id: dict[str, list[str]] = {}
     calls: list[dict[str, object]] = []
     for event in events:
-        if isinstance(event, ToolCallDeltaEvent):
-            deltas_by_id.setdefault(event.tool_call_id, []).append(event.delta)
+        if isinstance(event, ToolCallArgumentsSegmentEvent):
+            deltas_by_id.setdefault(event.tool_call_id, []).append(
+                event.arguments_json_fragment
+            )
         elif isinstance(event, ToolCallStartEvent):
             calls.append(
                 {

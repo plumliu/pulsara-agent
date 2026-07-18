@@ -30,7 +30,11 @@ from pulsara_agent.event import (
     PhysicalOperationReservationSettledEvent,
 )
 from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.llm.drafts import ProviderErrorDraft, build_semantic_draft
+from pulsara_agent.llm.drafts import (
+    ProviderErrorDraft,
+    SanitizedProviderSemanticEnvelope,
+    build_semantic_draft,
+)
 from pulsara_agent.llm.accounting import build_model_reservation_settlement_event
 from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
@@ -85,12 +89,15 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultTextContentFact,
 )
 from pulsara_agent.primitives.model_call import (
+    DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT,
     ModelCallPurpose,
     ModelTokenUsageFact,
     ResolvedModelTargetFact,
+    sha256_fingerprint,
 )
 from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
 from pulsara_agent.llm.recovery import ModelStreamRecoveryService
+from pulsara_agent.llm.segment import ModelStreamSegmentAccumulator
 from pulsara_agent.llm.terminal_projection import (
     ModelTerminalProjectionReducer,
     build_default_terminal_projection_contract_bundle,
@@ -120,6 +127,7 @@ from pulsara_agent.runtime.long_horizon.coordinator import (
 from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_shadow,
 )
+from pulsara_agent.runtime.long_horizon.store import LongHorizonStateStore
 from pulsara_agent.runtime.authority_materialization import (
     LedgerMaterializationAccountStore,
     LedgerMaterializationCoordinator,
@@ -1857,6 +1865,25 @@ def test_rollout_model_reservation_and_settlement_use_exact_quote() -> None:
     assert state.active_reservations == ()
 
 
+def test_rollout_state_snapshot_freezes_state_and_reducer_high_water_together() -> None:
+    account = _account()
+    store = LongHorizonStateStore(
+        (
+            RolloutBudgetAccountOpenedEvent(
+                **CTX.event_fields(),
+                sequence=1,
+                account=account,
+            ),
+        )
+    )
+
+    through_sequence, state = store.rollout_state_snapshot(account.account_id)
+
+    assert through_sequence == 1
+    assert state is not None
+    assert state.through_sequence == through_sequence
+
+
 def _fold_model_settlement(
     settlement: RolloutBudgetReservationSettledEvent,
 ) -> None:
@@ -2553,12 +2580,35 @@ def test_model_stream_recovery_preserves_durable_provider_error_winner() -> None
         transport_sequence_index=0,
         error=sanitize_provider_failure(message="provider unavailable"),
     )
-    provider_error = LLMRuntime._semantic_event_from_draft(
-        call=call,
-        event_context=CTX,
-        model_call_start_event_id=start.id,
-        draft=draft,
+    source_before = sha256_fingerprint(
+        "model-stream-sanitized-source:v2", "empty"
     )
+    source_after = sha256_fingerprint(
+        "model-stream-sanitized-source-receipt:v2",
+        {
+            "source_accumulator_before": source_before,
+            "transport_sequence_index": 0,
+            "draft_kind": draft.draft_kind,
+            "draft_fingerprint": draft.draft_fingerprint,
+        },
+    )
+    envelope = SanitizedProviderSemanticEnvelope(
+        envelope_id="provider-error-envelope",
+        draft=draft,
+        proposed_transport_sequence_index=0,
+        source_accumulator_before=source_before,
+        source_accumulator_after=source_after,
+        accepted_at_monotonic_ns=0,
+        adapter_source_payload_bytes=1,
+        counts_as_adapter_source_item=False,
+    )
+    prepared = ModelStreamSegmentAccumulator(
+        resolved_model_call_id=call.fact.resolved_model_call_id,
+        model_call_start_event_id=start.id,
+        context=CTX,
+    ).push(envelope)
+    assert len(prepared) == 1
+    provider_error = prepared[0].event
     log.extend((start, provider_error))
 
     report = ModelStreamRecoveryService(
@@ -2600,6 +2650,9 @@ def _commit_completed_main_model_call(
         model_stream_semantic_domain_contract_fingerprint=(
             build_default_authority_materialization_contract_bundle()
             .event_domain.contract.transcript_semantic_domain_contract_fingerprint
+        ),
+        segment_policy_contract_fingerprint=(
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.contract_fingerprint
         ),
     )
     projection = reducer.prepare_terminal(

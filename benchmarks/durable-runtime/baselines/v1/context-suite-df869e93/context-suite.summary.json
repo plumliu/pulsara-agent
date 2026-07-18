@@ -1,0 +1,87 @@
+{
+  "completed_scenarios": [
+    {
+      "benchmark_run_id": "benchmark:420068ed66f946b4d6ab2df9",
+      "measurement_contract_adhered": true,
+      "output_file": "artifact-heavy-tools-df869e93.jsonl",
+      "production_acceptance_passed": true,
+      "raw_sample_vector_sha256": "sha256:955d9e4fa1416d663e99e1e3cf20eaef73591c4272ac46b89757a5f8b1951fc9",
+      "sample_count": 60,
+      "scenario_id": "artifact-heavy-tools",
+      "summary_file": "artifact-heavy-tools-df869e93.jsonl.summary.json",
+      "summary_file_sha256": "sha256:6b806e818b74a4d8fe4e407ae9e10fe13906fb1e12552d38feaceb18d749c37f"
+    },
+    {
+      "benchmark_run_id": "benchmark:64af817ad119b0327296f2be",
+      "measurement_contract_adhered": true,
+      "output_file": "checkpoint-rebase-and-restart-df869e93.jsonl",
+      "production_acceptance_passed": true,
+      "raw_sample_vector_sha256": "sha256:99aa41fdb63d4b13862d7aaf0dd52ddba68b34b55b63deef3b72b729548c3f1d",
+      "sample_count": 60,
+      "scenario_id": "checkpoint-rebase-and-restart",
+      "summary_file": "checkpoint-rebase-and-restart-df869e93.jsonl.summary.json",
+      "summary_file_sha256": "sha256:40ad4e7dfcb53d406cdd2daa9d184f15d0d6ced9f587bda0537163a240d0f9b7"
+    },
+    {
+      "benchmark_run_id": "benchmark:6c692ee723522af3b070cad5",
+      "measurement_contract_adhered": true,
+      "output_file": "incremental-active-window-df869e93.jsonl",
+      "production_acceptance_passed": true,
+      "raw_sample_vector_sha256": "sha256:96d54549354992a407322b5d09099978f7594c2229b2f0ddbba62fa0b789184f",
+      "sample_count": 60,
+      "scenario_id": "incremental-active-window",
+      "summary_file": "incremental-active-window-df869e93.jsonl.summary.json",
+      "summary_file_sha256": "sha256:6317f79af2e5ab0ec7504b6342c652e8b8f77876420d0e853e0e9ff9658642a2"
+    },
+    {
+      "benchmark_run_id": "benchmark:29245fb71973c9f1fa5d24fc",
+      "measurement_contract_adhered": true,
+      "output_file": "long-plan-prefix-growth-df869e93.jsonl",
+      "production_acceptance_passed": true,
+      "raw_sample_vector_sha256": "sha256:2448a3304026bff37aed7f8b84d9450d3919ad6b5cec62ff0660b4737cb0b627",
+      "sample_count": 40,
+      "scenario_id": "long-plan-prefix-growth",
+      "summary_file": "long-plan-prefix-growth-df869e93.jsonl.summary.json",
+      "summary_file_sha256": "sha256:60d180ed1037147982df2d87a9ff64754540be1e26ae59d96a7903457838e5ab"
+    },
+    {
+      "benchmark_run_id": "benchmark:0d9d951c1c3a649678b458a0",
+      "measurement_contract_adhered": true,
+      "output_file": "single-long-compaction-df869e93.jsonl",
+      "production_acceptance_passed": true,
+      "raw_sample_vector_sha256": "sha256:56842fca1eade576d8508edcdea12c909c27fd943a76c4ded03f3a24cbd3053c",
+      "sample_count": 40,
+      "scenario_id": "single-long-compaction",
+      "summary_file": "single-long-compaction-df869e93.jsonl.summary.json",
+      "summary_file_sha256": "sha256:ae80f9bd3165f6e4ce1c6216c3e8792867c2122c4a72bb999bb2f8b6129d42e2"
+    },
+    {
+      "benchmark_run_id": "benchmark:37f21bcbdb77cef4db5ca596",
+      "measurement_contract_adhered": true,
+      "output_file": "subagent-two-children-df869e93.jsonl",
+      "production_acceptance_passed": true,
+      "raw_sample_vector_sha256": "sha256:2e8272f69a62648084d0691b03e8b5b088edb07e05ac595122b44b37778c2f16",
+      "sample_count": 40,
+      "scenario_id": "subagent-two-children",
+      "summary_file": "subagent-two-children-df869e93.jsonl.summary.json",
+      "summary_file_sha256": "sha256:d14f38ddb0b3b6a5c40f8c00c37deedcb01c60e15731600bde20272d966121a0"
+    }
+  ],
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "error_type": null,
+  "expected_scenario_ids": [
+    "artifact-heavy-tools",
+    "checkpoint-rebase-and-restart",
+    "incremental-active-window",
+    "long-plan-prefix-growth",
+    "single-long-compaction",
+    "subagent-two-children"
+  ],
+  "git_commit": "df869e93df0bca4eb58ce87c6a97ac960cb0706d",
+  "manifest_contract_fingerprint": "sha256:8751b64a6778c81c05c5d07d4213a1ff04626193a3202121ff1d08ebf4e484b2",
+  "production_acceptance_passed": true,
+  "reason_code": null,
+  "schema_version": "pulsara.context-suite-journal.v1",
+  "status": "completed",
+  "total_trajectories": 340
+}

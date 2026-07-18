@@ -41,7 +41,7 @@ from pulsara_agent.event import (
     RequireUserConfirmEvent,
     RunEndEvent,
     RunErrorEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     ToolCallStartEvent,
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
@@ -203,9 +203,9 @@ class RealLLMUserSimulator:
                 if isinstance(event, RunErrorEvent)
             ]
             raw_text = "".join(
-                event.delta
+                event.text
                 for event in events
-                if isinstance(event, TextBlockDeltaEvent)
+                if isinstance(event, TextBlockSegmentEvent)
             )
             diagnostic = {
                 "attempt": attempt,

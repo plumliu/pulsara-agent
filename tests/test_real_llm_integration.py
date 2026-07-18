@@ -24,6 +24,12 @@ from tests.conftest import (
     run_start_permission_fields,
 )
 
+from tests.support.model_stream import (
+    make_tool_call_arguments_segment_event,
+    make_tool_call_end_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     EventContext,
     ContextWindowOpenedEvent,
@@ -43,11 +49,10 @@ from pulsara_agent.event import (
     RunErrorEvent,
     RunStartEvent,
     RolloutBudgetAccountOpenedEvent,
-    TextBlockDeltaEvent,
-    ThinkingBlockDeltaEvent,
+    TextBlockSegmentEvent,
+    ThinkingBlockSegmentEvent,
     TerminalProcessCompletedEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
+    ToolCallArgumentsSegmentEvent,
     ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
@@ -276,7 +281,7 @@ def test_real_flash_model_emits_replayable_agent_events():
     assert result["errors"] == []
     assert result["event_type_names"][0] == "ModelCallStartEvent"
     assert "ModelCallStartEvent" in result["event_type_names"]
-    assert "TextBlockDeltaEvent" in result["event_type_names"]
+    assert "TextBlockSegmentEvent" in result["event_type_names"]
     assert "ModelCallEndEvent" in result["event_type_names"]
     assert result["event_type_names"][-1] == "PhysicalOperationReservationSettledEvent"
     assert result["event_type_names"].index("ModelCallEndEvent") < len(
@@ -299,7 +304,7 @@ def test_real_flash_model_can_emit_tool_call_events():
 
     assert result["errors"] == []
     assert "ToolCallStartEvent" in result["event_type_names"]
-    assert "ToolCallDeltaEvent" in result["event_type_names"]
+    assert "ToolCallArgumentsSegmentEvent" in result["event_type_names"]
     assert "ToolCallEndEvent" in result["event_type_names"]
     assert result["tool_call_name"] == "echo_tool"
     assert "Pulsara" in result["tool_call_input"]
@@ -336,10 +341,10 @@ def test_real_pro_model_emits_text_and_optional_thinking_events():
     result = asyncio.run(_run_real_thinking_text_smoke())
 
     assert result["errors"] == []
-    assert "TextBlockDeltaEvent" in result["event_type_names"]
+    assert "TextBlockSegmentEvent" in result["event_type_names"]
     assert "PULSARA_THINKING_OK" in result["text"]
     assert "PULSARA_THINKING_OK" in result["replayed_text"]
-    if "ThinkingBlockDeltaEvent" not in result["event_type_names"]:
+    if "ThinkingBlockSegmentEvent" not in result["event_type_names"]:
         pytest.skip(
             "Configured provider did not expose reasoning summary events for this request."
         )
@@ -368,9 +373,9 @@ def test_real_chat_completions_thinking_delta_is_consumed():
     result = asyncio.run(_run_real_chat_thinking_delta_smoke())
 
     assert result["errors"] == []
-    assert "ThinkingBlockDeltaEvent" in result["event_type_names"]
+    assert "ThinkingBlockSegmentEvent" in result["event_type_names"]
     assert result["thinking"]
-    assert "TextBlockDeltaEvent" in result["event_type_names"]
+    assert "TextBlockSegmentEvent" in result["event_type_names"]
     assert "PULSARA_THINKING_DELTA_PROBE" in result["text"]
     assert "PULSARA_THINKING_DELTA_PROBE" in result["replayed_text"]
     assert result["replayed_thinking"]
@@ -1565,8 +1570,8 @@ async def _run_real_flash_smoke() -> dict:
         completion = await handle.wait_completed()
         model_result = await handle.wait_result()
         for event in completion.committed_events:
-            if isinstance(event, TextBlockDeltaEvent):
-                text_parts.append(event.delta)
+            if isinstance(event, TextBlockSegmentEvent):
+                text_parts.append(event.text)
             if isinstance(event, RunErrorEvent):
                 errors.append(_run_error_diagnostic(event))
 
@@ -1703,17 +1708,17 @@ async def _run_real_aborted_unfinished_tool_recovery_context_smoke() -> dict:
                     name="assistant",
                 ),
                 model_start,
-                ToolCallStartEvent(
+                make_tool_call_start_event(
                     **ctx.event_fields(),
                     tool_call_id="call:danger",
                     tool_call_name="terminal",
                 ),
-                ToolCallDeltaEvent(
+                make_tool_call_arguments_segment_event(
                     **ctx.event_fields(),
                     tool_call_id="call:danger",
                     delta='{"command": "rm -rf ./PULSARA_DANGEROUS_DO_NOT_RUN"}',
                 ),
-                ToolCallEndEvent(
+                make_tool_call_end_event(
                     **ctx.event_fields(),
                     tool_call_id="call:danger",
                 ),
@@ -1876,7 +1881,9 @@ async def _run_real_tool_call_smoke() -> dict:
         "",
     )
     tool_call_input = "".join(
-        event.delta for event in events if isinstance(event, ToolCallDeltaEvent)
+        event.arguments_json_fragment
+        for event in events
+        if isinstance(event, ToolCallArgumentsSegmentEvent)
     )
     replayed_tool_call = next(iter(model_result.tool_calls), None)
 
@@ -3754,8 +3761,8 @@ def _tool_calls_from_stream_events(events) -> list[dict]:
         if isinstance(event, ToolCallStartEvent):
             current = {"name": event.tool_call_name, "arguments_text": ""}
             calls.append(current)
-        elif isinstance(event, ToolCallDeltaEvent) and current is not None:
-            current["arguments_text"] += event.delta
+        elif isinstance(event, ToolCallArgumentsSegmentEvent) and current is not None:
+            current["arguments_text"] += event.arguments_json_fragment
     for call in calls:
         text = call.pop("arguments_text")
         call["arguments"] = json.loads(text) if text else {}
@@ -3950,7 +3957,9 @@ async def _run_real_agent_memory_domain_search_scope_smoke(tmp_path: Path) -> di
             event for event in events if isinstance(event, ToolCallStartEvent)
         ]
         tool_call_arguments = "".join(
-            event.delta for event in events if isinstance(event, ToolCallDeltaEvent)
+            event.arguments_json_fragment
+            for event in events
+            if isinstance(event, ToolCallArgumentsSegmentEvent)
         )
         tool_result_texts = [
             event.delta
@@ -5288,10 +5297,10 @@ async def _collect_real_events(
         completion = await handle.wait_completed()
         model_result = await handle.wait_result()
         for event in completion.committed_events:
-            if isinstance(event, TextBlockDeltaEvent):
-                text_parts.append(event.delta)
-            if isinstance(event, ThinkingBlockDeltaEvent):
-                thinking_parts.append(event.delta)
+            if isinstance(event, TextBlockSegmentEvent):
+                text_parts.append(event.text)
+            if isinstance(event, ThinkingBlockSegmentEvent):
+                thinking_parts.append(event.thinking)
             if isinstance(event, RunErrorEvent):
                 errors.append(_run_error_diagnostic(event))
 
@@ -5522,7 +5531,9 @@ async def _run_real_flash_memory_retry_json_smoke() -> dict:
         event for event in events if isinstance(event, ToolCallStartEvent)
     ]
     tool_call_arguments = "".join(
-        event.delta for event in events if isinstance(event, ToolCallDeltaEvent)
+        event.arguments_json_fragment
+        for event in events
+        if isinstance(event, ToolCallArgumentsSegmentEvent)
     )
     return {
         "tool_names": [event.tool_call_name for event in tool_call_events],
@@ -5901,8 +5912,10 @@ def _summarize_collected_result(result: dict) -> dict:
 def _tool_arguments_by_call_id(events) -> dict[str, dict]:
     deltas_by_call: dict[str, list[str]] = {}
     for event in events:
-        if isinstance(event, ToolCallDeltaEvent):
-            deltas_by_call.setdefault(event.tool_call_id, []).append(event.delta)
+        if isinstance(event, ToolCallArgumentsSegmentEvent):
+            deltas_by_call.setdefault(event.tool_call_id, []).append(
+                event.arguments_json_fragment
+            )
     parsed: dict[str, dict] = {}
     for tool_call_id, deltas in deltas_by_call.items():
         raw = "".join(deltas)

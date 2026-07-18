@@ -91,6 +91,7 @@ from pulsara_agent.primitives.transcript_projection import (
     RunTranscriptSeedArtifactFact,
 )
 from pulsara_agent.primitives.terminal_projection import (
+    ModelCallSemanticSourceFact,
     ModelTerminalProjectionPayloadFact,
     TerminalProjectionDocumentFact,
 )
@@ -1312,6 +1313,7 @@ def _terminal_projection_event_projection(
         "completed_block_count": None,
         "interrupted_block_count": None,
         "projection_order_verified": None,
+        "model_stream_settlement_measurement": None,
     }
     artifact = store.artifact(reference.document_artifact_id)
     if artifact is not None:
@@ -1344,6 +1346,40 @@ def _terminal_projection_event_projection(
                 projection["interrupted_block_count"] = statuses.count(
                     "interrupted"
                 )
+                if isinstance(document.source_fact, ModelCallSemanticSourceFact):
+                    measurement = document.source_fact.stream_settlement_measurement
+                    projection["model_stream_settlement_measurement"] = {
+                        "measurement_fingerprint": measurement.measurement_fingerprint,
+                        "physical_accounting_mode": (
+                            measurement.physical_accounting_mode
+                        ),
+                        "adapter_source_item_count": (
+                            measurement.adapter_source_item_count
+                        ),
+                        "adapter_source_payload_bytes": (
+                            measurement.adapter_source_payload_bytes
+                        ),
+                        "synthetic_source_item_count": (
+                            measurement.synthetic_source_item_count
+                        ),
+                        "synthetic_source_payload_bytes": (
+                            measurement.synthetic_source_payload_bytes
+                        ),
+                        "singleton_event_count": measurement.singleton_event_count,
+                        "segment_event_count": measurement.segment_event_count,
+                        "durable_semantic_event_count": (
+                            measurement.durable_semantic_event_count
+                        ),
+                        "segment_content_utf8_bytes": (
+                            measurement.segment_content_utf8_bytes
+                        ),
+                        "durable_candidate_payload_bytes": (
+                            measurement.durable_candidate_payload_bytes
+                        ),
+                        "actual_semantic_commit_batch_count": (
+                            measurement.actual_semantic_commit_batch_count
+                        ),
+                    }
             else:
                 projection["completed_block_count"] = 1
                 projection["interrupted_block_count"] = 0

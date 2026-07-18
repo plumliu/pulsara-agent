@@ -223,7 +223,17 @@ def deterministic_ledger_charge(
         schema = DEFAULT_EVENT_SCHEMA_REGISTRY.resolve_for_event(event).schema_contract
         bound = bounds.get((str(event.type), schema.event_schema_version))
         if bound is not None:
-            charged_bytes += bound.max_stored_envelope_bytes
+            if str(event.type) == "PHYSICAL_OPERATION_CHARGE_APPLIED":
+                dynamic_charge = (
+                    event.charge.charge_applied_event_charge_payload_bytes
+                )
+                if dynamic_charge > bound.max_stored_envelope_bytes:
+                    raise MaterializationAccountContractError(
+                        "dynamic charge-applied quote exceeds its envelope bound"
+                    )
+                charged_bytes += dynamic_charge
+            else:
+                charged_bytes += bound.max_stored_envelope_bytes
         else:
             charged_bytes += len(
                 canonical_event_payload_bytes(event.model_copy(update={"sequence": None}))
@@ -241,6 +251,7 @@ def deterministic_bookkeeping_charge(
     event_type: str,
     *,
     contract: PhysicalChargeContractFact,
+    business_event_count: int | None = None,
 ) -> DeterministicLedgerCharge:
     matching = tuple(
         item for item in contract.bookkeeping_event_bounds if item.event_type == event_type
@@ -249,9 +260,28 @@ def deterministic_bookkeeping_charge(
         raise MaterializationAccountContractError(
             f"bookkeeping event does not have one fixed charge: {event_type}"
         )
+    charged_payload_bytes = matching[0].max_stored_envelope_bytes
+    if event_type == "PHYSICAL_OPERATION_CHARGE_APPLIED":
+        if business_event_count is None or business_event_count <= 0:
+            raise MaterializationAccountContractError(
+                "charge-applied bookkeeping requires a positive business event count"
+            )
+        charged_payload_bytes = (
+            contract.charge_applied_bookkeeping_base_charge_bytes
+            + business_event_count
+            * contract.charge_applied_bookkeeping_per_business_event_charge_bytes
+        )
+        if charged_payload_bytes > matching[0].max_stored_envelope_bytes:
+            raise MaterializationAccountContractError(
+                "dynamic charge-applied quote exceeds the canonical envelope bound"
+            )
+    elif business_event_count is not None:
+        raise MaterializationAccountContractError(
+            "business event count is only valid for charge-applied bookkeeping"
+        )
     return DeterministicLedgerCharge(
         event_count=1,
-        charged_payload_bytes=matching[0].max_stored_envelope_bytes,
+        charged_payload_bytes=charged_payload_bytes,
     )
 
 
@@ -1625,6 +1655,7 @@ class LedgerMaterializationCoordinator:
             charge_event_charge = deterministic_bookkeeping_charge(
                 "PHYSICAL_OPERATION_CHARGE_APPLIED",
                 contract=self.charge_contract,
+                business_event_count=len(prepared_business),
             )
             charged_events = business_charge.event_count + charge_event_charge.event_count
             charged_bytes = (
@@ -1812,6 +1843,7 @@ class LedgerMaterializationCoordinator:
         reservation: PhysicalOperationReservationFact,
         business_events: Sequence[AgentEvent],
         terminal_outcome: str,
+        model_stream_measurement_fingerprint: str | None = None,
         deadline_monotonic: float | None = None,
     ) -> CommittedPhysicalSettlement:
         """Commit a stable terminal batch and close its exact reservation."""
@@ -1970,6 +2002,9 @@ class LedgerMaterializationCoordinator:
                 total_charged_events=total_charged_events,
                 total_charged_payload_bytes=total_charged_bytes,
                 terminal_outcome=terminal_outcome,
+                model_stream_measurement_fingerprint=(
+                    model_stream_measurement_fingerprint
+                ),
                 released_on_suspension_events_lifetime=(
                     released_on_suspension_events
                 ),

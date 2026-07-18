@@ -1,0 +1,231 @@
+{
+  "benchmark_run_id": "benchmark:420068ed66f946b4d6ab2df9",
+  "case_aggregates": [
+    {
+      "case_contract_fingerprint": "sha256:90e3301f559756ba360f39de42ae824b09c023f65316e98c9092a90be72b1f4f",
+      "case_id": "artifact-heavy-tools:default:process_cold",
+      "metrics": [
+        {
+          "maximum": 1.0059160420205444,
+          "median": 0.9566239790874533,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.8934162079822272,
+          "p95_nearest_rank": 1.000549958087504,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.5967666057583231,
+          "median": 0.5872211153529441,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.5794889038392844,
+          "p95_nearest_rank": 0.5933236026814064,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 7.7579658748582006,
+          "median": 7.6338744995882735,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 7.533355749910697,
+          "p95_nearest_rank": 7.713206834858283,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 118,
+          "median": 118.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 118,
+          "p95_nearest_rank": 118,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 11,
+          "median": 11.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 11,
+          "p95_nearest_rank": 11,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.21982162597123533,
+          "median": 0.21015068789711222,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.20776895782910287,
+          "p95_nearest_rank": 0.2149830408161506,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    },
+    {
+      "case_contract_fingerprint": "sha256:ee908c889eb971c8b355a72d6bca13206cddc79de0e9de1b0193422adea3b2fa",
+      "case_id": "artifact-heavy-tools:default:steady_state",
+      "metrics": [
+        {
+          "maximum": 0.9155526660615578,
+          "median": 0.7817296459688805,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.7162524999585003,
+          "p95_nearest_rank": 0.79787879192736,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.5642035096221102,
+          "median": 0.5227351283941132,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.5157412853754627,
+          "p95_nearest_rank": 0.5370100127676358,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 7.334645625087433,
+          "median": 6.795556669123471,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 6.704636709881015,
+          "p95_nearest_rank": 6.981130165979266,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 118,
+          "median": 118.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 118,
+          "p95_nearest_rank": 118,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 11,
+          "median": 11.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 11,
+          "p95_nearest_rank": 11,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.334276627167128,
+          "median": 0.21195755992084742,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.2080538758309558,
+          "p95_nearest_rank": 0.27044495893642306,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    },
+    {
+      "case_contract_fingerprint": "sha256:0433ba304f2eebd3f67e260d05553869a7697b6b88905a16df07deb4d7935159",
+      "case_id": "artifact-heavy-tools:default:verified_artifact_cache_warm",
+      "metrics": [
+        {
+          "maximum": 0.79141454200726,
+          "median": 0.7731435419409536,
+          "metric_id": "context_prepare_max_wall_seconds",
+          "minimum": 0.7173655410297215,
+          "p95_nearest_rank": 0.7913788330042735,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 0.5490076827028623,
+          "median": 0.5193858093385083,
+          "metric_id": "context_prepare_mean_wall_seconds",
+          "minimum": 0.5096127179254276,
+          "p95_nearest_rank": 0.5366338075210269,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 7.13709987513721,
+          "median": 6.752015521400608,
+          "metric_id": "context_prepare_total_wall_seconds",
+          "minimum": 6.624965333030559,
+          "p95_nearest_rank": 6.976239497773349,
+          "sample_count": 20,
+          "unit": "seconds"
+        },
+        {
+          "maximum": 118,
+          "median": 118.0,
+          "metric_id": "final_authority_event_count",
+          "minimum": 118,
+          "p95_nearest_rank": 118,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 11,
+          "median": 11.0,
+          "metric_id": "final_semantic_delta_event_count",
+          "minimum": 11,
+          "p95_nearest_rank": 11,
+          "sample_count": 20,
+          "unit": "events"
+        },
+        {
+          "maximum": 0.2814120809780434,
+          "median": 0.2111970824189484,
+          "metric_id": "pure_context_compile_total_wall_seconds",
+          "minimum": 0.20788375101983547,
+          "p95_nearest_rank": 0.275090581853874,
+          "sample_count": 20,
+          "unit": "seconds"
+        }
+      ],
+      "sample_count": 20
+    }
+  ],
+  "case_contract_fingerprints": [
+    "sha256:90e3301f559756ba360f39de42ae824b09c023f65316e98c9092a90be72b1f4f",
+    "sha256:ee908c889eb971c8b355a72d6bca13206cddc79de0e9de1b0193422adea3b2fa",
+    "sha256:0433ba304f2eebd3f67e260d05553869a7697b6b88905a16df07deb4d7935159"
+  ],
+  "counterfactual_samples_excluded": true,
+  "dataset_id": "pulsara.durable-runtime.v1",
+  "environment": {
+    "git": {
+      "commit": "df869e93df0bca4eb58ce87c6a97ac960cb0706d",
+      "dirty": false
+    },
+    "postgres": {
+      "configuration_fingerprint": "sha256:1babd816a44e245de601de61f9db2a11eb04b3903e9f7c42474a40a3e29cf358",
+      "connection_pool_fingerprint": "sha256:874e657a39df00365d9d647cea45f7143fee98c53618629c77d0ce75d7e643a7",
+      "server_version": "17.9 (Homebrew)"
+    },
+    "python": {
+      "implementation": "CPython",
+      "machine": "arm64",
+      "platform": "macOS-26.2-arm64-arm-64bit",
+      "version": "3.12.12"
+    },
+    "runner_build_fingerprint": "sha256:b5b44c31d7dec2834255b4c21f14fd6ba28f3c134f88702cdec297de9614d8e7",
+    "runtime_capacity": {
+      "auxiliary_io_workers": 12,
+      "configuration_fingerprint": "sha256:393aa28a338fc8484f804286baf6cc604a6bb8f9a51aaef03197233b0e8a45bd",
+      "critical_ledger_workers": 4,
+      "postgres_bounded_read_capacity": 12,
+      "postgres_critical_write_reserve": 4,
+      "postgres_default_lease_timeout_seconds": 30.0,
+      "postgres_pool_max_connections": 16
+    },
+    "schema_version": "pulsara.durable-runtime.environment.v1"
+  },
+  "manifest_contract_fingerprint": "sha256:8751b64a6778c81c05c5d07d4213a1ff04626193a3202121ff1d08ebf4e484b2",
+  "measurement_contract_adhered": true,
+  "percentile_contract": "nearest_rank_v1",
+  "production_acceptance_passed": true,
+  "raw_sample_vector_sha256": "sha256:955d9e4fa1416d663e99e1e3cf20eaef73591c4272ac46b89757a5f8b1951fc9",
+  "sample_count": 60,
+  "scenario_id": "artifact-heavy-tools",
+  "schema_version": "pulsara.durable-runtime.run-summary.v1"
+}

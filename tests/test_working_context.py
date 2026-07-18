@@ -7,11 +7,14 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+    make_tool_call_start_event,
+)
+
 from pulsara_agent.event import (
     EventContext,
     ReplyEndEvent,
-    TextBlockDeltaEvent,
-    ToolCallStartEvent,
     ToolResultEndEvent,
     ToolResultStartEvent,
     ToolResultTextDeltaEvent,
@@ -36,7 +39,7 @@ def test_working_context_guard_rejects_low_signal_run() -> None:
     ctx = _ctx()
     timeline = build_run_timeline(
         [
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **ctx.event_fields(), block_id="text:1", delta="ok", sequence=1
             ),
             ReplyEndEvent(
@@ -58,7 +61,7 @@ def test_working_context_guard_rejects_empty_memory_search_run() -> None:
     ctx = _ctx()
     timeline = build_run_timeline(
         [
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:search",
                 tool_call_name="memory_search",
@@ -88,7 +91,7 @@ def test_working_context_guard_rejects_empty_memory_search_run() -> None:
                     "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
                 },
             ),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **ctx.event_fields(),
                 block_id="text:1",
                 delta=(
@@ -163,7 +166,7 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
     )
     try:
         for event in [
-            ToolCallStartEvent(
+            make_tool_call_start_event(
                 **ctx.event_fields(),
                 tool_call_id="call:read",
                 tool_call_name="read_file",
@@ -187,7 +190,7 @@ def test_durable_hook_injects_and_updates_working_context() -> None:
                     "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
                 },
             ),
-            TextBlockDeltaEvent(
+            make_text_block_segment_event(
                 **ctx.event_fields(),
                 block_id="text:1",
                 delta="I inspected the implementation plan and validated the scope/domain wiring.",

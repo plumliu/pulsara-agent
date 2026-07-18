@@ -127,31 +127,69 @@ class PhysicalBurstContractBase(FrozenFactBase):
         return self
 
 
-class TransportFragmentedBurstContractFact(PhysicalBurstContractBase):
-    schema_version: Literal["transport_fragmented_burst_contract.v1"]
-    burst_shape: Literal["transport_fragmented"]
+class TransportSegmentedBurstContractFact(PhysicalBurstContractBase):
+    schema_version: Literal["transport_segmented_burst_contract.v1"]
+    burst_shape: Literal["transport_segmented"]
     operation_kind: Literal[PhysicalOperationKind.MODEL_CALL]
-    fragmentation_mode: Literal["one_event_per_sanitized_source_item"]
+    segmentation_mode: Literal["contiguous_model_delta_segment_v1"]
     max_source_items: PositiveInt
-    max_sanitized_source_payload_bytes: PositiveInt
+    max_source_payload_bytes: PositiveInt
+    max_single_source_item_canonical_bytes: PositiveInt
+    max_segment_source_items: PositiveInt
+    max_segment_content_utf8_bytes: PositiveInt
+    max_segment_canonical_event_bytes: PositiveInt
+    max_durable_event_wrapper_overhead_bytes: PositiveInt
+    max_unconfirmed_age_millis: PositiveInt
     max_durable_events_per_source_item: PositiveInt
-    max_canonical_wrapper_payload_bytes_per_source_item: PositiveInt
+    max_synthetic_semantic_tail_events: PositiveInt
+    max_synthetic_semantic_tail_payload_bytes: PositiveInt
+    max_start_commit_batches: PositiveInt
+    max_terminal_commit_batches: PositiveInt
+    max_recovery_commit_batches: PositiveInt
+    max_bookkeeping_events_per_commit: PositiveInt
+    max_bookkeeping_base_payload_bytes_per_commit: PositiveInt
+    max_bookkeeping_payload_bytes_per_business_event: PositiveInt
+    segment_policy_contract_fingerprint: Fingerprint
     sanitization_contract_fingerprint: Fingerprint
 
     @model_validator(mode="after")
-    def _covers_fragmented_burst(self) -> "TransportFragmentedBurstContractFact":
-        required_events = (
+    def _covers_segmented_burst(self) -> "TransportSegmentedBurstContractFact":
+        if self.max_durable_events_per_source_item != 1:
+            raise ValueError("V1 model segmentation requires one event/source worst case")
+        if self.max_synthetic_semantic_tail_events != 1:
+            raise ValueError("V1 model segmentation permits one synthetic semantic tail")
+        if self.max_start_commit_batches != 1 or self.max_terminal_commit_batches != 1:
+            raise ValueError("V1 model lifecycle has one start and terminal batch")
+        max_durable_events = (
             self.max_source_items * self.max_durable_events_per_source_item
+            + self.max_synthetic_semantic_tail_events
+        )
+        required_commit_batches = (
+            self.max_start_commit_batches
+            + max_durable_events
+            + self.max_terminal_commit_batches
+            + self.max_recovery_commit_batches
+        )
+        required_events = (
+            max_durable_events
+            + required_commit_batches * self.max_bookkeeping_events_per_commit
             + self.max_structural_tail_events
             + self.max_terminal_recovery_events
         )
         required_bytes = (
-            self.max_sanitized_source_payload_bytes
-            + self.max_source_items
-            * self.max_canonical_wrapper_payload_bytes_per_source_item
+            self.max_source_payload_bytes
+            + self.max_synthetic_semantic_tail_payload_bytes
+            + max_durable_events
+            * self.max_durable_event_wrapper_overhead_bytes
+            + required_commit_batches
+            * self.max_bookkeeping_base_payload_bytes_per_commit
+            + max_durable_events
+            * self.max_bookkeeping_payload_bytes_per_business_event
             + self.max_structural_tail_payload_bytes
             + self.max_terminal_recovery_payload_bytes
         )
+        if self.max_commit_batches < required_commit_batches:
+            raise ValueError("segmented transport commit batch bound is underestimated")
         if self.max_total_reserved_events < required_events:
             raise ValueError("transport burst event reservation is underestimated")
         if self.max_total_reserved_payload_bytes < required_bytes:
@@ -241,7 +279,7 @@ class FixedBatchBurstContractFact(PhysicalBurstContractBase):
 
 
 PhysicalBurstContractFact: TypeAlias = Annotated[
-    TransportFragmentedBurstContractFact
+    TransportSegmentedBurstContractFact
     | ToolDeltaBurstContractFact
     | FixedBatchBurstContractFact,
     Field(discriminator="burst_shape"),
@@ -296,7 +334,8 @@ class PhysicalChargeContractFact(FrozenFactBase):
     reservation_bookkeeping_charge_events: PositiveInt
     reservation_bookkeeping_charge_bytes: PositiveInt
     charge_applied_bookkeeping_charge_events: PositiveInt
-    charge_applied_bookkeeping_charge_bytes: PositiveInt
+    charge_applied_bookkeeping_base_charge_bytes: PositiveInt
+    charge_applied_bookkeeping_per_business_event_charge_bytes: PositiveInt
     suspension_bookkeeping_charge_events: PositiveInt
     suspension_bookkeeping_charge_bytes: PositiveInt
     settlement_bookkeeping_charge_events: PositiveInt
@@ -997,6 +1036,7 @@ class PhysicalOperationSettlementFact(FrozenFactBase):
         "host_teardown",
         "recovered_interrupted",
     ]
+    model_stream_measurement_fingerprint: Fingerprint | None = None
     released_on_suspension_events_lifetime: NonNegativeInt
     released_on_suspension_payload_bytes_lifetime: NonNegativeInt
     released_on_settlement_events: NonNegativeInt
@@ -1040,6 +1080,12 @@ class PhysicalOperationSettlementFact(FrozenFactBase):
             )
         ):
             raise ValueError("active settlement cannot report suspension release")
+        if (self.owner_kind == PhysicalOperationKind.MODEL_CALL) != (
+            self.model_stream_measurement_fingerprint is not None
+        ):
+            raise ValueError(
+                "only model-call settlement requires model stream measurement"
+            )
         return self
 
 
@@ -1157,7 +1203,7 @@ class PhysicalStoredEnvelopeObservation(FrozenRuntimeStateBase):
 
 _OWN_FINGERPRINTS: tuple[tuple[str, str, str], ...] = (
     ("fixed_batch_event_contract.v1", "event_contract_fingerprint", "fixed-batch-event-contract:v1"),
-    ("transport_fragmented_burst_contract.v1", "contract_fingerprint", "transport-fragmented-burst-contract:v1"),
+    ("transport_segmented_burst_contract.v1", "contract_fingerprint", "transport-segmented-burst-contract:v1"),
     ("tool_delta_burst_contract.v1", "contract_fingerprint", "tool-delta-burst-contract:v1"),
     ("fixed_batch_burst_contract.v1", "contract_fingerprint", "fixed-batch-burst-contract:v1"),
     ("stored_envelope_identity_bounds.v1", "bounds_contract_fingerprint", "stored-envelope-identity-bounds:v1"),
@@ -1246,5 +1292,5 @@ __all__ = [
     "TranscriptDomainPrefixFact",
     "TranscriptDomainSparseReadProofFact",
     "TranscriptSemanticEventContractFact",
-    "TransportFragmentedBurstContractFact",
+    "TransportSegmentedBurstContractFact",
 ]

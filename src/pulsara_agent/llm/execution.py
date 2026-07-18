@@ -8,14 +8,20 @@ already committed events and may detach without cancelling the worker.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Awaitable, Callable, Literal, cast
 from uuid import uuid4
 
 from pulsara_agent.event import AgentEvent, ModelCallEndEvent, ModelCallStartEvent
+from pulsara_agent.llm.coalescing import (
+    ArbiterSignalStamp,
+    ModelStreamInputArbiter,
+)
+from pulsara_agent.primitives.model_call import sha256_fingerprint
 
 if TYPE_CHECKING:
+    from pulsara_agent.llm.coalescing import ModelStreamCoalescingCoordinator
     from pulsara_agent.primitives.model_call import CommittedModelCallResult
 
 
@@ -64,7 +70,13 @@ class ModelStreamLiveSemanticCursor:
     resolved_model_call_id: str
     model_call_start_event_id: str
     start_sequence: int
-    semantic_item_count: int = 0
+    confirmed_source_item_count: int = 0
+    confirmed_source_accumulator: str = field(
+        default_factory=lambda: sha256_fingerprint(
+            "model-stream-sanitized-source:v2", "empty"
+        )
+    )
+    confirmed_durable_event_count: int = 0
     last_semantic_event_id: str | None = None
     terminal_event_id: str | None = None
 
@@ -73,7 +85,9 @@ class ModelStreamLiveSemanticCursor:
         *,
         resolved_model_call_id: str,
         model_call_start_event_id: str,
-        expected_semantic_item_count: int,
+        expected_source_item_count: int,
+        expected_source_accumulator: str,
+        expected_durable_event_count: int,
         expected_previous_semantic_event_id: str | None,
     ) -> None:
         if (
@@ -84,7 +98,9 @@ class ModelStreamLiveSemanticCursor:
         if self.terminal_event_id is not None:
             raise RuntimeError("model stream live semantic cursor is terminal")
         if (
-            self.semantic_item_count != expected_semantic_item_count
+            self.confirmed_source_item_count != expected_source_item_count
+            or self.confirmed_source_accumulator != expected_source_accumulator
+            or self.confirmed_durable_event_count != expected_durable_event_count
             or self.last_semantic_event_id != expected_previous_semantic_event_id
         ):
             raise RuntimeError("model stream live semantic cursor drifted")
@@ -94,8 +110,24 @@ class ModelStreamLiveSemanticCursor:
             raise ValueError("semantic cursor advance requires committed events")
         if self.terminal_event_id is not None:
             raise RuntimeError("terminal model stream cannot advance semantics")
-        self.semantic_item_count += len(events)
-        self.last_semantic_event_id = events[-1].id
+        for event in events:
+            attribution = getattr(event, "model_stream_attribution", None)
+            if attribution is None:
+                raise ValueError("semantic cursor advance requires attribution")
+            span = attribution.source_span
+            if (
+                attribution.durable_semantic_event_index
+                != self.confirmed_durable_event_count
+                or span.first_transport_sequence_index
+                != self.confirmed_source_item_count
+                or span.source_accumulator_before
+                != self.confirmed_source_accumulator
+            ):
+                raise RuntimeError("model stream semantic cursor continuity drifted")
+            self.confirmed_source_item_count += span.source_item_count
+            self.confirmed_source_accumulator = span.source_accumulator_after
+            self.confirmed_durable_event_count += 1
+            self.last_semantic_event_id = event.id
 
     def mark_terminal(self, event: ModelCallEndEvent) -> None:
         if self.terminal_event_id is not None and self.terminal_event_id != event.id:
@@ -224,9 +256,12 @@ class ModelStreamExecutionHandle:
         self._task: asyncio.Task[None] | None = None
         self._activation_gate = asyncio.Event()
         self._cancel_requested = asyncio.Event()
+        self._input_arbiter = ModelStreamInputArbiter()
+        self._coalescing_owner: ModelStreamCoalescingCoordinator | None = None
         self._subscriptions: dict[int, ModelStreamNotificationSubscription] = {}
         self._next_subscription_id = 1
         self._cancel_reason: Literal["user_stop", "host_teardown"] | None = None
+        self._cancel_stamp: ArbiterSignalStamp | None = None
         self._physical_operations: dict[str, asyncio.Future[object]] = {}
         self._live_semantic_cursor: ModelStreamLiveSemanticCursor | None = None
 
@@ -322,8 +357,26 @@ class ModelStreamExecutionHandle:
         self, *, reason: Literal["user_stop", "host_teardown"]
     ) -> None:
         if self._cancel_reason is None:
+            self._cancel_stamp = self._input_arbiter.stamp()
             self._cancel_reason = reason
             self._cancel_requested.set()
+
+    @property
+    def input_arbiter(self) -> ModelStreamInputArbiter:
+        return self._input_arbiter
+
+    def install_coalescing_owner(
+        self,
+        owner: ModelStreamCoalescingCoordinator,
+    ) -> None:
+        if self._coalescing_owner is not None:
+            raise RuntimeError("model stream coalescing owner is already installed")
+        self._coalescing_owner = owner
+
+    @property
+    def coalescing_owned_candidate_count(self) -> int:
+        owner = self._coalescing_owner
+        return owner.owned_candidate_count if owner is not None else 0
 
     async def wait_until_activated(self) -> None:
         await self._activation_gate.wait()
@@ -338,12 +391,15 @@ class ModelStreamExecutionHandle:
 
     async def wait_cancellation_requested(
         self,
-    ) -> Literal["user_stop", "host_teardown"]:
+    ) -> tuple[Literal["user_stop", "host_teardown"], ArbiterSignalStamp]:
         await self._cancel_requested.wait()
         reason = self._cancel_reason
-        if reason is None:  # defensive against an invalid manual Event mutation
+        stamp = self._cancel_stamp
+        if (
+            reason is None or stamp is None
+        ):  # defensive against an invalid manual Event mutation
             raise RuntimeError("model stream cancellation signal lost its reason")
-        return reason
+        return reason, stamp
 
     def register_physical_operation(
         self, operation: asyncio.Future[object]

@@ -36,9 +36,12 @@ from pulsara_agent.primitives.authority_materialization import (
     TranscriptDomainPrefixFact,
     TranscriptDomainSparseReadProofFact,
     TranscriptSemanticEventContractFact,
-    TransportFragmentedBurstContractFact,
+    TransportSegmentedBurstContractFact,
 )
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.model_call import (
+    DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT,
+)
 
 
 _CANONICAL_EVENT_SERIALIZATION_CONTRACT_FINGERPRINT = context_fingerprint(
@@ -403,10 +406,7 @@ class AuthorityMaterializationContractDoctor:
                 raise ValueError("physical burst event quote is infeasible")
             if contract.max_total_reserved_payload_bytes > byte_limit:
                 raise ValueError("physical burst byte quote is infeasible")
-            if isinstance(
-                contract,
-                (TransportFragmentedBurstContractFact, ToolDeltaBurstContractFact),
-            ):
+            if isinstance(contract, ToolDeltaBurstContractFact):
                 minimum_structural_events = (
                     bundle.charge_contract.reservation_bookkeeping_charge_events
                     + contract.max_commit_batches
@@ -417,7 +417,10 @@ class AuthorityMaterializationContractDoctor:
                 minimum_structural_bytes = (
                     bundle.charge_contract.reservation_bookkeeping_charge_bytes
                     + contract.max_commit_batches
-                    * bundle.charge_contract.charge_applied_bookkeeping_charge_bytes
+                    * bundle.charge_contract.charge_applied_bookkeeping_base_charge_bytes
+                    + contract.max_result_delta_items
+                    * contract.max_durable_events_per_delta_item
+                    * bundle.charge_contract.charge_applied_bookkeeping_per_business_event_charge_bytes
                     + bundle.charge_contract.suspension_bookkeeping_charge_bytes
                     + bundle.charge_contract.settlement_bookkeeping_charge_bytes
                 )
@@ -437,15 +440,53 @@ class AuthorityMaterializationContractDoctor:
                     + bundle.charge_contract.fixed_schema_wrapper_charge_bytes_per_event
                 )
                 wrapper_bound = (
-                    contract.max_canonical_wrapper_payload_bytes_per_source_item
-                    if isinstance(contract, TransportFragmentedBurstContractFact)
-                    else contract.max_canonical_wrapper_payload_bytes_per_delta_item
+                    contract.max_canonical_wrapper_payload_bytes_per_delta_item
                 )
                 if wrapper_bound < wrapper_floor:
                     raise ValueError(
                         "physical burst per-item wrapper quote is underestimated"
                     )
+            if isinstance(contract, TransportSegmentedBurstContractFact):
+                if contract.max_bookkeeping_events_per_commit < (
+                    bundle.charge_contract.charge_applied_bookkeeping_charge_events
+                ):
+                    raise ValueError(
+                        "segmented burst bookkeeping event quote is underestimated"
+                    )
+                if contract.max_bookkeeping_base_payload_bytes_per_commit < (
+                    bundle.charge_contract.charge_applied_bookkeeping_base_charge_bytes
+                ):
+                    raise ValueError(
+                        "segmented burst bookkeeping base quote is underestimated"
+                    )
+                if contract.max_bookkeeping_payload_bytes_per_business_event < (
+                    bundle.charge_contract.charge_applied_bookkeeping_per_business_event_charge_bytes
+                ):
+                    raise ValueError(
+                        "segmented burst bookkeeping per-event quote is underestimated"
+                    )
+                wrapper_floor = (
+                    bundle.charge_contract.fixed_sequence_wrapper_charge_bytes_per_event
+                    + bundle.charge_contract.fixed_schema_wrapper_charge_bytes_per_event
+                )
+                if contract.max_durable_event_wrapper_overhead_bytes < wrapper_floor:
+                    raise ValueError(
+                        "segmented burst durable wrapper quote is underestimated"
+                    )
             if isinstance(contract, FixedBatchBurstContractFact):
+                minimum_structural_bytes = (
+                    bundle.charge_contract.reservation_bookkeeping_charge_bytes
+                    + contract.max_commit_batches
+                    * bundle.charge_contract.charge_applied_bookkeeping_base_charge_bytes
+                    + contract.max_business_events
+                    * bundle.charge_contract.charge_applied_bookkeeping_per_business_event_charge_bytes
+                    + bundle.charge_contract.suspension_bookkeeping_charge_bytes
+                    + bundle.charge_contract.settlement_bookkeeping_charge_bytes
+                )
+                if contract.max_structural_tail_payload_bytes < minimum_structural_bytes:
+                    raise ValueError(
+                        "fixed batch commit quote exceeds structural byte quote"
+                    )
                 self._verify_fixed_batch(contract)
         report_payload = {
             "checked_binding_count": len(bindings),
@@ -505,7 +546,9 @@ def _fixed_event_contract(
 
 def _build_charge_contract() -> PhysicalChargeContractFact:
     bookkeeping_envelope_bound = 256 * 1024
-    charge_applied_envelope_bound = 32 * 1024
+    charge_applied_envelope_bound = 256 * 1024
+    charge_applied_base_charge = 7_680
+    charge_applied_per_business_event_charge = 2_048
     bounds_payload = {
         "schema_version": "stored_envelope_identity_bounds.v1",
         "maximum_ledger_sequence": 9_999_999_999,
@@ -591,8 +634,11 @@ def _build_charge_contract() -> PhysicalChargeContractFact:
         "reservation_bookkeeping_charge_events": 1,
         "reservation_bookkeeping_charge_bytes": bookkeeping_envelope_bound,
         "charge_applied_bookkeeping_charge_events": 1,
-        "charge_applied_bookkeeping_charge_bytes": (
-            charge_applied_envelope_bound
+        "charge_applied_bookkeeping_base_charge_bytes": (
+            charge_applied_base_charge
+        ),
+        "charge_applied_bookkeeping_per_business_event_charge_bytes": (
+            charge_applied_per_business_event_charge
         ),
         "suspension_bookkeeping_charge_events": 1,
         "suspension_bookkeeping_charge_bytes": bookkeeping_envelope_bound,
@@ -666,16 +712,21 @@ def _transport_contract(
     *,
     event_domain_fingerprint: str,
     charge_fingerprint: str,
-) -> TransportFragmentedBurstContractFact:
+) -> TransportSegmentedBurstContractFact:
+    max_source_items = MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL
+    max_durable_events = max_source_items + 1
+    max_commit_batches = 1 + max_durable_events + 1 + 2
+    bookkeeping_base_bytes = 7_680
+    bookkeeping_per_business_event_bytes = 2_048
     payload = {
-        "schema_version": "transport_fragmented_burst_contract.v1",
-        "burst_shape": "transport_fragmented",
+        "schema_version": "transport_segmented_burst_contract.v1",
+        "burst_shape": "transport_segmented",
         "contract_id": "pulsara.model_stream.default",
-        "contract_version": "1",
+        "contract_version": "2",
         "operation_kind": PhysicalOperationKind.MODEL_CALL,
-        "max_commit_batches": 4_096,
-        "max_structural_tail_events": 4_200,
-        "max_structural_tail_payload_bytes": 136 * 1024 * 1024,
+        "max_commit_batches": max_commit_batches,
+        "max_structural_tail_events": 128,
+        "max_structural_tail_payload_bytes": 9 * 1024 * 1024,
         "max_terminal_recovery_events": MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS,
         "max_terminal_recovery_payload_bytes": (
             MAX_MODEL_STREAM_STRUCTURAL_TAIL_PAYLOAD_BYTES
@@ -683,12 +734,18 @@ def _transport_contract(
         "terminal_tail_reserved_events": 128,
         "terminal_tail_reserved_payload_bytes": 9 * 1024 * 1024,
         "max_total_reserved_events": (
-            MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL + 4_232
+            max_durable_events
+            + max_commit_batches
+            + 128
+            + MAX_MODEL_STREAM_STRUCTURAL_TAIL_EVENTS
         ),
         "max_total_reserved_payload_bytes": (
             MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL
-            + MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL * 2_048
-            + 136 * 1024 * 1024
+            + 64 * 1024
+            + max_durable_events * 2_048
+            + max_commit_batches * bookkeeping_base_bytes
+            + max_durable_events * bookkeeping_per_business_event_bytes
+            + 9 * 1024 * 1024
             + MAX_MODEL_STREAM_STRUCTURAL_TAIL_PAYLOAD_BYTES
         ),
         "event_domain_registry_contract_fingerprint": event_domain_fingerprint,
@@ -696,22 +753,52 @@ def _transport_contract(
             _CANONICAL_EVENT_SERIALIZATION_CONTRACT_FINGERPRINT
         ),
         "physical_charge_contract_fingerprint": charge_fingerprint,
-        "fragmentation_mode": "one_event_per_sanitized_source_item",
+        "segmentation_mode": "contiguous_model_delta_segment_v1",
         "max_source_items": MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
-        "max_sanitized_source_payload_bytes": (
+        "max_source_payload_bytes": (
             MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL
         ),
+        "max_single_source_item_canonical_bytes": (
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT
+            .max_single_source_item_canonical_bytes
+        ),
+        "max_segment_source_items": (
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.max_segment_source_items
+        ),
+        "max_segment_content_utf8_bytes": (
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.max_content_utf8_bytes
+        ),
+        "max_segment_canonical_event_bytes": (
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.max_canonical_event_bytes
+        ),
+        "max_durable_event_wrapper_overhead_bytes": 2_048,
+        "max_unconfirmed_age_millis": (
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT
+            .max_unconfirmed_age_millis
+        ),
         "max_durable_events_per_source_item": 1,
-        "max_canonical_wrapper_payload_bytes_per_source_item": 2_048,
+        "max_synthetic_semantic_tail_events": 1,
+        "max_synthetic_semantic_tail_payload_bytes": 64 * 1024,
+        "max_start_commit_batches": 1,
+        "max_terminal_commit_batches": 1,
+        "max_recovery_commit_batches": 2,
+        "max_bookkeeping_events_per_commit": 1,
+        "max_bookkeeping_base_payload_bytes_per_commit": bookkeeping_base_bytes,
+        "max_bookkeeping_payload_bytes_per_business_event": (
+            bookkeeping_per_business_event_bytes
+        ),
+        "segment_policy_contract_fingerprint": (
+            DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.contract_fingerprint
+        ),
         "sanitization_contract_fingerprint": context_fingerprint(
             "provider-semantic-source-sanitization:v1",
             "SanitizingLLMTransport+finite-source-circuit-breaker",
         ),
     }
-    return TransportFragmentedBurstContractFact(
+    return TransportSegmentedBurstContractFact(
         **payload,
         contract_fingerprint=_own_fingerprint(
-            "transport-fragmented-burst-contract:v1", payload
+            "transport-segmented-burst-contract:v1", payload
         ),
     )
 
@@ -727,13 +814,13 @@ def _tool_contract(
         "operation_kind": PhysicalOperationKind.TOOL_CALL,
         "max_commit_batches": 64,
         "max_structural_tail_events": 136,
-        "max_structural_tail_payload_bytes": 4 * 1024 * 1024,
+        "max_structural_tail_payload_bytes": 10 * 1024 * 1024,
         "max_terminal_recovery_events": 8,
         "max_terminal_recovery_payload_bytes": 256 * 1024,
         "terminal_tail_reserved_events": 32,
         "terminal_tail_reserved_payload_bytes": 2 * 1024 * 1024,
         "max_total_reserved_events": 4_240,
-        "max_total_reserved_payload_bytes": 29 * 1024 * 1024,
+        "max_total_reserved_payload_bytes": 36 * 1024 * 1024,
         "event_domain_registry_contract_fingerprint": event_domain_fingerprint,
         "canonical_event_serialization_contract_fingerprint": (
             _CANONICAL_EVENT_SERIALIZATION_CONTRACT_FINGERPRINT
@@ -781,15 +868,22 @@ def _fixed_contract(
         "fixed-batch-matrix:v1",
         tuple(item.event_contract_fingerprint for item in contracts),
     )
+    max_commit_batches = 4
+    structural_tail_bytes = max(
+        2 * 1024 * 1024,
+        3 * 256 * 1024
+        + max_commit_batches * 7_680
+        + max_business_events * 2_048,
+    )
     payload = {
         "schema_version": "fixed_batch_burst_contract.v1",
         "burst_shape": "fixed_batch",
         "contract_id": f"pulsara.fixed.{operation_kind.value}",
         "contract_version": "1",
         "operation_kind": operation_kind,
-        "max_commit_batches": 4,
+        "max_commit_batches": max_commit_batches,
         "max_structural_tail_events": 12,
-        "max_structural_tail_payload_bytes": 512 * 1024,
+        "max_structural_tail_payload_bytes": structural_tail_bytes,
         "max_terminal_recovery_events": 4,
         "max_terminal_recovery_payload_bytes": 256 * 1024,
         "terminal_tail_reserved_events": (
@@ -802,7 +896,7 @@ def _fixed_contract(
         ),
         "max_total_reserved_events": max_business_events + 16,
         "max_total_reserved_payload_bytes": (
-            max_business_bytes + 768 * 1024
+            max_business_bytes + structural_tail_bytes + 256 * 1024
         ),
         "event_domain_registry_contract_fingerprint": event_domain_fingerprint,
         "canonical_event_serialization_contract_fingerprint": (

@@ -1,7 +1,15 @@
 import asyncio
+from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta as make_raw_provider_text_delta,
+)
 
 from pulsara_agent.event import (
     CustomEvent,
@@ -10,21 +18,18 @@ from pulsara_agent.event import (
     ModelCallEndEvent,
     ModelCallStartEvent,
     ModelCallTerminalProjectionCommittedEvent,
+    PhysicalOperationChargeAppliedEvent,
+    PhysicalOperationReservationSettledEvent,
+    ProviderModelStreamErrorEvent,
     ReplyEndEvent,
     ReplyStartEvent,
     RolloutBudgetReservationCreatedEvent,
     RolloutBudgetReservationSettledEvent,
     RunEndEvent,
     RunErrorEvent,
-    TextBlockDeltaEvent,
+    TextBlockSegmentEvent,
     TextBlockEndEvent,
     TextBlockStartEvent,
-    ThinkingBlockDeltaEvent,
-    ThinkingBlockEndEvent,
-    ThinkingBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
 )
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.adapters.mock import MockTransport
@@ -37,9 +42,8 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_CHAT_COMPLETIONS_API,
     OPENAI_RESPONSES_API,
-    provider_error_data,
 )
-from pulsara_agent.llm.adapters.openai.events import AgentEventBuilder
+from pulsara_agent.llm.adapters.openai.events import RawProviderItemBuilder
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     build_responses_payload,
@@ -71,13 +75,19 @@ from pulsara_agent.llm.registry import (
     LLMTransportBindingUntrusted,
     LLMTransportRegistry,
 )
-from pulsara_agent.llm.request import LLMContext, LLMOptions
-from pulsara_agent.llm.runtime import (
-    LLMRuntime,
-    SemanticBatchTargetPolicy,
+from pulsara_agent.llm.raw_provider import (
+    RawProviderBlockEnd,
+    RawProviderBlockStart,
+    RawProviderFailure,
+    RawProviderTextDelta,
+    RawProviderThinkingDelta,
+    RawProviderToolCallDelta,
 )
+from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.runtime import LLMRuntime
 from pulsara_agent.llm.commit import (
     ModelStreamCommitContractError,
+    ModelStreamCommitNotCommitted,
     RuntimeSessionModelStreamEventCommitPort,
 )
 from pulsara_agent.llm.control import RunModelCallControlOwner
@@ -87,18 +97,21 @@ from pulsara_agent.event_log import (
     FrozenEventWriteCandidate,
     decode_event_write_candidate,
 )
+from pulsara_agent.event_log.serialization import freeze_event_write_candidate
 from pulsara_agent.llm.lifecycle import prepare_model_lifecycle_start_bundle
 from pulsara_agent.llm.sanitizing_transport import SanitizingLLMTransport
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.materialize import (
     materialize_committed_model_call_result_from_terminal_projection,
 )
+from pulsara_agent.llm.terminal_projection import persist_model_terminal_projection
 from pulsara_agent.primitives.model_call import (
     ModelCallControlDisposition,
     ModelCallPurpose,
     RunTerminationIntentAttributionFact,
     sha256_fingerprint,
 )
+from pulsara_agent.primitives.authority_materialization import PhysicalOperationKind
 from pulsara_agent.primitives.run_lifecycle import (
     RunStopReason,
     RunTerminalizationKind,
@@ -109,6 +122,63 @@ from pulsara_agent.runtime.state import LoopState
 EVENT_CONTEXT = EventContext(
     run_id="run:test", turn_id="turn:test", reply_id="reply:test"
 )
+
+
+def test_terminal_projection_cancel_after_physical_full_adopts_success() -> None:
+    async def scenario() -> None:
+        payload = b"confirmed artifact"
+        reference = SimpleNamespace(
+            document_artifact_id="artifact:model-terminal:cancel-after-full",
+            document_sha256=f"sha256:{sha256(payload).hexdigest()}",
+            document_byte_count=len(payload),
+            document_fact_fingerprint="sha256:" + "1" * 64,
+            document_contract_fingerprint="sha256:" + "2" * 64,
+        )
+        confirmation = SimpleNamespace(
+            result=SimpleNamespace(
+                id=reference.document_artifact_id,
+                digest=reference.document_sha256,
+                size_bytes=reference.document_byte_count,
+            )
+        )
+
+        class CancelAfterFullOperation:
+            calls = 0
+            physical_task_cancelled = False
+
+            async def wait_physical_completion(self):
+                self.calls += 1
+                if self.calls == 1:
+                    task = asyncio.current_task()
+                    assert task is not None
+                    task.cancel()
+                    await asyncio.sleep(0)
+                return confirmation
+
+        operation = CancelAfterFullOperation()
+
+        class IoService:
+            async def start_owned(self, **_kwargs):
+                return operation
+
+        runtime_session = SimpleNamespace(
+            context_input_io_service=IoService(),
+            runtime_session_id="runtime:cancel-after-full",
+            archive=SimpleNamespace(),
+        )
+        prepared = SimpleNamespace(
+            projection_reference=reference,
+            canonical_document_bytes=payload,
+        )
+
+        await persist_model_terminal_projection(
+            runtime_session,
+            prepared,
+            run_id="run:cancel-after-full",
+        )
+        assert operation.calls == 2
+
+    asyncio.run(scenario())
 
 
 async def no_retry_sleep(_delay: float) -> None:
@@ -326,9 +396,9 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
     assert events[2].context_id == "context:test"
     assert events[2].model_call_index == 3
     assert isinstance(events[3], TextBlockStartEvent)
-    assert isinstance(events[4], TextBlockDeltaEvent)
+    assert isinstance(events[4], TextBlockSegmentEvent)
     assert events[4].block_id == events[3].block_id
-    assert events[4].delta == "hello"
+    assert events[4].text == "hello"
     assert isinstance(events[5], TextBlockEndEvent)
     assert isinstance(events[6], ModelCallTerminalProjectionCommittedEvent)
     assert isinstance(events[7], ModelCallEndEvent)
@@ -341,6 +411,109 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
     assert isinstance(events[9], ReplyEndEvent)
 
 
+def test_model_stream_actual_measurement_joins_projection_and_settlement() -> None:
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="measured output"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        target = runtime.resolve_target(role=ModelRole.FLASH, requested_options=None)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.MEMORY_REFLECTION,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("measure"),),
+                context_id="context:measurement",
+                model_call_index=None,
+            ),
+        )
+        session = in_memory_runtime_session(
+            Path.cwd(),
+            default_event_metadata={
+                "execution_owner": {
+                    "runtime_session_id": "runtime:measurement-overlay",
+                    "generation": 7,
+                }
+            },
+        )
+        session.materialization_coordinator.bootstrap_genesis(
+            context=EVENT_CONTEXT,
+            business_events=(
+                CustomEvent(
+                    id="event:model-measurement-genesis",
+                    **EVENT_CONTEXT.event_fields(),
+                    name="model-measurement-genesis",
+                ),
+            ),
+            genesis_profile="host_first_run",
+            genesis_burst_contract=(
+                session.authority_materialization_contracts.burst_registry
+                .unique_binding_for_operation(PhysicalOperationKind.LEDGER_GENESIS)
+                .contract
+            ),
+            register_transcript_consumer=True,
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+        )
+        completion = await handle.wait_completed()
+        end = next(
+            event
+            for event in completion.committed_events
+            if isinstance(event, ModelCallEndEvent)
+        )
+        document = session.transcript_projection_document_registry.resolve(
+            end.terminal_projection.projection_reference
+        )
+        measurement = document.source_fact.stream_settlement_measurement
+        settlements = tuple(
+            event
+            for event in session.event_log.iter()
+            if isinstance(event, PhysicalOperationReservationSettledEvent)
+            and event.settlement.owner_id == call.fact.resolved_model_call_id
+        )
+        charges = tuple(
+            event
+            for event in session.event_log.iter()
+            if isinstance(event, PhysicalOperationChargeAppliedEvent)
+            and event.charge.owner_id == call.fact.resolved_model_call_id
+        )
+
+        assert measurement.physical_accounting_mode == "accounted"
+        assert measurement.adapter_source_item_count == 3
+        assert measurement.synthetic_source_item_count == 0
+        assert measurement.segment_event_count == 1
+        assert measurement.singleton_event_count == 2
+        assert measurement.durable_semantic_event_count == 3
+        assert measurement.actual_semantic_commit_batch_count == 1
+        assert len(measurement.semantic_commit_batches) == 1
+        assert len(charges) == 1
+        assert (
+            measurement.durable_candidate_payload_bytes
+            == charges[0].charge.business_candidate_charge_payload_bytes
+        )
+        assert len(settlements) == 1
+        assert (
+            settlements[0].settlement.model_stream_measurement_fingerprint
+            == measurement.measurement_fingerprint
+        )
+
+    asyncio.run(scenario())
+
+
 def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -> None:
     class BurstTransport:
         api = "mock"
@@ -350,14 +523,14 @@ def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -
         async def stream(self, *, call, context, event_context):
             del call, context
             block_id = "text:burst"
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id=block_id
             )
             for _ in range(40):
-                yield TextBlockDeltaEvent(
+                yield make_raw_provider_text_delta(
                     **event_context.event_fields(), block_id=block_id, delta="x"
                 )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id=block_id
             )
 
@@ -413,126 +586,9 @@ def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -
         completion = await handle.wait_completed()
 
         assert completion.terminal_outcome == "completed"
-        assert sum(port.semantic_batch_sizes) == 42
-        assert len(port.semantic_batch_sizes) < 10
-        assert max(port.semantic_batch_sizes) > 1
+        assert port.semantic_batch_sizes == [3]
 
     asyncio.run(scenario())
-
-
-def test_runtime_accepts_an_explicit_semantic_batch_policy(tmp_path) -> None:
-    class BurstTransport:
-        api = "mock"
-        binding_id = "test.explicit-batch-policy"
-        contract_version = "v1"
-
-        async def stream(self, *, call, context, event_context):
-            del call, context
-            block_id = "text:explicit-policy"
-            yield TextBlockStartEvent(
-                **event_context.event_fields(), block_id=block_id
-            )
-            for _ in range(10):
-                yield TextBlockDeltaEvent(
-                    **event_context.event_fields(),
-                    block_id=block_id,
-                    delta="x",
-                )
-            yield TextBlockEndEvent(
-                **event_context.event_fields(), block_id=block_id
-            )
-
-    class RecordingCommitPort(RuntimeSessionModelStreamEventCommitPort):
-        def __init__(self, *, runtime_session):
-            super().__init__(runtime_session=runtime_session, state=None)
-            self.semantic_batch_sizes: list[int] = []
-
-        async def commit_semantic(self, candidates, *, guard, live_cursor):
-            self.semantic_batch_sizes.append(len(candidates))
-            return await super().commit_semantic(
-                candidates,
-                guard=guard,
-                live_cursor=live_cursor,
-            )
-
-    async def scenario() -> None:
-        config = test_llm_config(
-            api_key="sk-test",
-            base_url="https://example.test/v1",
-            pro_model="pro",
-            flash_model="flash",
-            api="mock",
-        )
-        registry = LLMTransportRegistry()
-        registry.register(BurstTransport())
-        runtime = LLMRuntime(
-            config=config,
-            registry=registry,
-            semantic_batch_policy=SemanticBatchTargetPolicy(
-                max_events=4,
-                flush_structural_events=False,
-            ),
-        )
-        session = in_memory_runtime_session(tmp_path)
-        port = RecordingCommitPort(runtime_session=session)
-        target = runtime.resolve_target(role=ModelRole.FLASH)
-        call = runtime.resolve_call(
-            target=target,
-            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-        )
-        context = bind_test_context(
-            call,
-            test_llm_context(
-                messages=(LLMMessage.user("Say hi"),),
-                context_id="context:explicit-semantic-batch",
-                model_call_index=1,
-            ),
-        )
-        handle = _start_test_stream(
-            runtime,
-            call=call,
-            context=context,
-            event_context=EVENT_CONTEXT,
-            runtime_session=session,
-            run_execution_activation=make_test_run_execution_activation(),
-            commit_port=port,
-        )
-
-        completion = await handle.wait_completed()
-
-        assert completion.terminal_outcome == "completed"
-        assert port.semantic_batch_sizes == [4, 4, 4]
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    "policy",
-    [
-        SemanticBatchTargetPolicy(max_events=17),
-        SemanticBatchTargetPolicy(max_chars=4_097),
-        SemanticBatchTargetPolicy(max_age_seconds=0.026),
-    ],
-)
-def test_runtime_rejects_semantic_batch_targets_above_hard_limits(
-    policy,
-) -> None:
-    config = test_llm_config(
-        api_key="sk-test",
-        base_url="https://example.test/v1",
-        pro_model="pro",
-        flash_model="flash",
-        api="mock",
-    )
-    registry = LLMTransportRegistry()
-    registry.register(MockTransport("ok"))
-
-    with pytest.raises(ValueError, match="semantic batch target exceeds"):
-        LLMRuntime(
-            config=config,
-            registry=registry,
-            semantic_batch_policy=policy,
-        )
 
 
 def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> None:
@@ -548,14 +604,14 @@ def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> 
             async def stream(self, *, call, context, event_context):
                 del call, context
                 block_id = "text:stall"
-                yield TextBlockStartEvent(
+                yield RawProviderTextBlockStart(
                     **event_context.event_fields(), block_id=block_id
                 )
-                yield TextBlockDeltaEvent(
+                yield make_raw_provider_text_delta(
                     **event_context.event_fields(), block_id=block_id, delta="x"
                 )
                 await release.wait()
-                yield TextBlockEndEvent(
+                yield RawProviderTextBlockEnd(
                     **event_context.event_fields(), block_id=block_id
                 )
 
@@ -570,7 +626,7 @@ def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> 
                     guard=guard,
                     live_cursor=live_cursor,
                 )
-                if any(isinstance(event, TextBlockDeltaEvent) for event in decoded):
+                if any(isinstance(event, TextBlockSegmentEvent) for event in decoded):
                     delta_committed.set()
                 return result
 
@@ -610,7 +666,7 @@ def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> 
                 state=None,
             ),
         )
-        await asyncio.wait_for(delta_committed.wait(), timeout=0.5)
+        await asyncio.wait_for(delta_committed.wait(), timeout=2)
         assert handle.completion.done() is False
         release.set()
         completion = await asyncio.wait_for(handle.wait_completed(), timeout=1)
@@ -1179,20 +1235,31 @@ def test_provider_error_terminal_waits_for_inner_physical_drain(tmp_path) -> Non
 
         class FailingIterator:
             def __init__(self) -> None:
-                self._delivered = False
+                self._items = iter(
+                    (
+                        RawProviderBlockStart(
+                            block_kind="text",
+                            block_id="text:provider-error",
+                        ),
+                        RawProviderTextDelta(
+                            block_id="text:provider-error",
+                            delta="partial",
+                        ),
+                        RawProviderFailure(
+                            message="provider unavailable",
+                            code_hint="provider_failed",
+                        ),
+                    )
+                )
 
             def __aiter__(self):
                 return self
 
             async def __anext__(self):
-                if self._delivered:
+                try:
+                    return next(self._items)
+                except StopIteration:
                     raise StopAsyncIteration
-                self._delivered = True
-                return RunErrorEvent(
-                    **EVENT_CONTEXT.event_fields(),
-                    code="provider_failed",
-                    message="provider unavailable",
-                )
 
             async def aclose(self) -> None:
                 close_started.set()
@@ -1248,11 +1315,18 @@ def test_provider_error_terminal_waits_for_inner_physical_drain(tmp_path) -> Non
         completion = await handle.wait_completed()
 
         assert completion.terminal_outcome == "provider_error"
-        assert any(
-            isinstance(event, ModelCallEndEvent)
-            and event.outcome == "provider_error"
+        end = next(
+            event
             for event in session.event_log.iter()
+            if isinstance(event, ModelCallEndEvent)
         )
+        assert end.outcome == "provider_error"
+        document = session.transcript_projection_document_registry.resolve(
+            end.terminal_projection.projection_reference
+        )
+        text_item = document.payload.items[0].semantic_identity
+        assert text_item.block_kind == "text"
+        assert text_item.completion_status == "interrupted"
 
     asyncio.run(scenario())
 
@@ -1274,9 +1348,8 @@ def test_physical_completion_blocked_untrusted_preserves_owner_and_forbids_termi
                 if self._delivered:
                     raise StopAsyncIteration
                 self._delivered = True
-                return RunErrorEvent(
-                    **EVENT_CONTEXT.event_fields(),
-                    code="provider_failed",
+                return RawProviderFailure(
+                    code_hint="provider_failed",
                     message="provider unavailable",
                 )
 
@@ -1455,9 +1528,9 @@ def test_projection_authority_not_raw_semantic_stream_controls_completed_result(
         events = tuple(session.event_log.iter())
         drifted: list = []
         for event in events:
-            if isinstance(event, TextBlockDeltaEvent):
+            if isinstance(event, TextBlockSegmentEvent):
                 drifted.append(
-                    TextBlockDeltaEvent.model_validate(
+                    TextBlockSegmentEvent.model_validate(
                         {**event.model_dump(mode="json"), "delta": "RAW-DRIFT"}
                     )
                 )
@@ -1657,6 +1730,79 @@ def test_control_disposition_cancel_after_full_adopts_session_winner(
         assert winner is not None and winner.accepted_permit is not None
         assert await owner.permit_is_active(winner.accepted_permit)
         assert session.transcript_projection_state_store.snapshot().checkpointable
+
+    asyncio.run(scenario())
+
+
+def test_model_commit_port_resolves_cancelled_writer_physical_outcome(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.runtime.event_write_service import (
+        PendingRuntimeEventWriteError,
+        RuntimeEventWriteCancelled,
+    )
+
+    async def scenario() -> None:
+        session = in_memory_runtime_session(tmp_path)
+        port = RuntimeSessionModelStreamEventCommitPort(
+            runtime_session=session,
+            state=None,
+        )
+
+        async def cancelled_none(*_args, **_kwargs):
+            raise RuntimeEventWriteCancelled(
+                operation_result=None,
+                operation_error=PendingRuntimeEventWriteError(
+                    "cancelled before physical start"
+                ),
+                deadline_monotonic=1.0,
+            )
+
+        monkeypatch.setattr(
+            session.event_write_service,
+            "execute",
+            cancelled_none,
+        )
+        with pytest.raises(ModelStreamCommitNotCommitted):
+            await port._execute_owned_commit(lambda: None)  # noqa: SLF001
+
+        physical_error = RuntimeError("physical writer failed")
+
+        async def cancelled_error(*_args, **_kwargs):
+            raise RuntimeEventWriteCancelled(
+                operation_result=None,
+                operation_error=physical_error,
+                deadline_monotonic=1.0,
+            )
+
+        monkeypatch.setattr(
+            session.event_write_service,
+            "execute",
+            cancelled_error,
+        )
+        with pytest.raises(RuntimeError, match="physical writer failed") as raised:
+            await port._execute_owned_commit(lambda: None)  # noqa: SLF001
+        assert raised.value is physical_error
+
+        async def cancelled_unknown(*_args, **_kwargs):
+            raise RuntimeEventWriteCancelled(
+                operation_result=None,
+                operation_error=None,
+                deadline_monotonic=1.0,
+            )
+
+        monkeypatch.setattr(
+            session.event_write_service,
+            "execute",
+            cancelled_unknown,
+        )
+        with pytest.raises(
+            ModelStreamCommitContractError,
+            match="lost its physical outcome",
+        ):
+            await port._execute_owned_commit(lambda: None)  # noqa: SLF001
+        assert session.reconciliation_required
 
     asyncio.run(scenario())
 
@@ -2039,8 +2185,6 @@ def test_model_terminal_precommit_failure_retries_same_provider_outcome(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pulsara_agent.runtime.session import EventCommitError
-
     async def scenario() -> None:
         config = test_llm_config(
             api_key="sk-test",
@@ -2063,7 +2207,7 @@ def test_model_terminal_precommit_failure_retries_same_provider_outcome(
                 isinstance(event, ModelCallEndEvent) for event in events
             ):
                 failed_once = True
-                raise EventCommitError("synthetic terminal pre-commit failure")
+                raise RuntimeError("synthetic terminal pre-commit failure")
             return original_write(self, events, **kwargs)
 
         monkeypatch.setattr(
@@ -2103,6 +2247,152 @@ def test_model_terminal_precommit_failure_retries_same_provider_outcome(
         )
         assert len(ends) == 1
         assert ends[0].outcome == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_model_terminal_projection_write_retries_same_provider_outcome(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="provider completed"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        archive_type = type(session.archive)
+        original_put = archive_type.put_text_if_absent_or_confirm_identical
+        failed_once = False
+
+        def fail_before_projection_write(self, *args, **kwargs):
+            nonlocal failed_once
+            if not failed_once and str(kwargs.get("media_type", "")).startswith(
+                "application/vnd.pulsara.terminal-projection"
+            ):
+                failed_once = True
+                raise RuntimeError("synthetic projection write pre-commit failure")
+            return original_put(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            archive_type,
+            "put_text_if_absent_or_confirm_identical",
+            fail_before_projection_write,
+        )
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:stable-projection-retry",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+
+        completion = await handle.wait_completed()
+
+        assert failed_once is True
+        assert completion.terminal_outcome == "completed"
+        ends = tuple(
+            event
+            for event in session.event_log.iter()
+            if isinstance(event, ModelCallEndEvent)
+        )
+        assert len(ends) == 1
+        assert ends[0].outcome == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_model_semantic_precommit_failure_retries_same_candidate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        config = test_llm_config(
+            api_key="sk-test",
+            base_url="https://example.test/v1",
+            pro_model="pro",
+            flash_model="flash",
+            api="mock",
+        )
+        registry = LLMTransportRegistry()
+        registry.register(MockTransport(text="provider completed"))
+        runtime = LLMRuntime(config=config, registry=registry)
+        session = in_memory_runtime_session(tmp_path)
+        session_type = type(session)
+        original_write = session_type.write_events_from_thread
+        failed_candidate_payloads: tuple[bytes, ...] | None = None
+
+        def fail_before_semantic_commit(self, events, **kwargs):
+            nonlocal failed_candidate_payloads
+            is_semantic = bool(events) and all(
+                getattr(event, "model_stream_attribution", None) is not None
+                for event in events
+            )
+            payloads = tuple(
+                freeze_event_write_candidate(event).canonical_payload_bytes
+                for event in events
+            )
+            if is_semantic and failed_candidate_payloads is None:
+                failed_candidate_payloads = payloads
+                raise RuntimeError("synthetic semantic pre-commit failure")
+            if is_semantic:
+                assert payloads == failed_candidate_payloads
+            return original_write(self, events, **kwargs)
+
+        monkeypatch.setattr(
+            session_type,
+            "write_events_from_thread",
+            fail_before_semantic_commit,
+        )
+        target = runtime.resolve_target(role=ModelRole.FLASH)
+        call = runtime.resolve_call(
+            target=target,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+        )
+        context = bind_test_context(
+            call,
+            test_llm_context(
+                messages=(LLMMessage.user("Say hi"),),
+                context_id="context:stable-semantic-retry",
+                model_call_index=1,
+            ),
+        )
+        handle = _start_test_stream(
+            runtime,
+            call=call,
+            context=context,
+            event_context=EVENT_CONTEXT,
+            runtime_session=session,
+            run_execution_activation=make_test_run_execution_activation(),
+        )
+        completion = await handle.wait_completed()
+
+        assert failed_candidate_payloads is not None
+        assert completion.terminal_outcome == "completed"
+        assert sum(
+            isinstance(event, ModelCallEndEvent)
+            for event in session.event_log.iter()
+        ) == 1
 
     asyncio.run(scenario())
 
@@ -2631,6 +2921,24 @@ def test_openai_responses_events_translate_to_agent_events() -> None:
         {"type": "response.output_text.delta", "delta": "hello"},
         builder=builder,
     )
+    text_done_events = translate_responses_event(
+        {"type": "response.output_text.done", "text": "hello"},
+        builder=builder,
+    )
+    thinking_events = translate_responses_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "think",
+        },
+        builder=builder,
+    )
+    thinking_done_events = translate_responses_event(
+        {
+            "type": "response.reasoning_summary_text.done",
+            "text": "think",
+        },
+        builder=builder,
+    )
     start_events = translate_responses_event(
         {
             "type": "response.output_item.added",
@@ -2646,7 +2954,7 @@ def test_openai_responses_events_translate_to_agent_events() -> None:
         {
             "type": "response.function_call_arguments.delta",
             "item_id": "fc_1",
-            "delta": '{"q"',
+            "delta": '{"q": "json-ld"}',
         },
         builder=builder,
     )
@@ -2663,16 +2971,205 @@ def test_openai_responses_events_translate_to_agent_events() -> None:
         builder=builder,
     )
 
-    assert isinstance(text_events[0], TextBlockStartEvent)
-    assert isinstance(text_events[1], TextBlockDeltaEvent)
-    assert isinstance(start_events[0], ToolCallStartEvent)
+    assert isinstance(text_events[0], RawProviderBlockStart)
+    assert isinstance(text_events[1], RawProviderTextDelta)
+    assert len(text_done_events) == 1
+    assert isinstance(text_done_events[0], RawProviderBlockEnd)
+    assert text_done_events[0].block_kind == "text"
+    assert isinstance(thinking_events[0], RawProviderBlockStart)
+    assert isinstance(thinking_events[1], RawProviderThinkingDelta)
+    assert len(thinking_done_events) == 1
+    assert isinstance(thinking_done_events[0], RawProviderBlockEnd)
+    assert thinking_done_events[0].block_kind == "thinking"
+    assert isinstance(start_events[0], RawProviderBlockStart)
     assert len(args_events) == 1
-    assert isinstance(args_events[0], ToolCallDeltaEvent)
+    assert isinstance(args_events[0], RawProviderToolCallDelta)
     assert args_events[0].tool_call_id == "fc_1"
-    assert args_events[0].delta == '{"q"'
+    assert args_events[0].delta == '{"q": "json-ld"}'
     assert len(done_events) == 1
-    assert isinstance(done_events[0], ToolCallEndEvent)
-    assert done_events[0].tool_call_id == "fc_1"
+    assert isinstance(done_events[0], RawProviderBlockEnd)
+    assert done_events[0].block_id == "fc_1"
+
+
+def test_openai_responses_rejects_arguments_before_named_tool_start() -> None:
+    builder = transport_builder_for_test()
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="arguments arrived before a named tool-call start",
+    ):
+        translate_responses_event(
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "unknown-item",
+                "delta": "{}",
+            },
+            builder=builder,
+        )
+
+
+def test_openai_responses_rejects_missing_tool_call_identity() -> None:
+    builder = transport_builder_for_test()
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="missing a stable identity",
+    ) as exc_info:
+        translate_responses_event(
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "name": "lookup"},
+            },
+            builder=builder,
+        )
+
+    assert exc_info.value.reason_code == "transport_tool_call_identity_missing"
+
+
+def test_openai_responses_done_only_content_is_preserved_losslessly() -> None:
+    builder = transport_builder_for_test()
+
+    events = translate_responses_event(
+        {"type": "response.output_text.done", "text": "complete"},
+        builder=builder,
+    )
+
+    assert len(events) == 3
+    assert isinstance(events[0], RawProviderBlockStart)
+    assert isinstance(events[1], RawProviderTextDelta)
+    assert events[1].delta == "complete"
+    assert isinstance(events[2], RawProviderBlockEnd)
+
+
+def test_openai_responses_done_payload_mismatch_fails_closed() -> None:
+    builder = transport_builder_for_test()
+    translate_responses_event(
+        {"type": "response.output_text.delta", "delta": "prefix"},
+        builder=builder,
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="text done payload differs",
+    ):
+        translate_responses_event(
+            {"type": "response.output_text.done", "text": "different"},
+            builder=builder,
+        )
+
+
+def test_openai_responses_tool_arguments_done_mismatch_fails_closed() -> None:
+    builder = transport_builder_for_test()
+    translate_responses_event(
+        {
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "id": "fc_1", "name": "lookup"},
+        },
+        builder=builder,
+    )
+    translate_responses_event(
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "delta": '{"q":"prefix"}',
+        },
+        builder=builder,
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="final arguments differ",
+    ):
+        translate_responses_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "name": "lookup",
+                    "arguments": '{"q":"different"}',
+                },
+            },
+            builder=builder,
+        )
+
+
+def test_openai_responses_done_tool_identity_drift_fails_closed() -> None:
+    builder = transport_builder_for_test()
+    translate_responses_event(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_item_1",
+                "call_id": "call_1",
+                "name": "lookup",
+            },
+        },
+        builder=builder,
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="changed its frozen tool-call identity",
+    ):
+        translate_responses_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "call_id": "call_2",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            },
+            builder=builder,
+        )
+
+
+def test_openai_responses_done_tool_name_drift_fails_closed() -> None:
+    builder = transport_builder_for_test()
+    translate_responses_event(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_item_1",
+                "call_id": "call_1",
+                "name": "lookup",
+            },
+        },
+        builder=builder,
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="changed the frozen tool-call name",
+    ):
+        translate_responses_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "call_id": "call_1",
+                    "name": "search",
+                    "arguments": "{}",
+                },
+            },
+            builder=builder,
+        )
+
+
+def test_openai_raw_builder_closes_parallel_tools_in_start_order() -> None:
+    builder = transport_builder_for_test()
+    builder.tool_call_start(tool_call_id="call_b", tool_call_name="second")
+    builder.tool_call_start(tool_call_id="call_a", tool_call_name="first")
+
+    events = builder.close_active_blocks()
+
+    assert [event.block_id for event in events] == ["call_b", "call_a"]
 
 
 def test_openai_responses_transport_can_stream_mock_raw_events() -> None:
@@ -2716,15 +3213,16 @@ def test_openai_responses_transport_can_stream_mock_raw_events() -> None:
 
     assert not any(isinstance(event, ModelCallStartEvent) for event in events)
     assert any(
-        isinstance(event, TextBlockDeltaEvent) and event.delta == "hi"
+        isinstance(event, RawProviderTextDelta) and event.delta == "hi"
         for event in events
     )
     assert any(
-        isinstance(event, ToolCallStartEvent) and event.tool_call_name == "lookup"
+        isinstance(event, RawProviderBlockStart) and event.tool_call_name == "lookup"
         for event in events
     )
     assert any(
-        isinstance(event, ToolCallDeltaEvent) and event.delta == "{}"
+        isinstance(event, RawProviderToolCallDelta)
+        and event.delta == "{}"
         for event in events
     )
     assert not any(isinstance(event, ModelCallEndEvent) for event in events)
@@ -2750,15 +3248,15 @@ def test_non_streaming_response_synthesizes_same_event_shape() -> None:
         builder=builder,
     )
 
-    assert isinstance(events[0], ThinkingBlockStartEvent)
-    assert isinstance(events[1], ThinkingBlockDeltaEvent)
-    assert isinstance(events[2], TextBlockStartEvent)
-    assert isinstance(events[3], TextBlockDeltaEvent)
-    assert isinstance(events[4], ToolCallStartEvent)
-    assert isinstance(events[5], ToolCallDeltaEvent)
-    assert isinstance(events[6], ToolCallEndEvent)
-    assert any(isinstance(event, TextBlockEndEvent) for event in events)
-    assert any(isinstance(event, ThinkingBlockEndEvent) for event in events)
+    assert isinstance(events[0], RawProviderBlockStart)
+    assert isinstance(events[1], RawProviderThinkingDelta)
+    assert isinstance(events[2], RawProviderBlockStart)
+    assert isinstance(events[3], RawProviderTextDelta)
+    assert isinstance(events[4], RawProviderBlockStart)
+    assert isinstance(events[5], RawProviderToolCallDelta)
+    assert isinstance(events[6], RawProviderBlockEnd)
+    assert any(isinstance(event, RawProviderBlockEnd) for event in events)
+    assert any(isinstance(event, RawProviderBlockEnd) for event in events)
     assert isinstance(events[-1], TransportUsageReport)
     assert events[-1].usage is not None
     assert events[-1].usage.input_tokens == 3
@@ -2942,12 +3440,12 @@ def test_openai_responses_tool_calls_prefer_call_id_over_item_id() -> None:
         builder=builder,
     )
 
-    start = next(event for event in events if isinstance(event, ToolCallStartEvent))
-    delta = next(event for event in events if isinstance(event, ToolCallDeltaEvent))
-    end = next(event for event in events if isinstance(event, ToolCallEndEvent))
-    assert start.tool_call_id == "call_responses_1"
+    start = next(event for event in events if isinstance(event, RawProviderBlockStart))
+    delta = next(event for event in events if isinstance(event, RawProviderToolCallDelta))
+    end = next(event for event in events if isinstance(event, RawProviderBlockEnd))
+    assert start.block_id == "call_responses_1"
     assert delta.tool_call_id == "call_responses_1"
-    assert end.tool_call_id == "call_responses_1"
+    assert end.block_id == "call_responses_1"
 
 
 def test_openai_responses_streaming_arguments_map_item_id_to_call_id() -> None:
@@ -2993,12 +3491,52 @@ def test_openai_responses_streaming_arguments_map_item_id_to_call_id() -> None:
         )
     )
 
-    assert isinstance(events[0], ToolCallStartEvent)
-    assert isinstance(events[1], ToolCallDeltaEvent)
-    assert isinstance(events[2], ToolCallEndEvent)
-    assert events[0].tool_call_id == "call_responses_1"
+    assert isinstance(events[0], RawProviderBlockStart)
+    assert isinstance(events[1], RawProviderToolCallDelta)
+    assert isinstance(events[2], RawProviderBlockEnd)
+    assert events[0].block_id == "call_responses_1"
     assert events[1].tool_call_id == "call_responses_1"
-    assert events[2].tool_call_id == "call_responses_1"
+    assert events[2].block_id == "call_responses_1"
+
+
+def test_openai_responses_done_reuses_frozen_item_to_call_id_mapping() -> None:
+    builder = transport_builder_for_test()
+
+    events = []
+    events.extend(
+        translate_responses_event(
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "call_id": "call_responses_1",
+                    "name": "lookup",
+                },
+            },
+            builder=builder,
+        )
+    )
+    events.extend(
+        translate_responses_event(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "arguments": "{}",
+                },
+            },
+            builder=builder,
+        )
+    )
+
+    assert isinstance(events[0], RawProviderBlockStart)
+    assert isinstance(events[1], RawProviderToolCallDelta)
+    assert isinstance(events[2], RawProviderBlockEnd)
+    assert events[0].block_id == "call_responses_1"
+    assert events[1].tool_call_id == "call_responses_1"
+    assert events[2].block_id == "call_responses_1"
 
 
 def test_openai_responses_error_event_emits_run_error_without_model_end() -> None:
@@ -3010,9 +3548,9 @@ def test_openai_responses_error_event_emits_run_error_without_model_end() -> Non
     )
 
     assert len(events) == 1
-    assert isinstance(events[0], RunErrorEvent)
+    assert isinstance(events[0], RawProviderFailure)
     assert events[0].message == "provider exploded"
-    assert events[0].code == "openai_responses_error"
+    assert events[0].code_hint == "provider_transport_error"
 
 
 def test_openai_responses_transport_uses_sdk_stream() -> None:
@@ -3051,7 +3589,7 @@ def test_openai_responses_transport_uses_sdk_stream() -> None:
 
     assert fake_client.responses.calls[0]["model"] == "flash"
     assert fake_client.responses.calls[0]["stream"] is True
-    assert isinstance(events[0], TextBlockStartEvent)
+    assert isinstance(events[0], RawProviderBlockStart)
     assert events[1].delta == "pong"
     assert isinstance(events[-1], TransportUsageReport)
     assert events[-1].usage is not None
@@ -3083,13 +3621,9 @@ def test_openai_responses_transport_emits_run_error_event() -> None:
     events = asyncio.run(collect())
 
     assert len(events) == 1
-    assert isinstance(events[0], RunErrorEvent)
-    assert events[0].type is EventType.RUN_ERROR
+    assert isinstance(events[0], RawProviderFailure)
     assert events[0].message == "boom"
-    assert events[0].code == "openai_responses_error"
-    assert events[0].metadata["provider_data"]["type"] == "RuntimeError"
-    assert events[0].metadata["provider_data"]["message"] == "boom"
-    assert "RuntimeError" in events[0].metadata["provider_data"]["repr"]
+    assert events[0].code_hint == "provider_transport_error"
 
 
 def test_openai_responses_transport_retries_pre_output_failure() -> None:
@@ -3138,14 +3672,10 @@ def test_openai_responses_transport_retries_pre_output_failure() -> None:
 
     assert len(fake_client.responses.calls) == 2
     assert fake_client.close_count == 0
-    retry_events = [event for event in events if isinstance(event, CustomEvent)]
-    assert len(retry_events) == 1
-    assert retry_events[0].name == "llm.retry"
-    assert retry_events[0].value["attempt"] == 1
-    assert retry_events[0].value["reason"] == "transport_error"
+    assert not any(isinstance(event, CustomEvent) for event in events)
     assert [type(event) for event in events].count(ModelCallStartEvent) == 0
     assert any(
-        isinstance(event, TextBlockDeltaEvent) and event.delta == "pong"
+        isinstance(event, RawProviderTextDelta) and event.delta == "pong"
         for event in events
     )
     assert isinstance(events[-1], TransportUsageReport)
@@ -3295,15 +3825,14 @@ def test_openai_responses_transport_does_not_retry_after_text_delta() -> None:
     assert not any(
         isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
     )
-    error = next(event for event in events if isinstance(event, RunErrorEvent))
-    assert (
-        error.metadata["provider_data"]["retry"]["skipped_reason"]
-        == "semantic_output_started"
-    )
-    assert any(isinstance(event, TextBlockEndEvent) for event in events)
+    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    assert error.code_hint == "provider_transport_error"
+    assert error.retry_summary is not None
+    assert error.retry_summary.skipped_reason == "semantic_output_started"
+    assert not any(isinstance(event, RawProviderBlockEnd) for event in events)
 
 
-def test_openai_responses_transport_retry_exhausted_has_trace() -> None:
+def test_openai_responses_transport_retry_exhausted_has_durable_summary() -> None:
     import asyncio
 
     fake_client = FakeOpenAIClient(
@@ -3337,13 +3866,59 @@ def test_openai_responses_transport_retry_exhausted_has_trace() -> None:
 
     events = asyncio.run(collect())
 
-    retry_events = [event for event in events if isinstance(event, CustomEvent)]
-    assert len(retry_events) == 1
-    error = next(event for event in events if isinstance(event, RunErrorEvent))
-    retry = error.metadata["provider_data"]["retry"]
-    assert retry["exhausted"] is True
-    assert retry["attempts"] == 2
-    assert retry["traces"][0]["error_message"] == "reset one"
+    assert not any(isinstance(event, CustomEvent) for event in events)
+    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    assert error.code_hint == "provider_transport_error"
+    assert error.retry_summary is not None
+    assert error.retry_summary.exhausted is True
+    assert error.retry_summary.retry_count == 1
+    assert error.retry_summary.attempts[0].reason
+
+
+def test_model_stream_retry_summary_is_durable_and_secret_safe() -> None:
+    fake_client = FakeOpenAIClient(
+        responses_script=[
+            ConnectionError("reset sk-secret https://provider.example/one"),
+            ConnectionError("reset sk-secret https://provider.example/two"),
+        ]
+    )
+    transport = OpenAIResponsesTransport(
+        api_key="sk-test",
+        retry_config=LLMRetryConfig(
+            attempts=2, base_delay_seconds=0.01, jitter_ratio=0
+        ),
+        retry_sleep=no_retry_sleep,
+        _client=fake_client,
+    )
+    config = test_llm_config(
+        api_key="sk-test",
+        base_url="https://example.test/v1",
+        pro_model="pro",
+        flash_model="flash",
+    )
+    registry = LLMTransportRegistry()
+    registry.register(transport)
+    runtime = LLMRuntime(config=config, registry=registry)
+
+    events = asyncio.run(
+        collect_events(
+            runtime,
+            ModelRole.FLASH,
+            test_llm_context(messages=(LLMMessage.user("ping"),)),
+        )
+    )
+
+    durable_error = next(
+        event for event in events if isinstance(event, ProviderModelStreamErrorEvent)
+    )
+    summary = durable_error.error.retry_summary
+    assert summary is not None
+    assert summary.exhausted is True
+    assert summary.retry_count == 1
+    serialized = summary.model_dump_json()
+    assert "sk-secret" not in serialized
+    assert "provider.example" not in serialized
+    assert "provider_data" not in serialized
 
 
 def test_model_stream_retry_remains_adapter_private_and_reuses_call() -> None:
@@ -3392,7 +3967,7 @@ def test_model_stream_retry_remains_adapter_private_and_reuses_call() -> None:
         for event in events
     )
     assert any(
-        isinstance(event, TextBlockDeltaEvent) and event.delta == "ok"
+        isinstance(event, TextBlockSegmentEvent) and event.text == "ok"
         for event in events
     )
     starts = [event for event in events if isinstance(event, ModelCallStartEvent)]
@@ -3404,24 +3979,7 @@ def test_model_stream_retry_remains_adapter_private_and_reuses_call() -> None:
     assert len(fake_client.responses.calls) == 2
     assert fake_client.responses.calls[0] == fake_client.responses.calls[1]
     assert isinstance(events[-1], ReplyEndEvent)
-def test_provider_error_data_includes_exception_chain() -> None:
-    try:
-        try:
-            raise OSError("socket reset by peer")
-        except OSError as exc:
-            raise RuntimeError("Connection error.") from exc
-    except RuntimeError as exc:
-        data = provider_error_data(exc)
-
-    assert data["type"] == "RuntimeError"
-    assert data["message"] == "Connection error."
-    assert "RuntimeError" in data["repr"]
-    assert data["causes"][0]["relation"] == "cause"
-    assert data["causes"][0]["type"] == "OSError"
-    assert data["causes"][0]["message"] == "socket reset by peer"
-
-
-def test_openai_chat_completions_transport_error_metadata_includes_cause() -> None:
+def test_openai_chat_completions_transport_error_emits_raw_failure() -> None:
     import asyncio
 
     try:
@@ -3453,14 +4011,9 @@ def test_openai_chat_completions_transport_error_metadata_includes_cause() -> No
         )
 
     events = asyncio.run(collect())
-    provider_data = events[0].metadata["provider_data"]
-
-    assert isinstance(events[0], RunErrorEvent)
+    assert isinstance(events[0], RawProviderFailure)
     assert events[0].message == "Connection error."
-    assert events[0].code == "openai_chat_completions_error"
-    assert provider_data["type"] == "RuntimeError"
-    assert provider_data["causes"][0]["type"] == "OSError"
-    assert provider_data["causes"][0]["message"] == "deepseek stream closed"
+    assert events[0].code_hint == "provider_transport_error"
 
 
 def test_openai_chat_completions_payload_uses_internal_context() -> None:
@@ -3764,21 +4317,23 @@ def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
 
     assert not any(isinstance(event, ModelCallStartEvent) for event in events)
     assert any(
-        isinstance(event, TextBlockDeltaEvent) and event.delta == "hi"
+        isinstance(event, RawProviderTextDelta) and event.delta == "hi"
         for event in events
     )
     assert any(
-        isinstance(event, ToolCallStartEvent) and event.tool_call_id == "call_chat_1"
+        isinstance(event, RawProviderBlockStart) and event.block_id == "call_chat_1"
         for event in events
     )
     assert [
-        event.delta for event in events if isinstance(event, ToolCallDeltaEvent)
+        event.delta
+        for event in events
+        if isinstance(event, RawProviderToolCallDelta)
     ] == [
         '{"q"',
         ':"pulsara"}',
     ]
     assert any(
-        isinstance(event, ToolCallEndEvent) and event.tool_call_id == "call_chat_1"
+        isinstance(event, RawProviderBlockEnd) and event.block_id == "call_chat_1"
         for event in events
     )
     assert isinstance(events[-1], TransportUsageReport)
@@ -3798,11 +4353,11 @@ def test_openai_chat_completions_translates_reasoning_content_delta() -> None:
         accumulator=accumulator,
     )
 
-    assert isinstance(events[0], ThinkingBlockStartEvent)
-    assert isinstance(events[1], ThinkingBlockDeltaEvent)
+    assert isinstance(events[0], RawProviderBlockStart)
+    assert isinstance(events[1], RawProviderThinkingDelta)
     assert events[1].delta == "think"
-    assert isinstance(events[2], TextBlockStartEvent)
-    assert isinstance(events[3], TextBlockDeltaEvent)
+    assert isinstance(events[2], RawProviderBlockStart)
+    assert isinstance(events[3], RawProviderTextDelta)
     assert events[3].delta == "answer"
 
 
@@ -3843,7 +4398,7 @@ def test_openai_chat_completions_transport_uses_sdk_stream() -> None:
 
     assert fake_client.chat.completions.calls[0]["model"] == "flash"
     assert fake_client.chat.completions.calls[0]["stream"] is True
-    assert isinstance(events[0], TextBlockStartEvent)
+    assert isinstance(events[0], RawProviderBlockStart)
     assert events[1].delta == "pong"
     assert isinstance(events[-1], TransportUsageReport)
     assert events[-1].usage is not None
@@ -3900,11 +4455,9 @@ def test_openai_chat_completions_transport_retries_pre_output_failure() -> None:
     assert len(fake_client.chat.completions.calls) == 2
     assert fake_client.close_count == 0
     assert [type(event) for event in events].count(ModelCallStartEvent) == 0
-    retry_events = [event for event in events if isinstance(event, CustomEvent)]
-    assert len(retry_events) == 1
-    assert retry_events[0].value["reason"] == "transport_error"
+    assert not any(isinstance(event, CustomEvent) for event in events)
     assert any(
-        isinstance(event, TextBlockDeltaEvent) and event.delta == "pong"
+        isinstance(event, RawProviderTextDelta) and event.delta == "pong"
         for event in events
     )
     assert isinstance(events[-1], TransportUsageReport)
@@ -4030,18 +4583,18 @@ def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> 
         isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
     )
     assert any(
-        isinstance(event, ToolCallDeltaEvent) and event.delta == '{"q"'
+        isinstance(event, RawProviderToolCallDelta)
+        and event.delta == '{"q"'
         for event in events
     )
-    assert any(isinstance(event, ToolCallEndEvent) for event in events)
-    error = next(event for event in events if isinstance(event, RunErrorEvent))
-    assert (
-        error.metadata["provider_data"]["retry"]["skipped_reason"]
-        == "semantic_output_started"
-    )
+    assert not any(isinstance(event, RawProviderBlockEnd) for event in events)
+    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    assert error.code_hint == "provider_transport_error"
+    assert error.retry_summary is not None
+    assert error.retry_summary.skipped_reason == "semantic_output_started"
 
 
-def test_openai_chat_completions_retry_exhausted_has_trace() -> None:
+def test_openai_chat_completions_retry_exhausted_has_durable_summary() -> None:
     import asyncio
 
     fake_client = FakeOpenAIClient(
@@ -4076,13 +4629,12 @@ def test_openai_chat_completions_retry_exhausted_has_trace() -> None:
 
     events = asyncio.run(collect())
 
-    retry_events = [event for event in events if isinstance(event, CustomEvent)]
-    assert len(retry_events) == 1
-    error = next(event for event in events if isinstance(event, RunErrorEvent))
-    retry = error.metadata["provider_data"]["retry"]
-    assert retry["exhausted"] is True
-    assert retry["attempts"] == 2
-    assert retry["traces"][0]["error_message"] == "reset one"
+    assert not any(isinstance(event, CustomEvent) for event in events)
+    error = next(event for event in events if isinstance(event, RawProviderFailure))
+    assert error.code_hint == "provider_transport_error"
+    assert error.retry_summary is not None
+    assert error.retry_summary.exhausted is True
+    assert error.retry_summary.retry_count == 1
 
 
 def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -> None:
@@ -4124,12 +4676,185 @@ def test_openai_chat_completions_caches_arguments_until_tool_call_id_arrives() -
     )
 
     assert first_events == []
-    assert isinstance(second_events[0], ToolCallStartEvent)
-    assert second_events[0].tool_call_id == "call_late"
-    assert isinstance(second_events[1], ToolCallDeltaEvent)
+    assert isinstance(second_events[0], RawProviderBlockStart)
+    assert second_events[0].block_id == "call_late"
+    assert isinstance(second_events[1], RawProviderToolCallDelta)
     assert second_events[1].tool_call_id == "call_late"
     assert second_events[1].delta == '{"q"'
-    assert isinstance(second_events[2], ToolCallEndEvent)
+    assert isinstance(second_events[2], RawProviderBlockEnd)
+
+
+def test_openai_chat_completions_waits_for_name_after_id_and_arguments() -> None:
+    builder = transport_builder_for_test()
+    accumulator = ChatToolCallAccumulator(builder=builder)
+
+    first_events = translate_chat_completion_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_late_name",
+                                "function": {"arguments": "{}"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        builder=builder,
+        accumulator=accumulator,
+    )
+    second_events = translate_chat_completion_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "function": {"name": "lookup"}}
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+        builder=builder,
+        accumulator=accumulator,
+    )
+
+    assert first_events == []
+    assert isinstance(second_events[0], RawProviderBlockStart)
+    assert second_events[0].block_id == "call_late_name"
+    assert isinstance(second_events[1], RawProviderToolCallDelta)
+    assert second_events[1].delta == "{}"
+    assert isinstance(second_events[2], RawProviderBlockEnd)
+
+
+def test_openai_chat_completions_fails_closed_without_named_tool_start() -> None:
+    builder = transport_builder_for_test()
+    accumulator = ChatToolCallAccumulator(builder=builder)
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="ended before a named tool-call start",
+    ):
+        translate_chat_completion_chunk(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_missing_name",
+                                    "function": {"arguments": "{}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            builder=builder,
+            accumulator=accumulator,
+        )
+
+
+def test_openai_chat_completions_rejects_late_tool_identity_drift() -> None:
+    builder = transport_builder_for_test()
+    accumulator = ChatToolCallAccumulator(builder=builder)
+    translate_chat_completion_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "lookup"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        builder=builder,
+        accumulator=accumulator,
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="changed its frozen call ID",
+    ):
+        translate_chat_completion_chunk(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_2",
+                                    "function": {"arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            builder=builder,
+            accumulator=accumulator,
+        )
+
+
+def test_openai_chat_completions_rejects_late_tool_name_drift() -> None:
+    builder = transport_builder_for_test()
+    accumulator = ChatToolCallAccumulator(builder=builder)
+    translate_chat_completion_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "lookup"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        builder=builder,
+        accumulator=accumulator,
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="changed its frozen tool name",
+    ):
+        translate_chat_completion_chunk(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"name": "search"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            builder=builder,
+            accumulator=accumulator,
+        )
 
 
 def test_default_llm_runtime_registers_openai_responses_transport() -> None:
@@ -4164,9 +4889,7 @@ def transport_builder_for_test(config: LLMConfig | None = None):
         pro_model="pro",
         flash_model="flash",
     )
-    return AgentEventBuilder(
-        event_context=EVENT_CONTEXT,
-    )
+    return RawProviderItemBuilder()
 
 
 class FakeAsyncStream:

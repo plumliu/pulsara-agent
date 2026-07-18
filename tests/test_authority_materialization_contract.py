@@ -9,6 +9,15 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 from tests.support.runtime_session import in_memory_runtime_session
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+)
+
+from tests.support.model_stream import (
+    make_text_block_start_event,
+)
+
 from pulsara_agent.primitives.context import ToolArgumentsParseErrorCode
 from pulsara_agent.event import (
     CustomEvent,
@@ -16,8 +25,6 @@ from pulsara_agent.event import (
     LedgerMaterializationConsumerHorizonAdvancedEvent,
     PlanExitResolvedEvent,
     TerminalProcessCompletedEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
 )
 from pulsara_agent.event_log import (
     InMemoryEventLog,
@@ -27,8 +34,16 @@ from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     canonical_event_payload_bytes,
 )
-from pulsara_agent.llm.drafts import ProviderErrorDraft, ProviderTransportTerminalDraft
+from pulsara_agent.llm.drafts import (
+    ProviderErrorDraft,
+    ProviderTransportTerminalDraft,
+    SanitizedProviderSemanticEnvelope,
+)
 from pulsara_agent.llm.sanitizing_transport import SanitizingProviderTransportExecution
+from pulsara_agent.primitives.model_call import (
+    ModelStreamSettlementMeasurementFact,
+    sha256_fingerprint,
+)
 from pulsara_agent.primitives import (
     DURABLE_FACT_FINGERPRINT_REGISTRY,
     ActivePhysicalReservationStateFact,
@@ -52,7 +67,7 @@ from pulsara_agent.primitives import (
     TranscriptProjectionLiveAssemblyState,
     TranscriptProjectionStableSemanticStateFact,
     TranscriptSemanticEventContractFact,
-    TransportFragmentedBurstContractFact,
+    TransportSegmentedBurstContractFact,
     StableEventIdentityFact,
     TerminalContentSemanticFact,
     TerminalInlineContentFact,
@@ -61,7 +76,6 @@ from pulsara_agent.primitives import (
 )
 from pulsara_agent.runtime.authority_materialization import (
     AuthorityMaterializationContractDoctor,
-    AuthorityMaterializationContractBundle,
     CheckpointDispatchBarrierActive,
     account_with_committed_usage,
     build_default_authority_materialization_contract_bundle,
@@ -72,8 +86,6 @@ from pulsara_agent.runtime.authority_materialization import (
     commit_checkpoint_recovered_interrupted,
     LedgerMaterializationAccountStore,
     LedgerMaterializationCoordinator,
-    PhysicalBurstContractBinding,
-    PhysicalBurstContractRegistry,
     build_default_checkpoint_terminal_contract,
     install_checkpoint_barrier,
     prepare_run_transcript_seed,
@@ -115,32 +127,80 @@ def _fact(model: type[T], /, **payload: Any) -> T:
     return model(**payload)
 
 
+def _unbootstrapped_stream_measurement() -> ModelStreamSettlementMeasurementFact:
+    payload = {
+        "segment_policy_contract_fingerprint": _fingerprint("segment-policy"),
+        "physical_accounting_mode": "unbootstrapped_test",
+        "adapter_source_item_count": 1,
+        "adapter_source_payload_bytes": 1,
+        "synthetic_source_item_count": 0,
+        "synthetic_source_payload_bytes": 0,
+        "source_item_count": 1,
+        "source_payload_bytes": 1,
+        "singleton_event_count": 1,
+        "segment_event_count": 0,
+        "durable_semantic_event_count": 1,
+        "segment_content_utf8_bytes": 0,
+        "segment_candidate_payload_bytes": 0,
+        "singleton_candidate_payload_bytes": 1,
+        "durable_candidate_payload_bytes": 1,
+        "semantic_commit_batches": (),
+        "actual_semantic_commit_batch_count": None,
+    }
+    provisional = ModelStreamSettlementMeasurementFact.model_construct(
+        **payload, measurement_fingerprint="pending"
+    )
+    canonical = provisional.model_dump(
+        mode="json", exclude={"measurement_fingerprint"}
+    )
+    return ModelStreamSettlementMeasurementFact(
+        **canonical,
+        measurement_fingerprint=sha256_fingerprint(
+            "model-stream-settlement-measurement:v1", canonical
+        ),
+    )
+
+
 def _transport_payload() -> dict[str, Any]:
     return {
-        "schema_version": "transport_fragmented_burst_contract.v1",
-        "burst_shape": "transport_fragmented",
+        "schema_version": "transport_segmented_burst_contract.v1",
+        "burst_shape": "transport_segmented",
         "contract_id": "model-stream",
-        "contract_version": "1",
+        "contract_version": "2",
         "operation_kind": PhysicalOperationKind.MODEL_CALL,
-        "max_commit_batches": 4,
+        "max_commit_batches": 15,
         "max_structural_tail_events": 3,
         "max_structural_tail_payload_bytes": 300,
         "max_terminal_recovery_events": 2,
         "max_terminal_recovery_payload_bytes": 200,
         "terminal_tail_reserved_events": 2,
         "terminal_tail_reserved_payload_bytes": 200,
-        "max_total_reserved_events": 15,
-        "max_total_reserved_payload_bytes": 1_500,
+        "max_total_reserved_events": 31,
+        "max_total_reserved_payload_bytes": 1_825,
         "event_domain_registry_contract_fingerprint": _fingerprint("domain"),
         "canonical_event_serialization_contract_fingerprint": _fingerprint(
             "serialization"
         ),
         "physical_charge_contract_fingerprint": _fingerprint("charge"),
-        "fragmentation_mode": "one_event_per_sanitized_source_item",
+        "segmentation_mode": "contiguous_model_delta_segment_v1",
         "max_source_items": 10,
-        "max_sanitized_source_payload_bytes": 800,
+        "max_source_payload_bytes": 800,
+        "max_single_source_item_canonical_bytes": 128,
+        "max_segment_source_items": 4,
+        "max_segment_content_utf8_bytes": 128,
+        "max_segment_canonical_event_bytes": 256,
+        "max_durable_event_wrapper_overhead_bytes": 20,
+        "max_unconfirmed_age_millis": 1_000,
         "max_durable_events_per_source_item": 1,
-        "max_canonical_wrapper_payload_bytes_per_source_item": 20,
+        "max_synthetic_semantic_tail_events": 1,
+        "max_synthetic_semantic_tail_payload_bytes": 100,
+        "max_start_commit_batches": 1,
+        "max_terminal_commit_batches": 1,
+        "max_recovery_commit_batches": 2,
+        "max_bookkeeping_events_per_commit": 1,
+        "max_bookkeeping_base_payload_bytes_per_commit": 10,
+        "max_bookkeeping_payload_bytes_per_business_event": 5,
+        "segment_policy_contract_fingerprint": _fingerprint("segment-policy"),
         "sanitization_contract_fingerprint": _fingerprint("sanitizer"),
     }
 
@@ -218,15 +278,19 @@ def _model_document(*, completion_status: str = "completed") -> object:
     )
     source = _fact(
         ModelCallSemanticSourceFact,
-        schema_version="model_call_semantic_source.v1",
+        schema_version="model_call_semantic_source.v3",
         resolved_model_call_id="call:1",
         model_call_start_event_identity=_stable_event("event:start"),
         source_semantic_item_count=1,
         source_first_transport_index=0,
         source_last_transport_index=0,
         source_semantic_accumulator=_fingerprint("model-source"),
+        durable_semantic_event_count=1,
+        durable_event_accumulator=_fingerprint("model-durable-source"),
+        segment_policy_contract_fingerprint=_fingerprint("segment-policy"),
         model_stream_semantic_domain_contract_fingerprint=_fingerprint("model-domain"),
         reducer_contract_fingerprint=_fingerprint("model-reducer"),
+        stream_settlement_measurement=_unbootstrapped_stream_measurement(),
     )
     return _fact(
         TerminalProjectionDocumentFact,
@@ -265,21 +329,21 @@ def _generation(
 
 
 def test_transport_burst_contract_proves_finite_worst_case() -> None:
-    contract = _fact(TransportFragmentedBurstContractFact, **_transport_payload())
+    contract = _fact(TransportSegmentedBurstContractFact, **_transport_payload())
 
-    assert contract.max_total_reserved_events == 15
+    assert contract.max_total_reserved_events == 31
     parsed = TypeAdapter(PhysicalBurstContractFact).validate_python(
         contract.model_dump(mode="json")
     )
-    assert isinstance(parsed, TransportFragmentedBurstContractFact)
+    assert isinstance(parsed, TransportSegmentedBurstContractFact)
 
 
 def test_transport_burst_contract_rejects_underestimated_tail() -> None:
     payload = _transport_payload()
-    payload["max_total_reserved_events"] = 14
+    payload["max_total_reserved_events"] = 30
 
     with pytest.raises(ValidationError, match="event reservation is underestimated"):
-        _fact(TransportFragmentedBurstContractFact, **payload)
+        _fact(TransportSegmentedBurstContractFact, **payload)
 
 
 def test_burst_max_commit_batches_covers_charge_applied_transitions() -> None:
@@ -288,52 +352,27 @@ def test_burst_max_commit_batches_covers_charge_applied_transitions() -> None:
         PhysicalOperationKind.MODEL_CALL
     )
     contract = model_binding.contract
-    minimum_bytes = (
-        bundle.charge_contract.reservation_bookkeeping_charge_bytes
-        + contract.max_commit_batches
-        * bundle.charge_contract.charge_applied_bookkeeping_charge_bytes
-        + bundle.charge_contract.suspension_bookkeeping_charge_bytes
-        + bundle.charge_contract.settlement_bookkeeping_charge_bytes
+    max_durable_events = (
+        contract.max_source_items * contract.max_durable_events_per_source_item
+        + contract.max_synthetic_semantic_tail_events
     )
-    assert contract.max_structural_tail_payload_bytes >= minimum_bytes
+    minimum_bytes = (
+        contract.max_source_payload_bytes
+        + contract.max_synthetic_semantic_tail_payload_bytes
+        + max_durable_events * contract.max_durable_event_wrapper_overhead_bytes
+        + contract.max_commit_batches
+        * contract.max_bookkeeping_base_payload_bytes_per_commit
+        + max_durable_events
+        * contract.max_bookkeeping_payload_bytes_per_business_event
+        + contract.max_structural_tail_payload_bytes
+        + contract.max_terminal_recovery_payload_bytes
+    )
+    assert contract.max_total_reserved_payload_bytes >= minimum_bytes
 
     payload = contract.model_dump(mode="python", exclude={"contract_fingerprint"})
-    payload["max_structural_tail_payload_bytes"] = minimum_bytes - 1
-    payload["max_total_reserved_payload_bytes"] = max(
-        payload["max_total_reserved_payload_bytes"],
-        payload["max_sanitized_source_payload_bytes"]
-        + payload["max_source_items"]
-        * payload["max_canonical_wrapper_payload_bytes_per_source_item"]
-        + payload["max_structural_tail_payload_bytes"]
-        + payload["max_terminal_recovery_payload_bytes"],
-    )
-    drifted = _fact(TransportFragmentedBurstContractFact, **payload)
-    registry = PhysicalBurstContractRegistry()
-    for binding in bundle.burst_registry.bindings():
-        registry.register(
-            PhysicalBurstContractBinding(
-                contract=(
-                    drifted
-                    if binding.contract.operation_kind
-                    is PhysicalOperationKind.MODEL_CALL
-                    else binding.contract
-                ),
-                implementation_build_fingerprint=(
-                    binding.implementation_build_fingerprint
-                ),
-            )
-        )
-    drifted_bundle = AuthorityMaterializationContractBundle(
-        event_domain=bundle.event_domain,
-        charge_contract=bundle.charge_contract,
-        limits=bundle.limits,
-        burst_registry=registry,
-    )
-    with pytest.raises(
-        ValueError,
-        match="commit batches exceed structural byte quote",
-    ):
-        AuthorityMaterializationContractDoctor().verify(drifted_bundle)
+    payload["max_total_reserved_payload_bytes"] = minimum_bytes - 1
+    with pytest.raises(ValidationError, match="byte reservation is underestimated"):
+        _fact(TransportSegmentedBurstContractFact, **payload)
 
 
 def test_charge_applied_bound_covers_max_identity_semantic_batch() -> None:
@@ -405,7 +444,12 @@ def test_charge_applied_bound_covers_max_identity_semantic_batch() -> None:
         + bundle.charge_contract.fixed_schema_wrapper_charge_bytes_per_event
     )
     assert actual_stored_charge <= (
-        bundle.charge_contract.charge_applied_bookkeeping_charge_bytes
+        charged.charge_event.charge.charge_applied_event_charge_payload_bytes
+    )
+    assert charged.charge_event.charge.charge_applied_event_charge_payload_bytes == (
+        bundle.charge_contract.charge_applied_bookkeeping_base_charge_bytes
+        + 16
+        * bundle.charge_contract.charge_applied_bookkeeping_per_business_event_charge_bytes
     )
 
 
@@ -704,7 +748,7 @@ def test_default_authority_materialization_doctor_proves_all_operation_kinds() -
 def test_transcript_sparse_prefix_proves_semantic_delta_without_full_ledger() -> None:
     event_log = InMemoryEventLog(runtime_session_id="runtime:sparse-proof")
     context = EventContext(run_id="run:1", turn_id="turn:1", reply_id="reply:1")
-    event_log.append(TextBlockStartEvent(**context.event_fields(), block_id="block:1"))
+    event_log.append(make_text_block_start_event(**context.event_fields(), block_id="block:1"))
     event_log.append(
         PlanExitResolvedEvent(
             **context.event_fields(),
@@ -732,7 +776,7 @@ def test_transcript_sparse_prefix_proves_semantic_delta_without_full_ledger() ->
 def test_transcript_sparse_prefix_has_canonical_empty_range() -> None:
     event_log = InMemoryEventLog(runtime_session_id="runtime:sparse-empty")
     context = EventContext(run_id="run:1", turn_id="turn:1", reply_id="reply:1")
-    event_log.append(TextBlockStartEvent(**context.event_fields(), block_id="block:1"))
+    event_log.append(make_text_block_start_event(**context.event_fields(), block_id="block:1"))
     binding = build_default_authority_materialization_contract_bundle().event_domain
 
     raw = event_log.read_transcript_domain_delta(
@@ -759,25 +803,28 @@ def test_sanitizing_transport_stops_at_source_item_circuit_breaker(
     context = EventContext(run_id="raw:run", turn_id="raw:turn", reply_id="raw:reply")
 
     async def raw_stream():
-        yield TextBlockStartEvent(**context.event_fields(), block_id="block:1")
-        yield TextBlockEndEvent(**context.event_fields(), block_id="block:1")
+        yield RawProviderTextBlockStart(**context.event_fields(), block_id="block:1")
+        yield RawProviderTextBlockEnd(**context.event_fields(), block_id="block:1")
 
     execution = SanitizingProviderTransportExecution(
         raw_stream=raw_stream(), resolved_model_call_id="call:1"
     )
 
     async def collect():
-        return (
-            await execution.read_next(),
-            await execution.read_next(),
-            await execution.read_next(),
-        )
+        first = await execution.read_next()
+        assert isinstance(first, SanitizedProviderSemanticEnvelope)
+        execution.acknowledge_adopted(first.envelope_id)
+        error = await execution.read_next()
+        assert isinstance(error, SanitizedProviderSemanticEnvelope)
+        execution.acknowledge_adopted(error.envelope_id)
+        return first, error, await execution.read_next()
 
     first, error, terminal = asyncio.run(collect())
 
     assert first is not None
-    assert isinstance(error, ProviderErrorDraft)
-    assert error.error.code == "transport_source_item_limit_exceeded"
+    assert isinstance(error, SanitizedProviderSemanticEnvelope)
+    assert isinstance(error.draft, ProviderErrorDraft)
+    assert error.draft.error.code == "transport_source_item_limit_exceeded"
     assert isinstance(terminal, ProviderTransportTerminalDraft)
     assert terminal.outcome == "provider_error"
 
@@ -793,19 +840,23 @@ def test_sanitizing_transport_stops_at_sanitized_byte_circuit_breaker(
     context = EventContext(run_id="raw:run", turn_id="raw:turn", reply_id="raw:reply")
 
     async def raw_stream():
-        yield TextBlockStartEvent(**context.event_fields(), block_id="block:1")
+        yield RawProviderTextBlockStart(**context.event_fields(), block_id="block:1")
 
     execution = SanitizingProviderTransportExecution(
         raw_stream=raw_stream(), resolved_model_call_id="call:1"
     )
 
     async def collect():
-        return await execution.read_next(), await execution.read_next()
+        error = await execution.read_next()
+        assert isinstance(error, SanitizedProviderSemanticEnvelope)
+        execution.acknowledge_adopted(error.envelope_id)
+        return error, await execution.read_next()
 
     error, terminal = asyncio.run(collect())
 
-    assert isinstance(error, ProviderErrorDraft)
-    assert error.error.code == "transport_source_payload_limit_exceeded"
+    assert isinstance(error, SanitizedProviderSemanticEnvelope)
+    assert isinstance(error.draft, ProviderErrorDraft)
+    assert error.draft.error.code == "transport_source_payload_limit_exceeded"
     assert isinstance(terminal, ProviderTransportTerminalDraft)
     assert terminal.outcome == "provider_error"
 
@@ -1069,6 +1120,9 @@ def test_retained_reservation_charges_and_settles_exact_predecessor() -> None:
             ),
         ),
         terminal_outcome="completed",
+        model_stream_measurement_fingerprint=_fingerprint(
+            "retained-model-stream-measurement"
+        ),
     )
 
     assert settled.resulting_account_state.active_reservations == ()
@@ -2885,6 +2939,13 @@ def test_full_source_doctor_rebuilds_checkpoint(tmp_path) -> None:
     assert inspector_projection["terminal_projections"][0]["restore_outcome"] == (
         "exact"
     )
+    stream_measurement = inspector_projection["terminal_projections"][0][
+        "model_stream_settlement_measurement"
+    ]
+    assert stream_measurement is not None
+    assert stream_measurement["adapter_source_item_count"] > 0
+    assert stream_measurement["durable_semantic_event_count"] > 0
+    assert stream_measurement["actual_semantic_commit_batch_count"] > 0
     checkpoint_projection = inspector_projection["checkpoint_accelerations"][0]
     assert checkpoint_projection["checkpoint_id"] == rebuilt.rebuilt_checkpoint_id
     assert checkpoint_projection["restore_outcome"] == "not_hydrated"

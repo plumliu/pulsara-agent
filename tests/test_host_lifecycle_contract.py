@@ -19,6 +19,15 @@ import pytest
 from tests.support.runtime_session import in_memory_runtime_session
 from tests.support.settings import compatibility_storage_config
 
+from tests.support.raw_provider import (
+    RawProviderTextBlockEnd,
+    RawProviderTextBlockStart,
+    RawProviderTextDelta,
+    RawProviderToolCallDelta,
+    RawProviderToolCallEnd,
+    RawProviderToolCallStart,
+)
+
 from pulsara_agent.event import (
     AgentEvent,
     CapabilityExposureResolvedEvent,
@@ -26,12 +35,6 @@ from pulsara_agent.event import (
     RunEndEvent,
     RunInteractionResumeBoundaryEvent,
     RunStartEvent,
-    TextBlockDeltaEvent,
-    TextBlockEndEvent,
-    TextBlockStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
 )
 from pulsara_agent.host import (
     DuplicateHostSessionError,
@@ -92,23 +95,23 @@ class ScriptedTransport:
             await asyncio.sleep(self.delay)
         reply = self.replies.pop(0)
         if "text" in reply:
-            yield TextBlockStartEvent(**event_context.event_fields(), block_id="text:1")
-            yield TextBlockDeltaEvent(
+            yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextDelta(
                 **event_context.event_fields(), block_id="text:1", delta=reply["text"]
             )
-            yield TextBlockEndEvent(**event_context.event_fields(), block_id="text:1")
+            yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
         for call in reply.get("tool_calls", []):
-            yield ToolCallStartEvent(
+            yield RawProviderToolCallStart(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 tool_call_name=call["name"],
             )
-            yield ToolCallDeltaEvent(
+            yield RawProviderToolCallDelta(
                 **event_context.event_fields(),
                 tool_call_id=call["id"],
                 delta=call["arguments"],
             )
-            yield ToolCallEndEvent(
+            yield RawProviderToolCallEnd(
                 **event_context.event_fields(), tool_call_id=call["id"]
             )
 
@@ -1515,17 +1518,17 @@ def test_stream_observer_is_bounded_and_detach_does_not_cancel_run(
 
         async def stream(self, *, call, context, event_context):
             del call
-            yield TextBlockStartEvent(
+            yield RawProviderTextBlockStart(
                 **event_context.event_fields(), block_id="text:burst"
             )
             for _ in range(total_deltas):
                 self.produced += 1
-                yield TextBlockDeltaEvent(
+                yield RawProviderTextDelta(
                     **event_context.event_fields(),
                     block_id="text:burst",
                     delta="x",
                 )
-            yield TextBlockEndEvent(
+            yield RawProviderTextBlockEnd(
                 **event_context.event_fields(), block_id="text:burst"
             )
 

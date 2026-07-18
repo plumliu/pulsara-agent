@@ -10,7 +10,11 @@ import psycopg
 import pytest
 from tests.support.runtime_session import in_memory_runtime_session
 
-from pulsara_agent.event import EventContext, ReplyEndEvent, TextBlockDeltaEvent
+from tests.support.model_stream import (
+    make_text_block_segment_event,
+)
+
+from pulsara_agent.event import EventContext, ReplyEndEvent
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.graph import PostgresGraphStore
 from pulsara_agent.memory import (
@@ -48,7 +52,7 @@ def _seed_runtime_parent_rows(dsn: str, tmp_path: Path, *, runtime_session_id: s
     session_id = runtime_session_id or _runtime_session_id()
     ctx = _event_context("artifact-parent")
     event_log = PostgresEventLog(dsn=dsn, runtime_session_id=session_id, workspace_root=tmp_path)
-    event_log.append(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:parent", delta="parent"))
+    event_log.append(make_text_block_segment_event(**ctx.event_fields(), block_id="text:parent", delta="parent"))
     return session_id, ctx
 
 
@@ -413,7 +417,7 @@ def test_run_timeline_persistence_can_use_postgres_artifact_store(tmp_path: Path
     )
 
     async def run() -> None:
-        await runtime.emit(TextBlockDeltaEvent(**ctx.event_fields(), block_id="text:1", delta="hello"))
+        await runtime.emit(make_text_block_segment_event(**ctx.event_fields(), block_id="text:1", delta="hello"))
         await runtime.emit(ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"))
 
     try:
