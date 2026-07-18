@@ -339,6 +339,9 @@ class LLMRuntime:
                 context_id=context.context_id or "",
                 model_call_index=context.model_call_index,
                 recovery_plan=recovery_plan,
+                governance_input_attribution=(
+                    start_bundle.governance_input_attribution
+                ),
             )
             start_batch = (
                 *start_bundle.companion_candidates,

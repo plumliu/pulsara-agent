@@ -18,7 +18,11 @@ from pydantic import (
     model_validator,
 )
 
-from pulsara_agent.event.candidates import MemoryCandidate
+from pulsara_agent.event.candidates import (
+    InvalidAttemptPayload,
+    MemoryCandidate,
+    ValidCandidatePayload,
+)
 from pulsara_agent.message.blocks import (
     ToolCallBlock,
     ToolResultArtifactRef,
@@ -146,6 +150,14 @@ from pulsara_agent.primitives.terminal_projection import (
     ToolResultTerminalProjectionEndReferenceFact,
 )
 from pulsara_agent.primitives.frozen import StableEventIdentityFact
+from pulsara_agent.primitives.governance_evidence import (
+    CompactionCandidateAttributionFact,
+    CompactionMemoryCandidateExtractorContractFact,
+    GovernanceBatchInputReferenceFact,
+    GovernanceModelInputAttributionFact,
+    MemoryCandidateEvidenceRejectedRecord,
+    ReflectionCandidateAttributionFact,
+)
 from pulsara_agent.primitives.run_lifecycle import (
     FAILURE_STOP_REASONS,
     RunStopReason,
@@ -311,6 +323,11 @@ class EventType(StrEnum):
     MEMORY_MAINTENANCE_PROPOSED = "MEMORY_MAINTENANCE_PROPOSED"
     MEMORY_MAINTENANCE_APPLIED = "MEMORY_MAINTENANCE_APPLIED"
     MEMORY_MAINTENANCE_REJECTED = "MEMORY_MAINTENANCE_REJECTED"
+    MEMORY_GOVERNANCE_BATCH_PREPARED = "MEMORY_GOVERNANCE_BATCH_PREPARED"
+    MEMORY_GOVERNANCE_BATCH_COMPLETED = "MEMORY_GOVERNANCE_BATCH_COMPLETED"
+    MEMORY_GOVERNANCE_BATCH_FAILED = "MEMORY_GOVERNANCE_BATCH_FAILED"
+    MEMORY_GOVERNANCE_BATCH_BLOCKED = "MEMORY_GOVERNANCE_BATCH_BLOCKED"
+    MEMORY_CANDIDATE_EVIDENCE_REJECTED = "MEMORY_CANDIDATE_EVIDENCE_REJECTED"
 
     PROJECTION_REQUESTED = "PROJECTION_REQUESTED"
     PROJECTION_READY = "PROJECTION_READY"
@@ -1033,6 +1050,7 @@ class ModelCallStartEvent(EventBase):
     context_id: str
     model_call_index: int | None = None
     recovery_plan: ModelStreamRecoveryPlanFact
+    governance_input_attribution: GovernanceModelInputAttributionFact | None = None
 
     @model_validator(mode="after")
     def _validate_call_context(self) -> "ModelCallStartEvent":
@@ -1058,6 +1076,20 @@ class ModelCallStartEvent(EventBase):
             and self.model_call_index is not None
         ):
             raise ValueError("model call start recovery plan lifecycle mismatch")
+        is_governance = self.resolved_call.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
+        if is_governance != (self.governance_input_attribution is not None):
+            raise ValueError(
+                "memory governance model Start requires exact batch input attribution"
+            )
+        if self.governance_input_attribution is not None:
+            attribution = self.governance_input_attribution
+            if (
+                attribution.resolved_model_call_id
+                != self.resolved_call.resolved_model_call_id
+                or attribution.target_fingerprint
+                != self.resolved_call.target.target_fingerprint
+            ):
+                raise ValueError("governance model Start attribution drifted")
         return self
 
 
@@ -2031,11 +2063,34 @@ class MemoryReflectionCompletedEvent(EventBase):
     usage: ModelTokenUsageFact | None
     estimated_input_tokens: int = Field(ge=0)
     reported_model_id: str | None
+    reflection_model_call_end_event_identity: StableEventIdentityFact
+    reflection_model_result_semantic_fingerprint: str = Field(min_length=1)
+    reflection_policy_contract_fingerprint: str = Field(min_length=1)
+    ordered_candidate_attributions: tuple[
+        ReflectionCandidateAttributionFact, ...
+    ] = Field(max_length=256)
 
     @model_validator(mode="after")
     def _validate_usage(self) -> "MemoryReflectionCompletedEvent":
         _validate_model_usage(self.usage_status, self.usage)
         _validate_reported_model_id(self.reported_model_id)
+        if self.proposed_count != len(self.ordered_candidate_attributions):
+            raise ValueError("reflection proposed count/attribution mismatch")
+        indices = tuple(
+            item.candidate_index for item in self.ordered_candidate_attributions
+        )
+        if indices != tuple(range(len(indices))):
+            raise ValueError("reflection candidate indices must be contiguous")
+        expected_kinds = tuple(
+            item.candidate_payload.candidate.kind
+            if isinstance(item.candidate_payload, ValidCandidatePayload)
+            else item.candidate_payload.attempted_kind or "invalid"
+            if isinstance(item.candidate_payload, InvalidAttemptPayload)
+            else "invalid"
+            for item in self.ordered_candidate_attributions
+        )
+        if tuple(self.candidate_kinds) != expected_kinds:
+            raise ValueError("reflection candidate kinds/attributions mismatch")
         return self
 
 
@@ -2371,6 +2426,105 @@ class ContextCompactionMemoryCandidatesProposedEvent(EventBase):
     error_count: int = 0
     extractor_version: str = "compaction-memory-candidates:v1"
     diagnostics: list[CompactionCandidateDiagnosticEvent] = Field(default_factory=list)
+    summary_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    summary_content_bytes: int = Field(ge=0, le=16 * 1024 * 1024)
+    extractor_contract: CompactionMemoryCandidateExtractorContractFact
+    ordered_candidate_attributions: tuple[
+        CompactionCandidateAttributionFact, ...
+    ] = Field(max_length=256)
+    completed_compaction_event_identity: StableEventIdentityFact
+
+    @model_validator(mode="after")
+    def _candidate_attribution_join(
+        self,
+    ) -> "ContextCompactionMemoryCandidatesProposedEvent":
+        if self.proposed_count != len(self.ordered_candidate_attributions):
+            raise ValueError("compaction proposed count/attribution mismatch")
+        if tuple(self.candidate_entry_ids) != tuple(
+            item.candidate_entry_id for item in self.ordered_candidate_attributions
+        ):
+            raise ValueError("compaction candidate IDs/attributions mismatch")
+        if self.extractor_version != self.extractor_contract.extractor_version:
+            raise ValueError("compaction extractor version drifted")
+        return self
+
+
+class MemoryCandidateEvidenceRejectedEvent(EventBase):
+    type: Literal[EventType.MEMORY_CANDIDATE_EVIDENCE_REJECTED] = (
+        EventType.MEMORY_CANDIDATE_EVIDENCE_REJECTED
+    )
+    governance_batch_id: str = Field(min_length=1, max_length=256)
+    rejection: MemoryCandidateEvidenceRejectedRecord
+
+
+class MemoryGovernanceBatchPreparedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_PREPARED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_PREPARED
+    )
+    governance_batch_id: str = Field(min_length=1, max_length=256)
+    source_ledger_through_sequence: int = Field(ge=0)
+    candidate_entry_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
+    preparing_claims_fingerprint: str = Field(min_length=1)
+    batch_input_reference: GovernanceBatchInputReferenceFact
+    resolved_model_call_id: str = Field(min_length=1, max_length=256)
+    target_fingerprint: str = Field(min_length=1)
+    model_input_fingerprint: str = Field(min_length=1)
+    ordered_prompt_projections_fingerprint: str = Field(min_length=1)
+    event_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _prepared_join(self) -> "MemoryGovernanceBatchPreparedEvent":
+        if self.batch_input_reference.governance_batch_id != self.governance_batch_id:
+            raise ValueError("prepared governance batch reference drifted")
+        if len(self.candidate_entry_ids) != len(set(self.candidate_entry_ids)):
+            raise ValueError("prepared governance candidate IDs must be unique")
+        return self
+
+
+class MemoryGovernanceBatchCompletedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_COMPLETED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_COMPLETED
+    )
+    governance_batch_id: str
+    prepared_event_id: str
+    batch_input_fingerprint: str
+    governance_model_call_id: str
+    decision_ids: tuple[str, ...] = Field(max_length=32)
+    terminal_reason: Literal["decisions_applied", "no_decisions"]
+    diagnostics: tuple[str, ...] = Field(max_length=8)
+    terminal_event_fingerprint: str
+
+
+class MemoryGovernanceBatchFailedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_FAILED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_FAILED
+    )
+    governance_batch_id: str
+    prepared_event_id: str
+    batch_input_fingerprint: str
+    governance_model_call_id: str | None
+    decision_ids: tuple[str, ...] = Field(max_length=32)
+    terminal_reason: Literal[
+        "model_failed", "output_invalid", "decision_apply_failed", "cancelled"
+    ]
+    diagnostics: tuple[str, ...] = Field(max_length=8)
+    terminal_event_fingerprint: str
+
+
+class MemoryGovernanceBatchBlockedEvent(EventBase):
+    type: Literal[EventType.MEMORY_GOVERNANCE_BATCH_BLOCKED] = (
+        EventType.MEMORY_GOVERNANCE_BATCH_BLOCKED
+    )
+    governance_batch_id: str
+    prepared_event_id: str
+    batch_input_fingerprint: str
+    governance_model_call_id: str | None
+    decision_ids: tuple[str, ...] = Field(max_length=32)
+    terminal_reason: Literal[
+        "authority_untrusted", "artifact_untrusted", "historical_binding_missing"
+    ]
+    diagnostics: tuple[str, ...] = Field(max_length=8)
+    terminal_event_fingerprint: str
 
 
 class ContextCompactionFailedEvent(EventBase):
@@ -3519,6 +3673,11 @@ AgentEvent: TypeAlias = (
     | MemoryMaintenanceProposedEvent
     | MemoryMaintenanceAppliedEvent
     | MemoryMaintenanceRejectedEvent
+    | MemoryGovernanceBatchPreparedEvent
+    | MemoryGovernanceBatchCompletedEvent
+    | MemoryGovernanceBatchFailedEvent
+    | MemoryGovernanceBatchBlockedEvent
+    | MemoryCandidateEvidenceRejectedEvent
     | ProjectionRequestedEvent
     | ProjectionReadyEvent
     | ProjectionFailedEvent

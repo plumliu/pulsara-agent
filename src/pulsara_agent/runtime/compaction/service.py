@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 from dataclasses import dataclass, field
 from importlib import resources
@@ -85,7 +86,19 @@ from pulsara_agent.runtime.compaction.candidates import (
     CompactionMemoryCandidateSink,
     ContextCompactionMemoryCandidatePolicy,
     parse_compaction_memory_candidates,
+    compaction_extractor_contract,
 )
+from pulsara_agent.memory.candidates.pool import candidate_payload_fingerprint
+from pulsara_agent.memory.candidates.projection_outbox import (
+    CandidateProjectionOutboxRow,
+    MemoryCandidateProjectionCommitPort,
+)
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.governance_evidence import (
+    CandidateProjectionOutboxItemFact,
+    CandidateProjectionProducerKind,
+)
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 from pulsara_agent.runtime.compaction.commit import (
     CompactionCommitCancelledAfterCommit,
     CompactionCommitPendingAfterCancellation,
@@ -189,6 +202,7 @@ class ContextCompactionService:
     model_role: ModelRole = ModelRole.FLASH
     candidate_sink: CompactionMemoryCandidateSink | None = None
     event_commit_port: CompactionEventCommitPort | None = None
+    candidate_projection_commit_port: MemoryCandidateProjectionCommitPort | None = None
     _consecutive_failures: int = 0
     _pending_terminalizations: dict[str, CompactionTerminalizationOwner] = field(
         default_factory=dict,
@@ -1178,7 +1192,11 @@ class ContextCompactionService:
             ),
             execution_registry=self.runtime_session.model_stream_execution_registry,
         )
-        return await collect_direct_model_call_handle(handle, expected_call=call)
+        return await collect_direct_model_call_handle(
+            handle,
+            expected_call=call,
+            runtime_session_id=self.runtime_session_id,
+        )
 
     async def _append_memory_candidate_proposals_if_enabled(
         self,
@@ -1209,46 +1227,44 @@ class ContextCompactionService:
             return
         try:
             append_result = await asyncio.to_thread(
-                sink.append_compaction_candidates,
+                sink.prepare_compaction_candidates,
                 completed_event=completed,
                 summary_artifact_id=summary_artifact_id,
                 summary_text=summary,
                 parse_result=parse_result,
                 policy=policy,
             )
-            await self._append_memory_candidates_proposed_event(
-                completed=completed,
-                summary_artifact_id=summary_artifact_id,
-                parse_result=parse_result,
-                append_result=append_result,
-                diagnostics=(),
-            )
         except Exception as exc:
             diagnostic = CompactionCandidateDiagnostic(
-                code="compaction_candidate_append_failed",
+                code="compaction_candidate_preparation_failed",
                 message=type(exc).__name__,
                 redacted=True,
             )
-            fallback_result = CompactionCandidateAppendResult(
+            append_result = CompactionCandidateAppendResult(
                 source_event_id=completed.id,
                 source_event_sequence=int(completed.sequence or 0),
                 source_artifact_id=summary_artifact_id,
                 entry_ids=(),
                 diagnostics=(diagnostic,),
             )
-            await self._append_memory_candidates_proposed_event(
-                completed=completed,
-                summary_artifact_id=summary_artifact_id,
-                parse_result=parse_result,
-                append_result=fallback_result,
-                diagnostics=(),
-            )
+        # Once the producer candidate is built, its ID and payload are stable.
+        # Durable commit errors must propagate for same-candidate recovery; they
+        # must never be rewritten as a zero-candidate preparation diagnostic.
+        await self._append_memory_candidates_proposed_event(
+            completed=completed,
+            summary_artifact_id=summary_artifact_id,
+            summary=summary,
+            parse_result=parse_result,
+            append_result=append_result,
+            diagnostics=(),
+        )
 
     async def _append_memory_candidates_proposed_event(
         self,
         *,
         completed: ContextCompactionCompletedEvent,
         summary_artifact_id: str,
+        summary: str,
         parse_result: CompactionCandidateParseResult,
         append_result: CompactionCandidateAppendResult,
         diagnostics: tuple[CompactionCandidateDiagnostic, ...],
@@ -1268,6 +1284,7 @@ class ContextCompactionService:
             and ("failed" in diagnostic.code or "malformed" in diagnostic.code)
         )
         event = ContextCompactionMemoryCandidatesProposedEvent(
+            id=f"context-compaction:{completed.compaction_id}:memory-candidates",
             **EventContext(
                 run_id=completed.run_id,
                 turn_id=completed.turn_id,
@@ -1287,11 +1304,65 @@ class ContextCompactionService:
             diagnostics=[
                 _event_diagnostic(diagnostic) for diagnostic in all_diagnostics
             ],
+            summary_content_sha256=hashlib.sha256(
+                summary.encode("utf-8")
+            ).hexdigest(),
+            summary_content_bytes=len(summary.encode("utf-8")),
+            extractor_contract=compaction_extractor_contract(
+                self.policy.memory_candidates
+            ),
+            ordered_candidate_attributions=append_result.attributions,
+            completed_compaction_event_identity=stable_event_identity(
+                completed,
+                runtime_session_id=self.runtime_session_id,
+            ),
         )
-        try:
-            await self._commit_event(event)
-        except Exception:
-            return
+        if self.candidate_projection_commit_port is None:
+            raise RuntimeError(
+                "compaction candidate producer requires projection commit ownership"
+            )
+        producer_identity = stable_event_identity(
+            event,
+            runtime_session_id=self.runtime_session_id,
+        )
+        projected_candidates = tuple(
+            candidate.model_copy(
+                update={
+                    "source_event_id": event.id,
+                    "metadata": {
+                        **candidate.metadata,
+                        "source_event_id": event.id,
+                        "compaction_completed_event_id": completed.id,
+                    },
+                }
+            )
+            for candidate in append_result.candidates
+        )
+        rows = tuple(
+            CandidateProjectionOutboxRow(
+                item=build_frozen_fact(
+                    CandidateProjectionOutboxItemFact,
+                    schema_version="candidate_projection_outbox_item.v1",
+                    producer_kind=CandidateProjectionProducerKind.COMPACTION,
+                    producer_event_identity=producer_identity,
+                    candidate_entry_id=candidate.entry_id,
+                    candidate_index=index,
+                    candidate_payload=candidate.payload,
+                    candidate_payload_fingerprint=candidate_payload_fingerprint(
+                        candidate.payload
+                    ),
+                    candidate_attribution_fingerprint=(
+                        append_result.attributions[index].attribution_fingerprint
+                    ),
+                ),
+                candidate=candidate,
+            )
+            for index, candidate in enumerate(projected_candidates)
+        )
+        await self.candidate_projection_commit_port.commit_producer_bundle(
+            producer_event=event,
+            rows=rows,
+        )
 
     def _build_plan(
         self,

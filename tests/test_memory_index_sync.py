@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from tests.support.model_stream import (
     make_text_block_segment_event,
 )
+from tests.support.governance import make_test_governance_execution_identity
 
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.event import EventContext
@@ -41,6 +42,9 @@ from pulsara_agent.memory.governance.relatedness import (
 )
 from pulsara_agent.ontology import memory
 from pulsara_agent.settings import StorageConfig
+
+
+_VERIFIED_REPLACEMENT_REF = "candidate_user_quote"
 
 
 def test_memory_search_index_rebuild_populates_fts_candidates() -> None:
@@ -167,6 +171,10 @@ def test_index_sync_consumes_governance_outbox_and_marks_applied(tmp_path) -> No
                 reason="Submit active memory for index sync.",
             ),
             governance_batch_id=batch_id,
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(candidate,),
+            ),
         )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)
         memory_id = result.decision_record.write_outcome.memory_id
@@ -278,7 +286,7 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
                 target_entry_id=candidate.entry_id,
                 candidate=_preference_candidate("candidate:index-sync-supersede-new"),
                 superseded_memory_ids=(old_id,),
-                replacement_evidence_refs=(log.iter(run_id=source_ctx.run_id)[0].id,),
+                replacement_evidence_refs=(_VERIFIED_REPLACEMENT_REF,),
                 reason="Explicitly replace verbose summaries with concise summaries.",
             ),
             governance_batch_id=batch_id,
@@ -288,6 +296,20 @@ def test_index_sync_consumes_superseded_ids_from_governance_outbox(tmp_path) -> 
                 availability=MappingProxyType(
                     {candidate.entry_id: RelatednessAvailability.FULL}
                 ),
+                node_revisions=MappingProxyType(
+                    {candidate.entry_id: MappingProxyType({old_id: 1})}
+                ),
+                verified_evidence_refs=MappingProxyType(
+                    {
+                        candidate.entry_id: frozenset(
+                            {_VERIFIED_REPLACEMENT_REF}
+                        )
+                    }
+                ),
+            ),
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(candidate,),
             ),
         )
         assert isinstance(result.decision_record.write_outcome, WriteSucceededOutcome)

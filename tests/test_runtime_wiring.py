@@ -23,6 +23,9 @@ from pulsara_agent.memory.candidates.pool import (
     PooledMemoryCandidate,
     SubmitAsIsDecision,
 )
+from pulsara_agent.memory.governance.executor import (
+    GovernanceDecisionExecutionIdentity,
+)
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
@@ -65,6 +68,19 @@ class _WiringEmbeddingProvider:
 
     async def aclose(self):
         return None
+
+
+def _governance_execution_identity(
+    candidate: PooledMemoryCandidate,
+) -> GovernanceDecisionExecutionIdentity:
+    return GovernanceDecisionExecutionIdentity(
+        batch_input_fingerprint="sha256:test-governance-batch-input",
+        batch_input_reference_fingerprint="sha256:test-governance-batch-reference",
+        governance_model_call_id="model_call:test-governance",
+        decision_index=0,
+        allowed_candidate_entry_ids=frozenset({candidate.entry_id}),
+        allowed_scopes=frozenset({"ctx:user"}),
+    )
 
 
 def test_in_memory_runtime_wiring_persists_run_timeline(tmp_path) -> None:
@@ -144,6 +160,7 @@ def test_governance_events_from_runtime_wiring_do_not_block_next_emit(tmp_path) 
                 reason="Explicit durable preference.",
             ),
             governance_batch_id=f"governance:test:{uuid4().hex}",
+            execution_identity=_governance_execution_identity(candidate),
         )
         governance_sequences = tuple(event.sequence for event in result.events)
         assert all(sequence is not None for sequence in governance_sequences)
@@ -223,7 +240,8 @@ def test_governance_apply_runs_off_host_event_loop(
                 SubmitAsIsDecision(
                     target_entry_id=candidate.entry_id,
                     reason="Verify auxiliary ownership.",
-                )
+                ),
+                execution_identity=_governance_execution_identity(candidate),
             )
         )
         try:

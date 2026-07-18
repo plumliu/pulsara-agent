@@ -48,6 +48,7 @@ from pulsara_agent.event_log.protocol import (
     RawTranscriptDomainDeltaSnapshot,
     RawTranscriptDomainPrefixFact,
     EventLogWriteConflict,
+    EventLogTransactionCompanion,
     MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
     same_event_payload,
@@ -69,6 +70,7 @@ from pulsara_agent.primitives.authority_materialization import (
     LedgerMaterializationAccountStateFact,
     PhysicalChargeContractFact,
 )
+from pulsara_agent.storage import RUNTIME_TRUTH_SCHEMA_SQL
 from pulsara_agent.message.message import AssistantMsg, Msg
 from pulsara_agent.message.reducer import (
     MessageReducer,
@@ -91,6 +93,11 @@ class PostgresEventLog:
     _confirmed_parent_turn_runs: dict[str, str] = field(
         default_factory=dict, init=False, repr=False
     )
+
+    def __post_init__(self) -> None:
+        with postgres_event_connection(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(RUNTIME_TRUTH_SCHEMA_SQL)
 
     def ensure_runtime_session_owner(self) -> None:
         """Create the session row needed by artifacts produced before RunStart."""
@@ -237,6 +244,7 @@ class PostgresEventLog:
         expected_account_state_fingerprint: str | None,
         resulting_account_state: LedgerMaterializationAccountStateFact,
         physical_charge_contract: PhysicalChargeContractFact,
+        transaction_companion: EventLogTransactionCompanion | None = None,
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]:
@@ -352,6 +360,11 @@ class PostgresEventLog:
                             Jsonb(resulting_account_state.model_dump(mode="json")),
                         ),
                     )
+                    if transaction_companion is not None:
+                        transaction_companion.apply_postgres(
+                            cursor,
+                            stored_events,
+                        )
             self._session_parent_confirmed = True
             self._confirmed_parent_run_ids.update(ensured_runs)
             self._confirmed_parent_turn_runs.update(

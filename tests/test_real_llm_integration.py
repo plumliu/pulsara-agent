@@ -33,6 +33,7 @@ from tests.support.model_stream import (
 from pulsara_agent.event import (
     EventContext,
     ContextWindowOpenedEvent,
+    MemoryReflectionCompletedEvent,
     MemoryReflectionFailedEvent,
     MemoryWriteFailedEvent,
     MemoryWriteResultEvent,
@@ -60,7 +61,6 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.capability import LocalSkillCapabilityProvider, sync_bundled_skills
 from pulsara_agent.capability.runtime import CapabilityRuntime
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.entities.memory import Preference
 from pulsara_agent.graph import OxigraphGraphStore, PostgresGraphStore
@@ -73,13 +73,9 @@ from pulsara_agent.llm.request import LLMContext, LLMOptions
 from pulsara_agent.memory import (
     MemoryDomainContext,
     MemoryGovernanceEngine,
-    MemoryGovernanceExecutor,
     MemoryGovernanceOptions,
     MemoryLifecycle,
-    MemoryWriteUnitOfWork,
-    PostgresArtifactStore,
     PostgresCandidatePool,
-    PostgresMemoryQuery,
     PostgresWorkingContextStore,
     load_run_timeline,
     summarize_run_timeline,
@@ -92,21 +88,13 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     sha256_fingerprint,
 )
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
 from pulsara_agent.memory.canonical.reconcile import PostgresMemoryReconciler
 from pulsara_agent.memory.canonical.vector_index_sync import MemoryVectorIndexSync
-from pulsara_agent.memory.canonical.vector_query import MemoryVectorQuery
-from pulsara_agent.memory.governance.relatedness import (
-    GovernanceRelatednessService,
-    MemoryGovernanceRelatednessOptions,
-)
 from pulsara_agent.memory.reflection.engine import (
     MemoryReflectionEngine,
     MemoryReflectionHint,
     MemoryReflectionOptions,
 )
-from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.memory.canonical.write_service import MemoryWriteService
 from pulsara_agent.message import TextBlock, ToolCallBlock, UserMsg
 from pulsara_agent.ontology import memory, runtime as rt
 from pulsara_agent.runtime import (
@@ -118,6 +106,7 @@ from pulsara_agent.runtime import (
     build_agent_runtime_wiring,
 )
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.wiring import build_durable_runtime_wiring
 from pulsara_agent.runtime.tool_artifacts import InMemoryToolResultArtifactIndex
 from pulsara_agent.runtime.long_horizon.reducer_contract import (
     build_default_subagent_graph_reducer_contract,
@@ -130,7 +119,6 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import EffectivePermissionPolicy, preset_to_policy
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.retrieval.runtime import build_retrieval_runtime_resources
-from pulsara_agent.retrieval.tokenizer.factory import build_tokenizer
 from pulsara_agent.tools.builtins.memory import RememberPreferenceTool
 
 
@@ -4046,13 +4034,14 @@ async def _run_real_agent_cross_dialogue_domain_recall_smoke(tmp_path: Path) -> 
         pending_before_governance = (
             wiring_a.runtime_wiring.candidate_pool.list_pending()
         )
-        governance_results = (
-            wiring_a.runtime_wiring.memory_governance_executor.submit_pending_as_is(
-                governance_batch_id=governance_batch_id
-            )
+        governance_engine = wiring_a.runtime_wiring.memory_governance_engine
+        assert governance_engine is not None
+        governance_result = await governance_engine.run_pending(
+            trigger_reason="real_cross_dialogue_memory",
+            governance_batch_id=governance_batch_id,
         )
         governance_events = [
-            event for applied in governance_results for event in applied.events
+            event for applied in governance_result.applied for event in applied.events
         ]
         memory_results = [
             event
@@ -5148,13 +5137,14 @@ async def _run_real_agent_remember_tool_rollout(tmp_path: Path, case: dict) -> d
             wiring.runtime_wiring.candidate_pool,
             runtime_session.runtime_session_id,
         )
-        governance_results = (
-            wiring.runtime_wiring.memory_governance_executor.submit_pending_as_is(
-                governance_batch_id=governance_batch_id
-            )
+        governance_engine = wiring.runtime_wiring.memory_governance_engine
+        assert governance_engine is not None
+        governance_result = await governance_engine.run_pending(
+            trigger_reason="real_agent_remember_tool",
+            governance_batch_id=governance_batch_id,
         )
         governance_events = [
-            event for governance in governance_results for event in governance.events
+            event for applied in governance_result.applied for event in applied.events
         ]
         all_events = [*events, *governance_events]
         memory_results = [
@@ -5334,20 +5324,17 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
     seed_text = (
         "Please remember this durable preference: the user prefers concise summaries."
     )
-    graph = _build_real_durable_graph(settings)
-    candidate_pool = PostgresCandidatePool(dsn=dsn)
-    event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
-    runtime_session = _direct_real_runtime_session(
-        event_log=event_log,
+    runtime_wiring = build_durable_runtime_wiring(
+        settings,
+        Path.cwd(),
         runtime_session_id=runtime_session_id,
-    )
-    archive = PostgresArtifactStore(dsn=dsn)
-    ledger = ExecutionEvidenceLedger(
-        graph=graph,
-        archive=archive,
-        gate=MemoryWriteGate(),
         graph_id=graph_id,
     )
+    graph = runtime_wiring.graph
+    candidate_pool = runtime_wiring.candidate_pool
+    event_log = runtime_wiring.event_log
+    runtime_session = runtime_wiring.runtime_session
+    archive = runtime_wiring.archive
     llm_runtime = build_llm_runtime(settings.llm)
     engine = MemoryReflectionEngine(
         llm_runtime=llm_runtime,
@@ -5356,6 +5343,28 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
         graph_id=graph_id,
         options=MemoryReflectionOptions(llm_options=LLMOptions()),
         runtime_session=runtime_session,
+        candidate_projection_commit_port=(
+            runtime_wiring.candidate_projection_commit_port
+        ),
+    )
+    governance_engine = MemoryGovernanceEngine(
+        llm_runtime=llm_runtime,
+        executor=runtime_wiring.memory_governance_executor,
+        runtime_session=runtime_session,
+        archive=archive,
+        claim_repository=runtime_wiring.memory_governance_claim_repository,
+        preparation_repository=(
+            runtime_wiring.memory_governance_preparation_repository
+        ),
+        evidence_builder=runtime_wiring.memory_governance_evidence_builder,
+        preparation_commit_port=(
+            runtime_wiring.memory_governance_preparation_commit_port
+        ),
+        candidate_projection_commit_port=(
+            runtime_wiring.candidate_projection_commit_port
+        ),
+        options=MemoryGovernanceOptions(llm_options=LLMOptions()),
+        relatedness_service=runtime_wiring.governance_relatedness,
     )
     state = LoopState(session_id=runtime_session_id)
     state.messages.append(
@@ -5376,7 +5385,7 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
             event_context=seed_context,
             user_input=seed_text,
         )
-        events = await engine.reflect(
+        returned_reflection_events = await engine.reflect(
             state=state,
             event_store=event_log,
             trigger_reasons=["cheap_memory_hint"],
@@ -5390,33 +5399,25 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
             ],
             safe_point="on_session_end",
         )
+        durable_reflection_events = [
+            event
+            for event in event_log.iter(run_id=state.run_id)
+            if isinstance(
+                event,
+                (MemoryReflectionCompletedEvent, MemoryReflectionFailedEvent),
+            )
+        ]
         pending_after_reflection = _pending_candidate_count(
             candidate_pool,
             runtime_session_id,
         )
-        governance = MemoryGovernanceExecutor(
-            candidate_pool=candidate_pool,
-            memory_write_service=MemoryWriteService(ledger=ledger),
-            event_log=event_log,
-            event_commit_port=lambda events: runtime_session.write_events_from_thread(
-                events
-            ).committed_events,
-            graph=graph,
-            graph_id=graph_id,
-            runtime_session_id=state.session_id,
-            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                dsn=dsn,
-                runtime_session_id=state.session_id,
-                graph_id=graph_id,
-                archive=archive,
-            ),
-        )
-        governance_results = governance.submit_pending_as_is(
+        governance_result = await governance_engine.run_pending(
+            trigger_reason="real_memory_reflection",
             governance_batch_id=governance_batch_id
         )
         outbox_applied_count = _replay_real_graph_outbox(settings, graph_id=graph_id)
         governance_events = [
-            event for result in governance_results for event in result.events
+            event for applied in governance_result.applied for event in applied.events
         ]
         memory_results = [
             event
@@ -5424,8 +5425,16 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
             if isinstance(event, MemoryWriteResultEvent)
         ]
         failures = [
-            event for event in events if isinstance(event, MemoryReflectionFailedEvent)
+            event
+            for event in durable_reflection_events
+            if isinstance(event, MemoryReflectionFailedEvent)
         ]
+        if not failures:
+            failures = [
+                event
+                for event in returned_reflection_events
+                if isinstance(event, MemoryReflectionFailedEvent)
+            ]
         outbox_payload_kind = None
         outbox_surface_apply_status = None
         import psycopg
@@ -5442,7 +5451,9 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
                     outbox_payload_kind = payload.get("kind")
                     outbox_surface_apply_status = payload.get("surface_apply_status")
         return {
-            "event_type_names": [type(event).__name__ for event in events],
+            "event_type_names": [
+                type(event).__name__ for event in durable_reflection_events
+            ],
             "governance_event_type_names": [
                 type(event).__name__ for event in governance_events
             ],
@@ -5551,76 +5562,42 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
     dsn = settings.storage.postgres_dsn
     graph_id = f"graph:real-governance/{uuid4().hex}"
     runtime_session_id = f"runtime:real-governance:{uuid4().hex}"
-    event_context = EventContext(
-        run_id=f"run:real-governance-source:{uuid4().hex}",
-        turn_id=f"turn:real-governance-source:{uuid4().hex}",
-        reply_id=f"reply:real-governance-source:{uuid4().hex}",
+    memory_domain = MemoryDomainContext(
+        memory_domain_id=f"u_real_governance_{uuid4().hex[:12]}",
+        workspace_kind="transient",
     )
-    graph = _build_real_durable_graph(settings)
-    candidate_pool = PostgresCandidatePool(dsn=dsn)
-    event_log = PostgresEventLog(dsn=dsn, runtime_session_id=runtime_session_id)
-    runtime_session = _direct_real_runtime_session(
-        event_log=event_log,
+    wiring = build_agent_runtime_wiring(
+        settings,
+        Path.cwd(),
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(),
+        system_prompt=(
+            "Call remember_preference exactly once with statement='The user prefers concise summaries.', "
+            "scope='ctx:user', source_authority='explicit_user_instruction', and "
+            "verification_status='user_confirmed'. Then answer exactly PULSARA_GOVERNANCE_SOURCE_READY."
+        ),
         runtime_session_id=runtime_session_id,
-    )
-    archive = PostgresArtifactStore(dsn=dsn)
-    ledger = ExecutionEvidenceLedger(
-        graph=graph,
-        archive=archive,
-        gate=MemoryWriteGate(),
         graph_id=graph_id,
+        memory_domain=memory_domain,
+        memory_reflection=False,
+        enable_workspace_skills=False,
+        permission_policy=_trusted_terminal_policy(),
     )
-    llm_runtime = build_llm_runtime(settings.llm)
+    runtime_wiring = wiring.runtime_wiring
+    graph = runtime_wiring.graph
+    candidate_pool = runtime_wiring.candidate_pool
+    runtime_session = runtime_wiring.runtime_session
     governance_batch_id = f"governance:real-governance:{uuid4().hex}"
     try:
-        await _bootstrap_direct_real_runtime_session(
-            runtime_session,
-            model_target=llm_runtime.resolve_target(role=ModelRole.FLASH).fact,
-            event_context=event_context,
-            user_input="The user prefers concise summaries.",
+        await run_agent_task(
+            wiring.agent_runtime,
+            "Please remember that the user prefers concise summaries.",
         )
-        candidate_pool.append_candidate(
-            PooledMemoryCandidate(
-                payload=ValidCandidatePayload(
-                    candidate=PreferenceCandidate(
-                        candidate_id="candidate:real-governance-preference",
-                        statement="The user prefers concise summaries.",
-                        scope="ctx:user",
-                        source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
-                        verification_status=memory.VerificationStatus.USER_CONFIRMED,
-                    )
-                ),
-                origin=CandidateOrigin.MAIN_AGENT_TOOL,
-                source_session_id=runtime_session_id,
-                source_run_id=event_context.run_id,
-                source_turn_id=event_context.turn_id,
-                source_reply_id=event_context.reply_id,
-            )
-        )
-        executor = MemoryGovernanceExecutor(
-            candidate_pool=candidate_pool,
-            memory_write_service=MemoryWriteService(ledger=ledger),
-            event_log=event_log,
-            event_commit_port=lambda events: runtime_session.write_events_from_thread(
-                events
-            ).committed_events,
-            graph=graph,
-            graph_id=graph_id,
-            runtime_session_id=runtime_session_id,
-            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                dsn=dsn,
-                runtime_session_id=runtime_session_id,
-                graph_id=graph_id,
-                archive=archive,
-            ),
-        )
-        engine = MemoryGovernanceEngine(
-            llm_runtime=llm_runtime,
-            executor=executor,
-            options=MemoryGovernanceOptions(llm_options=LLMOptions()),
-            runtime_session=runtime_session,
-        )
-
+        pending = _pending_candidates_for_session(candidate_pool, runtime_session_id)
+        assert len(pending) == 1
+        engine = runtime_wiring.memory_governance_engine
+        assert engine is not None
         result = await engine.run_pending(
             trigger_reason="real_llm_governance_smoke",
             governance_batch_id=governance_batch_id,
@@ -5673,6 +5650,8 @@ async def _run_real_flash_memory_governance_smoke() -> dict:
         runtime_session.close()
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
         graph.delete_graph(graph_id)
+        _delete_postgres_artifacts_for_session(dsn, runtime_session_id)
+        _delete_working_context(dsn, memory_domain.memory_domain_id)
         _delete_postgres_runtime_session(dsn, runtime_session_id)
 
 
@@ -5722,31 +5701,40 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
     graph_id = f"graph:real-governance-{label}/{uuid4().hex}"
     runtime_session_id = f"runtime:real-governance-{label}:{uuid4().hex}"
     old_id = f"preference:real-governance-{label}-old"
-    source_ctx = EventContext(
-        run_id=f"run:real-governance-{label}-source:{uuid4().hex}",
-        turn_id=f"turn:real-governance-{label}-source:{uuid4().hex}",
-        reply_id=f"reply:real-governance-{label}-source:{uuid4().hex}",
+    memory_domain = MemoryDomainContext(
+        memory_domain_id=f"u_real_governance_{label}_{uuid4().hex[:12]}",
+        workspace_kind="project",
+        stable_project_key=str(tmp_path),
     )
     governance_batch_id = f"governance:real-governance-{label}:{uuid4().hex}"
-    graph = _build_real_durable_graph(settings)
     retrieval_resources = build_retrieval_runtime_resources(settings.retrieval)
-    event_log = PostgresEventLog(
-        dsn=dsn, runtime_session_id=runtime_session_id, workspace_root=tmp_path
-    )
-    runtime_session = _direct_real_runtime_session(
-        event_log=event_log,
+    wiring = build_agent_runtime_wiring(
+        settings,
+        tmp_path,
+        durable=True,
+        model_role=ModelRole.FLASH,
+        options=LLMOptions(),
+        system_prompt=(
+            "Call remember_preference exactly once with "
+            f"statement={new_statement!r}, scope='ctx:user', "
+            "source_authority='explicit_user_instruction', and "
+            "verification_status='user_confirmed'. Then answer exactly "
+            "PULSARA_GOVERNANCE_SOURCE_READY."
+        ),
         runtime_session_id=runtime_session_id,
+        graph_id=graph_id,
+        memory_domain=memory_domain,
+        memory_reflection=False,
+        enable_workspace_skills=False,
+        permission_policy=_trusted_terminal_policy(),
+        retrieval_resources=retrieval_resources,
     )
-    llm_runtime = build_llm_runtime(settings.llm)
-    candidate_pool = PostgresCandidatePool(dsn=dsn)
+    runtime_wiring = wiring.runtime_wiring
+    graph = runtime_wiring.graph
+    candidate_pool = runtime_wiring.candidate_pool
+    runtime_session = runtime_wiring.runtime_session
     now = utc_now()
     try:
-        await _bootstrap_direct_real_runtime_session(
-            runtime_session,
-            model_target=llm_runtime.resolve_target(role=ModelRole.FLASH).fact,
-            event_context=source_ctx,
-            user_input=user_quote,
-        )
         graph.put_jsonld(
             Preference(
                 id=old_id,
@@ -5762,77 +5750,15 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
             ).to_jsonld(),
             graph_id=graph_id,
         )
-        pooled = candidate_pool.append_candidate(
-            PooledMemoryCandidate(
-                payload=ValidCandidatePayload(
-                    candidate=PreferenceCandidate(
-                        candidate_id=f"candidate:real-governance-{label}",
-                        statement=new_statement,
-                        scope="ctx:user",
-                        source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
-                        verification_status=memory.VerificationStatus.USER_CONFIRMED,
-                    )
-                ),
-                origin=CandidateOrigin.MAIN_AGENT_TOOL,
-                source_session_id=runtime_session_id,
-                source_run_id=source_ctx.run_id,
-                source_turn_id=source_ctx.turn_id,
-                source_reply_id=source_ctx.reply_id,
-                user_quote=user_quote,
-            )
+        await run_agent_task(
+            wiring.agent_runtime,
+            user_quote,
         )
-        executor = MemoryGovernanceExecutor(
-            candidate_pool=candidate_pool,
-            memory_write_service=MemoryWriteService(
-                ledger=ExecutionEvidenceLedger(
-                    graph=graph,
-                    archive=PostgresArtifactStore(dsn=dsn),
-                    gate=MemoryWriteGate(),
-                    graph_id=graph_id,
-                )
-            ),
-            event_log=event_log,
-            event_commit_port=lambda events: runtime_session.write_events_from_thread(
-                events
-            ).committed_events,
-            graph=graph,
-            graph_id=graph_id,
-            runtime_session_id=runtime_session_id,
-            memory_write_uow_factory=lambda: MemoryWriteUnitOfWork(
-                dsn=dsn,
-                runtime_session_id=runtime_session_id,
-                archive=PostgresArtifactStore(dsn=dsn),
-                graph_id=graph_id,
-                workspace_root=tmp_path,
-            ),
-        )
-        engine = MemoryGovernanceEngine(
-            llm_runtime=llm_runtime,
-            executor=executor,
-            options=MemoryGovernanceOptions(llm_options=LLMOptions()),
-            relatedness_service=GovernanceRelatednessService(
-                memory_query=PostgresMemoryQuery(dsn=dsn),
-                tokenizer=build_tokenizer(settings.retrieval.tokenizer),
-                embedding=retrieval_resources.embedding,
-                vector_query=(
-                    MemoryVectorQuery(dsn)
-                    if retrieval_resources.embedding is not None
-                    else None
-                ),
-                reranker=retrieval_resources.rerank,
-                provider_name=settings.retrieval.embedding.provider,
-                options=MemoryGovernanceRelatednessOptions(
-                    dense_candidate_min_score=(
-                        settings.retrieval.governance_relatedness.dense_candidate_min_score
-                    ),
-                    max_inline_gap_embeds=(
-                        settings.retrieval.governance_relatedness.max_inline_gap_embeds
-                    ),
-                ),
-            ),
-            runtime_session=runtime_session,
-        )
-
+        pending = _pending_candidates_for_session(candidate_pool, runtime_session_id)
+        assert len(pending) == 1
+        pooled = pending[0]
+        engine = runtime_wiring.memory_governance_engine
+        assert engine is not None
         result = await engine.run_pending(
             trigger_reason=f"real_llm_governance_{label}_smoke",
             governance_batch_id=governance_batch_id,
@@ -5891,6 +5817,8 @@ async def _run_real_flash_memory_governance_lifecycle_smoke(
         await retrieval_resources.aclose()
         graph.delete_graph(graph_id)
         _delete_postgres_governance_decisions(dsn, [governance_batch_id])
+        _delete_postgres_artifacts_for_session(dsn, runtime_session_id)
+        _delete_working_context(dsn, memory_domain.memory_domain_id)
         _delete_postgres_runtime_session(dsn, runtime_session_id)
 
 

@@ -17,6 +17,8 @@ class MemoryGovernanceCoordinator:
     on_commit: Callable[[], None] | None = None
     _pending: dict[str, MemoryGovernanceEngine] = field(default_factory=dict, init=False, repr=False)
     _last_run: dict[str, float] = field(default_factory=dict, init=False, repr=False)
+    _retry_attempts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _next_retry_at: dict[str, float] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _stop: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -43,23 +45,46 @@ class MemoryGovernanceCoordinator:
             self._pending = {}
             deferred_delay: float | None = None
             for session_id, engine in pending.items():
-                elapsed = time.monotonic() - self._last_run.get(session_id, 0.0)
-                if elapsed < self.session_min_interval_seconds:
+                now = time.monotonic()
+                retry_at = self._next_retry_at.get(session_id)
+                if retry_at is not None and now < retry_at:
+                    self._pending[session_id] = engine
+                    delay = retry_at - now
+                    deferred_delay = delay if deferred_delay is None else min(deferred_delay, delay)
+                    continue
+                elapsed = now - self._last_run.get(session_id, 0.0)
+                if retry_at is None and elapsed < self.session_min_interval_seconds:
                     self._pending[session_id] = engine
                     delay = self.session_min_interval_seconds - elapsed
                     deferred_delay = delay if deferred_delay is None else min(deferred_delay, delay)
                     continue
-                result = await engine.run_pending(trigger_reason="turn_safe_point")
+                try:
+                    result = await engine.run_pending(trigger_reason="turn_safe_point")
+                except Exception:
+                    retry_required = True
+                    result = None
+                else:
+                    retry_required = (
+                        engine.executor.event_dispatch_retry_required
+                        or engine.retry_required
+                    )
                 self._last_run[session_id] = time.monotonic()
-                if result.applied and self.on_commit is not None:
+                if result is not None and result.applied and self.on_commit is not None:
                     self.on_commit()
-                if engine.executor.event_dispatch_retry_required:
+                if retry_required:
+                    attempt = min(self._retry_attempts.get(session_id, 0) + 1, 7)
+                    self._retry_attempts[session_id] = attempt
+                    retry_delay = min(0.5 * (2 ** (attempt - 1)), 30.0)
+                    self._next_retry_at[session_id] = time.monotonic() + retry_delay
                     self._pending[session_id] = engine
                     deferred_delay = (
-                        self.session_min_interval_seconds
+                        retry_delay
                         if deferred_delay is None
-                        else min(deferred_delay, self.session_min_interval_seconds)
+                        else min(deferred_delay, retry_delay)
                     )
+                else:
+                    self._retry_attempts.pop(session_id, None)
+                    self._next_retry_at.pop(session_id, None)
             if self._pending:
                 if deferred_delay:
                     try:

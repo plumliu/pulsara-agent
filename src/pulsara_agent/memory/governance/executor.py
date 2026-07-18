@@ -48,6 +48,11 @@ from pulsara_agent.memory.canonical.mutation_outbox import (
 from pulsara_agent.memory.canonical.write_service import MemoryWriteOutcome, MemoryWriteService
 from pulsara_agent.memory.scope import CTX_USER
 from pulsara_agent.ontology import memory
+from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.governance_evidence import (
+    GovernanceDerivedWriteAttributionFact,
+)
 
 
 _SUPERSEDABLE_TYPES: frozenset[str] = frozenset({"Preference"})
@@ -63,6 +68,27 @@ class MemoryGovernanceApplyResult:
     decision_record: MemoryGovernanceDecisionRecord
     events: list[AgentEvent]
     diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GovernanceDecisionExecutionIdentity:
+    batch_input_fingerprint: str
+    batch_input_reference_fingerprint: str
+    governance_model_call_id: str
+    decision_index: int
+    allowed_candidate_entry_ids: frozenset[str]
+    allowed_scopes: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.batch_input_fingerprint
+            or not self.batch_input_reference_fingerprint
+            or not self.governance_model_call_id
+            or not 0 <= self.decision_index <= 31
+            or not self.allowed_candidate_entry_ids
+            or not self.allowed_scopes
+        ):
+            raise ValueError("invalid governance decision execution identity")
 
 
 @dataclass(slots=True)
@@ -104,14 +130,23 @@ class MemoryGovernanceExecutor:
         *,
         governance_batch_id: str | None = None,
         relatedness_context: RelatednessExecutionContext | None = None,
+        execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
         batch_id = governance_batch_id or new_governance_batch_id()
         target_entries = self._validate_target_entries(decision)
+        target_ids = frozenset(item.entry_id for item in target_entries)
+        if not target_ids.issubset(execution_identity.allowed_candidate_entry_ids):
+            raise ValueError("governance decision targets candidates outside its batch")
+        if not execution_identity.allowed_scopes.issubset(
+            self.allowed_write_scopes
+        ):
+            raise ValueError("governance decision input scopes exceed runtime policy")
         return self._apply_decision_with_uow(
             decision,
             governance_batch_id=batch_id,
             relatedness_context=relatedness_context,
             target_entries=target_entries,
+            execution_identity=execution_identity,
         )
 
     async def apply_decision_async(
@@ -120,12 +155,14 @@ class MemoryGovernanceExecutor:
         *,
         governance_batch_id: str | None = None,
         relatedness_context: RelatednessExecutionContext | None = None,
+        execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
         operation = partial(
             self.apply_decision,
             decision,
             governance_batch_id=governance_batch_id,
             relatedness_context=relatedness_context,
+            execution_identity=execution_identity,
         )
         return await self._run_auxiliary_operation(
             "memory-governance-apply",
@@ -167,12 +204,15 @@ class MemoryGovernanceExecutor:
         governance_batch_id: str,
         relatedness_context: RelatednessExecutionContext | None,
         target_entries: tuple[PooledMemoryCandidate, ...],
+        execution_identity: GovernanceDecisionExecutionIdentity,
     ) -> MemoryGovernanceApplyResult:
         if isinstance(decision, SkipDecision):
             record = _decision_record(
                 decision=decision,
+                requested_decision=decision,
                 governance_batch_id=governance_batch_id,
                 write_outcome=NoWriteOutcome(),
+                execution_identity=execution_identity,
             )
             with self.memory_write_uow_factory() as uow:
                 uow.decisions.append_decision(record)
@@ -182,17 +222,24 @@ class MemoryGovernanceExecutor:
         if candidate is None:
             record = _decision_record(
                 decision=_skip_for_invalid(decision),
+                requested_decision=decision,
                 governance_batch_id=governance_batch_id,
                 write_outcome=NoWriteOutcome(),
+                execution_identity=execution_identity,
             )
             with self.memory_write_uow_factory() as uow:
                 uow.decisions.append_decision(record)
             return MemoryGovernanceApplyResult(decision_record=record, events=[])
-        if candidate.scope not in self.allowed_write_scopes:
+        if (
+            candidate.scope not in self.allowed_write_scopes
+            or candidate.scope not in execution_identity.allowed_scopes
+        ):
             record = _decision_record(
                 decision=_skip_out_of_scope(decision, candidate.scope),
+                requested_decision=decision,
                 governance_batch_id=governance_batch_id,
                 write_outcome=NoWriteOutcome(),
+                execution_identity=execution_identity,
             )
             with self.memory_write_uow_factory() as uow:
                 uow.decisions.append_decision(record)
@@ -208,8 +255,10 @@ class MemoryGovernanceExecutor:
                     reason="Compaction-origin candidates cannot perform replacement lifecycle decisions in V1.",
                     skip_reason=compaction_lifecycle_block,
                 ),
+                requested_decision=decision,
                 governance_batch_id=governance_batch_id,
                 write_outcome=NoWriteOutcome(),
+                execution_identity=execution_identity,
             )
             with self.memory_write_uow_factory() as uow:
                 uow.decisions.append_decision(record)
@@ -230,8 +279,10 @@ class MemoryGovernanceExecutor:
                         reason="A canonical memory with the same type, scope, and statement already exists.",
                         skip_reason="duplicate_existing_memory",
                     ),
+                    requested_decision=decision,
                     governance_batch_id=governance_batch_id,
                     write_outcome=NoWriteOutcome(),
+                    execution_identity=execution_identity,
                 )
                 uow.decisions.append_decision(record)
                 return MemoryGovernanceApplyResult(decision_record=record, events=[])
@@ -247,10 +298,13 @@ class MemoryGovernanceExecutor:
                 ) or self._replacement_evidence_block_reason(
                     decision,
                     target_entry=_single_target_entry(decision.target_entry_id, target_entries),
+                    relatedness_context=relatedness_context,
                 )
                 if supersede_blocked_reason is None:
                     valid_old_ids, supersede_blocked_reason = self._validate_supersede_targets(
-                        decision, uow
+                        decision,
+                        uow,
+                        relatedness_context=relatedness_context,
                     )
             valid_contradicted_ids: tuple[str, ...] = ()
             contradiction_blocked_reason: str | None = None
@@ -263,7 +317,11 @@ class MemoryGovernanceExecutor:
                 )
                 if contradiction_blocked_reason is None:
                     valid_contradicted_ids, contradiction_blocked_reason = (
-                        self._validate_contradiction_targets(decision, uow)
+                        self._validate_contradiction_targets(
+                            decision,
+                            uow,
+                            relatedness_context=relatedness_context,
+                        )
                     )
 
             context = governance_batch_context(governance_batch_id)
@@ -325,17 +383,9 @@ class MemoryGovernanceExecutor:
             recorded_superseded_ids = valid_old_ids if did_supersede else ()
             recorded_contradicted_ids = valid_contradicted_ids if did_contradict else ()
 
-            is_supersede_origin = isinstance(decision, SupersedeAndSubmitDecision)
-            is_contradiction_origin = isinstance(decision, ContradictAndSubmitDecision)
-            if not (is_supersede_origin or is_contradiction_origin):
-                governance_candidate = self._governance_candidate_for_decision(
-                    effective_decision,
-                    governance_batch_id=governance_batch_id,
-                )
-                if governance_candidate is not None:
-                    uow.decisions.append_candidate(governance_candidate)
             record = _decision_record(
                 decision=effective_decision,
+                requested_decision=decision,
                 governance_batch_id=governance_batch_id,
                 write_outcome=_write_outcome(
                     outcome,
@@ -343,7 +393,17 @@ class MemoryGovernanceExecutor:
                     superseded_memory_ids=recorded_superseded_ids,
                     contradicted_memory_ids=recorded_contradicted_ids,
                 ),
+                execution_identity=execution_identity,
             )
+            is_supersede_origin = isinstance(decision, SupersedeAndSubmitDecision)
+            is_contradiction_origin = isinstance(decision, ContradictAndSubmitDecision)
+            if not (is_supersede_origin or is_contradiction_origin):
+                governance_candidate = self._governance_candidate_for_decision(
+                    effective_decision,
+                    record=record,
+                )
+                if governance_candidate is not None:
+                    uow.decisions.append_candidate(governance_candidate)
             uow.decisions.append_decision(record)
             mutation_payload = governed_memory_mutation_payload(
                 record=record,
@@ -415,33 +475,6 @@ class MemoryGovernanceExecutor:
 
         return await loop.run_in_executor(auxiliary_io_executor(), operation)
 
-    def submit_pending_as_is(
-        self,
-        *,
-        limit: int | None = None,
-        governance_batch_id: str | None = None,
-    ) -> list[MemoryGovernanceApplyResult]:
-        batch_id = governance_batch_id or new_governance_batch_id()
-        results: list[MemoryGovernanceApplyResult] = []
-        for candidate in self.candidate_pool.list_pending():
-            if candidate.source_session_id != self.runtime_session_id:
-                continue
-            if limit is not None and len(results) >= limit:
-                break
-            if isinstance(candidate.payload, ValidCandidatePayload):
-                decision: GovernanceDecision = SubmitAsIsDecision(
-                    target_entry_id=candidate.entry_id,
-                    reason="Submit valid pending candidate as-is.",
-                )
-            else:
-                decision = SkipDecision(
-                    target_entry_ids=(candidate.entry_id,),
-                    reason="Invalid memory tool attempt cannot be submitted as-is.",
-                    skip_reason="invalid_attempt",
-                )
-            results.append(self.apply_decision(decision, governance_batch_id=batch_id))
-        return results
-
     def _candidate_for_decision(self, decision: GovernanceDecision):
         if isinstance(decision, SubmitAsIsDecision):
             pooled = self.candidate_pool.get_candidate(decision.target_entry_id)
@@ -462,37 +495,56 @@ class MemoryGovernanceExecutor:
         self,
         decision: GovernanceDecision,
         *,
-        governance_batch_id: str,
+        record: MemoryGovernanceDecisionRecord,
     ) -> PooledMemoryCandidate | None:
         if isinstance(decision, CorrectAndSubmitDecision):
             return self._governance_candidate(
                 decision.candidate,
-                decision.target_entry_id,
-                governance_batch_id,
+                (decision.target_entry_id,),
+                record,
             )
         if isinstance(decision, MergeAndSubmitDecision):
             return self._governance_candidate(
                 decision.candidate,
-                decision.target_entry_ids[0],
-                governance_batch_id,
+                decision.target_entry_ids,
+                record,
             )
         return None
 
     def _governance_candidate(
         self,
         candidate,
-        source_entry_id: str,
-        governance_batch_id: str,
+        source_entry_ids: tuple[str, ...],
+        record: MemoryGovernanceDecisionRecord,
     ) -> PooledMemoryCandidate:
-        ctx = governance_batch_context(governance_batch_id)
+        ctx = governance_batch_context(record.governance_batch_id)
+        attribution = build_frozen_fact(
+            GovernanceDerivedWriteAttributionFact,
+            schema_version="governance_derived_write_attribution.v1",
+            parent_candidate_entry_ids=source_entry_ids,
+            governance_batch_id=record.governance_batch_id,
+            batch_input_fingerprint=record.batch_input_fingerprint,
+            decision_id=record.decision_id,
+            decision_payload_fingerprint=record.decision_payload_fingerprint,
+        )
+        entry_digest = context_fingerprint(
+            "governance-derived-candidate-entry-id:v1",
+            attribution.attribution_fingerprint,
+        ).removeprefix("sha256:")
         return PooledMemoryCandidate(
+            entry_id=f"pool:governance:{entry_digest}",
             payload=ValidCandidatePayload(candidate=candidate),
             origin=CandidateOrigin.GOVERNANCE,
             source_session_id=self.runtime_session_id,
             source_run_id=ctx.run_id,
             source_turn_id=ctx.turn_id,
             source_reply_id=ctx.reply_id,
-            user_quote=f"corrected_from:{source_entry_id}",
+            user_quote=f"derived_from:{','.join(source_entry_ids)}",
+            metadata={
+                "governance_derived_write_attribution": attribution.model_dump(
+                    mode="json"
+                )
+            },
         )
 
     def _validate_target_entries(self, decision: GovernanceDecision) -> tuple[PooledMemoryCandidate, ...]:
@@ -520,6 +572,8 @@ class MemoryGovernanceExecutor:
         self,
         decision: SupersedeAndSubmitDecision,
         uow: GovernanceWriteUnitOfWork,
+        *,
+        relatedness_context: RelatednessExecutionContext | None,
     ) -> tuple[tuple[str, ...], str | None]:
         candidate = decision.candidate
         if candidate.kind not in _SUPERSEDABLE_TYPES:
@@ -531,10 +585,18 @@ class MemoryGovernanceExecutor:
 
         valid: list[str] = []
         for old_id in decision.superseded_memory_ids:
-            try:
-                old_doc = uow.graph.get_jsonld(old_id, graph_id=uow.resolved_graph_id)
-            except KeyError:
+            locked = uow.lock_canonical_memory(old_id)
+            if locked is None:
                 return (), f"supersede_target_missing:{old_id}"
+            old_doc, actual_revision = locked
+            revision_error = _relatedness_revision_block_reason(
+                entry_id=decision.target_entry_id,
+                memory_id=old_id,
+                actual_revision=actual_revision,
+                relatedness_context=relatedness_context,
+            )
+            if revision_error is not None:
+                return (), revision_error
             old_status = str(old_doc.get(memory.STATUS.name, ""))
             old_scope = str(old_doc.get(memory.SCOPE.name, ""))
             old_types = _jsonld_type_names(old_doc)
@@ -573,15 +635,17 @@ class MemoryGovernanceExecutor:
         decision: SupersedeAndSubmitDecision,
         *,
         target_entry: PooledMemoryCandidate,
+        relatedness_context: RelatednessExecutionContext | None,
     ) -> str | None:
         if not decision.replacement_evidence_refs:
             return "missing_replacement_evidence"
         allowed: set[str] = set()
-        if isinstance(target_entry.payload, ValidCandidatePayload):
-            allowed.update(target_entry.payload.candidate.evidence_ids)
-        allowed.update(event.id for event in self.event_log.iter(run_id=target_entry.source_run_id))
-        if target_entry.user_quote:
-            allowed.add("candidate_user_quote")
+        if relatedness_context is not None:
+            allowed.update(
+                relatedness_context.verified_evidence_refs.get(
+                    target_entry.entry_id, frozenset()
+                )
+            )
         for ref in decision.replacement_evidence_refs:
             if ref not in allowed:
                 return f"replacement_evidence_not_in_source_context:{ref}"
@@ -591,6 +655,8 @@ class MemoryGovernanceExecutor:
         self,
         decision: ContradictAndSubmitDecision,
         uow: GovernanceWriteUnitOfWork,
+        *,
+        relatedness_context: RelatednessExecutionContext | None,
     ) -> tuple[tuple[str, ...], str | None]:
         candidate = decision.candidate
         if candidate.kind not in _CONTRADICTABLE_TYPES:
@@ -602,10 +668,18 @@ class MemoryGovernanceExecutor:
 
         valid: list[str] = []
         for old_id in decision.contradicted_memory_ids:
-            try:
-                old_doc = uow.graph.get_jsonld(old_id, graph_id=uow.resolved_graph_id)
-            except KeyError:
+            locked = uow.lock_canonical_memory(old_id)
+            if locked is None:
                 return (), f"contradiction_target_missing:{old_id}"
+            old_doc, actual_revision = locked
+            revision_error = _relatedness_revision_block_reason(
+                entry_id=decision.target_entry_id,
+                memory_id=old_id,
+                actual_revision=actual_revision,
+                relatedness_context=relatedness_context,
+            )
+            if revision_error is not None:
+                return (), revision_error
             old_status = str(old_doc.get(memory.STATUS.name, ""))
             old_scope = str(old_doc.get(memory.SCOPE.name, ""))
             old_types = _jsonld_type_names(old_doc)
@@ -617,6 +691,28 @@ class MemoryGovernanceExecutor:
                 return (), f"contradiction_target_type_not_contradictable:{old_id}:{sorted(old_types)}"
             valid.append(old_id)
         return tuple(valid), None
+
+
+def _relatedness_revision_block_reason(
+    *,
+    entry_id: str,
+    memory_id: str,
+    actual_revision: int,
+    relatedness_context: RelatednessExecutionContext | None,
+) -> str | None:
+    if relatedness_context is None:
+        return "relatedness_context_missing"
+    expected_revision = relatedness_context.node_revisions.get(entry_id, {}).get(
+        memory_id
+    )
+    if expected_revision is None:
+        return f"relatedness_revision_missing:{memory_id}"
+    if expected_revision != actual_revision:
+        return (
+            f"relatedness_target_revision_drift:{memory_id}:"
+            f"expected={expected_revision}:actual={actual_revision}"
+        )
+    return None
 
 
 def _write_outcome(
@@ -654,13 +750,54 @@ def _decision_record(
     *,
     governance_batch_id: str,
     decision: GovernanceDecision,
+    requested_decision: GovernanceDecision,
     write_outcome,
+    execution_identity: GovernanceDecisionExecutionIdentity,
 ) -> MemoryGovernanceDecisionRecord:
+    decision_id, requested_decision_payload_fingerprint = governance_decision_identity(
+        decision=requested_decision,
+        execution_identity=execution_identity,
+    )
+    decision_payload_fingerprint = context_fingerprint(
+        "memory-governance-effective-decision-payload:v1",
+        decision.model_dump(mode="json"),
+    )
     return MemoryGovernanceDecisionRecord(
+        decision_id=decision_id,
         governance_batch_id=governance_batch_id,
+        batch_input_fingerprint=execution_identity.batch_input_fingerprint,
+        batch_input_reference_fingerprint=(
+            execution_identity.batch_input_reference_fingerprint
+        ),
+        governance_model_call_id=execution_identity.governance_model_call_id,
+        decision_index=execution_identity.decision_index,
+        requested_decision_payload_fingerprint=(
+            requested_decision_payload_fingerprint
+        ),
+        decision_payload_fingerprint=decision_payload_fingerprint,
         decision=decision,
         write_outcome=write_outcome,
     )
+
+
+def governance_decision_identity(
+    *,
+    decision: GovernanceDecision,
+    execution_identity: GovernanceDecisionExecutionIdentity,
+) -> tuple[str, str]:
+    decision_payload_fingerprint = context_fingerprint(
+        "memory-governance-decision-payload:v1",
+        decision.model_dump(mode="json"),
+    )
+    decision_id = "memory_governance_decision:" + context_fingerprint(
+        "memory-governance-decision-id:v1",
+        (
+            execution_identity.batch_input_fingerprint,
+            execution_identity.decision_index,
+            decision_payload_fingerprint,
+        ),
+    ).removeprefix("sha256:")
+    return decision_id, decision_payload_fingerprint
 
 
 def _skip_for_invalid(decision: GovernanceDecision) -> SkipDecision:
@@ -722,6 +859,7 @@ def _is_target_drift(reason: str) -> bool:
             "target_not_active",
             "target_scope_mismatch",
             "target_type_not_",
+            "target_revision_drift",
         )
     )
 

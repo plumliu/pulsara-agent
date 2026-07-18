@@ -280,3 +280,29 @@ V1 production binding 固定为：
 carrier ID、version、provider API、wire-shape fingerprint 与 contract fingerprint 均进入 target identity。Chat/Responses adapter 必须校验
 binding 后再 lowering；不得把 runtime observation 伪装成带 tool-call identity 的消息。最低回归必须覆盖两个 production API 的 wire role、
 target fingerprint/rebind，以及 finalization status observation 可进入下一次真实 model call。
+
+---
+
+## 16. Memory governance exact model input contract
+
+Memory governance仍使用普通 session-owned `LLMRuntime` model-stream lifecycle，不拥有旁路
+transport或caller writer。它的 `ResolvedModelCallFact`、target fingerprint与 exact
+`LLMContext`必须在 `MemoryGovernanceBatchPreparedEvent` 之前冻结进 content-addressed batch
+artifact。
+
+Prepared FULL是 governance ModelStart的必要前置。ModelStart必须携带
+`GovernanceModelInputAttributionFact`，并逐项 join Prepared event identity、batch input artifact
+reference、resolved model call ID、target fingerprint与最终 model-visible input fingerprint。
+同一 batch不得在 Prepared前启动模型，也不得在恢复时用当前配置产生新的 call ID、system
+prompt、estimator结果或messages。
+
+Governance execution owner与 model stream owner是两层明确 ownership：前者拥有 claim、artifact、
+Prepared、decision suffix与batch terminalization；后者只拥有一次已冻结 call的provider stream。
+Caller cancellation只detach governance waiter；已启动的 model stream继续由其 registry完成
+transport drain、terminal projection和settlement。Start-without-End按通用 model stream recovery
+修复；Prepared-without-Start按 governance preparation artifact原样启动。
+
+Governance prompt只消费 typed bounded evidence projection和relatedness projection，不包含 raw
+`source_events`、model stream segment、SDK/provider payload或序列化 tool-result semantics推断。
+Prompt feasibility必须用冻结 target的实际 estimator验证完整 system prompt + messages + wrapper，
+不得用 UTF-8 bytes直接冒充 token budget。

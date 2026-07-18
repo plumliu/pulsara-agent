@@ -407,6 +407,14 @@ governed canonical memory graph 的唯一写入口是：
 - target 的最终合法性由 executor 复核
 - 精确 embedding/rerank score 只用于内部排序、截断与诊断，不进入 Flash prompt
 - lifecycle target 必须属于该 candidate 在当前 governance batch 的 executor-side allowlist；prompt 规则不能替代该校验
+- model-visible input必须分开保存bounded typed evidence、可逐字段复制的exact
+  `decision_candidate`与lifecycle allowlist；不得要求模型从payload wrapper反推decision candidate
+- destructive replacement只向模型暴露executor实际接受的stable ref；V1中只有exact匹配
+  canonical transcript span的quote可得到`candidate_user_quote`，producer event ID、semantic
+  fingerprint或artifact ref不得冒充replacement authority
+- governance model必须先判durability、再判duplicate、最后判lifecycle；该顺序进入versioned
+  exact system-prompt contract，但最终target/ref/candidate合法性仍由executor从同一frozen batch
+  snapshot独立复核
 - partial-channel degradation 仍应产出 allowlist 和诊断，但 v1 不在证据链不完整时执行 contradiction/supersede
 - `full` 相对于当前 deployment 已配置且本轮计划执行的通道定义；未配置 reranker 不得让部署永久处于 `partial`
 - canonical allowlist 只约束 contradiction/supersede 使用的 canonical memory IDs；`merge_and_submit.target_entry_ids` 属于 whole-batch candidate entry ID 空间，不受该 allowlist 约束
@@ -501,6 +509,7 @@ governed canonical memory graph 的唯一写入口是：
 7. graph delete 的 mirror 清理也属于异步面；authoritative Postgres cleanup 不得被 Oxigraph 可用性反向阻断
 8. whole-batch pending candidates 可用于 candidate-level merge，但 v1 不为 staged siblings 创建 provisional canonical id；它们之间的 canonical contradiction/supersede edge 明确 defer
 9. contradiction/supersede 的 canonical lifecycle target 必须来自当前 candidate 的 relatedness allowlist，并在 apply 的同一 UoW 中从同步面重新验证；candidate-entry merge 不在该 canonical allowlist 约束内
+10. `memory_nodes.node_revision` 是 canonical node 的 monotonic revision；每次 canonical document mutation 必须在同一事务内推进 revision。relatedness snapshot 必须冻结模型实际看到的 revision，destructive lifecycle apply 必须按 `graph_documents -> memory_nodes` 的固定锁序取得 document + revision，并与 frozen revision 精确比较；缺失或漂移只能 downgrade/regovernance，不能修改旧节点
 
 ### 11.3 合法停点
 
@@ -575,3 +584,38 @@ semantic relatedness 落地后必须新增：
 也就是说：
 
 > §13 不是“整份契约都已经有测试”，而是“哪些部分已有测试、哪些部分必须由迁移测试负责”。
+
+---
+
+## 14. Candidate producer provenance hard cut
+
+Candidate pool仍是提案箱，但每条 production candidate必须可定位到先行 durable producer
+authority：
+
+| origin | producer authority | candidate projection |
+|---|---|---|
+| MAIN_AGENT_TOOL | accepted model terminal projection + control disposition + terminal tool pair | deterministic main-agent builder |
+| REFLECTION | `MemoryReflectionCompletedEvent` ordered candidate attributions | transactional projection outbox |
+| COMPACTION | `ContextCompactionMemoryCandidatesProposedEvent` + confirmed summary artifact/extractor contract | transactional projection outbox |
+| GOVERNANCE | canonical decision/UOW attribution | audit-only，不再进入 pending governance |
+
+Main-agent candidate ID必须由 source tool-call identity与 versioned builder contract确定性派生；
+不得在 memory tool 或 replay 中生成随机替代 ID。Reflection completion必须逐项保存 candidate
+entry ID、payload fingerprint、index与quoted-evidence refs。Compaction必须绑定 summary content
+hash、extractor ID/version/contract fingerprint、raw candidate index、parsed payload fingerprint与
+intent fingerprint。
+
+用户原话是独立 typed evidence。Destructive replacement/supersede只能使用经 stable transcript
+entry exact span验证的 `canonical_user_span`；reflection-reported 或 compaction summary quote不能
+自行升级为 replacement authority。Governance prompt的 bounded projection不能改变完整 source
+evidence semantic identity。
+
+Producer event、candidate projection outbox与candidate row必须遵守 event-first crash contract。
+Dispatcher失败保留 pending outbox并由 session-owned owner重试；不得在 event FULL 前发布 row，
+也不得由 governance builder临时补造 orphan candidate的 provenance。
+
+`MemoryCandidateProjectionCommitPort` 是 producer bundle 的唯一 process-local owner。它必须在
+第一次 await 前接管 stable producer event + ordered outbox rows；`NONE` 重试同一 bundle，
+`UNKNOWN` 只允许 exact-ID confirm/handoff，caller cancellation 只 detach。Host close必须先
+停止该 port 的新 admission并drain owner，再投影已 durable 的 pending outbox；blocked
+reconciliation owner不得被静默退休。

@@ -111,6 +111,7 @@ Semantic relatedness 是 governance destructive lifecycle 的授权 side path，
 - duplicate/coexist/submit_as_is 是主路径。
 - 只有 relatedness 找到可信 canonical target 且 availability FULL 时，Flash 才可选择 supersede/contradict 分叉。
 - executor 必须强制 lifecycle target 来自 candidate 的 relatedness allowlist。
+- relatedness context 必须携带每个 surfaced canonical target 的 monotonic `node_revision`；executor 在 governance UOW 内锁定 canonical document 与 projection revision 后精确比较，防止模型决策与 mutation 之间的 target TOCTOU。
 - relatedness partial/unavailable 仍可允许非破坏性 submit/coexist，但不得允许 supersede/contradict。
 - same-batch staged-but-uncommitted sibling visibility 是 V1 deferred gap；committed-but-unindexed 可由 bounded inline gap embedding best-effort 补齐。
 
@@ -215,8 +216,61 @@ Executor 在 UOW commit 后写 runtime events 到 event log。
 - supersede/contradict without relatedness context are downgraded with diagnostic。
 - target not in relatedness allowlist is rejected/downgraded。
 - target drift re-read causes downgrade/regovernance diagnostic。
+- target revision drift causes downgrade/regovernance，且旧 canonical node 保持不变。
 - Postgres UOW writes graph + decision + outbox atomically。
 - failed write rolls back outbox mutation.
 - outbox surface status summarizes pending/applied/failed/partial。
 - index/vector/oxigraph consumers mark surface applied/failed.
 - coordinator debounces and wakes vector worker on commit.
+
+---
+
+## 11. Governance source evidence 与 batch ownership hard cut
+
+Memory governance 不得扫描整轮 EventLog、读取 raw model stream segment，或从序列化
+tool result 猜测 candidate provenance。Production input 只能来自以下三层 typed facts：
+
+- `GovernanceSourceEvidenceSemanticFact`：candidate、accepted marker、tool/result 或
+  reflection/compaction semantics；不得包含 sequence、artifact placement、segment policy；
+- `GovernanceSourceEvidenceAttributionFact`：exact stored event/artifact refs、producer
+  identity 与 source high-water；
+- `GovernanceEvidencePromptProjectionFact`：引用完整 semantic fingerprint 的 bounded
+  model-visible projection，不替代 canonical evidence。
+
+MAIN_AGENT_TOOL evidence 必须 join completed terminal projection、`ACCEPTED` control
+disposition、exact tool call/pair/result 与 canonical user span。REFLECTION 与 COMPACTION
+producer 必须先原子提交 producer event、ledger materialization account transition 与
+`memory_candidate_projection_outbox`；dispatcher 只能从 confirmed producer event 幂等投影
+candidate row。Candidate row 先于 producer carrier、或 producer event 失败后仍发布 candidate，
+均为禁止状态。`CandidateOrigin.GOVERNANCE` 继续只作 canonical-write audit attribution，
+不得重新进入治理输入。
+
+候选选择与 durable claim 必须在同一事务中 all-or-none 完成。同一 candidate 同时只能有
+一个 `preparing | prepared` owner。Evidence invalid 是 system-owned
+`MemoryCandidateEvidenceRejectedEvent` terminal outcome；canonical reducer、artifact hash、
+historical binding 或 EventLog proof 不可信时必须 latch 整个 governance batch，不能伪装成
+模型 `skip`。
+
+Governance 调用顺序固定为：
+
+```text
+claim
+-> atomic transcript authority snapshot
+-> typed evidence + relatedness freeze
+-> resolve exact model call
+-> persist content-addressed GovernanceBatchInputSnapshotFact
+-> MemoryGovernanceBatchPreparedEvent FULL
+-> ModelCallStartEvent
+-> decisions/UOW
+-> one terminal governance batch event
+```
+
+Batch input artifact必须保存 exact system prompt、ordered messages、resolved call、target、
+context ID、token estimate与完整 input fingerprint。Prepared、governance ModelStart、decision
+record和terminal event必须 join 同一 batch-input/reference fingerprint。Prepared recovery只可
+rebind artifact中冻结的historical target/call，不得读取当前配置重新 resolve。
+
+`GovernanceBatchExecutionOwnerRegistry`是 session-owned physical owner。Caller cancel、detach
+或 coordinator timeout不取消已准入 batch；close先停止 admission，再 bounded drain owner。
+PREPARING/PREPARED 状态必须从 durable claims、preparation locator与lifecycle events恢复；
+partial decision suffix按 stable decision identity幂等续写，不得重新治理已经提交的prefix。

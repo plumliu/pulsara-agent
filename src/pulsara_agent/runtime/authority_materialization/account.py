@@ -23,7 +23,7 @@ from pulsara_agent.event import (
     SubagentGraphCheckpointCommittedEvent,
     EventContext,
 )
-from pulsara_agent.event_log.protocol import EventLog
+from pulsara_agent.event_log.protocol import EventLog, EventLogTransactionCompanion
 from pulsara_agent.event_log.serialization import (
     DEFAULT_EVENT_SCHEMA_REGISTRY,
     canonical_event_payload_bytes,
@@ -2807,6 +2807,7 @@ class LedgerMaterializationCoordinator:
         business_window_id: str | None = None,
         business_window_generation: int | None = None,
         deadline_monotonic: float | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> CommittedOneShotPhysicalOperation:
         """Atomically reserve, append one finite batch, and settle it.
 
@@ -3119,6 +3120,7 @@ class LedgerMaterializationCoordinator:
                 resulting=resulting,
                 expected_last_sequence=source.ledger_through_sequence,
                 deadline_monotonic=deadline_monotonic,
+                transaction_companion=transaction_companion,
             )
             self.store.install_confirmed_state(resulting)
             return CommittedOneShotPhysicalOperation(
@@ -3510,6 +3512,7 @@ class LedgerMaterializationCoordinator:
         resulting: LedgerMaterializationAccountStateFact,
         expected_last_sequence: int,
         deadline_monotonic: float | None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> tuple[AgentEvent, ...]:
         """Commit or prove the exact stable event/account candidate FULL or NONE."""
 
@@ -3521,6 +3524,7 @@ class LedgerMaterializationCoordinator:
                     expected_account_state_fingerprint=source_state_fingerprint,
                     resulting_account_state=resulting,
                     physical_charge_contract=self.charge_contract,
+                    transaction_companion=transaction_companion,
                     expected_last_sequence=expected_last_sequence,
                     deadline_monotonic=deadline_monotonic,
                 )

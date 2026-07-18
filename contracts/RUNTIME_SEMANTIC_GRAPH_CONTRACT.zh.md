@@ -319,3 +319,24 @@ privileged offline doctor。
 `SubagentGraphSemanticSourceFact` 只表达 graph semantic source；`SubagentGraphAccelerationFact` 只表达 checkpoint、delta、
 ledger high-water 与 rebase 归因。Checkpoint ID、materialization event、delta range/count、physical sequence 不得进入 selection、snapshot、
 candidate 或 provider payload 的 semantic fingerprint。不同 checkpoint schedule 恢复出相同 graph 时 semantic source 必须相同。
+
+---
+
+## 9. Governance transcript authority boundary
+
+Memory governance source authority属于 transcript projection domain，不属于 runtime semantic
+graph，也不从 raw model-stream segment、working-context summary或 live scratchpad派生。
+`TranscriptProjectionStateStore.capture_governance_authority_snapshot()`必须在同一 reducer
+锁域内冻结 ledger through-sequence、accepted model projections/dispositions、stable user
+entries、tool call/pair/result state与snapshot fingerprint。
+
+所有 exact/sparse event reads只能读取到该 snapshot high-water。不得先读取 EventLog high-water，
+再把稍后取得的 reducer state贴到旧 H；也不得用 H 之后的 event回答本次 batch。
+
+Model stream segments继续属于 `non_transcript` ledger continuity。Governance只消费 accepted
+terminal projection及其 typed disposition/pairing结果；segment数量、seal schedule和transaction
+batching变化只能影响 physical attribution，不能改变 governance evidence semantic fingerprint。
+
+Authority snapshot与 exact referenced envelopes冲突时，runtime必须安装 reconciliation latch；
+candidate自身引用不存在的 source call、或 source run terminal后仍缺合法 pairing，才是可确定性
+终结的 candidate provenance invalid。两类失败不得合并为普通 governance skip。

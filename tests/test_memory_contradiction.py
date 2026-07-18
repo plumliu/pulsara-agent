@@ -11,6 +11,7 @@ import pytest
 from tests.support.model_stream import (
     make_text_block_segment_event,
 )
+from tests.support.governance import make_test_governance_execution_identity
 
 from pulsara_agent.entities.memory import Claim, Preference
 from pulsara_agent.event import EventContext, EventType
@@ -108,6 +109,10 @@ def test_postgres_governance_contradiction_writes_new_links_old_keeps_active_and
             ),
             governance_batch_id=batch_id,
             relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(pooled,),
+            ),
         )
 
         assert isinstance(result.decision_record.decision, ContradictAndSubmitDecision)
@@ -186,6 +191,10 @@ def test_uow_contradiction_links_old_new_in_memory_without_audit_candidate() -> 
         governance_batch_id="governance:test:uow-contradiction",
         relatedness_context=_relatedness_context(
             "governance:test:uow-contradiction", pooled.entry_id, (old_id,)
+        ),
+        execution_identity=make_test_governance_execution_identity(
+            governance_batch_id="governance:test:uow-contradiction",
+            candidates=(pooled,),
         ),
     )
 
@@ -297,6 +306,10 @@ def test_postgres_contradiction_downgrades_gate_failures_without_audit_candidate
                 relatedness_context=_relatedness_context(
                     batch_id, pooled.entry_id, contradicted_ids
                 ),
+                execution_identity=make_test_governance_execution_identity(
+                    governance_batch_id=batch_id,
+                    candidates=(pooled,),
+                ),
             )
 
             assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -354,6 +367,10 @@ def test_postgres_contradiction_downgrades_when_new_node_is_not_active(tmp_path)
                 reason="Should not link contradiction if the new node is not ACTIVE.",
             ),
             governance_batch_id=batch_id,
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(pooled,),
+            ),
         )
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -406,6 +423,10 @@ def test_postgres_contradiction_write_failure_does_not_link_or_record_contradict
                 reason="Write should fail before linking contradiction.",
             ),
             governance_batch_id=batch_id,
+            execution_identity=make_test_governance_execution_identity(
+                governance_batch_id=batch_id,
+                candidates=(pooled,),
+            ),
         )
 
         assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -469,6 +490,10 @@ def test_postgres_contradiction_rolls_back_when_lifecycle_fails_after_first_edge
                 ),
                 governance_batch_id=batch_id,
                 relatedness_context=_relatedness_context(batch_id, pooled.entry_id, (old_id,)),
+                execution_identity=make_test_governance_execution_identity(
+                    governance_batch_id=batch_id,
+                    candidates=(pooled,),
+                ),
             )
 
         old_doc = store.get_jsonld(old_id, graph_id=graph_id)
@@ -523,6 +548,10 @@ def test_contradiction_without_relatedness_context_is_blocked_and_downgraded() -
             reason="Contradiction attempted without relatedness context.",
         ),
         governance_batch_id="governance:test:contradiction-no-context",
+        execution_identity=make_test_governance_execution_identity(
+            governance_batch_id="governance:test:contradiction-no-context",
+            candidates=(pooled,),
+        ),
     )
 
     assert isinstance(result.decision_record.decision, CorrectAndSubmitDecision)
@@ -939,6 +968,7 @@ def _view(
         do_not_apply_when=None,
         created_at=now,
         updated_at=now,
+        node_revision=1,
         evidence_ids=(),
         outgoing=outgoing,
         incoming=incoming,
@@ -1055,6 +1085,9 @@ def _relatedness_context(
         governance_batch_id=batch_id,
         allowlists=MappingProxyType({entry_id: frozenset(memory_ids)}),
         availability=MappingProxyType({entry_id: RelatednessAvailability.FULL}),
+        node_revisions=MappingProxyType(
+            {entry_id: MappingProxyType({memory_id: 1 for memory_id in memory_ids})}
+        ),
     )
 
 

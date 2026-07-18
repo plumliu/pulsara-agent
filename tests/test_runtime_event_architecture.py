@@ -43,6 +43,77 @@ MEMORY_GOVERNANCE_DIR = (
 )
 
 
+def test_governance_source_evidence_has_no_legacy_event_guessing() -> None:
+    forbidden_text = (
+        "_source_event_summaries",
+        '"source_events"',
+        "TextBlockSegmentEvent",
+        "ThinkingBlockSegmentEvent",
+        "DataBlockSegmentEvent",
+        "ToolCallArgumentsSegmentEvent",
+    )
+    violations: list[str] = []
+    for path in sorted(MEMORY_GOVERNANCE_DIR.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        for text in forbidden_text:
+            if text in source:
+                violations.append(f"{relative}:{text}")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "iter"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "event_log"
+            ):
+                violations.append(f"{relative}:{node.lineno}:event_log.iter")
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "delta"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "event"
+            ):
+                violations.append(f"{relative}:{node.lineno}:.delta")
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in {"getattr", "hasattr"}
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "event"
+            ):
+                violations.append(f"{relative}:{node.lineno}:{node.func.id}")
+    assert violations == []
+
+
+def test_memory_candidate_producers_cannot_bypass_projection_ownership() -> None:
+    producer_paths = (
+        REPO_ROOT / "src/pulsara_agent/memory/reflection/engine.py",
+        REPO_ROOT / "src/pulsara_agent/runtime/compaction/service.py",
+    )
+    violations: list[str] = []
+    for path in producer_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append_candidate"
+            ):
+                violations.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}"
+                )
+    memory_tool = (
+        REPO_ROOT / "src/pulsara_agent/tools/builtins/memory.py"
+    ).read_text(encoding="utf-8")
+    assert "uuid4" not in memory_tool
+    assert "build_main_agent_memory_candidate_payload(" in memory_tool
+    assert "self.candidate_type.model_validate(" not in memory_tool
+    assert violations == []
+
+
 def test_model_stream_delta_events_are_physically_deleted() -> None:
     forbidden = (
         "TextBlockDeltaEvent",

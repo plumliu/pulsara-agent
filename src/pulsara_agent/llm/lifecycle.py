@@ -26,12 +26,16 @@ from pulsara_agent.event_log.serialization import (
     freeze_event_write_candidate,
 )
 from pulsara_agent.llm.estimator import estimate_model_context_for_call
+from pulsara_agent.llm.request import llm_context_fingerprint
 from pulsara_agent.primitives._context_base import context_fingerprint
 from pulsara_agent.primitives.long_horizon import (
     ModelCallReservationQuoteFact,
     RolloutPhase,
     RolloutReservationFact,
     calculate_model_call_reservation,
+)
+from pulsara_agent.primitives.governance_evidence import (
+    GovernanceModelInputAttributionFact,
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelContextMode
@@ -70,6 +74,7 @@ class ModelLifecycleStartCommitBundle:
     reservation_quote: ModelCallReservationQuoteFact | None
     recovery_plan: ModelStreamRecoveryPlanFact
     companion_candidates: tuple[FrozenEventWriteCandidate, ...]
+    governance_input_attribution: GovernanceModelInputAttributionFact | None
     bundle_fingerprint: str
 
     @property
@@ -108,6 +113,7 @@ def prepare_model_lifecycle_start_bundle(
     window_compaction_started_event_id: str | None = None,
     extra_companion_candidates: tuple[AgentEvent, ...] = (),
     prepared_rollout_reservation: PreparedModelRolloutReservation | None = None,
+    governance_input_attribution: GovernanceModelInputAttributionFact | None = None,
 ) -> ModelLifecycleStartCommitBundle:
     """Freeze estimate-only lifecycle facts without starting provider I/O."""
 
@@ -168,6 +174,7 @@ def prepare_model_lifecycle_start_bundle(
             else None
         ),
         companion_candidates=frozen_companions,
+        governance_input_attribution=governance_input_attribution,
     )
     bundle = ModelLifecycleStartCommitBundle(
         **payload,
@@ -326,6 +333,18 @@ def validate_model_lifecycle_start_bundle(
             )
     elif companion_events:
         raise ValueError("direct lifecycle cannot carry start companions")
+    governance = call.fact.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
+    if governance != (bundle.governance_input_attribution is not None):
+        raise ValueError("governance model lifecycle attribution matrix mismatch")
+    if bundle.governance_input_attribution is not None:
+        attribution = bundle.governance_input_attribution
+        if (
+            attribution.resolved_model_call_id != call.fact.resolved_model_call_id
+            or attribution.target_fingerprint != call.target.fact.target_fingerprint
+            or attribution.final_model_visible_input_fingerprint
+            != llm_context_fingerprint(context)
+        ):
+            raise ValueError("governance model lifecycle input attribution drifted")
     payload = _bundle_payload(
         call_id=bundle.resolved_model_call_id,
         lifecycle_kind=bundle.lifecycle_kind,
@@ -337,6 +356,7 @@ def validate_model_lifecycle_start_bundle(
         ),
         reservation_quote=bundle.reservation_quote,
         companion_candidates=bundle.companion_candidates,
+        governance_input_attribution=bundle.governance_input_attribution,
     )
     expected = context_fingerprint(
         "model-lifecycle-start-bundle:v1",
@@ -512,6 +532,7 @@ def _bundle_payload(
     expected_rollout_account_state_fingerprint: str | None,
     reservation_quote: ModelCallReservationQuoteFact | None,
     companion_candidates: tuple[FrozenEventWriteCandidate, ...],
+    governance_input_attribution: GovernanceModelInputAttributionFact | None,
 ) -> dict[str, object]:
     return {
         "resolved_model_call_id": call_id,
@@ -526,6 +547,7 @@ def _bundle_payload(
         "reservation_quote": reservation_quote,
         "recovery_plan": recovery_plan,
         "companion_candidates": companion_candidates,
+        "governance_input_attribution": governance_input_attribution,
     }
 
 

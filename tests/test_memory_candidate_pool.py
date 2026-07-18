@@ -9,12 +9,12 @@ import pytest
 from tests.support.model_stream import (
     make_text_block_segment_event,
 )
+from tests.support.governance import make_test_governance_decision_record
 
 from pulsara_agent.event import EventContext
 from pulsara_agent.event.candidates import InvalidAttemptPayload, PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.memory import (
-    MemoryGovernanceDecisionRecord,
     MemoryWriteUnitOfWork,
     NoWriteOutcome,
     PooledMemoryCandidate,
@@ -75,35 +75,62 @@ def test_candidate_pool_round_trips_valid_and_invalid_payloads(pool_case: _PoolC
 
 def test_skip_decision_terminally_removes_candidate_from_pending(pool_case: _PoolCase) -> None:
     candidate = pool_case.pool.append_candidate(_pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}"))
+    governance_batch_id = f"governance:test:{uuid4().hex}"
+    decision = SkipDecision(
+        target_entry_ids=(candidate.entry_id,),
+        reason="not durable",
+        skip_reason="not_durable",
+    )
     pool_case.pool.append_decision(
-        MemoryGovernanceDecisionRecord(
-            governance_batch_id=f"governance:test:{uuid4().hex}",
-            decision=SkipDecision(
-                target_entry_ids=(candidate.entry_id,),
-                reason="not durable",
-                skip_reason="not_durable",
-            ),
+        make_test_governance_decision_record(
+            governance_batch_id=governance_batch_id,
+            decision=decision,
             write_outcome=NoWriteOutcome(),
+            candidates=(candidate,),
         )
     )
 
     assert _pending_for_case(pool_case) == []
 
 
+def test_system_evidence_rejection_terminally_removes_candidate_from_pending(
+    pool_case: _PoolCase,
+) -> None:
+    candidate = pool_case.pool.append_candidate(
+        _pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}")
+    )
+    event_id = f"memory_candidate:{candidate.entry_id}:evidence_rejected:1"
+
+    pool_case.pool.mark_evidence_rejected(
+        entry_id=candidate.entry_id,
+        rejection_event_id=event_id,
+    )
+    pool_case.pool.mark_evidence_rejected(
+        entry_id=candidate.entry_id,
+        rejection_event_id=event_id,
+    )
+
+    assert pool_case.pool.evidence_rejection_event_id(candidate.entry_id) == event_id
+    assert _pending_for_case(pool_case) == []
+
+
 def test_write_failed_decision_does_not_terminally_remove_candidate(pool_case: _PoolCase) -> None:
     candidate = pool_case.pool.append_candidate(_pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}"))
+    governance_batch_id = f"governance:test:{uuid4().hex}"
+    decision = SubmitAsIsDecision(
+        target_entry_id=candidate.entry_id,
+        reason="try write",
+    )
     pool_case.pool.append_decision(
-        MemoryGovernanceDecisionRecord(
-            governance_batch_id=f"governance:test:{uuid4().hex}",
-            decision=SubmitAsIsDecision(
-                target_entry_id=candidate.entry_id,
-                reason="try write",
-            ),
+        make_test_governance_decision_record(
+            governance_batch_id=governance_batch_id,
+            decision=decision,
             write_outcome=WriteFailedOutcome(
                 error_type="RuntimeError",
                 message="temporary store failure",
                 write_event_ids=("event:failed",),
             ),
+            candidates=(candidate,),
         )
     )
 
@@ -114,13 +141,15 @@ def test_write_failed_decision_does_not_terminally_remove_candidate(pool_case: _
 
 def test_write_succeeded_decision_terminally_removes_candidate(pool_case: _PoolCase) -> None:
     candidate = pool_case.pool.append_candidate(_pooled_valid(pool_case, entry_id=f"pool:test:{uuid4().hex}"))
+    governance_batch_id = f"governance:test:{uuid4().hex}"
+    decision = SubmitAsIsDecision(
+        target_entry_id=candidate.entry_id,
+        reason="write",
+    )
     pool_case.pool.append_decision(
-        MemoryGovernanceDecisionRecord(
-            governance_batch_id=f"governance:test:{uuid4().hex}",
-            decision=SubmitAsIsDecision(
-                target_entry_id=candidate.entry_id,
-                reason="write",
-            ),
+        make_test_governance_decision_record(
+            governance_batch_id=governance_batch_id,
+            decision=decision,
             write_outcome=WriteSucceededOutcome(
                 memory_id="preference:test",
                 memory_type="Preference",
@@ -130,6 +159,7 @@ def test_write_succeeded_decision_terminally_removes_candidate(pool_case: _PoolC
                 gate_reason="ok",
                 write_event_ids=("event:result",),
             ),
+            candidates=(candidate,),
         )
     )
 

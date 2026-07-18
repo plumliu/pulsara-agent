@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from uuid import uuid4
 
@@ -66,10 +67,12 @@ from pulsara_agent.event import (
     ToolResultTextDeltaEvent,
 )
 from pulsara_agent.event_log import PostgresEventLog
+from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
 from pulsara_agent.inspector import InspectorService, PostgresInspectorStore
 from pulsara_agent.inspector.service import (
     _context_compilation_projection,
     _long_horizon_run_projection,
+    _memory_governance_projection,
     _model_contract_projection,
     _rollout_status_shadow_projection,
 )
@@ -101,6 +104,12 @@ from pulsara_agent.primitives.long_horizon import (
     calculate_model_call_reservation,
 )
 from pulsara_agent.memory.candidates.pool import CANDIDATE_POOL_SCHEMA_SQL
+from pulsara_agent.memory.candidates.pool import candidate_payload_fingerprint
+from pulsara_agent.llm.terminal_projection import stable_event_identity
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.governance_evidence import (
+    CompactionCandidateAttributionFact,
+)
 from pulsara_agent.message import ToolResultArtifactRef, ToolResultState
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.runtime.permission import preset_to_policy
@@ -110,12 +119,52 @@ from pulsara_agent.runtime.tool_action import (
 )
 from pulsara_agent.tools import ToolCall
 from pulsara_agent.runtime.subagent.facts import subagent_dependency_generation
+from pulsara_agent.runtime.compaction.candidates import (
+    ContextCompactionMemoryCandidatePolicy,
+    compaction_extractor_contract,
+)
 from pulsara_agent.settings import StorageConfig
 from pulsara_agent.storage import MEMORY_SUBSTRATE_SCHEMA_SQL
 
 
 def _stored(event, sequence: int):
     return event.model_copy(update={"sequence": sequence})
+
+
+def test_memory_governance_projection_reports_durable_owner_state() -> None:
+    class Store:
+        def governance_batches_for_session(self, session_id):
+            assert session_id == "runtime:test"
+            return [{"governance_batch_id": "governance:one", "status": "prepared"}]
+
+        def governance_claims_for_session(self, session_id):
+            assert session_id == "runtime:test"
+            return [
+                {"candidate_entry_id": "pool:one", "status": "prepared"},
+                {"candidate_entry_id": "pool:two", "status": "terminal"},
+            ]
+
+        def governance_evidence_rejections_for_session(self, session_id):
+            assert session_id == "runtime:test"
+            return [{"candidate_entry_id": "pool:invalid"}]
+
+        def candidate_projection_outbox_for_session(self, session_id):
+            assert session_id == "runtime:test"
+            return [
+                {"candidate_entry_id": "pool:pending", "status": "pending"},
+                {"candidate_entry_id": "pool:applied", "status": "applied"},
+            ]
+
+    projection = _memory_governance_projection(Store(), session_id="runtime:test")
+
+    assert projection["counts"] == {
+        "batches": 1,
+        "open_claims": 1,
+        "evidence_rejections": 1,
+        "pending_candidate_projections": 1,
+    }
+    assert projection["batches"][0]["status"] == "prepared"
+    assert projection["claims"][1]["status"] == "terminal"
 
 
 def _action_classification(
@@ -1435,7 +1484,34 @@ def test_inspect_session_links_context_compaction_memory_candidates(
                 included_run_ids=[ctx.run_id],
             )
         )
-        log.append(
+        candidate_payload = ValidCandidatePayload(
+            candidate=PreferenceCandidate(
+                candidate_id="candidate:compaction-inspector",
+                statement=(
+                    "The user prefers syncing release before pushing GitHub."
+                ),
+                scope="ctx:workspace/test",
+                source_authority="conversation_evidence",
+                verification_status="inferred",
+                evidence_ids=[],
+            )
+        )
+        extractor_contract = compaction_extractor_contract(
+            ContextCompactionMemoryCandidatePolicy()
+        )
+        summary_text = "Compaction summary mentions release sync workflow."
+        candidate_attribution = build_frozen_fact(
+            CompactionCandidateAttributionFact,
+            schema_version="compaction_candidate_attribution.v1",
+            candidate_entry_id=candidate_entry_id,
+            raw_candidate_index=0,
+            candidate_payload=candidate_payload,
+            candidate_payload_fingerprint=candidate_payload_fingerprint(
+                candidate_payload
+            ),
+            intent_fingerprint="sha256:inspector",
+        )
+        proposed = log.append(
             ContextCompactionMemoryCandidatesProposedEvent(
                 **ctx.event_fields(),
                 compaction_id=completed.compaction_id,
@@ -1445,6 +1521,17 @@ def test_inspect_session_links_context_compaction_memory_candidates(
                 candidate_entry_ids=[candidate_entry_id],
                 attempted_count=1,
                 proposed_count=1,
+                extractor_version=extractor_contract.extractor_version,
+                summary_content_sha256=hashlib.sha256(
+                    summary_text.encode("utf-8")
+                ).hexdigest(),
+                summary_content_bytes=len(summary_text.encode("utf-8")),
+                extractor_contract=extractor_contract,
+                ordered_candidate_attributions=(candidate_attribution,),
+                completed_compaction_event_identity=stable_event_identity(
+                    completed,
+                    runtime_session_id=runtime_session_id,
+                ),
             )
         )
         with psycopg.connect(dsn) as connection:
@@ -1471,23 +1558,14 @@ def test_inspect_session_links_context_compaction_memory_candidates(
                         candidate_entry_id,
                         Jsonb(
                             {
-                                "payload_kind": "valid",
-                                "candidate": {
-                                    "kind": "Preference",
-                                    "candidate_id": "candidate:compaction-inspector",
-                                    "statement": "The user prefers syncing release before pushing GitHub.",
-                                    "scope": "ctx:workspace/test",
-                                    "source_authority": "conversation_evidence",
-                                    "verification_status": "inferred",
-                                    "evidence_ids": [],
-                                },
+                                **candidate_payload.model_dump(mode="json"),
                             }
                         ),
                         runtime_session_id,
                         ctx.run_id,
                         ctx.turn_id,
                         ctx.reply_id,
-                        completed.id,
+                        proposed.id,
                         summary_artifact_id,
                         "sha256:inspector",
                         Jsonb(
@@ -1505,14 +1583,26 @@ def test_inspect_session_links_context_compaction_memory_candidates(
                     insert into memory_governance_decisions (
                         decision_id,
                         governance_batch_id,
+                        batch_input_fingerprint,
+                        batch_input_reference_fingerprint,
+                        governance_model_call_id,
+                        decision_index,
+                        requested_decision_payload_fingerprint,
+                        decision_payload_fingerprint,
                         decision,
                         write_outcome
                     )
-                    values (%s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         decision_id,
                         governance_batch_id,
+                        f"sha256:batch:{governance_batch_id}",
+                        f"sha256:reference:{governance_batch_id}",
+                        f"model_call:{governance_batch_id}",
+                        0,
+                        f"sha256:requested:{decision_id}",
+                        f"sha256:effective:{decision_id}",
                         Jsonb(
                             {
                                 "kind": "skip",
@@ -1538,7 +1628,7 @@ def test_inspect_session_links_context_compaction_memory_candidates(
         assert window["candidate_proposals"][0]["proposed_count"] == 1
         assert window["memory_candidates"][0]["entry_id"] == candidate_entry_id
         assert window["memory_candidates"][0]["origin"] == "compaction"
-        assert window["memory_candidates"][0]["source_event_id"] == completed.id
+        assert window["memory_candidates"][0]["source_event_id"] == proposed.id
         assert window["memory_candidates"][0]["metadata"]["summary_excerpt"].startswith(
             "Compaction summary"
         )
@@ -2327,14 +2417,26 @@ def test_inspect_run_outbox_uses_structured_lineage_not_payload_text(
                     insert into memory_governance_decisions (
                         decision_id,
                         governance_batch_id,
+                        batch_input_fingerprint,
+                        batch_input_reference_fingerprint,
+                        governance_model_call_id,
+                        decision_index,
+                        requested_decision_payload_fingerprint,
+                        decision_payload_fingerprint,
                         decision,
                         write_outcome
                     )
-                    values (%s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         decision_id,
                         governance_batch_id,
+                        f"sha256:batch:{governance_batch_id}",
+                        f"sha256:reference:{governance_batch_id}",
+                        f"model_call:{governance_batch_id}",
+                        0,
+                        f"sha256:requested:{decision_id}",
+                        f"sha256:effective:{decision_id}",
                         Jsonb(
                             {
                                 "kind": "submit_as_is",

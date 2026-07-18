@@ -12,9 +12,6 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, ClassVar
-from uuid import uuid4
-
-from pydantic import ValidationError
 
 from pulsara_agent.event.candidates import (
     ActionBoundaryCandidate,
@@ -32,6 +29,10 @@ from pulsara_agent.memory.candidates.pool import CandidateOrigin, CandidatePoolP
 from pulsara_agent.memory.candidates.proposal_sink import MEMORY_INVALID_RETRY_LIMIT, MemoryProposalSink, MemoryRetryState
 from pulsara_agent.tools.base import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.schemas import json_text, object_schema
+from pulsara_agent.memory.candidates.main_agent_builder import (
+    build_main_agent_memory_candidate_payload,
+    main_agent_memory_candidate_entry_id,
+)
 
 
 _SOURCE_AUTHORITIES = [item.value for item in memory.SourceAuthority]
@@ -153,6 +154,7 @@ _DECISION_PARAMETERS = _memory_parameters(
 @dataclass(slots=True)
 class _RememberMemoryTool:
     sink: MemoryProposalSink
+    runtime_session_id: str = "in-memory"
 
     name: ClassVar[str]
     description: ClassVar[str]
@@ -168,22 +170,20 @@ class _RememberMemoryTool:
             attempted_kind=self.kind,
             raw_arguments=call.arguments,
         )
-        payload = {
-            **call.arguments,
-            "candidate_id": f"candidate:{uuid4().hex}",
-            "kind": self.kind,
-        }
-        try:
-            candidate = self.candidate_type.model_validate(payload)
-        except ValidationError as exc:
+        candidate_payload = build_main_agent_memory_candidate_payload(
+            runtime_session_id=self.runtime_session_id,
+            tool_call_id=call.id,
+            tool_name=call.name,
+            arguments=call.arguments,
+        )
+        if isinstance(candidate_payload, InvalidAttemptPayload):
             retry_state = self.sink.record_invalid(
                 CandidatePoolProposal(
-                    payload=InvalidAttemptPayload(
-                        attempted_tool_name=call.name,
-                        attempted_kind=self.kind,
-                        raw_arguments=dict(call.arguments),
-                        validation_error=str(exc),
+                    entry_id=_main_tool_candidate_entry_id(
+                        runtime_session_id=self.runtime_session_id,
+                        tool_call_id=call.id,
                     ),
+                    payload=candidate_payload,
                     origin=CandidateOrigin.MAIN_AGENT_TOOL,
                     source_tool_call_id=call.id,
                 ),
@@ -193,11 +193,23 @@ class _RememberMemoryTool:
                 call_id=call.id,
                 tool_name=call.name,
                 status=ToolResultState.ERROR,
-                output=json_text(_invalid_candidate_output(exc, retry_state)),
+                output=json_text(
+                    _invalid_candidate_output(
+                        candidate_payload.validation_error,
+                        retry_state,
+                    )
+                ),
             )
+        if not isinstance(candidate_payload, ValidCandidatePayload):
+            raise TypeError("main-agent memory candidate builder returned unknown payload")
+        candidate = candidate_payload.candidate
         self.sink.deposit_valid(
             CandidatePoolProposal(
-                payload=ValidCandidatePayload(candidate=candidate),
+                entry_id=_main_tool_candidate_entry_id(
+                    runtime_session_id=self.runtime_session_id,
+                    tool_call_id=call.id,
+                ),
+                payload=candidate_payload,
                 origin=CandidateOrigin.MAIN_AGENT_TOOL,
                 source_tool_call_id=call.id,
             ),
@@ -216,6 +228,15 @@ class _RememberMemoryTool:
                 }
             ),
         )
+
+
+def _main_tool_candidate_entry_id(
+    *, runtime_session_id: str, tool_call_id: str
+) -> str:
+    return main_agent_memory_candidate_entry_id(
+        runtime_session_id=runtime_session_id,
+        tool_call_id=tool_call_id,
+    )
 
 
 def _intent_fingerprint(*, tool_name: str, attempted_kind: str, raw_arguments: dict[str, Any]) -> str:
@@ -249,8 +270,11 @@ def _stable_args_hash(raw_arguments: dict[str, Any]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
 
 
-def _invalid_candidate_output(exc: ValidationError, retry_state: MemoryRetryState) -> dict[str, Any]:
-    message = f"{exc.error_count()} validation error(s): {exc}"
+def _invalid_candidate_output(
+    validation_error: str,
+    retry_state: MemoryRetryState,
+) -> dict[str, Any]:
+    message = validation_error
     if not retry_state.retry_allowed:
         message = (
             f"{message}\nDo not retry this memory tool for the same memory intent in this run. "

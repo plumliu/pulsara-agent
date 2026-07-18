@@ -87,6 +87,10 @@ class GovernanceWriteUnitOfWork(Protocol):
 
     def ensure_event_context_rows(self, context: EventContext) -> None: ...
 
+    def lock_canonical_memory(
+        self, memory_id: str
+    ) -> tuple[dict[str, Any], int] | None: ...
+
     def __enter__(self) -> Self: ...
 
     def __exit__(
@@ -214,6 +218,47 @@ class MemoryWriteUnitOfWork:
                     f"and run {run_id!r}"
                 )
 
+    def lock_canonical_memory(
+        self, memory_id: str
+    ) -> tuple[dict[str, Any], int] | None:
+        """Lock one canonical document and its projection revision in write order."""
+
+        assert self.connection is not None
+        with self.connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT payload
+                FROM graph_documents
+                WHERE graph_id = %s AND id = %s
+                FOR UPDATE
+                """,
+                (self.resolved_graph_id, memory_id),
+            )
+            document_row = cursor.fetchone()
+            if document_row is None:
+                return None
+            payload = document_row["payload"]
+            if not isinstance(payload, dict):
+                raise TypeError(
+                    f"stored canonical memory payload is not an object: {memory_id}"
+                )
+            cursor.execute(
+                """
+                SELECT node_revision
+                FROM memory_nodes
+                WHERE graph_id = %s AND id = %s
+                FOR UPDATE
+                """,
+                (self.resolved_graph_id, memory_id),
+            )
+            projection_row = cursor.fetchone()
+            if projection_row is None:
+                raise ValueError(
+                    "canonical memory projection is missing for locked document "
+                    f"{memory_id}"
+                )
+        return payload, int(projection_row["node_revision"])
+
 
 @dataclass(slots=True)
 class _PoolDecisionRepository:
@@ -290,6 +335,15 @@ class InMemoryMemoryWriteUnitOfWork:
     def ensure_event_context_rows(self, context: EventContext) -> None:
         return None
 
+    def lock_canonical_memory(
+        self, memory_id: str
+    ) -> tuple[dict[str, Any], int] | None:
+        try:
+            document = self.graph.get_jsonld(memory_id, graph_id=self.graph_id)
+        except KeyError:
+            return None
+        return document, 1
+
 
 @dataclass(slots=True)
 class CandidateDecisionRepository:
@@ -309,13 +363,14 @@ class CandidateDecisionRepository:
                     source_reply_id,
                     source_tool_call_id,
                     user_quote,
+                    quoted_evidence_locator,
                     source_event_id,
                     source_artifact_id,
                     intent_fingerprint,
                     metadata,
                     created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                 """,
                 (
                     candidate.entry_id,
@@ -327,6 +382,11 @@ class CandidateDecisionRepository:
                     candidate.source_reply_id,
                     candidate.source_tool_call_id,
                     candidate.user_quote,
+                    Jsonb(
+                        candidate.quoted_evidence_locator.model_dump(mode="json")
+                        if candidate.quoted_evidence_locator is not None
+                        else None
+                    ),
                     candidate.source_event_id,
                     candidate.source_artifact_id,
                     candidate.intent_fingerprint,
@@ -344,15 +404,27 @@ class CandidateDecisionRepository:
                 INSERT INTO memory_governance_decisions (
                     decision_id,
                     governance_batch_id,
+                    batch_input_fingerprint,
+                    batch_input_reference_fingerprint,
+                    governance_model_call_id,
+                    decision_index,
+                    requested_decision_payload_fingerprint,
+                    decision_payload_fingerprint,
                     decision,
                     write_outcome,
                     created_at
                 )
-                VALUES (%s, %s, %s, %s, %s::timestamptz)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
                 """,
                 (
                     record.decision_id,
                     record.governance_batch_id,
+                    record.batch_input_fingerprint,
+                    record.batch_input_reference_fingerprint,
+                    record.governance_model_call_id,
+                    record.decision_index,
+                    record.requested_decision_payload_fingerprint,
+                    record.decision_payload_fingerprint,
                     Jsonb(_decision_adapter.dump_python(record.decision, mode="json")),
                     Jsonb(_outcome_adapter.dump_python(record.write_outcome, mode="json")),
                     record.created_at,

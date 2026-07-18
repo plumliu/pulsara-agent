@@ -27,6 +27,7 @@ from pulsara_agent.event_log.protocol import (
     RawTranscriptDomainDeltaSnapshot,
     RawTranscriptDomainPrefixFact,
     EventLogWriteConflict,
+    EventLogTransactionCompanion,
     MaterializationAccountStateConflict,
     raw_checkpoint_catalog_identity,
     same_event_payload,
@@ -209,6 +210,7 @@ class InMemoryEventLog:
         expected_account_state_fingerprint: str | None,
         resulting_account_state: LedgerMaterializationAccountStateFact,
         physical_charge_contract: PhysicalChargeContractFact,
+        transaction_companion: EventLogTransactionCompanion | None = None,
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]:
@@ -267,6 +269,8 @@ class InMemoryEventLog:
                 raw_events,
                 physical_charge_contract,
             )
+            if transaction_companion is not None:
+                transaction_companion.apply_in_memory(stored_events)
             self._raw_events.extend(raw_events)
             for stored, raw in zip(stored_events, raw_events, strict=True):
                 self._append_transcript_prefix(stored, raw)

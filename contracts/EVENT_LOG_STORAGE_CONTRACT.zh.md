@@ -355,3 +355,30 @@ exact suffix。两阶段冻结相同requested high-water、reducer contract与se
 
 第二阶段允许观察到更高的ledger high-water，但不得把requested prefix之后的event混入delta，也不得悄悄更换selected candidate。Checkpoint event参与all-event ledger continuity，但是
 subagent graph reducer 的 deterministic no-op，不参与 graph semantic accumulator。
+
+---
+
+## 13. Memory governance lifecycle storage contract
+
+Governance hard cut新增的 durable lifecycle包括 producer candidate-attribution events、
+`MemoryCandidateEvidenceRejectedEvent`、`MemoryGovernanceBatchPreparedEvent`、唯一
+Completed/Failed/Blocked terminal event，以及 governance `ModelCallStartEvent`上的 required
+`GovernanceModelInputAttributionFact`。所有事件必须进入 current AgentEvent union、versioned raw
+envelope registry与historical decoder；未知 schema/domain binding fail closed。
+
+Reflection/compaction producer commit使用 EventLog transaction companion，在同一 PostgreSQL
+connection/transaction内完成 producer event append、ledger materialization account advance与
+`memory_candidate_projection_outbox` insert。Governance Prepared commit同样原子完成 event、claim
+`PREPARING -> PREPARED` CAS与preparation locator transition。Terminal commit原子完成 lifecycle
+event、全部 claim terminal transition与preparation terminal transition。任何 companion失败必须使
+整批 rollback；不得先写 event后补业务 row。
+
+正常 governance preparation禁止 `EventLog.iter()` 或整 run/session扫描。Source attribution使用
+带 sequence、event schema fingerprint、payload fingerprint与stored-envelope fingerprint的 exact
+refs，并要求每个 sequence不超过 frozen authority high-water。Recovery只允许 bounded exact-ID、
+per-call与artifact reads。Prepared artifact confirmed但event未提交时保留 PREPARING owner；
+Prepared FULL后 claim和locator必须同时可恢复。
+
+Claim、preparation、projection-outbox与evidence-rejection表属于 durable recovery state，不是可丢
+cache。数据库 reset hard cut后，缺表、claim/event payload冲突、同 candidate 双 open owner或
+terminal event仍有open claim均 fail closed。

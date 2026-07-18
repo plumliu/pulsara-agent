@@ -51,6 +51,7 @@ from pulsara_agent.event_log import (
     InMemoryEventLog,
     DEFAULT_EVENT_SCHEMA_REGISTRY,
 )
+from pulsara_agent.event_log.protocol import EventLogTransactionCompanion
 from pulsara_agent.memory.candidates.proposal_sink import MemoryProposalSink
 from pulsara_agent.llm.execution import ModelStreamExecutionRegistry
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
@@ -448,6 +449,11 @@ class RuntimeSession:
         init=False,
         repr=False,
     )
+    _memory_governance_reconciliation_required: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
     mcp_installation_id: str = field(default="mcp_installation:empty", init=False)
     mcp_installation_owner_runtime_session_id: str = field(init=False)
     _pending_mcp_installation_audits: list[McpPendingInstallationAudit] = field(
@@ -472,6 +478,7 @@ class RuntimeSession:
         bind_event_log_owner = getattr(self.event_log, "bind_runtime_session_id", None)
         if bind_event_log_owner is not None:
             bind_event_log_owner(self.runtime_session_id)
+        self.event_log.ensure_runtime_session_owner()
         self.mcp_installation_owner_runtime_session_id = self.runtime_session_id
         self.artifact_service = ToolResultArtifactService(
             archive=self.archive,
@@ -1137,6 +1144,7 @@ class RuntimeSession:
         return (
             self._ledger_reconciliation_required
             or self._context_input_reconciliation_required
+            or self._memory_governance_reconciliation_required
             or self._reconciliation_required
         )
 
@@ -1172,6 +1180,12 @@ class RuntimeSession:
 
         with self.write_coordinator.lock:
             self._context_input_reconciliation_required = True
+
+    def latch_memory_governance_reconciliation_required(self) -> None:
+        """Block mutation when durable governance authority cannot be joined."""
+
+        with self.write_coordinator.lock:
+            self._memory_governance_reconciliation_required = True
 
     def record_context_input_cache_diagnostic(
         self,
@@ -1531,6 +1545,7 @@ class RuntimeSession:
         *,
         expected_last_sequence: int | None = None,
         state: LoopState | None = None,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> EventWriteResult:
         self.publisher.bind_running_loop()
         deadline = self.event_write_service.new_deadline_monotonic()
@@ -1561,6 +1576,10 @@ class RuntimeSession:
             and self.event_log.next_sequence() == 1
         )
         tool_reservation = self._active_tool_reservation_for_batch(prepared)
+        if transaction_companion is not None and (is_genesis or tool_reservation is not None):
+            raise ValueError(
+                "transaction companion requires an accounted one-shot event batch"
+            )
         if (
             missing_account
             and not is_genesis
@@ -1603,6 +1622,7 @@ class RuntimeSession:
                         state=state,
                         await_delivery=True,
                         deadline_monotonic=deadline,
+                        transaction_companion=transaction_companion,
                     ),
                     deadline_monotonic=deadline,
                 )
@@ -2351,9 +2371,178 @@ class RuntimeSession:
         self._require_runtime_managed_sequence(event)
         return self._with_default_metadata(event)
 
+    def _validate_memory_governance_batch(
+        self,
+        events: tuple[AgentEvent, ...],
+    ) -> None:
+        from pulsara_agent.event import (
+            MemoryGovernanceBatchBlockedEvent,
+            MemoryGovernanceBatchCompletedEvent,
+            MemoryGovernanceBatchFailedEvent,
+            MemoryGovernanceBatchPreparedEvent,
+        )
+        from pulsara_agent.memory.governance.batch_input import (
+            hydrate_governance_batch_input,
+        )
+        from pulsara_agent.llm.terminal_projection import stable_event_identity
+
+        terminal_types = (
+            MemoryGovernanceBatchCompletedEvent,
+            MemoryGovernanceBatchFailedEvent,
+            MemoryGovernanceBatchBlockedEvent,
+        )
+        for event in events:
+            if (
+                isinstance(event, ModelCallStartEvent)
+                and event.governance_input_attribution is not None
+            ):
+                attribution = event.governance_input_attribution
+                prepared_ref = attribution.governance_batch_prepared_event_reference
+                prepared_event = self.event_log.get_by_id(
+                    prepared_ref.stable_identity.event_id
+                )
+                if not isinstance(
+                    prepared_event, MemoryGovernanceBatchPreparedEvent
+                ) or prepared_ref.stable_identity != stable_event_identity(
+                    prepared_event,
+                    runtime_session_id=self.runtime_session_id,
+                ):
+                    raise ValueError(
+                        "governance model Start lacks its exact Prepared event"
+                    )
+                snapshot = hydrate_governance_batch_input(
+                    reference=attribution.batch_input_reference,
+                    archive=self.archive,
+                    runtime_session_id=self.runtime_session_id,
+                    deadline_monotonic=(
+                        self.event_write_service.current_deadline_monotonic()
+                    ),
+                )
+                model_input = snapshot.model_input
+                if (
+                    prepared_event.batch_input_reference
+                    != attribution.batch_input_reference
+                    or event.resolved_call != model_input.resolved_call
+                    or event.context_id != model_input.context_id
+                    or attribution.final_model_visible_input_fingerprint
+                    != model_input.provider_neutral_context_fingerprint
+                ):
+                    raise ValueError(
+                        "governance model Start/artifact identity drifted"
+                    )
+            elif isinstance(event, MemoryGovernanceBatchPreparedEvent):
+                snapshot = hydrate_governance_batch_input(
+                    reference=event.batch_input_reference,
+                    archive=self.archive,
+                    runtime_session_id=self.runtime_session_id,
+                    deadline_monotonic=(
+                        self.event_write_service.current_deadline_monotonic()
+                    ),
+                )
+                expected_prompt_fingerprint = context_fingerprint(
+                    "governance-ordered-prompt-projections:v1",
+                    {
+                        "evidence": tuple(
+                            item.prompt_projection.projection_fingerprint
+                            for item in snapshot.ordered_candidate_snapshots
+                        ),
+                        "relatedness": tuple(
+                            item.snapshot_fingerprint
+                            for item in snapshot.ordered_relatedness_snapshots
+                        ),
+                    },
+                )
+                expected_payload = {
+                    "governance_batch_id": snapshot.governance_batch_id,
+                    "source_ledger_through_sequence": (
+                        snapshot.source_ledger_through_sequence
+                    ),
+                    "candidate_entry_ids": tuple(
+                        item.candidate_entry_id
+                        for item in snapshot.ordered_preparing_claims
+                    ),
+                    "preparing_claims_fingerprint": context_fingerprint(
+                        "governance-preparing-claims:v1",
+                        tuple(
+                            item.claim_fingerprint
+                            for item in snapshot.ordered_preparing_claims
+                        ),
+                    ),
+                    "batch_input_reference": event.batch_input_reference,
+                    "resolved_model_call_id": (
+                        snapshot.model_input.resolved_call.resolved_model_call_id
+                    ),
+                    "target_fingerprint": snapshot.model_input.target_fingerprint,
+                    "model_input_fingerprint": (
+                        snapshot.model_input.provider_neutral_context_fingerprint
+                    ),
+                    "ordered_prompt_projections_fingerprint": (
+                        expected_prompt_fingerprint
+                    ),
+                }
+                if (
+                    event.governance_batch_id != snapshot.governance_batch_id
+                    or event.source_ledger_through_sequence
+                    != snapshot.source_ledger_through_sequence
+                    or event.candidate_entry_ids
+                    != expected_payload["candidate_entry_ids"]
+                    or event.preparing_claims_fingerprint
+                    != expected_payload["preparing_claims_fingerprint"]
+                    or event.resolved_model_call_id
+                    != expected_payload["resolved_model_call_id"]
+                    or event.target_fingerprint
+                    != expected_payload["target_fingerprint"]
+                    or event.model_input_fingerprint
+                    != expected_payload["model_input_fingerprint"]
+                    or event.ordered_prompt_projections_fingerprint
+                    != expected_prompt_fingerprint
+                    or event.event_fingerprint
+                    != context_fingerprint(
+                        "memory-governance-batch-prepared-event:v1",
+                        expected_payload,
+                    )
+                ):
+                    raise ValueError(
+                        "governance Prepared event/artifact join drifted"
+                    )
+            elif isinstance(event, terminal_types):
+                prepared = self.event_log.get_by_id(event.prepared_event_id)
+                if not isinstance(prepared, MemoryGovernanceBatchPreparedEvent):
+                    raise ValueError(
+                        "governance terminal event lacks its Prepared authority"
+                    )
+                if (
+                    prepared.governance_batch_id != event.governance_batch_id
+                    or prepared.batch_input_reference.batch_input_fingerprint
+                    != event.batch_input_fingerprint
+                ):
+                    raise ValueError("governance terminal/Prepared identity drifted")
+                terminal_kind = (
+                    "completed"
+                    if isinstance(event, MemoryGovernanceBatchCompletedEvent)
+                    else "failed"
+                    if isinstance(event, MemoryGovernanceBatchFailedEvent)
+                    else "blocked"
+                )
+                payload = {
+                    "governance_batch_id": event.governance_batch_id,
+                    "prepared_event_id": event.prepared_event_id,
+                    "batch_input_fingerprint": event.batch_input_fingerprint,
+                    "governance_model_call_id": event.governance_model_call_id,
+                    "decision_ids": event.decision_ids,
+                    "terminal_reason": event.terminal_reason,
+                    "diagnostics": event.diagnostics,
+                }
+                if event.terminal_event_fingerprint != context_fingerprint(
+                    f"memory-governance-batch-{terminal_kind}-event:v1",
+                    payload,
+                ):
+                    raise ValueError("governance terminal event fingerprint drifted")
+
     def _validate_run_lifecycle_batch(self, events: tuple[AgentEvent, ...]) -> None:
         """Enforce the stable RunStart-to-RunEnd identity before commit."""
 
+        self._validate_memory_governance_batch(events)
         self._validate_terminal_projection_batch(events)
 
         starts_in_batch = {
@@ -2951,6 +3140,7 @@ class RuntimeSession:
         await_delivery: bool,
         deadline_monotonic: float,
         enqueue_publication: bool = True,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> _WriteAttempt:
         if not events:
             result = EventWriteResult(
@@ -2989,6 +3179,11 @@ class RuntimeSession:
                     await_delivery=await_delivery,
                     deadline_monotonic=deadline_monotonic,
                     enqueue_publication=enqueue_publication,
+                    transaction_companion=transaction_companion,
+                )
+            if transaction_companion is not None:
+                raise EventReconciliationRequired(
+                    "transaction companion requires a materialization account"
                 )
             commit_deadline = _commit_phase_deadline(deadline_monotonic)
             try:
@@ -3161,6 +3356,7 @@ class RuntimeSession:
         await_delivery: bool,
         deadline_monotonic: float,
         enqueue_publication: bool,
+        transaction_companion: EventLogTransactionCompanion | None = None,
     ) -> _WriteAttempt:
         """Commit an already-frozen finite ledger batch with typed accounting."""
 
@@ -3242,6 +3438,7 @@ class RuntimeSession:
                     owner_id=f"one_shot:{identity}",
                     burst_contract=burst_contract,
                     deadline_monotonic=deadline_monotonic,
+                    transaction_companion=transaction_companion,
                 )
         except Exception as exc:
             from pulsara_agent.runtime.authority_materialization import (
@@ -3720,6 +3917,7 @@ class RuntimeSession:
             self._reconciliation_required = False
             self._ledger_reconciliation_required = False
             self._context_input_reconciliation_required = False
+            self._memory_governance_reconciliation_required = False
         if self._owns_terminal_manager:
             self.terminal_sessions.shutdown()
 

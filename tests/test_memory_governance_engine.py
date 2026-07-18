@@ -2,67 +2,59 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import AsyncIterator
-from uuid import uuid4
+from typing import AsyncIterator, TypeAlias
 
+from tests.support import test_llm_config
 from tests.support.raw_provider import (
     RawProviderTextBlockEnd,
     RawProviderTextBlockStart,
     RawProviderTextDelta,
 )
 
-from tests.support.model_stream import (
-    make_text_block_segment_event,
-    make_tool_call_arguments_segment_event,
-    make_tool_call_end_event,
-    make_tool_call_start_event,
-)
-
 from pulsara_agent.event import (
     AgentEvent,
     EventContext,
-    EventType,
-    MemoryWriteResultEvent,
-    ToolResultEndEvent,
-    ToolResultStartEvent,
-    ToolResultTextDeltaEvent,
+    MemoryCandidateEvidenceRejectedEvent,
+    MemoryGovernanceBatchCompletedEvent,
+    MemoryGovernanceBatchFailedEvent,
+    MemoryGovernanceBatchPreparedEvent,
+    MemoryReflectionCompletedEvent,
+    ModelCallStartEvent,
 )
-from pulsara_agent.event.candidates import PreferenceCandidate, ValidCandidatePayload
-from pulsara_agent.event_log import InMemoryEventLog
-from pulsara_agent.graph import InMemoryGraphStore
 from pulsara_agent.llm import LLMRuntime
-from tests.support import test_llm_config, test_model_limits
 from pulsara_agent.llm.registry import LLMTransportRegistry
-from pulsara_agent.llm.request import LLMContext, LLMOptions
+from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.result import TransportUsageReport
-from tests.conftest import tool_result_end_contract_fields
-from pulsara_agent.memory import InMemoryArchiveStore
-from pulsara_agent.memory.candidates.pool import (
-    CandidateOrigin,
-    InMemoryCandidatePool,
-    MemoryGovernanceDecisionRecord,
-    PooledMemoryCandidate,
-    SubmitAsIsDecision,
-    WriteFailedOutcome,
-)
-from pulsara_agent.memory.governance.executor import MemoryGovernanceExecutor
 from pulsara_agent.memory.governance.engine import (
     MemoryGovernanceEngine,
-    MemoryGovernanceOptions,
-    _legacy_execution_context,
     _parse_governance_output,
-    _related_existing_memories,
 )
-from pulsara_agent.memory.governance.relatedness import RelatednessAvailability
-from pulsara_agent.memory.canonical.ledger import ExecutionEvidenceLedger
-from pulsara_agent.memory.canonical.write_gate import MemoryWriteGate
-from pulsara_agent.memory.canonical.write_service import MemoryWriteService
-from pulsara_agent.message import ToolResultState
+from pulsara_agent.memory.governance.preparation import (
+    GovernanceBatchPreparationStatus,
+)
+from pulsara_agent.memory.reflection.engine import (
+    MemoryReflectionEngine,
+    MemoryReflectionHint,
+)
+from pulsara_agent.memory.scope import MemoryDomainContext
+from pulsara_agent.message import UserMsg
 from pulsara_agent.ontology import memory
-from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
-from tests.support.memory_uow import fake_memory_uow_factory
-from tests.support.runtime_session import in_memory_runtime_session
+from pulsara_agent.primitives.governance_evidence import (
+    GovernanceCandidateClaimStatus,
+)
+from pulsara_agent.primitives.model_call import (
+    ModelCallPurpose,
+    ModelTokenUsageFact,
+)
+from pulsara_agent.runtime import LoopState
+from pulsara_agent.runtime.wiring import build_in_memory_runtime_wiring
+
+
+ReplyFactory: TypeAlias = Callable[[LLMContext], dict[str, object]]
+ScriptedReply: TypeAlias = dict[str, object] | ReplyFactory
 
 
 class _ScriptedTransport:
@@ -70,14 +62,8 @@ class _ScriptedTransport:
     binding_id = "test.scripted"
     contract_version = "v1"
 
-    def __init__(
-        self,
-        replies: list[str],
-        *,
-        usage: ModelTokenUsageFact | None = None,
-    ) -> None:
+    def __init__(self, replies: list[ScriptedReply]) -> None:
         self.replies = replies
-        self.usage = usage
         self.contexts: list[LLMContext] = []
 
     async def stream(
@@ -88,228 +74,635 @@ class _ScriptedTransport:
         event_context: EventContext,
     ) -> AsyncIterator[AgentEvent]:
         self.contexts.append(context)
-        text = self.replies.pop(0)
-        yield RawProviderTextBlockStart(**event_context.event_fields(), block_id="text:1")
-        yield RawProviderTextDelta(
-            **event_context.event_fields(), block_id="text:1", delta=text
+        scripted = self.replies.pop(0)
+        reply = scripted(context) if callable(scripted) else scripted
+        text = str(reply.get("text", ""))
+        block_id = f"text:{len(self.contexts)}"
+        yield RawProviderTextBlockStart(
+            **event_context.event_fields(),
+            block_id=block_id,
         )
-        yield RawProviderTextBlockEnd(**event_context.event_fields(), block_id="text:1")
-        if self.usage is not None:
+        yield RawProviderTextDelta(
+            **event_context.event_fields(),
+            block_id=block_id,
+            delta=text,
+        )
+        yield RawProviderTextBlockEnd(
+            **event_context.event_fields(),
+            block_id=block_id,
+        )
+        usage = reply.get("usage")
+        if usage is not None:
             yield TransportUsageReport(
                 usage_status="reported",
-                usage=self.usage,
+                usage=ModelTokenUsageFact.model_validate(usage),
                 reported_model_id=call.target.fact.model_id,
             )
 
 
-def test_memory_governance_engine_submits_pending_candidate_with_synthetic_context() -> (
-    None
-):
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    candidate = pool.append_candidate(_pooled_preference())
-    transport = _ScriptedTransport(
-        [
-            json.dumps(
-                {
-                    "reason": "Durable explicit preference.",
-                    "decisions": [
-                        {
-                            "kind": "submit_as_is",
-                            "target_entry_id": candidate.entry_id,
-                            "reason": "The candidate is a durable preference.",
-                        }
-                    ],
-                }
-            )
-        ]
-    )
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(transport),
-        executor=_executor(pool=pool, graph=graph, log=log),
-        options=MemoryGovernanceOptions(limit=5),
-    )
+def test_memory_governance_engine_runs_event_first_evidence_pipeline(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json()},
+                _submit_all_reply,
+            ],
+        )
+        candidate_ids = await _produce_reflection_candidate(harness)
 
-    result = asyncio.run(
-        engine.run_pending(
+        result = await harness.engine.run_pending(
             trigger_reason="test",
-            governance_batch_id="governance:test:engine",
+            governance_batch_id="governance:test:event-first",
         )
-    )
 
-    assert result.error_type is None
-    assert [decision.kind for decision in result.decisions] == ["submit_as_is"]
-    assert len(result.applied) == 1
-    assert [event.type for event in result.applied[0].events] == [
-        EventType.MEMORY_CANDIDATE_PROPOSED,
-        EventType.MEMORY_WRITE_RESULT,
-    ]
-    assert all(
-        event.run_id == "run:governance/governance:test:engine"
-        for event in result.applied[0].events
-    )
-    assert pool.list_pending() == []
-    assert len(graph.find_by_type(memory.PREFERENCE)) == 1
-    assert "Memory Governance Agent" in transport.contexts[0].system_prompt
-    assert result.resolved_model_call is not None
-    assert result.resolved_model_call.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
-    assert result.usage_status == "missing"
-    assert result.usage is None
-    assert result.estimated_input_tokens is not None
-    assert result.estimated_input_tokens > 0
+        assert result.error_type is None
+        assert [decision.kind for decision in result.decisions] == ["submit_as_is"]
+        assert len(result.applied) == 1
+        assert harness.wiring.candidate_pool.list_pending() == []
+        memories = harness.wiring.graph.find_by_type(
+            memory.PREFERENCE,
+            graph_id=harness.wiring.graph_id,
+        )
+        assert len(memories) == 1
+        assert memories[0][memory.STATEMENT.name] == (
+            "The user prefers concise summaries."
+        )
+
+        events = harness.wiring.event_log.iter()
+        prepared = tuple(
+            event for event in events if isinstance(event, MemoryGovernanceBatchPreparedEvent)
+        )
+        completed = tuple(
+            event for event in events if isinstance(event, MemoryGovernanceBatchCompletedEvent)
+        )
+        governance_starts = tuple(
+            event
+            for event in events
+            if isinstance(event, ModelCallStartEvent)
+            and event.resolved_call.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
+        )
+        assert len(prepared) == len(completed) == len(governance_starts) == 1
+        assert prepared[0].sequence is not None
+        assert governance_starts[0].sequence is not None
+        assert prepared[0].sequence < governance_starts[0].sequence
+        assert prepared[0].candidate_entry_ids == candidate_ids
+        assert completed[0].prepared_event_id == prepared[0].id
+        attribution = governance_starts[0].governance_input_attribution
+        assert attribution is not None
+        assert attribution.batch_input_reference == prepared[0].batch_input_reference
+        assert result.resolved_model_call == governance_starts[0].resolved_call
+
+        claims = harness.wiring.memory_governance_claim_repository.claims_for_batch(
+            runtime_session_id="runtime:test",
+            governance_batch_id="governance:test:event-first",
+        )
+        assert {claim.status for claim in claims} == {
+            GovernanceCandidateClaimStatus.TERMINAL
+        }
+        preparation = harness.wiring.memory_governance_preparation_repository.get(
+            runtime_session_id="runtime:test",
+            governance_batch_id="governance:test:event-first",
+        )
+        assert preparation is not None
+        assert preparation.status is GovernanceBatchPreparationStatus.TERMINAL
+
+        model_input = _governance_input(harness.transport.contexts[1])
+        prompt_view = model_input["candidates"][0]
+        prompt_candidate = prompt_view["candidate"]
+        assert prompt_candidate["candidate_entry_id"] == candidate_ids[0]
+        assert prompt_candidate["evidence_kind"] == "reflection"
+        assert prompt_view["decision_candidate"]["statement"] == (
+            "The user prefers concise summaries."
+        )
+        assert prompt_view["lifecycle"][
+            "allowed_replacement_evidence_refs"
+        ] == []
+        assert "source_events" not in json.dumps(model_input, sort_keys=True)
+        assert prompt_candidate["ordered_evidence_texts"][0]["field_code"] == (
+            "reflection_report"
+        )
+
+    asyncio.run(scenario())
 
 
-def test_memory_governance_engine_exposes_whole_batch_and_merges_before_apply() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    first = pool.append_candidate(
-        _pooled_preference(statement="The user prefers concise summaries.")
-    )
-    second = pool.append_candidate(
-        _pooled_preference(statement="The user prefers brief summaries.")
-    )
-    transport = _ScriptedTransport(
-        [
-            json.dumps(
-                {
-                    "reason": "The two pending candidates express one preference.",
-                    "decisions": [
-                        {
-                            "kind": "merge_and_submit",
-                            "target_entry_ids": [first.entry_id, second.entry_id],
-                            "candidate": {
-                                "kind": "Preference",
-                                "candidate_id": "candidate:merged-concise-summary",
-                                "statement": "The user prefers concise summaries.",
-                                "scope": "ctx:user",
-                                "source_authority": "explicit_user_instruction",
-                                "verification_status": "user_confirmed",
-                                "evidence_ids": [],
-                            },
-                            "reason": "Merge equivalent wording before either candidate is applied.",
-                        }
-                    ],
-                }
+def test_memory_governance_claims_are_all_or_none_across_batches(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [{"text": _reflection_json(two_candidates=True)}],
+        )
+        candidate_ids = await _produce_reflection_candidate(harness)
+        repository = harness.wiring.memory_governance_claim_repository
+
+        first, second = await asyncio.gather(
+            asyncio.to_thread(
+                repository.claim_pending_batch,
+                runtime_session_id="runtime:test",
+                governance_batch_id="governance:test:claim-a",
+                limit=8,
+            ),
+            asyncio.to_thread(
+                repository.claim_pending_batch,
+                runtime_session_id="runtime:test",
+                governance_batch_id="governance:test:claim-b",
+                limit=8,
+            ),
+        )
+
+        winners = tuple(batch for batch in (first, second) if batch.candidates)
+        losers = tuple(batch for batch in (first, second) if not batch.candidates)
+        assert len(winners) == len(losers) == 1
+        assert tuple(item.entry_id for item in winners[0].candidates) == candidate_ids
+        assert winners[0].claims
+        assert losers[0].claims == ()
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_invalid_source_is_system_rejected(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(tmp_path, [{"text": _reflection_json()}])
+        (candidate_id,) = await _produce_reflection_candidate(harness)
+        pool = harness.wiring.candidate_pool
+        stored = pool._candidates[candidate_id]
+        pool._candidates[candidate_id] = stored.model_copy(
+            update={"source_event_id": "memory_reflection:missing"},
+            deep=True,
+        )
+
+        result = await harness.engine.run_pending(
+            trigger_reason="invalid-source",
+            governance_batch_id="governance:test:invalid-source",
+        )
+
+        assert result.error_type is None
+        assert result.decisions == []
+        assert harness.transport.contexts == [harness.transport.contexts[0]]
+        rejections = tuple(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, MemoryCandidateEvidenceRejectedEvent)
+        )
+        assert len(rejections) == 1
+        assert rejections[0].rejection.candidate_entry_id == candidate_id
+        assert pool.evidence_rejection_event_id(candidate_id) == rejections[0].id
+        assert pool.list_pending() == []
+        claims = harness.wiring.memory_governance_claim_repository.claims_for_batch(
+            runtime_session_id="runtime:test",
+            governance_batch_id="governance:test:invalid-source",
+        )
+        assert {claim.status for claim in claims} == {
+            GovernanceCandidateClaimStatus.TERMINAL
+        }
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_rejects_invalid_sibling_and_prepares_valid_one(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json(two_candidates=True)},
+                _submit_all_reply,
+            ],
+        )
+        candidate_ids = await _produce_reflection_candidate(harness)
+        invalid_id, valid_id = candidate_ids
+        pool = harness.wiring.candidate_pool
+        invalid = pool._candidates[invalid_id]
+        pool._candidates[invalid_id] = invalid.model_copy(
+            update={"source_event_id": "memory_reflection:missing"},
+            deep=True,
+        )
+        batch_id = "governance:test:mixed-validity"
+
+        result = await harness.engine.run_pending(
+            trigger_reason="mixed-validity",
+            governance_batch_id=batch_id,
+        )
+
+        assert result.error_type is None
+        assert len(result.applied) == 1
+        assert result.decisions[0].target_entry_id == valid_id
+        rejections = tuple(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, MemoryCandidateEvidenceRejectedEvent)
+        )
+        assert len(rejections) == 1
+        assert rejections[0].rejection.candidate_entry_id == invalid_id
+        claims = harness.wiring.memory_governance_claim_repository.claims_for_batch(
+            runtime_session_id="runtime:test",
+            governance_batch_id=batch_id,
+        )
+        assert {claim.status for claim in claims} == {
+            GovernanceCandidateClaimStatus.TERMINAL
+        }
+        prepared = next(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, MemoryGovernanceBatchPreparedEvent)
+        )
+        assert prepared.candidate_entry_ids == (valid_id,)
+        assert pool.list_pending() == []
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_prepared_recovery_uses_frozen_call(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json()},
+                _submit_all_reply,
+            ],
+        )
+        await _produce_reflection_candidate(harness)
+        batch_id = "governance:test:frozen-prepared-recovery"
+        original_call_or_materialize = MemoryGovernanceEngine._call_or_materialize
+
+        async def leave_model_stream_unstarted(self, **kwargs):
+            del self, kwargs
+            return None
+
+        monkeypatch.setattr(
+            MemoryGovernanceEngine,
+            "_call_or_materialize",
+            leave_model_stream_unstarted,
+        )
+        first = await harness.engine.run_pending(
+            trigger_reason="prepare-only",
+            governance_batch_id=batch_id,
+        )
+        assert first.error_type == "GovernanceModelStreamNotTerminal"
+        prepared = tuple(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, MemoryGovernanceBatchPreparedEvent)
+        )
+        assert len(prepared) == 1
+        frozen_call_id = prepared[0].resolved_model_call_id
+
+        monkeypatch.setattr(
+            MemoryGovernanceEngine,
+            "_call_or_materialize",
+            original_call_or_materialize,
+        )
+
+        def unexpected_resolve(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("Prepared recovery must not resolve current config")
+
+        monkeypatch.setattr(LLMRuntime, "resolve_target", unexpected_resolve)
+        monkeypatch.setattr(LLMRuntime, "resolve_call", unexpected_resolve)
+        second = await harness.engine.run_pending(
+            trigger_reason="recovery",
+            governance_batch_id=batch_id,
+        )
+
+        assert second.error_type is None
+        assert second.resolved_model_call is not None
+        assert second.resolved_model_call.resolved_model_call_id == frozen_call_id
+        starts = tuple(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, ModelCallStartEvent)
+            and event.resolved_call.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
+        )
+        assert len(starts) == 1
+        assert starts[0].resolved_call.resolved_model_call_id == frozen_call_id
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_caller_cancel_detaches_from_owned_preparation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json()},
+                _submit_all_reply,
+            ],
+        )
+        await _produce_reflection_candidate(harness)
+        batch_id = "governance:test:cancel-detach"
+        entered = threading.Event()
+        release = threading.Event()
+        archive_type = type(harness.wiring.archive)
+        original_put = archive_type.put_text_if_absent_or_confirm_identical
+
+        def blocking_put(self, artifact_id, *args, **kwargs):
+            if artifact_id.startswith("governance-batch-input:"):
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("test governance artifact release timed out")
+            return original_put(self, artifact_id, *args, **kwargs)
+
+        monkeypatch.setattr(
+            archive_type,
+            "put_text_if_absent_or_confirm_identical",
+            blocking_put,
+        )
+        detached = asyncio.create_task(
+            harness.engine.run_pending(
+                trigger_reason="cancel-detach",
+                governance_batch_id=batch_id,
             )
-        ]
-    )
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(transport),
-        executor=_executor(pool=pool, graph=graph, log=log),
-    )
+        )
+        assert await asyncio.to_thread(entered.wait, 10)
+        detached.cancel()
+        try:
+            await detached
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cancelled governance waiter unexpectedly completed")
 
-    result = asyncio.run(
-        engine.run_pending(
+        assert harness.engine.execution_owners.pending_count == 1
+        joined = asyncio.create_task(
+            harness.engine.run_pending(
+                trigger_reason="cancel-detach-join",
+                governance_batch_id=batch_id,
+            )
+        )
+        release.set()
+        result = await asyncio.wait_for(joined, timeout=10)
+
+        assert result.error_type is None
+        assert len(result.applied) == 1
+        await asyncio.sleep(0)
+        assert harness.engine.execution_owners.pending_count == 0
+        assert harness.wiring.candidate_pool.list_pending() == []
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_engine_merges_one_reflection_batch(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json(two_candidates=True)},
+                _merge_all_reply,
+            ],
+        )
+        candidate_ids = await _produce_reflection_candidate(harness)
+        assert len(candidate_ids) == 2
+
+        result = await harness.engine.run_pending(
             trigger_reason="test",
-            governance_batch_id="governance:test:whole-batch-merge",
+            governance_batch_id="governance:test:merge",
         )
-    )
 
-    planner_payload = json.loads(
-        transport.contexts[0].messages[0].content[0].split("\n", 1)[1]
-    )
-    assert [item["entry_id"] for item in planner_payload["candidates"]] == [
-        first.entry_id,
-        second.entry_id,
-    ]
-    assert [decision.kind for decision in result.decisions] == ["merge_and_submit"]
-    assert result.error_type is None
-    assert pool.list_pending() == []
-    memories = graph.find_by_type(memory.PREFERENCE)
-    assert len(memories) == 1
-    assert memories[0][memory.STATEMENT.name] == "The user prefers concise summaries."
-
-
-def test_memory_governance_engine_invalid_json_does_not_write_or_decide() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    pool.append_candidate(_pooled_preference())
-    transport = _ScriptedTransport(["not json"])
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(transport),
-        executor=_executor(pool=pool, graph=graph, log=log),
-    )
-
-    result = asyncio.run(engine.run_pending(trigger_reason="test"))
-
-    assert result.error_type == "ValueError"
-    assert result.applied == []
-    assert pool.list_decisions() == []
-    assert len(pool.list_pending()) == 1
-    assert graph.find_by_type(memory.PREFERENCE) == []
-
-
-def test_governance_compaction_candidate_uses_bounded_window_evidence_view() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    source_ctx = EventContext(
-        run_id="run:source:compaction",
-        turn_id="turn:source:compaction",
-        reply_id="reply:source:compaction",
-    )
-    first = log.append(
-        make_text_block_segment_event(
-            **source_ctx.event_fields(),
-            block_id="text:one",
-            delta="The user asks to sync release.",
+        assert result.error_type is None
+        assert [decision.kind for decision in result.decisions] == [
+            "merge_and_submit"
+        ]
+        assert harness.wiring.candidate_pool.list_pending() == []
+        memories = harness.wiring.graph.find_by_type(
+            memory.PREFERENCE,
+            graph_id=harness.wiring.graph_id,
         )
-    )
-    log.append(
-        make_text_block_segment_event(
-            **source_ctx.event_fields(),
-            block_id="text:two",
-            delta="The user asks to push GitHub.",
+        assert len(memories) == 1
+        assert memories[0][memory.STATEMENT.name] == (
+            "The user prefers concise summaries."
         )
-    )
-    candidate = pool.append_candidate(
-        _pooled_preference(
-            source_run_id="run:compaction:attribution",
-            statement="The user prefers syncing release before pushing GitHub in this workspace.",
-        ).model_copy(
-            update={
-                "origin": CandidateOrigin.COMPACTION,
-                "source_event_id": "event:compaction-completed",
-                "source_artifact_id": "context_compaction:test:summary",
-                "intent_fingerprint": "sha256:compaction",
-                "metadata": {
-                    "compaction_id": "context_compaction:test",
-                    "summary_artifact_id": "context_compaction:test:summary",
-                    "summary_excerpt": "The user repeatedly asks to sync release before pushing.",
-                    "summary_excerpt_chars": 62,
-                    "summary_excerpt_truncated": False,
-                    "included_run_ids": [source_ctx.run_id],
-                    "included_run_count": 1,
-                    "through_sequence": first.sequence,
-                    "keep_after_sequence": first.sequence,
-                    "source_event_id": "event:compaction-completed",
-                    "source_event_sequence": 99,
-                },
-            }
+        assert tuple(
+            item["candidate"]["candidate_entry_id"]
+            for item in _governance_input(harness.transport.contexts[1])["candidates"]
+        ) == candidate_ids
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_engine_recovers_partial_decision_suffix(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json(two_candidates=True)},
+                _submit_each_reply,
+            ],
         )
-    )
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(_ScriptedTransport([])),
-        executor=_executor(pool=pool, graph=graph, log=log),
-    )
+        candidate_ids = await _produce_reflection_candidate(harness)
+        executor_type = type(harness.wiring.memory_governance_executor)
+        original_apply = executor_type.apply_decision_async
+        call_count = 0
 
-    snapshot = engine._candidate_snapshot(candidate)
+        async def fail_second_apply(self, decision, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise RuntimeError("injected second decision failure")
+            return await original_apply(self, decision, **kwargs)
 
-    assert snapshot["origin"] == "compaction"
-    assert snapshot["metadata"]["summary_excerpt"].startswith("The user repeatedly")
-    assert (
-        snapshot["attribution_context"]["source_run_id"] == "run:compaction:attribution"
-    )
-    evidence_view = snapshot["compaction_evidence_view"]
-    assert evidence_view["compaction_id"] == "context_compaction:test"
-    assert evidence_view["summary_artifact_id"] == "context_compaction:test:summary"
-    assert evidence_view["summary_excerpt"].startswith("The user repeatedly")
-    assert evidence_view["included_run_ids"] == [source_ctx.run_id]
-    assert evidence_view["source_event_count"] == 1
-    assert [item["event_id"] for item in snapshot["source_events"]] == [first.id]
+        monkeypatch.setattr(executor_type, "apply_decision_async", fail_second_apply)
+        batch_id = "governance:test:partial-decision-recovery"
+        first = await harness.engine.run_pending(
+            trigger_reason="test",
+            governance_batch_id=batch_id,
+        )
+
+        assert first.error_type == "RuntimeError"
+        assert len(first.applied) == 1
+        assert harness.engine.retry_required is True
+        assert len(harness.wiring.candidate_pool.list_decisions()) == 1
+        assert not any(
+            isinstance(event, MemoryGovernanceBatchFailedEvent)
+            for event in harness.wiring.event_log.iter()
+        )
+        claims = harness.wiring.memory_governance_claim_repository.claims_for_batch(
+            runtime_session_id="runtime:test",
+            governance_batch_id=batch_id,
+        )
+        assert tuple(claim.candidate_entry_id for claim in claims) == candidate_ids
+        assert {claim.status for claim in claims} == {
+            GovernanceCandidateClaimStatus.PREPARED
+        }
+
+        monkeypatch.setattr(executor_type, "apply_decision_async", original_apply)
+        second = await harness.engine.run_pending(
+            trigger_reason="recovery",
+            governance_batch_id=batch_id,
+        )
+
+        assert second.error_type is None
+        assert len(second.applied) == 2
+        assert second.applied[0].diagnostics == ("recovered_existing_decision",)
+        assert len(harness.wiring.candidate_pool.list_decisions()) == 2
+        completed = tuple(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, MemoryGovernanceBatchCompletedEvent)
+        )
+        assert len(completed) == 1
+        claims = harness.wiring.memory_governance_claim_repository.claims_for_batch(
+            runtime_session_id="runtime:test",
+            governance_batch_id=batch_id,
+        )
+        assert {claim.status for claim in claims} == {
+            GovernanceCandidateClaimStatus.TERMINAL
+        }
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_engine_invalid_output_terminalizes_claim(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json()},
+                {"text": "not json"},
+            ],
+        )
+        candidate_ids = await _produce_reflection_candidate(harness)
+
+        result = await harness.engine.run_pending(
+            trigger_reason="test",
+            governance_batch_id="governance:test:invalid-output",
+        )
+
+        assert result.error_type == "ValueError"
+        assert result.applied == []
+        assert harness.wiring.candidate_pool.list_decisions() == []
+        assert harness.wiring.graph.find_by_type(
+            memory.PREFERENCE,
+            graph_id=harness.wiring.graph_id,
+        ) == []
+        failures = tuple(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, MemoryGovernanceBatchFailedEvent)
+        )
+        assert len(failures) == 1
+        assert failures[0].terminal_reason == "output_invalid"
+        claims = harness.wiring.memory_governance_claim_repository.claims_for_batch(
+            runtime_session_id="runtime:test",
+            governance_batch_id="governance:test:invalid-output",
+        )
+        assert tuple(claim.candidate_entry_id for claim in claims) == candidate_ids
+        assert {claim.status for claim in claims} == {
+            GovernanceCandidateClaimStatus.TERMINAL
+        }
+
+        contexts_before = len(harness.transport.contexts)
+        second = await harness.engine.run_pending(
+            trigger_reason="retry",
+            governance_batch_id="governance:test:invalid-output",
+        )
+        assert second.decisions == []
+        assert len(harness.transport.contexts) == contexts_before
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_engine_rejects_decision_for_unclaimed_id(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json()},
+                {"text": _invalid_target_reply()},
+            ],
+        )
+        await _produce_reflection_candidate(harness)
+
+        result = await harness.engine.run_pending(
+            trigger_reason="test",
+            governance_batch_id="governance:test:bad-target",
+        )
+
+        assert result.error_type == "ValueError"
+        assert result.applied == []
+        assert harness.wiring.candidate_pool.list_decisions() == []
+        failure = next(
+            event
+            for event in harness.wiring.event_log.iter()
+            if isinstance(event, MemoryGovernanceBatchFailedEvent)
+        )
+        assert failure.terminal_reason == "output_invalid"
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_result_carries_reported_usage(tmp_path: Path) -> None:
+    usage = {
+        "input_tokens": 101,
+        "cached_input_tokens": 11,
+        "output_tokens": 7,
+        "reasoning_output_tokens": None,
+        "total_tokens": 108,
+    }
+
+    def governance_reply(context: LLMContext) -> dict[str, object]:
+        reply = _submit_all_reply(context)
+        reply["usage"] = usage
+        return reply
+
+    async def scenario() -> None:
+        harness = _harness(
+            tmp_path,
+            [
+                {"text": _reflection_json()},
+                governance_reply,
+            ],
+        )
+        await _produce_reflection_candidate(harness)
+
+        result = await harness.engine.run_pending(trigger_reason="usage-contract")
+
+        assert result.error_type is None
+        assert result.resolved_model_call is not None
+        assert result.resolved_model_call.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
+        assert result.usage_status == "reported"
+        assert result.usage == ModelTokenUsageFact.model_validate(usage)
+        assert result.estimated_input_tokens is not None
+        assert result.reported_model_id == result.resolved_model_call.target.model_id
+
+    asyncio.run(scenario())
+
+
+def test_memory_governance_empty_pool_does_not_resolve_or_call_model(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        harness = _harness(tmp_path, [])
+
+        result = await harness.engine.run_pending(trigger_reason="test")
+
+        assert result.decisions == []
+        assert result.applied == []
+        assert result.resolved_model_call is None
+        assert harness.transport.contexts == []
+
+    asyncio.run(scenario())
 
 
 def test_memory_governance_parser_accepts_contradict_and_submit() -> None:
@@ -330,463 +723,262 @@ def test_memory_governance_parser_accepts_contradict_and_submit() -> None:
                             "verification_status": "user_confirmed",
                             "evidence_ids": [],
                         },
-                        "contradicted_memory_ids": ["preference:likes-egg-tarts"],
-                        "reason": "The new preference conflicts with the existing preference.",
+                        "contradicted_memory_ids": [
+                            "preference:likes-egg-tarts"
+                        ],
+                        "reason": "The new preference conflicts with the old one.",
                     }
                 ],
             }
         )
     )
 
-    assert [decision.kind for decision in output.decisions] == ["contradict_and_submit"]
+    assert [decision.kind for decision in output.decisions] == [
+        "contradict_and_submit"
+    ]
     assert output.decisions[0].contradicted_memory_ids == (
         "preference:likes-egg-tarts",
     )
 
 
-def test_memory_governance_engine_invalid_target_returns_error_without_write() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    pool.append_candidate(_pooled_preference())
-    transport = _ScriptedTransport(
-        [
-            json.dumps(
-                {
-                    "reason": "Bad target id.",
-                    "decisions": [
-                        {
-                            "kind": "submit_as_is",
-                            "target_entry_id": "pool:missing",
-                            "reason": "This id was not present in the input.",
-                        }
-                    ],
-                }
-            )
-        ]
+class _Harness:
+    def __init__(
+        self,
+        *,
+        wiring,
+        transport: _ScriptedTransport,
+        reflection: MemoryReflectionEngine,
+        engine: MemoryGovernanceEngine,
+    ) -> None:
+        self.wiring = wiring
+        self.transport = transport
+        self.reflection = reflection
+        self.engine = engine
+
+
+def _harness(tmp_path: Path, replies: list[ScriptedReply]) -> _Harness:
+    domain = MemoryDomainContext(
+        memory_domain_id="u_test",
+        workspace_kind="transient",
     )
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(transport),
-        executor=_executor(pool=pool, graph=graph, log=log),
-    )
-
-    result = asyncio.run(
-        engine.run_pending(
-            trigger_reason="test",
-            governance_batch_id="governance:test:bad-target",
-        )
-    )
-
-    assert result.error_type == "KeyError"
-    assert result.applied == []
-    assert pool.list_decisions() == []
-    assert len(pool.list_pending()) == 1
-    assert log.iter(run_id="run:governance/governance:test:bad-target") == []
-    assert graph.find_by_type(memory.PREFERENCE) == []
-
-
-def test_memory_governance_engine_input_includes_candidate_audit_view() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    candidate = pool.append_candidate(
-        _pooled_preference(source_run_id="run:source:audit")
-    )
-    assert isinstance(candidate.payload, ValidCandidatePayload)
-    existing = candidate.payload.candidate.model_copy(
-        update={"candidate_id": "candidate:existing"}
-    )
-    existing_outcome = _service_on(graph).submit(
-        existing,
-        event_context=EventContext(
-            run_id="run:old", turn_id="turn:old", reply_id="reply:old"
-        ),
-    )
-    assert any(
-        isinstance(event, MemoryWriteResultEvent) for event in existing_outcome.events
-    )
-    log.extend(
-        [
-            make_tool_call_start_event(
-                run_id="run:source:audit",
-                turn_id=candidate.source_turn_id,
-                reply_id=candidate.source_reply_id,
-                tool_call_id="call:remember",
-                tool_call_name="remember_preference",
-            ),
-            make_tool_call_arguments_segment_event(
-                run_id="run:source:audit",
-                turn_id=candidate.source_turn_id,
-                reply_id=candidate.source_reply_id,
-                tool_call_id="call:remember",
-                delta='{"statement":"The user prefers concise summaries."}',
-            ),
-            make_tool_call_end_event(
-                run_id="run:source:audit",
-                turn_id=candidate.source_turn_id,
-                reply_id=candidate.source_reply_id,
-                tool_call_id="call:remember",
-            ),
-            ToolResultStartEvent(
-                run_id="run:source:audit",
-                turn_id=candidate.source_turn_id,
-                reply_id=candidate.source_reply_id,
-                tool_call_id="call:remember",
-                tool_call_name="remember_preference",
-            ),
-            ToolResultTextDeltaEvent(
-                run_id="run:source:audit",
-                turn_id=candidate.source_turn_id,
-                reply_id=candidate.source_reply_id,
-                tool_call_id="call:remember",
-                delta='{"status":"proposed"}',
-            ),
-            ToolResultEndEvent(
-                run_id="run:source:audit",
-                turn_id=candidate.source_turn_id,
-                reply_id=candidate.source_reply_id,
-                **tool_result_end_contract_fields(
-                    "call:remember", tool_name="remember"
-                ),
-                tool_call_id="call:remember",
-                state=ToolResultState.SUCCESS,
-                metadata={
-                    "tool_observation_timing": {"observed_at": "2026-01-01T00:00:00Z"}
-                },
-            ),
-        ]
-    )
-    pool.append_decision(
-        MemoryGovernanceDecisionRecord(
-            governance_batch_id="governance:test:previous-failure",
-            decision=SubmitAsIsDecision(
-                target_entry_id=candidate.entry_id, reason="previous try"
-            ),
-            write_outcome=WriteFailedOutcome(
-                error_type="RuntimeError",
-                message="temporary store failure",
-                write_event_ids=("event:failed",),
-            ),
-        )
-    )
-    transport = _ScriptedTransport(
-        [
-            json.dumps(
-                {
-                    "reason": "Duplicate existing memory.",
-                    "decisions": [
-                        {
-                            "kind": "skip",
-                            "target_entry_ids": [candidate.entry_id],
-                            "reason": "Already present in canonical memory.",
-                            "skip_reason": "duplicate_existing_memory",
-                        }
-                    ],
-                }
-            )
-        ]
-    )
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(transport),
-        executor=_executor(pool=pool, graph=graph, log=log),
-    )
-
-    result = asyncio.run(
-        engine.run_pending(
-            trigger_reason="test",
-            governance_batch_id="governance:test:audit-view",
-        )
-    )
-
-    assert result.error_type is None
-    user_payload = transport.contexts[0].messages[0].content[0].split("\n", 1)[1]
-    governance_input = json.loads(user_payload)
-    snapshot = governance_input["candidates"][0]
-    assert snapshot["entry_id"] == candidate.entry_id
-    assert snapshot["user_quote"] == "Please remember that I prefer concise summaries."
-    assert snapshot["content_key"]
-    assert any(
-        event["tool_call_name"] == "remember_preference"
-        for event in snapshot["source_events"]
-    )
-    assert any(
-        "status" in event.get("delta", "") for event in snapshot["source_events"]
-    )
-    assert (
-        snapshot["prior_governance_decisions"][0]["write_outcome"]["kind"]
-        == "write_failed"
-    )
-    assert snapshot["related_existing_memories"][0]["memory_id"]
-    assert snapshot["related_existing_memories"][0]["is_exact_duplicate"] is True
-
-
-def test_memory_governance_engine_empty_pool_does_not_call_llm() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    transport = _ScriptedTransport([])
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(transport),
-        executor=_executor(pool=pool, graph=graph, log=log),
-    )
-
-    result = asyncio.run(engine.run_pending(trigger_reason="test"))
-
-    assert result.decisions == []
-    assert result.applied == []
-    assert transport.contexts == []
-    assert result.resolved_model_call is None
-    assert result.usage_status is None
-    assert result.usage is None
-    assert result.estimated_input_tokens is None
-
-
-def test_governance_resolves_direct_call() -> None:
-    test_memory_governance_engine_submits_pending_candidate_with_synthetic_context()
-
-
-def test_governance_empty_batch_does_not_resolve_call() -> None:
-    test_memory_governance_engine_empty_pool_does_not_call_llm()
-
-
-def test_governance_result_carries_call_fact() -> None:
-    test_memory_governance_engine_submits_pending_candidate_with_synthetic_context()
-
-
-def test_governance_result_carries_usage_without_durable_session_projection() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    pool.append_candidate(_pooled_preference())
-    usage = ModelTokenUsageFact(
-        input_tokens=101,
-        cached_input_tokens=11,
-        output_tokens=7,
-        reasoning_output_tokens=None,
-        total_tokens=108,
-    )
-    transport = _ScriptedTransport(
-        [json.dumps({"reason": "skip", "decisions": []})],
-        usage=usage,
-    )
-    engine = _governance_engine(
-        llm_runtime=_llm_runtime(transport),
-        executor=_executor(pool=pool, graph=graph, log=log),
-    )
-
-    result = asyncio.run(engine.run_pending(trigger_reason="usage-contract"))
-
-    assert result.resolved_model_call is not None
-    assert result.usage_status == "reported"
-    assert result.usage == usage
-    assert result.estimated_input_tokens is not None
-    assert result.reported_model_id == result.resolved_model_call.target.model_id
-    # Governance deliberately has no independent session-event append in this
-    # hard cut; the later governance-UOW chapter owns durable history.
-    assert log.iter(run_id=result.resolved_model_call.resolved_model_call_id) == []
-
-
-def test_governance_oversized_context_fails_before_provider() -> None:
-    graph = InMemoryGraphStore()
-    pool = InMemoryCandidatePool()
-    log = InMemoryEventLog()
-    pool.append_candidate(_pooled_preference(statement="x" * 8_000))
-    transport = _ScriptedTransport([])
-    runtime = _llm_runtime(
-        transport,
-        flash_limits=test_model_limits(
-            total_context_tokens=256,
-            max_input_tokens=224,
-            max_output_tokens=64,
-            default_output_tokens=32,
-            input_safety_margin_tokens=8,
-        ),
-    )
-    engine = _governance_engine(
-        llm_runtime=runtime,
-        executor=_executor(pool=pool, graph=graph, log=log),
-        options=MemoryGovernanceOptions(llm_options=LLMOptions()),
-    )
-
-    result = asyncio.run(engine.run_pending(trigger_reason="oversized"))
-
-    assert result.error_type == "ModelInputBudgetExceeded"
-    assert result.resolved_model_call is not None
-    assert result.usage_status == "missing"
-    assert result.usage is None
-    assert result.estimated_input_tokens is not None
-    assert transport.contexts == []
-
-
-def test_direct_call_rejection_uses_subsystem_terminal_fact() -> None:
-    test_governance_oversized_context_fails_before_provider()
-
-
-def test_pr1_direct_validation_rejection_writes_subsystem_terminal_failure() -> None:
-    test_governance_oversized_context_fails_before_provider()
-
-
-def test_related_existing_memories_returns_active_same_scope_type_ranked_and_marks_duplicates() -> (
-    None
-):
-    graph = InMemoryGraphStore()
-    service = _service_on(graph)
-    service.submit(
-        _preference("candidate:dup", "The user prefers concise summaries."),
-        event_context=EventContext(
-            run_id="run:dup", turn_id="turn:dup", reply_id="reply:dup"
-        ),
-    )
-    service.submit(
-        _preference("candidate:unrelated", "The user likes dark mode in the IDE."),
-        event_context=EventContext(
-            run_id="run:un", turn_id="turn:un", reply_id="reply:un"
-        ),
-    )
-    candidate = _pooled_preference()
-
-    matches = _related_existing_memories(candidate, graph, graph_id=None)
-
-    statements = [match["statement"] for match in matches]
-    assert statements == [
-        "The user prefers concise summaries.",
-        "The user likes dark mode in the IDE.",
-    ]
-    assert matches[0]["is_exact_duplicate"] is True
-    assert matches[1]["is_exact_duplicate"] is False
-
-
-def _preference(candidate_id: str, statement: str) -> PreferenceCandidate:
-    return PreferenceCandidate(
-        candidate_id=candidate_id,
-        statement=statement,
-        scope="ctx:user",
-        source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
-        verification_status=memory.VerificationStatus.USER_CONFIRMED,
-    )
-
-
-def _executor(
-    *,
-    pool: InMemoryCandidatePool,
-    graph: InMemoryGraphStore,
-    log: InMemoryEventLog,
-) -> MemoryGovernanceExecutor:
-    ledger = ExecutionEvidenceLedger(
-        graph=graph,
-        archive=InMemoryArchiveStore(),
-        gate=MemoryWriteGate(),
-    )
-    service = MemoryWriteService(ledger=ledger)
-    return MemoryGovernanceExecutor(
-        candidate_pool=pool,
-        memory_write_service=service,
-        event_log=log,
-        event_commit_port=log.extend,
-        graph=graph,
+    wiring = build_in_memory_runtime_wiring(
+        tmp_path,
         runtime_session_id="runtime:test",
-        memory_write_uow_factory=fake_memory_uow_factory(
-            graph=graph,
-            candidate_pool=pool,
-            memory_write_service=service,
-        ),
+        memory_domain=domain,
     )
-
-
-def _governance_engine(
-    *,
-    llm_runtime: LLMRuntime,
-    executor: MemoryGovernanceExecutor,
-    **kwargs,
-) -> MemoryGovernanceEngine:
-    return MemoryGovernanceEngine(
+    transport = _ScriptedTransport(replies)
+    llm_runtime = _llm_runtime(transport)
+    reflection = MemoryReflectionEngine(
         llm_runtime=llm_runtime,
-        executor=executor,
-        runtime_session=in_memory_runtime_session(Path.cwd()),
-        **kwargs,
+        candidate_pool=wiring.candidate_pool,
+        graph=wiring.graph,
+        runtime_session=wiring.runtime_session,
+        graph_id=wiring.graph_id,
+        allowed_scopes=domain.allowed_write_scopes,
+        candidate_projection_commit_port=wiring.candidate_projection_commit_port,
+    )
+    engine = MemoryGovernanceEngine(
+        llm_runtime=llm_runtime,
+        executor=wiring.memory_governance_executor,
+        runtime_session=wiring.runtime_session,
+        archive=wiring.archive,
+        claim_repository=wiring.memory_governance_claim_repository,
+        preparation_repository=wiring.memory_governance_preparation_repository,
+        evidence_builder=wiring.memory_governance_evidence_builder,
+        preparation_commit_port=wiring.memory_governance_preparation_commit_port,
+        candidate_projection_commit_port=wiring.candidate_projection_commit_port,
+    )
+    return _Harness(
+        wiring=wiring,
+        transport=transport,
+        reflection=reflection,
+        engine=engine,
     )
 
 
-def _service_on(graph: InMemoryGraphStore) -> MemoryWriteService:
-    return MemoryWriteService(
-        ledger=ExecutionEvidenceLedger(
-            graph=graph,
-            archive=InMemoryArchiveStore(),
-            gate=MemoryWriteGate(),
+async def _produce_reflection_candidate(harness: _Harness) -> tuple[str, ...]:
+    state = LoopState(session_id=harness.wiring.runtime_session.runtime_session_id)
+    state.messages.append(
+        UserMsg(
+            name="user",
+            content="Please remember that I prefer concise summaries.",
         )
     )
-
-
-def _pooled_preference(
-    *,
-    source_run_id: str | None = None,
-    statement: str = "The user prefers concise summaries.",
-) -> PooledMemoryCandidate:
-    user_quote = (
-        "Please remember that I prefer concise summaries."
-        if statement == "The user prefers concise summaries."
-        else f"Please remember: {statement}"
-    )
-    return PooledMemoryCandidate(
-        entry_id=f"pool:test:{uuid4().hex}",
-        payload=ValidCandidatePayload(
-            candidate=PreferenceCandidate(
-                candidate_id=f"candidate:test:{uuid4().hex}",
-                statement=statement,
-                scope="ctx:user",
-                source_authority=memory.SourceAuthority.EXPLICIT_USER_INSTRUCTION,
-                verification_status=memory.VerificationStatus.USER_CONFIRMED,
+    if harness.wiring.runtime_session.materialization_account_store.snapshot() is None:
+        harness.wiring.runtime_session._adopt_unbootstrapped_in_memory_account_for_test(
+            incoming_run_id=state.run_id
+        )
+    events = await harness.reflection.reflect(
+        state=state,
+        event_store=harness.wiring.event_log,
+        trigger_reasons=["cheap_memory_hint"],
+        cheap_hints=[
+            MemoryReflectionHint(
+                source="cheap_string_match",
+                reason="test hint",
+                signal="remember",
+                excerpt="Please remember that I prefer concise summaries.",
             )
-        ),
-        origin=CandidateOrigin.MAIN_AGENT_TOOL,
-        source_session_id="runtime:test",
-        source_run_id=source_run_id or f"run:source:{uuid4().hex}",
-        source_turn_id=f"turn:source:{uuid4().hex}",
-        source_reply_id=f"reply:source:{uuid4().hex}",
-        user_quote=user_quote,
+        ],
+        safe_point="on_session_end",
+    )
+    assert events == []
+    completed = tuple(
+        event
+        for event in harness.wiring.event_log.iter()
+        if isinstance(event, MemoryReflectionCompletedEvent)
+    )
+    assert len(completed) == 1
+    pending = harness.wiring.candidate_pool.list_pending()
+    assert pending
+    assert tuple(item.source_event_id for item in pending) == (completed[0].id,) * len(
+        pending
+    )
+    return tuple(sorted(item.entry_id for item in pending))
+
+
+def _reflection_json(*, two_candidates: bool = False) -> str:
+    candidates = [
+        {
+            "kind": "Preference",
+            "statement": "The user prefers concise summaries.",
+            "scope": "ctx:user",
+            "source_authority": "explicit_user_instruction",
+            "verification_status": "user_confirmed",
+            "evidence_ids": [],
+        }
+    ]
+    if two_candidates:
+        candidates.append(
+            {
+                "kind": "Preference",
+                "statement": "The user prefers brief summaries.",
+                "scope": "ctx:user",
+                "source_authority": "explicit_user_instruction",
+                "verification_status": "user_confirmed",
+                "evidence_ids": [],
+            }
+        )
+    return json.dumps(
+        {
+            "should_reflect": True,
+            "reason": "The user explicitly requested a durable preference.",
+            "quoted_evidence": [
+                "Please remember that I prefer concise summaries."
+            ],
+            "candidate_kinds": ["Preference"] * len(candidates),
+            "summary": "found durable preference evidence",
+            "candidates": candidates,
+            "skipped_candidates": [],
+        }
     )
 
 
-def _llm_runtime(
-    transport: _ScriptedTransport,
-    *,
-    flash_limits=None,
-) -> LLMRuntime:
+def _submit_all_reply(context: LLMContext) -> dict[str, object]:
+    candidate_ids = _candidate_ids(context)
+    return {
+        "text": json.dumps(
+            {
+                "reason": "Durable explicit preference.",
+                "decisions": [
+                    {
+                        "kind": "submit_as_is",
+                        "target_entry_id": entry_id,
+                        "reason": "The evidence supports this preference.",
+                    }
+                    for entry_id in candidate_ids
+                ],
+            }
+        )
+    }
+
+
+def _submit_each_reply(context: LLMContext) -> dict[str, object]:
+    return {
+        "text": json.dumps(
+            {
+                "reason": "Apply each durable preference independently.",
+                "decisions": [
+                    {
+                        "kind": "submit_as_is",
+                        "target_entry_id": candidate_id,
+                        "reason": "Durable explicit preference.",
+                    }
+                    for candidate_id in _candidate_ids(context)
+                ],
+            }
+        )
+    }
+
+
+def _merge_all_reply(context: LLMContext) -> dict[str, object]:
+    candidate_ids = _candidate_ids(context)
+    return {
+        "text": json.dumps(
+            {
+                "reason": "The candidates express one preference.",
+                "decisions": [
+                    {
+                        "kind": "merge_and_submit",
+                        "target_entry_ids": list(candidate_ids),
+                        "candidate": {
+                            "kind": "Preference",
+                            "candidate_id": "candidate:merged-concise-summary",
+                            "statement": "The user prefers concise summaries.",
+                            "scope": "ctx:user",
+                            "source_authority": "explicit_user_instruction",
+                            "verification_status": "user_confirmed",
+                            "evidence_ids": [],
+                        },
+                        "reason": "Merge equivalent wording.",
+                    }
+                ],
+            }
+        )
+    }
+
+
+def _invalid_target_reply() -> str:
+    return json.dumps(
+        {
+            "reason": "Bad target id.",
+            "decisions": [
+                {
+                    "kind": "submit_as_is",
+                    "target_entry_id": "pool:missing",
+                    "reason": "This id was not in the frozen input.",
+                }
+            ],
+        }
+    )
+
+
+def _candidate_ids(context: LLMContext) -> tuple[str, ...]:
+    payload = _governance_input(context)
+    return tuple(
+        item["candidate"]["candidate_entry_id"]
+        for item in payload["candidates"]
+    )
+
+
+def _governance_input(context: LLMContext) -> dict[str, object]:
+    content = context.messages[0].content[0]
+    if not isinstance(content, str):
+        raise TypeError("governance test expected one text message")
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise TypeError("governance test input must be an object")
+    return parsed
+
+
+def _llm_runtime(transport: _ScriptedTransport) -> LLMRuntime:
     config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
         pro_model="pro",
         flash_model="flash",
-        flash_limits=flash_limits,
         api="scripted",
     )
     registry = LLMTransportRegistry()
     registry.register(transport)
     return LLMRuntime(config=config, registry=registry)
-
-
-def test_legacy_execution_context_fails_closed_for_lifecycle() -> None:
-    # No relatedness service is wired (in-memory test-double path). Even when a
-    # snapshot carries token-overlap related_existing_memories, the legacy
-    # context must NOT authorize a destructive lifecycle action: every entry is
-    # UNAVAILABLE with an empty allowlist, so supersede/contradict are blocked
-    # while the advisory ids remain visible to Flash via the snapshot itself.
-    snapshots = [
-        {
-            "entry_id": "pool:a",
-            "related_existing_memories": [
-                {"memory_id": "preference:overlap-1"},
-                {"memory_id": "preference:overlap-2"},
-            ],
-        },
-        {"entry_id": "pool:b", "related_existing_memories": []},
-    ]
-
-    context = _legacy_execution_context("governance:test:legacy-fail-closed", snapshots)
-
-    assert context.availability["pool:a"] is RelatednessAvailability.UNAVAILABLE
-    assert context.availability["pool:b"] is RelatednessAvailability.UNAVAILABLE
-    assert context.allowlists["pool:a"] == frozenset()
-    assert context.allowlists["pool:b"] == frozenset()
-    # Token-overlap ids must never grant lifecycle authority on the legacy path.
-    assert not context.allows_lifecycle("pool:a", "preference:overlap-1")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from hashlib import sha256
-from typing import Iterable, Protocol, Sequence
+from typing import Any, Iterable, Protocol, Sequence
 
 from pulsara_agent.event.events import AgentEvent
 from pulsara_agent.event_log.serialization import (
@@ -63,6 +63,26 @@ class MaterializationAccountStateConflict(RuntimeError):
             f"expected {expected_state_fingerprint!r}, "
             f"actual {actual_state_fingerprint!r}"
         )
+
+
+class EventLogTransactionCompanion(Protocol):
+    """Typed business mutation committed with one materialization append.
+
+    The PostgreSQL method runs on the EventLog transaction cursor.  The
+    in-memory method must validate and publish atomically from the caller's
+    perspective and must not perform fallible work after mutation.
+    """
+
+    def apply_postgres(
+        self,
+        cursor: Any,
+        stored_events: Sequence[AgentEvent],
+    ) -> None: ...
+
+    def apply_in_memory(
+        self,
+        stored_events: Sequence[AgentEvent],
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -788,6 +808,7 @@ class EventLog(Protocol):
         expected_account_state_fingerprint: str | None,
         resulting_account_state: LedgerMaterializationAccountStateFact,
         physical_charge_contract: PhysicalChargeContractFact,
+        transaction_companion: EventLogTransactionCompanion | None = None,
         expected_last_sequence: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> list[AgentEvent]: ...

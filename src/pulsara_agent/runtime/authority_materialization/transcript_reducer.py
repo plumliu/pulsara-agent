@@ -101,8 +101,22 @@ class _ProjectionRecord:
 @dataclass(slots=True)
 class _AcceptedModelAssembly:
     record: _ProjectionRecord
+    disposition_event: ModelCallControlDispositionResolvedEvent
     tool_calls: tuple[ModelToolCallBlockSemanticFact, ...]
     results: dict[str, _ProjectionRecord]
+
+
+@dataclass(frozen=True, slots=True)
+class GovernanceTranscriptAuthoritySnapshot:
+    """One reducer-owned governance authority view frozen at a single H."""
+
+    reducer_evidence_snapshot: TranscriptProjectionReducerEvidenceSnapshot
+    document_view: VerifiedTranscriptProjectionDocumentView
+    ledger_through_sequence: int
+    ledger_continuity_accumulator: str
+    transcript_semantic_event_count: int
+    transcript_semantic_accumulator: str
+    snapshot_fingerprint: str
 
 
 class TranscriptProjectionDocumentRegistry:
@@ -249,6 +263,62 @@ class TranscriptProjectionStateStore:
                             for reference in required_references
                         ),
                     },
+                ),
+            )
+
+    def capture_governance_authority_snapshot(
+        self,
+    ) -> GovernanceTranscriptAuthoritySnapshot:
+        """Freeze reducer evidence, hydrated documents, and H under one lock."""
+
+        with self._lock:
+            live_state = self._snapshot_unlocked()
+            stable_entries = tuple(self._stable_entries)
+            references: list[TerminalProjectionReferenceFact] = []
+            seen: set[str] = set()
+            for reference in stable_entry_projection_references(stable_entries):
+                if reference.reference_fingerprint in seen:
+                    continue
+                seen.add(reference.reference_fingerprint)
+                references.append(reference)
+            required_references = tuple(references)
+            reducer_snapshot = TranscriptProjectionReducerEvidenceSnapshot(
+                live_state=live_state,
+                stable_entries=stable_entries,
+                required_projection_references=required_references,
+                snapshot_fingerprint=context_fingerprint(
+                    "transcript-projection-reducer-evidence-snapshot:v1",
+                    {
+                        "live_assembly_fingerprint": live_state.assembly_fingerprint,
+                        "ordered_stable_entry_fact_fingerprints": tuple(
+                            entry.fact_fingerprint for entry in stable_entries
+                        ),
+                        "ordered_required_projection_reference_fingerprints": tuple(
+                            reference.reference_fingerprint
+                            for reference in required_references
+                        ),
+                    },
+                ),
+            )
+            document_view = self.documents.freeze_references(required_references)
+            payload = {
+                "reducer_evidence_snapshot_fingerprint": reducer_snapshot.snapshot_fingerprint,
+                "document_view_fingerprint": document_view.view_fingerprint,
+                "ledger_through_sequence": self._through_sequence,
+                "ledger_continuity_accumulator": self._ledger_continuity_accumulator,
+                "transcript_semantic_event_count": self._semantic_event_count,
+                "transcript_semantic_accumulator": self._semantic_accumulator,
+            }
+            return GovernanceTranscriptAuthoritySnapshot(
+                reducer_evidence_snapshot=reducer_snapshot,
+                document_view=document_view,
+                ledger_through_sequence=self._through_sequence,
+                ledger_continuity_accumulator=self._ledger_continuity_accumulator,
+                transcript_semantic_event_count=self._semantic_event_count,
+                transcript_semantic_accumulator=self._semantic_accumulator,
+                snapshot_fingerprint=context_fingerprint(
+                    "governance-transcript-authority-snapshot:v1",
+                    payload,
                 ),
             )
 
@@ -543,11 +613,16 @@ class TranscriptProjectionStateStore:
         )
         if not calls:
             self._stable_components.append(semantic_join.semantic_fingerprint)
-            self._append_model_message(record)
+            self._append_model_message(record, disposition_event=event)
             return
         if call_id in self._accepted_model_assemblies:
             raise ValueError("duplicate accepted model assembly")
-        assembly = _AcceptedModelAssembly(record=record, tool_calls=calls, results={})
+        assembly = _AcceptedModelAssembly(
+            record=record,
+            disposition_event=event,
+            tool_calls=calls,
+            results={},
+        )
         self._accepted_model_assemblies[call_id] = assembly
         for semantic in calls:
             if semantic.completion_status != "completed":
@@ -584,7 +659,10 @@ class TranscriptProjectionStateStore:
             return
         semantic_join = assembly.record.reference.semantic_join
         self._stable_components.append(semantic_join.semantic_fingerprint)
-        assistant_entry = self._append_model_message(assembly.record)
+        assistant_entry = self._append_model_message(
+            assembly.record,
+            disposition_event=assembly.disposition_event,
+        )
         call_block_position = len(self._stable_entries) - 1
         for semantic in assembly.tool_calls:
             self._append_tool_pair(
@@ -911,6 +989,8 @@ class TranscriptProjectionStateStore:
     def _append_model_message(
         self,
         record: _ProjectionRecord,
+        *,
+        disposition_event: ModelCallControlDispositionResolvedEvent,
     ) -> TranscriptMessageLeafEntryFact:
         payload = record.document.payload
         assert isinstance(payload, ModelTerminalProjectionPayloadFact)
@@ -949,6 +1029,7 @@ class TranscriptProjectionStateStore:
             ),
             content=content,
             source_event=event,
+            additional_source_events=(disposition_event,),
         )
 
     def _append_message_entry(
@@ -959,6 +1040,7 @@ class TranscriptProjectionStateStore:
         content: InlineNormalizedMessageContentFact
         | TerminalProjectionMessageContentRefFact,
         source_event: AgentEvent,
+        additional_source_events: tuple[AgentEvent, ...] = (),
     ) -> TranscriptMessageLeafEntryFact:
         semantic = build_frozen_fact(
             TranscriptMessageLeafSemanticFact,
@@ -968,13 +1050,16 @@ class TranscriptProjectionStateStore:
         )
         entry = build_frozen_fact(
             TranscriptMessageLeafEntryFact,
-            schema_version="transcript_message_leaf_entry.v3",
+            schema_version="transcript_message_leaf_entry.v4",
             entry_kind="message",
             ordinal=_ordinal(len(self._stable_entries)),
             semantic_identity=semantic,
             attribution=attribution,
             content=content,
-            source_event_refs=(_event_ref(self.runtime_session_id, source_event),),
+            source_event_refs=tuple(
+                _event_ref(self.runtime_session_id, item)
+                for item in (source_event, *additional_source_events)
+            ),
         )
         self._stable_entries.append(entry)
         return entry

@@ -41,6 +41,20 @@ def refresh_document_projection(cursor, *, graph_id: str, node_id: str, document
     projection = memory_node_projection(document)
     relation_rows = tuple(iter_relation_rows(document))
     cursor.execute(
+        "SELECT node_revision FROM memory_nodes "
+        "WHERE graph_id = %s AND id = %s FOR UPDATE",
+        (graph_id, node_id),
+    )
+    previous = cursor.fetchone()
+    previous_revision = (
+        None
+        if previous is None
+        else previous["node_revision"]
+        if isinstance(previous, dict)
+        else previous[0]
+    )
+    node_revision = 1 if previous_revision is None else int(previous_revision) + 1
+    cursor.execute(
         "DELETE FROM memory_nodes WHERE graph_id = %s AND id = %s",
         (graph_id, node_id),
     )
@@ -62,12 +76,14 @@ def refresh_document_projection(cursor, *, graph_id: str, node_id: str, document
                 do_not_apply_when,
                 created_at,
                 updated_at,
+                node_revision,
                 stale_after,
                 expires_at
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s::timestamptz, %s::timestamptz, %s::timestamptz, %s::timestamptz
+                %s::timestamptz, %s::timestamptz, %s,
+                %s::timestamptz, %s::timestamptz
             )
             """,
             (
@@ -85,6 +101,7 @@ def refresh_document_projection(cursor, *, graph_id: str, node_id: str, document
                 projection["do_not_apply_when"],
                 projection["created_at"],
                 projection["updated_at"],
+                node_revision,
                 projection["stale_after"],
                 projection["expires_at"],
             ),

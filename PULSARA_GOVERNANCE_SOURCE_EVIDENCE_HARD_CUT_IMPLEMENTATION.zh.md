@@ -1,6 +1,6 @@
 # Pulsara Governance Source Evidence Hard Cut 实施规格
 
-> 状态：待实施，规格已冻结
+> 状态：GSE0-GSE5 已完成
 >
 > 日期：2026-07-18
 >
@@ -18,6 +18,42 @@
 >
 > 长期契约：
 > `contracts/MEMORY_SURFACES_CONTRACT.zh.md`
+
+---
+
+## 实施结果（2026-07-18）
+
+GSE0-GSE5 已按本文档完成一次性 production hard cut，生产治理输入不再读取或猜测
+raw model-stream events。主要落点如下：
+
+- 新增 frozen governance evidence、batch input、claim、producer outbox 与 recovery DTO；
+- main-agent memory tool 与 replay evidence 共用唯一 versioned candidate builder；
+- governance evidence 从 transcript reducer 的同锁 frozen snapshot 派生，只接纳
+  `ACCEPTED` terminal projection、完成 pairing 的 tool result 与已验证 canonical quote；
+- reflection 与 compaction producer 使用 event/account/outbox 原子 bundle，candidate row
+  仅由 session-owned dispatcher 幂等投影；`NONE` 重试同一 candidate，`UNKNOWN` 精确
+  confirm，caller cancellation 只 detach，Host close drain producer owner；
+- governance candidate 使用 durable all-or-none claim；Prepared artifact 冻结 exact
+  `ResolvedModelCall`、system prompt、ordered messages、context ID 与 canonical
+  `LLMContext`，recovery 不读取 current model configuration 重新解释输入；
+- related canonical memory 冻结 `node_revision`；executor 在 UOW 内锁定 canonical row
+  并校验 revision，漂移时不执行旧 supersede/contradiction mutation；
+- Inspector、EventLog schema、PostgreSQL projection、长期 contracts 与 architecture
+  guards 已同步；`_source_event_summaries()`、raw `source_events` facade 和 governance
+  production full-run scan 已删除。
+
+最终验证：
+
+- `uv run pytest -q`：`2246 passed, 77 skipped`；
+- governance architecture guards：`31 passed`；
+- full real-LLM marker suite：`53 passed, 21 skipped`；其中skip均由独立昂贵
+  dogfood开关控制；
+- real embedding/reranker relatedness fixture：`recall@k = 1.0`；
+- `uv run ruff check src tests evals`：通过；
+- `git diff --check`：通过。
+
+本文后续章节继续保留冻结的设计、迁移顺序与验收矩阵，作为实现与长期审计的
+规范来源；其中“完成定义”均按上述 production hard cut 落地，不再表示待办。
 
 ---
 
@@ -1350,6 +1386,49 @@ Projection只允许：
 texts与artifact refs执行canonical serialization，重算UTF-8 bytes与payload fingerprint。
 `model_visible_payload`不允许`dict[str, Any]`、自由JSON或未绑定的pre-rendered
 prompt字符串。
+
+### 13.3 Exact decision view
+
+最终`GovernanceModelInputFact`中的每个candidate item必须同时保存三层、但不得混淆
+它们的authority：
+
+```text
+candidate
+    = GovernanceCandidatePromptPayloadFact
+    = bounded typed source-evidence projection
+
+decision_candidate
+    = ValidCandidatePayload.candidate的exact领域DTO
+    = 仅供需要candidate字段的decision逐字段复制
+
+lifecycle
+    = actions_allowed
+    + allowed_memory_ids
+    + allowed_replacement_evidence_refs
+```
+
+`decision_candidate`禁止携带`ValidCandidatePayload` wrapper；模型也不得把外层
+`candidate` evidence object复制进decision的`candidate`字段。无有效candidate时该字段为
+`null`，只有完整证据足以构造所有required typed fields时才允许
+`correct_and_submit/merge_and_submit`。
+
+`lifecycle.allowed_memory_ids`只来自本次冻结的FULL relatedness snapshot；
+`allowed_replacement_evidence_refs`只有在quoted evidence已exact匹配canonical transcript
+span时才包含`candidate_user_quote`。Producer event ID、quote semantic fingerprint与artifact
+reference不能冒充replacement authority。Prompt中的allowlist只帮助模型生成合法请求；
+executor仍必须独立从同一batch snapshot重建allowlist并逐项复核。
+
+`GovernanceSystemPromptContract` v4冻结以下决策顺序：
+
+1. 先判durability；today/this-time/one-off状态即使出现“remember”也应skip；
+2. 再判exact/semantic duplicate；重复memory应skip；
+3. 最后判lifecycle；只有canonical quote明确表达change/replace/stop Y use Z才可
+   supersede，普通durable冲突且没有replacement intent时使用non-destructive
+   contradiction，可兼容的相关事实继续走普通coexist路径。
+
+该顺序属于exact frozen model input contract，并进入system prompt SHA、assembly contract
+fingerprint与最终provider-neutral context fingerprint。修改任一规则必须升级contract version；
+recovery继续读取artifact中的旧exact prompt，不使用当前进程的新版本重新解释。
 
 禁止暴露：
 

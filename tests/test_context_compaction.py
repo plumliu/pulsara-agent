@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
@@ -87,6 +88,11 @@ from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.memory import InMemoryCandidatePool, MemoryDomainContext
 from pulsara_agent.memory.artifacts.archive import InMemoryArchiveStore
 from pulsara_agent.memory.candidates.pool import CandidateOrigin, PooledMemoryCandidate
+from pulsara_agent.memory.candidates.projection_outbox import (
+    CandidateProjectionOutboxDispatcher,
+    InMemoryCandidateProjectionOutbox,
+    MemoryCandidateProjectionCommitPort,
+)
 from pulsara_agent.ontology import memory
 from pulsara_agent.capability.runtime import CapabilityRuntime
 from pulsara_agent.capability.runtime import FrozenCapabilityExecutionSurface
@@ -112,6 +118,7 @@ from pulsara_agent.runtime.compaction.planner import strip_compaction_analysis
 from pulsara_agent.runtime.compaction.candidates import (
     CandidatePoolCompactionMemoryCandidateSink,
     ContextCompactionMemoryCandidatePolicy,
+    compaction_extractor_contract,
     parse_compaction_memory_candidates,
 )
 from pulsara_agent.runtime.compaction.inline import RuntimeContextCompactor
@@ -132,6 +139,7 @@ from pulsara_agent.runtime.compaction.service import (
     build_metadata_only_compaction_input,
     production_compaction_prompt,
 )
+from pulsara_agent.llm.terminal_projection import stable_event_identity
 import pulsara_agent.runtime.compaction.service as compaction_service_module
 from pulsara_agent.runtime.plan import (
     McpInputRequiredInteractionResolution,
@@ -337,13 +345,36 @@ async def _compact(service: ContextCompactionService, **kwargs):
 def _compaction_service(**kwargs: Any) -> ContextCompactionService:
     """Build compaction tests on the same RuntimeSession-owned model path as production."""
 
+    runtime_session_supplied = kwargs.get("runtime_session") is not None
     runtime_session = kwargs.get("runtime_session")
+    sink = kwargs.get("candidate_sink")
     if runtime_session is None:
         runtime_session = in_memory_runtime_session(
             Path.cwd(),
             runtime_session_id=kwargs["runtime_session_id"],
         )
         kwargs["runtime_session"] = runtime_session
+    if runtime_session_supplied and kwargs.get("event_commit_port") is None:
+        kwargs["event_commit_port"] = RuntimeSessionCompactionEventCommitPort(
+            runtime_session
+        )
+    if (
+        runtime_session_supplied
+        and sink is not None
+        and kwargs.get("candidate_projection_commit_port") is None
+    ):
+        repository = InMemoryCandidateProjectionOutbox()
+        kwargs["candidate_projection_commit_port"] = (
+            MemoryCandidateProjectionCommitPort(
+                runtime_session=runtime_session,
+                repository=repository,
+                dispatcher=CandidateProjectionOutboxDispatcher(
+                    runtime_session_id=runtime_session.runtime_session_id,
+                    repository=repository,
+                    candidate_pool=sink.candidate_pool,
+                ),
+            )
+        )
     return ContextCompactionService(**kwargs)
 
 
@@ -624,6 +655,10 @@ async def _emit_turn(
         model_target=target.fact,
         user_input=user_input,
     )
+    if runtime_session.materialization_account_store.snapshot() is None:
+        runtime_session._adopt_unbootstrapped_in_memory_account_for_test(
+            incoming_run_id=ctx.run_id
+        )
     call = llm_runtime.resolve_call(
         target=target,
         purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
@@ -842,13 +877,12 @@ class _FakeFailingAutoCompactionService(_FakeCompactionServiceBase):
 class _FakePreflightBoundaryCompactionService(_FakeCompactionServiceBase):
     def __init__(
         self,
-        event_log: InMemoryEventLog,
-        archive: InMemoryArchiveStore,
-        runtime_session_id: str,
+        runtime_session,
     ) -> None:
-        self.event_log = event_log
-        self.archive = archive
-        self.runtime_session_id = runtime_session_id
+        self.runtime_session = runtime_session
+        self.event_log = runtime_session.event_log
+        self.archive = runtime_session.archive
+        self.runtime_session_id = runtime_session.runtime_session_id
         self.calls: list[dict[str, object]] = []
 
     async def compact_if_needed(self, **kwargs) -> bool:
@@ -862,13 +896,37 @@ class _FakePreflightBoundaryCompactionService(_FakeCompactionServiceBase):
             metadata={"kind": "context_compaction_summary", "do_not_write_back": True},
         )
         through_sequence = self.event_log.next_sequence() - 1
-        self.event_log.append(
-            ContextCompactionCompletedEvent(
+        started_event_id = "context_compaction_started:preflight"
+        completed_event_id = "context_compaction_completed:preflight"
+        started_fields = compaction_started_contract_fields(
+            estimated_tokens_before=200_001,
+        )
+        started_fields["terminal_event_id"] = completed_event_id
+        await self.runtime_session.write_event(
+            ContextCompactionStartedEvent(
+                id=started_event_id,
                 **ctx.event_fields(),
-                **compaction_completed_contract_fields(
-                    estimated_tokens_before=200_001,
-                    estimated_tokens_after=4_000,
-                ),
+                **started_fields,
+                compaction_id="context_compaction:preflight",
+                trigger="auto",
+                reason=str(kwargs.get("reason", "preflight_context_threshold")),
+                window_number=1,
+                window_id="context_window:preflight",
+                threshold_tokens=200_000,
+                through_sequence=through_sequence,
+                keep_after_sequence=through_sequence,
+            )
+        )
+        completed_fields = compaction_completed_contract_fields(
+            estimated_tokens_before=200_001,
+            estimated_tokens_after=4_000,
+        )
+        completed_fields["started_event_id"] = started_event_id
+        await self.runtime_session.write_event(
+            ContextCompactionCompletedEvent(
+                id=completed_event_id,
+                **ctx.event_fields(),
+                **completed_fields,
                 compaction_id="context_compaction:preflight",
                 trigger="auto",
                 reason=str(kwargs.get("reason", "preflight_context_threshold")),
@@ -931,19 +989,31 @@ def test_context_compaction_events_round_trip() -> None:
     assert load_agent_event(dump_agent_event(started)) == started
     assert load_agent_event(dump_agent_event(completed)) == completed
 
+    summary = "summary text"
+    extractor_contract = compaction_extractor_contract(
+        ContextCompactionMemoryCandidatePolicy()
+    )
     proposed = ContextCompactionMemoryCandidatesProposedEvent(
         **ctx.event_fields(),
         compaction_id="context_compaction:test",
         source_event_id=completed.id,
         source_event_sequence=2,
         summary_artifact_id="artifact:summary",
-        candidate_entry_ids=["pool:test"],
+        candidate_entry_ids=[],
         attempted_count=1,
-        proposed_count=1,
-        skipped_count=0,
+        proposed_count=0,
+        skipped_count=1,
         duplicate_count=0,
         error_count=0,
-        extractor_version="compaction-memory-candidates:v1",
+        extractor_version=extractor_contract.extractor_version,
+        summary_content_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+        summary_content_bytes=len(summary.encode("utf-8")),
+        extractor_contract=extractor_contract,
+        ordered_candidate_attributions=(),
+        completed_compaction_event_identity=stable_event_identity(
+            completed,
+            runtime_session_id="runtime:test",
+        ),
     )
     assert load_agent_event(dump_agent_event(proposed)) == proposed
 
@@ -1503,10 +1573,16 @@ def test_terminal_commit_failure_keeps_bounded_compaction_owner_for_drain() -> N
 
 
 def test_context_compaction_appends_pending_memory_candidate() -> None:
-    log = InMemoryEventLog()
+    log = InMemoryEventLog(runtime_session_id="runtime:test")
     archive = InMemoryArchiveStore()
     candidate_pool = InMemoryCandidatePool()
-    _append_turn(log, "one", "please remember my workflow", "noted")
+    runtime_session = in_memory_runtime_session(
+        Path.cwd(),
+        runtime_session_id="runtime:test",
+        event_log=log,
+        archive=archive,
+    )
+    asyncio.run(_emit_turn(runtime_session, "one", "please remember my workflow", "noted"))
     raw = """
 <analysis>draft</analysis>
 <summary>Task state: user repeatedly syncs release before pushing.</summary>
@@ -1527,6 +1603,7 @@ def test_context_compaction_appends_pending_memory_candidate() -> None:
         archive=archive,
         llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
         runtime_session_id="runtime:test",
+        runtime_session=runtime_session,
         policy=ContextCompactionPolicy(min_events_after_last_compact=1),
         candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
             candidate_pool=candidate_pool,
@@ -1548,7 +1625,10 @@ def test_context_compaction_appends_pending_memory_candidate() -> None:
     assert len(pending) == 1
     candidate = pending[0]
     assert candidate.origin is CandidateOrigin.COMPACTION
-    assert candidate.source_event_id == event.id
+    assert candidate.source_event_id == (
+        f"context-compaction:{event.compaction_id}:memory-candidates"
+    )
+    assert candidate.metadata["compaction_completed_event_id"] == event.id
     assert candidate.source_artifact_id == event.summary_artifact_id
     assert candidate.intent_fingerprint is not None
     assert candidate.metadata["compaction_id"] == event.compaction_id
@@ -1569,10 +1649,16 @@ def test_context_compaction_appends_pending_memory_candidate() -> None:
 
 
 def test_context_compaction_zero_proposal_audit_event_for_all_skipped() -> None:
-    log = InMemoryEventLog()
+    log = InMemoryEventLog(runtime_session_id="runtime:test")
     archive = InMemoryArchiveStore()
     candidate_pool = InMemoryCandidatePool()
-    _append_turn(log, "one", "first request", "first reply")
+    runtime_session = in_memory_runtime_session(
+        Path.cwd(),
+        runtime_session_id="runtime:test",
+        event_log=log,
+        archive=archive,
+    )
+    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
     raw = """
 <summary>Task state: first request was handled.</summary>
 <memory_candidates_json>
@@ -1588,6 +1674,7 @@ def test_context_compaction_zero_proposal_audit_event_for_all_skipped() -> None:
         archive=archive,
         llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
         runtime_session_id="runtime:test",
+        runtime_session=runtime_session,
         policy=ContextCompactionPolicy(min_events_after_last_compact=1),
         candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
             candidate_pool=candidate_pool,
@@ -1626,10 +1713,16 @@ def test_context_compaction_zero_proposal_audit_event_for_all_skipped() -> None:
 
 
 def test_context_compaction_zero_proposal_audit_event_for_all_duplicate() -> None:
-    log = InMemoryEventLog()
+    log = InMemoryEventLog(runtime_session_id="runtime:test")
     archive = InMemoryArchiveStore()
     candidate_pool = InMemoryCandidatePool()
-    _append_turn(log, "one", "first request", "first reply")
+    runtime_session = in_memory_runtime_session(
+        Path.cwd(),
+        runtime_session_id="runtime:test",
+        event_log=log,
+        archive=archive,
+    )
+    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
     raw = """
 <summary>Task state: user repeatedly syncs release before pushing.</summary>
 <memory_candidates_json>
@@ -1657,6 +1750,7 @@ def test_context_compaction_zero_proposal_audit_event_for_all_duplicate() -> Non
         archive=archive,
         llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
         runtime_session_id="runtime:test",
+        runtime_session=runtime_session,
         policy=ContextCompactionPolicy(min_events_after_last_compact=1),
         candidate_sink=sink,
     )
@@ -1691,7 +1785,7 @@ def test_context_compaction_zero_proposal_audit_event_for_all_duplicate() -> Non
     assert "same intent fingerprint" in duplicate_audit.diagnostics[0].message
 
 
-def test_context_compaction_partial_candidate_append_failure_keeps_successful_entries() -> (
+def test_context_compaction_projection_failure_keeps_durable_outbox_for_retry() -> (
     None
 ):
     class FailingSecondAppendPool(InMemoryCandidatePool):
@@ -1709,10 +1803,16 @@ def test_context_compaction_partial_candidate_append_failure_keeps_successful_en
                 )
             return super().append_candidate(candidate)
 
-    log = InMemoryEventLog()
+    log = InMemoryEventLog(runtime_session_id="runtime:test")
     archive = InMemoryArchiveStore()
     candidate_pool = FailingSecondAppendPool()
-    _append_turn(log, "one", "first request", "first reply")
+    runtime_session = in_memory_runtime_session(
+        Path.cwd(),
+        runtime_session_id="runtime:test",
+        event_log=log,
+        archive=archive,
+    )
+    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
     raw = """
 <summary>Task state: user repeatedly syncs release before pushing.</summary>
 <memory_candidates_json>
@@ -1735,6 +1835,7 @@ def test_context_compaction_partial_candidate_append_failure_keeps_successful_en
         archive=archive,
         llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
         runtime_session_id="runtime:test",
+        runtime_session=runtime_session,
         policy=ContextCompactionPolicy(min_events_after_last_compact=1),
         candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
             candidate_pool=candidate_pool,
@@ -1761,39 +1862,41 @@ def test_context_compaction_partial_candidate_append_failure_keeps_successful_en
     ]
     assert len(audit_events) == 1
     audit = audit_events[0]
-    assert audit.proposed_count == 1
-    assert audit.candidate_entry_ids == [pending[0].entry_id]
-    assert audit.skipped_count == 1
-    assert audit.error_count == 1
-    diagnostic_codes = {diagnostic.code for diagnostic in audit.diagnostics}
-    assert "compaction_candidate_append_failed" in diagnostic_codes
-    assert (
-        "compaction_candidate_skipped:compaction_candidate_append_failed"
-        in diagnostic_codes
-    )
-    append_diagnostic = next(
-        diagnostic
-        for diagnostic in audit.diagnostics
-        if diagnostic.code == "compaction_candidate_append_failed"
-    )
-    assert append_diagnostic.message == "RuntimeError"
-    assert append_diagnostic.redacted is True
-    assert "sk-LEAK" not in "".join(
-        diagnostic.model_dump_json() for diagnostic in audit.diagnostics
-    )
+    assert audit.proposed_count == 2
+    assert len(audit.candidate_entry_ids) == 2
+    assert audit.skipped_count == 0
+    assert audit.error_count == 0
+    assert audit.diagnostics == []
+    port = service.candidate_projection_commit_port
+    assert port is not None
+    assert port.dispatch_retry_required is True
+
+    assert asyncio.run(port.flush_pending()) == 1
+    assert len(candidate_pool.list_pending()) == 2
+    assert port.dispatch_retry_required is False
 
 
-def test_context_compaction_sink_failure_records_single_redacted_diagnostic() -> None:
-    class FailingSink(CandidatePoolCompactionMemoryCandidateSink):
-        def append_compaction_candidates(self, **kwargs):  # type: ignore[no-untyped-def]
-            raise RuntimeError(
-                "database rejected candidate with secret sk-LEAKSHOULDNOTAPPEAR"
-            )
+def test_context_compaction_producer_commit_failure_does_not_rewrite_candidate() -> (
+    None
+):
+    class FailingProjectionCommitPort:
+        def __init__(self) -> None:
+            self.calls = []
 
-    log = InMemoryEventLog()
+        async def commit_producer_bundle(self, *, producer_event, rows):
+            self.calls.append((producer_event, rows))
+            raise RuntimeError("producer commit unavailable")
+
+    log = InMemoryEventLog(runtime_session_id="runtime:test")
     archive = InMemoryArchiveStore()
     candidate_pool = InMemoryCandidatePool()
-    _append_turn(log, "one", "first request", "first reply")
+    runtime_session = in_memory_runtime_session(
+        Path.cwd(),
+        runtime_session_id="runtime:test",
+        event_log=log,
+        archive=archive,
+    )
+    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
     raw = """
 <summary>Task state: user repeatedly syncs release before pushing.</summary>
 <memory_candidates_json>
@@ -1812,6 +1915,72 @@ def test_context_compaction_sink_failure_records_single_redacted_diagnostic() ->
         archive=archive,
         llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
         runtime_session_id="runtime:test",
+        runtime_session=runtime_session,
+        policy=ContextCompactionPolicy(min_events_after_last_compact=1),
+        candidate_sink=CandidatePoolCompactionMemoryCandidateSink(
+            candidate_pool=candidate_pool,
+            memory_domain=MemoryDomainContext(
+                memory_domain_id="u_test",
+                workspace_kind="project",
+                stable_project_key="/tmp/pulsara_agent",
+            ),
+            runtime_session_id="runtime:test",
+        ),
+    )
+    failing_port = FailingProjectionCommitPort()
+    service.candidate_projection_commit_port = failing_port  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="producer commit unavailable"):
+        asyncio.run(
+            _compact(service, trigger="manual", reason="user_requested", force=True)
+        )
+
+    assert len(failing_port.calls) == 1
+    producer_event, rows = failing_port.calls[0]
+    assert producer_event.proposed_count == 1
+    assert len(rows) == 1
+    assert not any(
+        isinstance(event, ContextCompactionMemoryCandidatesProposedEvent)
+        for event in log.iter()
+    )
+
+
+def test_context_compaction_sink_failure_records_single_redacted_diagnostic() -> None:
+    class FailingSink(CandidatePoolCompactionMemoryCandidateSink):
+        def prepare_compaction_candidates(self, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError(
+                "database rejected candidate with secret sk-LEAKSHOULDNOTAPPEAR"
+            )
+
+    log = InMemoryEventLog(runtime_session_id="runtime:test")
+    archive = InMemoryArchiveStore()
+    candidate_pool = InMemoryCandidatePool()
+    runtime_session = in_memory_runtime_session(
+        Path.cwd(),
+        runtime_session_id="runtime:test",
+        event_log=log,
+        archive=archive,
+    )
+    asyncio.run(_emit_turn(runtime_session, "one", "first request", "first reply"))
+    raw = """
+<summary>Task state: user repeatedly syncs release before pushing.</summary>
+<memory_candidates_json>
+{
+  "candidates": [
+    {
+      "kind": "Preference",
+      "statement": "The user prefers syncing release before pushing GitHub in this workspace."
+    }
+  ]
+}
+</memory_candidates_json>
+"""
+    service = _compaction_service(
+        event_log=log,
+        archive=archive,
+        llm_runtime=_llm_runtime(CompactScriptedTransport(raw)),
+        runtime_session_id="runtime:test",
+        runtime_session=runtime_session,
         policy=ContextCompactionPolicy(min_events_after_last_compact=1),
         candidate_sink=FailingSink(
             candidate_pool=candidate_pool,
@@ -1839,7 +2008,7 @@ def test_context_compaction_sink_failure_records_single_redacted_diagnostic() ->
     assert audit.proposed_count == 0
     assert audit.error_count == 1
     assert [diagnostic.code for diagnostic in audit.diagnostics] == [
-        "compaction_candidate_append_failed"
+        "compaction_candidate_preparation_failed"
     ]
     assert audit.diagnostics[0].message == "RuntimeError"
     assert audit.diagnostics[0].redacted is True
@@ -2303,6 +2472,7 @@ def test_runtime_context_compactor_failure_publishes_events_and_keeps_state_mess
                 CompactErrorAfterTextTransport("<summary>partial</summary>")
             ),
             runtime_session_id=runtime_session.runtime_session_id,
+            runtime_session=runtime_session,
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 auto_trigger_ratio=0.006,
@@ -3157,9 +3327,7 @@ def test_preflight_compaction_rebuilds_prior_messages_and_continues_original_use
         )
     )
     fake = _FakePreflightBoundaryCompactionService(
-        runtime_wiring.event_log,
-        runtime_wiring.archive,
-        runtime_wiring.runtime_session.runtime_session_id,
+        runtime_wiring.runtime_session,
     )
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     session = HostSession(
@@ -3214,9 +3382,7 @@ def test_next_run_reuses_prior_transcript_checkpoint_without_new_preflight_compa
         )
     )
     fake = _FakeOneShotPreflightBoundaryCompactionService(
-        runtime_wiring.event_log,
-        runtime_wiring.archive,
-        runtime_wiring.runtime_session.runtime_session_id,
+        runtime_wiring.runtime_session,
     )
     runtime_wiring = replace(runtime_wiring, compaction_service=fake)
     session = HostSession(

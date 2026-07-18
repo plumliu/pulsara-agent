@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
     do_not_apply_when TEXT,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
+    node_revision BIGINT NOT NULL DEFAULT 1 CHECK (node_revision >= 1),
     stale_after TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,
     fts TSVECTOR,
@@ -72,6 +73,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_nodes_status
 
 CREATE INDEX IF NOT EXISTS idx_memory_nodes_updated_at
     ON memory_nodes(graph_id, updated_at);
+
+ALTER TABLE memory_nodes
+    ADD COLUMN IF NOT EXISTS node_revision BIGINT NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS memory_vector_index (
     graph_id TEXT NOT NULL,

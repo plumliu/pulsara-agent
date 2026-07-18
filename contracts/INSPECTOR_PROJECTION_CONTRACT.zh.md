@@ -309,3 +309,27 @@ Session/run Inspector 必须从 durable `ContextWindowOpenedEvent`、`ContextWin
 
 Inspector只检查durable artifact存在性，不重新运行summarizer、不重新估算summary或post-compaction token，也不从当前window cache推断历史状态。
 Completed窗口切换必须表现为旧window closed、新window active；Failed或recovered-interrupted只终结attempt，不能伪造旧window已关闭。
+
+---
+
+## 15. Memory governance evidence projection
+
+Session Inspector新增 bounded `memory_governance` projection：
+
+- `batches[]`：batch input reference、source high-water、resolved call、
+  `staged | prepared | terminal`状态与Prepared/terminal event refs；
+- `claims[]`：candidate、batch、generation、`preparing | prepared | terminal | released`、
+  previous/current fingerprint与carrier refs；
+- `evidence_rejections[]`：system-owned rejection reason、candidate/generation、event ID；
+- `candidate_projection_outbox[]`：reflection/compaction producer identity、candidate index、
+  payload/attribution fingerprint、pending/applied/failed状态；
+- counts：batch数、open claims、evidence rejections、pending candidate projections。
+
+Historical Inspector只读取 durable artifact/events/rows，不运行 evidence builder、relatedness、
+governance model、candidate dispatcher或recovery owner。它不得从当前 transcript reducer、segment
+layout、live Cursor或current model config重建一份看似存在的 governance input。
+
+Batch artifact preview必须 bounded，并分别展示 evidence semantic fingerprint、physical
+attribution refs和prompt projection fingerprint；不得把三者折叠成一个 fingerprint。Artifact
+missing、hash conflict、open claim无Prepared、terminal batch仍有open claim、projection outbox
+永久failed应产生稳定 diagnostic，但 Inspector不得自行修复或终结候选。

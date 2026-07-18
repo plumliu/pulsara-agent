@@ -199,6 +199,90 @@ class PostgresInspectorStore:
             (entry_id, entry_id),
         )
 
+    def governance_batches_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 128,
+    ) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select runtime_session_id, governance_batch_id,
+                   batch_input_reference, preparing_claims_fingerprint,
+                   source_ledger_through_sequence, resolved_model_call_id,
+                   status, prepared_event_id, terminal_event_id,
+                   record_fingerprint, created_at, updated_at
+            from memory_governance_batch_inputs
+            where runtime_session_id = %s
+            order by created_at desc, governance_batch_id
+            limit %s
+            """,
+            (session_id, limit),
+        )
+
+    def governance_claims_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 512,
+    ) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select runtime_session_id, candidate_entry_id,
+                   candidate_row_fingerprint, governance_batch_id,
+                   claim_generation, status, prepared_event_id,
+                   terminal_record_id, previous_claim_fingerprint,
+                   claim_fingerprint, created_at, updated_at
+            from memory_governance_candidate_claims
+            where runtime_session_id = %s
+            order by created_at desc, candidate_entry_id
+            limit %s
+            """,
+            (session_id, limit),
+        )
+
+    def governance_evidence_rejections_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 256,
+    ) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select runtime_session_id, candidate_entry_id, claim_generation,
+                   governance_batch_id, rejection_event_id,
+                   rejection_payload, created_at
+            from memory_candidate_evidence_rejections
+            where runtime_session_id = %s
+            order by created_at desc, candidate_entry_id
+            limit %s
+            """,
+            (session_id, limit),
+        )
+
+    def candidate_projection_outbox_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 256,
+    ) -> list[dict[str, Any]]:
+        return self._fetchall(
+            """
+            select runtime_session_id, producer_kind, producer_event_id,
+                   candidate_entry_id, candidate_index,
+                   outbox_item_fingerprint, producer_payload_fingerprint,
+                   producer_event_identity, candidate_payload_fingerprint,
+                   candidate_attribution_fingerprint, candidate_payload,
+                   status, last_stable_failure_code,
+                   created_at, updated_at
+            from memory_candidate_projection_outbox
+            where runtime_session_id = %s
+            order by created_at desc, producer_event_id, candidate_index
+            limit %s
+            """,
+            (session_id, limit),
+        )
+
     def outbox_for_run(self, run_id: str) -> list[dict[str, Any]]:
         return self._fetchall(
             """

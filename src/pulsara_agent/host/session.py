@@ -2526,9 +2526,24 @@ class HostSession:
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
         await runtime_session.transcript_projection_checkpoint_service.request_close_cancellation()
+        governance_engine = self.wiring.runtime_wiring.memory_governance_engine
+        if governance_engine is not None:
+            await governance_engine.stop_admission_and_drain(
+                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            )
         await self.wiring.runtime_wiring.memory_governance_executor.flush_pending_event_outbox_async(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )
+        candidate_projection_port = (
+            self.wiring.runtime_wiring.candidate_projection_commit_port
+        )
+        if candidate_projection_port is not None:
+            await candidate_projection_port.stop_admission_and_drain(
+                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            )
+            await candidate_projection_port.flush_pending(
+                deadline_monotonic=time.monotonic() + drain_timeout_seconds
+            )
         await runtime_session.context_input_io_service.drain_pending(
             deadline_monotonic=time.monotonic() + drain_timeout_seconds
         )

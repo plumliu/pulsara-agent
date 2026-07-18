@@ -512,7 +512,7 @@ TranscriptProjectionLeafSemanticFact: TypeAlias = Annotated[
 
 
 class TranscriptMessageLeafEntryFact(FrozenFactBase):
-    schema_version: Literal["transcript_message_leaf_entry.v3"]
+    schema_version: Literal["transcript_message_leaf_entry.v4"]
     entry_kind: Literal["message"]
     ordinal: TranscriptProjectionOrdinalFact
     semantic_identity: TranscriptMessageLeafSemanticFact
@@ -1090,7 +1090,7 @@ _OWN: tuple[tuple[str, str | None, str], ...] = (
     ("transcript_message_leaf_semantic.v2", "semantic_fingerprint", "transcript-message-leaf-semantic:v2"),
     ("transcript_tool_pair_leaf_semantic.v2", "semantic_fingerprint", "transcript-tool-pair-leaf-semantic:v2"),
     ("transcript_tool_result_leaf_semantic.v2", "semantic_fingerprint", "transcript-tool-result-leaf-semantic:v2"),
-    ("transcript_message_leaf_entry.v3", "fact_fingerprint", "transcript-message-leaf-entry:v3"),
+    ("transcript_message_leaf_entry.v4", "fact_fingerprint", "transcript-message-leaf-entry:v4"),
     ("transcript_tool_pair_leaf_entry.v3", "fact_fingerprint", "transcript-tool-pair-leaf-entry:v3"),
     ("transcript_tool_result_leaf_entry.v3", "fact_fingerprint", "transcript-tool-result-leaf-entry:v3"),
     ("transcript_projection_node_ref.v1", "node_ref_fingerprint", "transcript-projection-node-ref:v1"),

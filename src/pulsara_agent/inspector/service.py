@@ -120,6 +120,10 @@ _REQUIRED_TABLES = (
     "memory_write_outbox",
     "memory_candidates",
     "memory_governance_decisions",
+    "memory_governance_candidate_claims",
+    "memory_governance_batch_inputs",
+    "memory_candidate_evidence_rejections",
+    "memory_candidate_projection_outbox",
     "recall_traces",
     "recall_usages",
 )
@@ -179,6 +183,10 @@ class InspectorService:
             store=self.store,
         )
         diagnostics.extend(authority_materialization["diagnostics"])
+        governance_projection = _memory_governance_projection(
+            self.store,
+            session_id=session_id,
+        )
         return {
             "inspect_kind": "session",
             "session": _json_safe(session),
@@ -221,6 +229,7 @@ class InspectorService:
             "ledger_materialization_account": authority_materialization[
                 "ledger_materialization_account"
             ],
+            "memory_governance": governance_projection,
             "mcp_installations": _mcp_installation_events_projection(events),
             "run_boundaries": boundary_projections,
             "events": _event_summaries(
@@ -606,6 +615,35 @@ class _InspectorEventLogLocator:
             runtime_session_id=runtime_session_id,
             workspace_root=str(workspace_root) if workspace_root is not None else None,
         )
+
+
+def _memory_governance_projection(
+    store: PostgresInspectorStore,
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    batches = store.governance_batches_for_session(session_id)
+    claims = store.governance_claims_for_session(session_id)
+    rejections = store.governance_evidence_rejections_for_session(session_id)
+    projection_outbox = store.candidate_projection_outbox_for_session(session_id)
+    return {
+        "batches": [_json_safe(row) for row in batches],
+        "claims": [_json_safe(row) for row in claims],
+        "evidence_rejections": [_json_safe(row) for row in rejections],
+        "candidate_projection_outbox": [
+            _json_safe(row) for row in projection_outbox
+        ],
+        "counts": {
+            "batches": len(batches),
+            "open_claims": sum(
+                row["status"] in {"preparing", "prepared"} for row in claims
+            ),
+            "evidence_rejections": len(rejections),
+            "pending_candidate_projections": sum(
+                row["status"] == "pending" for row in projection_outbox
+            ),
+        },
+    }
 
 
 def _mcp_installation_events_projection(

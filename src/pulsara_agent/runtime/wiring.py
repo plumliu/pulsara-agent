@@ -52,6 +52,20 @@ from pulsara_agent.memory.governance.relatedness import (
     GovernanceRelatednessService,
     MemoryGovernanceRelatednessOptions,
 )
+from pulsara_agent.memory.governance.batch_input import (
+    MemoryGovernanceBatchPreparationCommitPort,
+)
+from pulsara_agent.memory.governance.claims import (
+    InMemoryMemoryGovernanceCandidateClaimRepository,
+    MemoryGovernanceCandidateClaimRepository,
+    PostgresMemoryGovernanceCandidateClaimRepository,
+)
+from pulsara_agent.memory.governance.evidence import GovernanceSourceEvidenceBuilder
+from pulsara_agent.memory.governance.preparation import (
+    GovernanceBatchPreparationRepository,
+    InMemoryGovernanceBatchPreparationRepository,
+    PostgresGovernanceBatchPreparationRepository,
+)
 from pulsara_agent.memory.governance.event_outbox import (
     GovernanceEventOutboxDispatcher,
     PostgresGovernanceEventOutboxStore,
@@ -69,6 +83,12 @@ from pulsara_agent.memory.working_context import PostgresWorkingContextStore
 from pulsara_agent.runtime.agent import AgentRuntime
 from pulsara_agent.runtime.compaction import ContextCompactionPolicy, ContextCompactionService
 from pulsara_agent.runtime.compaction.candidates import CandidatePoolCompactionMemoryCandidateSink
+from pulsara_agent.memory.candidates.projection_outbox import (
+    CandidateProjectionOutboxDispatcher,
+    InMemoryCandidateProjectionOutbox,
+    MemoryCandidateProjectionCommitPort,
+    PostgresCandidateProjectionOutbox,
+)
 from pulsara_agent.runtime.compaction.commit import (
     RuntimeSessionCompactionEventCommitPort,
 )
@@ -94,6 +114,11 @@ class RuntimeWiring:
     ledger: ExecutionEvidenceLedger
     candidate_pool: CandidatePool
     memory_governance_executor: MemoryGovernanceExecutor
+    memory_governance_claim_repository: MemoryGovernanceCandidateClaimRepository
+    memory_governance_preparation_repository: GovernanceBatchPreparationRepository
+    memory_governance_evidence_builder: GovernanceSourceEvidenceBuilder
+    memory_governance_preparation_commit_port: MemoryGovernanceBatchPreparationCommitPort
+    candidate_projection_commit_port: MemoryCandidateProjectionCommitPort | None = None
     memory_recall_service: MemoryRecallService | None = None
     memory_query: PostgresMemoryQuery | None = None
     memory_governance_engine: MemoryGovernanceEngine | None = None
@@ -146,6 +171,17 @@ def build_in_memory_runtime_wiring(
         extra_tool_bindings=(mcp_installation or empty_mcp_installation()).tools,
         allow_unbootstrapped_test_events=True,
     )
+    candidate_projection_outbox = InMemoryCandidateProjectionOutbox()
+    candidate_projection_dispatcher = CandidateProjectionOutboxDispatcher(
+        runtime_session_id=runtime_session.runtime_session_id,
+        repository=candidate_projection_outbox,
+        candidate_pool=candidate_pool,
+    )
+    candidate_projection_commit_port = MemoryCandidateProjectionCommitPort(
+        runtime_session=runtime_session,
+        repository=candidate_projection_outbox,
+        dispatcher=candidate_projection_dispatcher,
+    )
     _register_timeline_hook(
         runtime_session=runtime_session,
         graph=graph,
@@ -179,6 +215,20 @@ def build_in_memory_runtime_wiring(
         ),
         allowed_write_scopes=_allowed_write_scopes(memory_domain),
     )
+    governance_claims = InMemoryMemoryGovernanceCandidateClaimRepository(
+        candidate_pool=candidate_pool
+    )
+    governance_preparations = InMemoryGovernanceBatchPreparationRepository()
+    governance_evidence = GovernanceSourceEvidenceBuilder(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_log=event_log,
+        archive=archive,
+    )
+    governance_preparation_commit = MemoryGovernanceBatchPreparationCommitPort(
+        runtime_session=runtime_session,
+        claim_repository=governance_claims,
+        preparation_repository=governance_preparations,
+    )
     return RuntimeWiring(
         runtime_session=runtime_session,
         event_log=event_log,
@@ -187,7 +237,12 @@ def build_in_memory_runtime_wiring(
         graph_id=resolved_graph_id,
         ledger=ledger,
         candidate_pool=candidate_pool,
+        candidate_projection_commit_port=candidate_projection_commit_port,
         memory_governance_executor=memory_governance_executor,
+        memory_governance_claim_repository=governance_claims,
+        memory_governance_preparation_repository=governance_preparations,
+        memory_governance_evidence_builder=governance_evidence,
+        memory_governance_preparation_commit_port=governance_preparation_commit,
         memory_recall_service=None,
         memory_query=None,
         memory_domain=memory_domain,
@@ -237,6 +292,19 @@ def build_durable_runtime_wiring(
     oxigraph_graph = OxigraphGraphStore(settings.storage.oxigraph_url)
     graph: GraphStore = DurableGraphFacade(postgres=postgres_graph, oxigraph=oxigraph_graph)
     candidate_pool = PostgresCandidatePool(dsn=settings.storage.postgres_dsn)
+    candidate_projection_outbox = PostgresCandidateProjectionOutbox(
+        dsn=settings.storage.postgres_dsn
+    )
+    candidate_projection_dispatcher = CandidateProjectionOutboxDispatcher(
+        runtime_session_id=runtime_session.runtime_session_id,
+        repository=candidate_projection_outbox,
+        candidate_pool=candidate_pool,
+    )
+    candidate_projection_commit_port = MemoryCandidateProjectionCommitPort(
+        runtime_session=runtime_session,
+        repository=candidate_projection_outbox,
+        dispatcher=candidate_projection_dispatcher,
+    )
     memory_query = PostgresMemoryQuery(dsn=settings.storage.postgres_dsn)
     tokenizer = build_tokenizer(settings.retrieval.tokenizer)
     working_context_store = (
@@ -353,6 +421,22 @@ def build_durable_runtime_wiring(
             ),
         ),
     )
+    governance_claims = PostgresMemoryGovernanceCandidateClaimRepository(
+        dsn=settings.storage.postgres_dsn
+    )
+    governance_preparations = PostgresGovernanceBatchPreparationRepository(
+        dsn=settings.storage.postgres_dsn
+    )
+    governance_evidence = GovernanceSourceEvidenceBuilder(
+        runtime_session_id=runtime_session.runtime_session_id,
+        event_log=event_log,
+        archive=archive,
+    )
+    governance_preparation_commit = MemoryGovernanceBatchPreparationCommitPort(
+        runtime_session=runtime_session,
+        claim_repository=governance_claims,
+        preparation_repository=governance_preparations,
+    )
     return RuntimeWiring(
         runtime_session=runtime_session,
         event_log=event_log,
@@ -361,7 +445,12 @@ def build_durable_runtime_wiring(
         graph_id=resolved_graph_id,
         ledger=ledger,
         candidate_pool=candidate_pool,
+        candidate_projection_commit_port=candidate_projection_commit_port,
         memory_governance_executor=memory_governance_executor,
+        memory_governance_claim_repository=governance_claims,
+        memory_governance_preparation_repository=governance_preparations,
+        memory_governance_evidence_builder=governance_evidence,
+        memory_governance_preparation_commit_port=governance_preparation_commit,
         memory_recall_service=memory_recall_service,
         memory_query=memory_query,
         memory_domain=memory_domain,
@@ -513,7 +602,22 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
         graph_id=runtime_wiring.graph_id,
         ledger=runtime_wiring.ledger,
         candidate_pool=runtime_wiring.candidate_pool,
+        candidate_projection_commit_port=(
+            runtime_wiring.candidate_projection_commit_port
+        ),
         memory_governance_executor=runtime_wiring.memory_governance_executor,
+        memory_governance_claim_repository=(
+            runtime_wiring.memory_governance_claim_repository
+        ),
+        memory_governance_preparation_repository=(
+            runtime_wiring.memory_governance_preparation_repository
+        ),
+        memory_governance_evidence_builder=(
+            runtime_wiring.memory_governance_evidence_builder
+        ),
+        memory_governance_preparation_commit_port=(
+            runtime_wiring.memory_governance_preparation_commit_port
+        ),
         memory_recall_service=runtime_wiring.memory_recall_service,
         memory_query=runtime_wiring.memory_query,
         memory_domain=runtime_wiring.memory_domain,
@@ -531,6 +635,9 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
             event_commit_port=RuntimeSessionCompactionEventCommitPort(
                 runtime_wiring.runtime_session
             ),
+            candidate_projection_commit_port=(
+                runtime_wiring.candidate_projection_commit_port
+            ),
             candidate_sink=(
                 CandidatePoolCompactionMemoryCandidateSink(
                     candidate_pool=runtime_wiring.candidate_pool,
@@ -547,6 +654,18 @@ def _with_memory_governance_engine(runtime_wiring: RuntimeWiring, *, llm_runtime
             llm_runtime=llm_runtime,
             executor=runtime_wiring.memory_governance_executor,
             runtime_session=runtime_wiring.runtime_session,
+            archive=runtime_wiring.archive,
+            claim_repository=runtime_wiring.memory_governance_claim_repository,
+            preparation_repository=(
+                runtime_wiring.memory_governance_preparation_repository
+            ),
+            evidence_builder=runtime_wiring.memory_governance_evidence_builder,
+            preparation_commit_port=(
+                runtime_wiring.memory_governance_preparation_commit_port
+            ),
+            candidate_projection_commit_port=(
+                runtime_wiring.candidate_projection_commit_port
+            ),
             options=MemoryGovernanceOptions(),
             relatedness_service=runtime_wiring.governance_relatedness,
         ),
@@ -580,6 +699,9 @@ def _build_memory_hooks(
         graph_id=runtime_wiring.graph_id,
         allowed_scopes=_allowed_write_scopes(runtime_wiring.memory_domain),
         options=memory_reflection_options or MemoryReflectionOptions(),
+        candidate_projection_commit_port=(
+            runtime_wiring.candidate_projection_commit_port
+        ),
     )
     return ReflectiveMemoryHooks(
         candidate_pool=runtime_wiring.candidate_pool,

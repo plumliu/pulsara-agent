@@ -21,6 +21,7 @@ class _Engine:
             candidate_pool=_Pool(session_id),
             event_dispatch_retry_required=False,
         )
+        self.retry_required = False
         self.calls = 0
 
     async def run_pending(self, *, trigger_reason: str):

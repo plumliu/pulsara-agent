@@ -529,7 +529,7 @@ def test_stable_projection_lowers_current_user_without_raw_stream_events() -> No
     )
     entry = _fact(
         TranscriptMessageLeafEntryFact,
-        schema_version="transcript_message_leaf_entry.v3",
+        schema_version="transcript_message_leaf_entry.v4",
         entry_kind="message",
         ordinal=TranscriptProjectionOrdinalFact(
             schema_version="transcript_projection_ordinal.v1",
@@ -639,7 +639,7 @@ def test_oversized_non_terminal_message_uses_typed_content_artifact() -> None:
     )
     entry = _fact(
         TranscriptMessageLeafEntryFact,
-        schema_version="transcript_message_leaf_entry.v3",
+        schema_version="transcript_message_leaf_entry.v4",
         entry_kind="message",
         ordinal=TranscriptProjectionOrdinalFact(
             schema_version="transcript_projection_ordinal.v1",

@@ -686,6 +686,7 @@ def test_run_start_and_first_mcp_installation_audit_are_one_atomic_batch(
         expected_account_state_fingerprint,
         resulting_account_state,
         physical_charge_contract,
+        transaction_companion=None,
         expected_last_sequence=None,
         deadline_monotonic=None,
     ):
@@ -697,6 +698,7 @@ def test_run_start_and_first_mcp_installation_audit_are_one_atomic_batch(
             expected_account_state_fingerprint=expected_account_state_fingerprint,
             resulting_account_state=resulting_account_state,
             physical_charge_contract=physical_charge_contract,
+            transaction_companion=transaction_companion,
             expected_last_sequence=expected_last_sequence,
             deadline_monotonic=deadline_monotonic,
         )
@@ -3215,6 +3217,7 @@ def test_run_end_known_precommit_failure_retries_stable_candidate_once(
             expected_account_state_fingerprint,
             resulting_account_state,
             physical_charge_contract,
+            transaction_companion=None,
             expected_last_sequence,
             deadline_monotonic=None,
         ):
@@ -3230,6 +3233,7 @@ def test_run_end_known_precommit_failure_retries_stable_candidate_once(
                 ),
                 resulting_account_state=resulting_account_state,
                 physical_charge_contract=physical_charge_contract,
+                transaction_companion=transaction_companion,
                 expected_last_sequence=expected_last_sequence,
                 deadline_monotonic=deadline_monotonic,
             )
@@ -4813,6 +4817,7 @@ def test_tool_gate_allow_and_rollout_reservation_commit_atomically(
         expected_account_state_fingerprint,
         resulting_account_state,
         physical_charge_contract,
+        transaction_companion=None,
         expected_last_sequence,
         deadline_monotonic=None,
     ):
@@ -4825,6 +4830,7 @@ def test_tool_gate_allow_and_rollout_reservation_commit_atomically(
             expected_account_state_fingerprint=expected_account_state_fingerprint,
             resulting_account_state=resulting_account_state,
             physical_charge_contract=physical_charge_contract,
+            transaction_companion=transaction_companion,
             expected_last_sequence=expected_last_sequence,
             deadline_monotonic=deadline_monotonic,
         )

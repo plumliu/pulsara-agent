@@ -503,7 +503,7 @@ def _externalize_oversized_messages(
         persisted.append(
             build_frozen_fact(
                 TranscriptMessageLeafEntryFact,
-                schema_version="transcript_message_leaf_entry.v3",
+                schema_version="transcript_message_leaf_entry.v4",
                 entry_kind="message",
                 ordinal=entry.ordinal,
                 semantic_identity=entry.semantic_identity,
