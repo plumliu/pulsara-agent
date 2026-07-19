@@ -31,6 +31,9 @@ from pulsara_agent.primitives.terminal_projection import (
     TerminalProjectionReferenceFact,
     ToolTerminalProjectionSemanticFact,
 )
+from pulsara_agent.primitives.transcript_projection import (
+    TranscriptProjectionLeafEntryReferenceFact,
+)
 
 
 Fingerprint = Annotated[str, Field(min_length=1, max_length=256)]
@@ -75,33 +78,6 @@ class GovernanceEvidenceArtifactReferenceFact(GovernanceEvidenceFrozenFact):
     artifact_contract_version: str = Field(min_length=1, max_length=64)
     artifact_contract_fingerprint: Fingerprint
     reference_fingerprint: Fingerprint
-
-
-class TranscriptProjectionLeafEntryReferenceFact(GovernanceEvidenceFrozenFact):
-    schema_version: Literal["transcript_projection_leaf_entry_reference.v1"]
-    runtime_session_id: str = Field(min_length=1, max_length=256)
-    entry_kind: Literal["message", "tool_pair", "tool_result"]
-    ordinal: int = Field(ge=0)
-    entry_semantic_fingerprint: Fingerprint
-    entry_fact_fingerprint: Fingerprint
-    source_event_references: tuple[GovernanceStoredEventReferenceFact, ...] = Field(
-        min_length=1,
-        max_length=16,
-    )
-    reference_fingerprint: Fingerprint
-
-    @model_validator(mode="after")
-    def _same_session_and_ordered(self) -> "TranscriptProjectionLeafEntryReferenceFact":
-        refs = self.source_event_references
-        if any(
-            ref.stable_identity.runtime_session_id != self.runtime_session_id
-            for ref in refs
-        ):
-            raise ValueError("leaf source references must belong to one session")
-        sequences = tuple(ref.sequence for ref in refs)
-        if sequences != tuple(sorted(sequences)) or len(sequences) != len(set(sequences)):
-            raise ValueError("leaf source references must be ordered and unique")
-        return self
 
 
 class GovernanceBatchInputArtifactContractFact(GovernanceEvidenceFrozenFact):
@@ -914,7 +890,6 @@ class GovernanceDerivedWriteAttributionFact(GovernanceEvidenceFrozenFact):
 _SCHEMAS: tuple[tuple[str, str, str], ...] = (
     ("governance_stored_event_reference.v1", "reference_fingerprint", "governance-stored-event-reference:v1"),
     ("governance_evidence_artifact_reference.v1", "reference_fingerprint", "governance-evidence-artifact-reference:v1"),
-    ("transcript_projection_leaf_entry_reference.v1", "reference_fingerprint", "transcript-projection-leaf-entry-reference:v1"),
     ("governance_batch_input_artifact_contract.v1", "contract_fingerprint", "governance-batch-input-artifact-contract:v1"),
     ("candidate_quoted_evidence_locator.v1", "locator_fingerprint", "candidate-quoted-evidence-locator:v1"),
     ("governance_candidate_payload_semantic.v1", "payload_semantic_fingerprint", "governance-candidate-payload-semantic:v1"),

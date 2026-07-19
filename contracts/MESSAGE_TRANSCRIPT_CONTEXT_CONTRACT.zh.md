@@ -143,7 +143,7 @@ sequence。最终assistant tool call/result pairing、message order与provider-n
 `TranscriptToolResultRefFact`、`ToolInteractionPairFact`、`ToolResultRenderUnit`、`RenderedToolResultFragment`的call/unit ID、
 call/result message ID、block index、global position与segment完全一致。跨call替换或只匹配unit ID均fail closed。
 
-每个non-transcript candidate必须精确匹配`ContextFactSnapshotFact.candidate_authorities`中同source的正文hash/chars、event/artifact
+每个 non-transcript candidate 必须精确匹配 `ContextFactSnapshotFact.context_source_candidates` 中同 source 的 typed semantic payload、revision、authority horizon 与 event/artifact attribution；禁止恢复旧的字符串 authority 重包装。
 refs、priority/required/stability、channel/lowering与dependency fingerprint。schema与compiler共同执行固定
 source/channel/lowering矩阵；合法artifact ID不能为伪造inline正文提供authority。
 

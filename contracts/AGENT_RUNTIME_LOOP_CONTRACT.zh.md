@@ -95,7 +95,7 @@ snapshot、transcript/tool-unit normalization、policy/cache prepare、candidate
 `ContextCompiledEvent(status="failed", failure_stage=..., input_failure=...)`，outer context/call/index必须与inner failure一致；
 不得只留下RunStart/RunEnd。ledger UNKNOWN/PARTIAL/reconciliation latch时才禁止继续append audit。
 
-Snapshot必须先冻结`candidate_source_selections`与`candidate_authorities`。Selection拥有eligible/selected/omitted、policy与
+Snapshot 必须先冻结 `candidate_source_selections` 与 `context_source_candidates`。Selection 拥有 eligible/selected/omitted、policy 与
 source range审计；authority只拥有实际model-visible正文/timing/attribution。Subagent selection必须在已冻结parent event slice上
 运行pure reducer一次性派生，Agent不得分别读取live selected/count后绑定较晚high-water。随后candidate prepare与compiler allocation都对正文hash、event/artifact refs、
 source/channel/lowering矩阵及high-water执行强join。`lowering_kind`是compiler实际lowering依据，不是只供审计展示的闲置字段。

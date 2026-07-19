@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import os
 import shutil
@@ -35,6 +36,8 @@ from pulsara_agent.event import (
     ContextWindowOpenedEvent,
     EventContext,
     ModelCallEndEvent,
+    ModelCallStartEvent,
+    ProviderInputGenerationRolloverResolvedEvent,
     RolloutBudgetAccountClosedEvent,
     RolloutBudgetAccountOpenedEvent,
     RunStartEvent,
@@ -43,6 +46,7 @@ from pulsara_agent.event import (
     RunErrorEvent,
     TextBlockSegmentEvent,
     ToolCallStartEvent,
+    ToolResultEndEvent,
     ToolResultTextDeltaEvent,
     UserConfirmResultEvent,
 )
@@ -54,6 +58,7 @@ from pulsara_agent.host.transcript import (
 from pulsara_agent.host import HostCore, HostWorkspaceInput
 from pulsara_agent.llm import LLMMessage, ModelRole, build_llm_runtime
 from pulsara_agent.llm.request import LLMOptions
+from pulsara_agent.message.blocks import ToolResultState
 from pulsara_agent.runtime import ApprovalResolution, ToolApprovalDecision
 from pulsara_agent.runtime.approval import PendingApproval
 from pulsara_agent.runtime.permission import (
@@ -69,6 +74,7 @@ from pulsara_agent.runtime.long_horizon.run_contract import (
     empty_projection_state_fingerprint,
     prepare_root_long_horizon_run,
 )
+from pulsara_agent.runtime.provider_input.vector import load_provider_input_vector
 from pulsara_agent.runtime.session import EventCommitError
 from pulsara_agent.settings import PulsaraSettings
 
@@ -186,7 +192,7 @@ class RealLLMUserSimulator:
             )
             runtime_session = in_memory_runtime_session(Path.cwd())
             try:
-                handle = start_test_direct_model_stream(
+                handle = await start_test_direct_model_stream(
                     self._runtime,
                     call=call,
                     context=bind_test_context(call, context),
@@ -389,6 +395,14 @@ def test_real_pr4_dogfood_llm_user_long_session(
     assert result["ok"], (
         f"{result.get('error', 'long dogfood failed')}\n{result['evidence']}"
     )
+    print(
+        "\nREAL_LLM_PR4_LONG_PROMPT_CACHE_OBSERVATION="
+        + json.dumps(
+            result["provider_cache_observation"],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 async def _run_real_pr4_dogfood_llm_user_small_loop(
@@ -555,8 +569,22 @@ async def _run_real_pr4_dogfood_llm_user_long_session(
             }
         )
         _verify_long_round10_final_inspect(session, evidence)
+        runtime_session = session.wiring.runtime_wiring.runtime_session
+        provider_cache_observation = _provider_prompt_cache_observation(
+            session.replay_events(), runtime_session=runtime_session
+        )
+        evidence.turns.append(
+            {
+                "round": "long_provider_prompt_cache_observation",
+                **provider_cache_observation,
+            }
+        )
         _collect_artifacts(workspace_root, evidence)
-        return {"ok": True, "evidence": evidence.to_json()}
+        return {
+            "ok": True,
+            "evidence": evidence.to_json(),
+            "provider_cache_observation": provider_cache_observation,
+        }
     except Exception as exc:  # pragma: no cover - used for real-provider diagnostics.
         failed = True
         _collect_artifacts(workspace_root, evidence)
@@ -1348,8 +1376,21 @@ async def _run_long_round6_stop_pending(
         "long round6 did not clear pending approval",
         evidence,
     )
+    stopped_terminals = tuple(
+        event for event in stopped_events if isinstance(event, ToolResultEndEvent)
+    )
+    stopped_payloads = _tool_result_payloads_by_call_id(stopped_events)
     _require(
-        _tool_result_payloads_by_call_id(stopped_events) == {},
+        len(stopped_terminals) == 1
+        and stopped_terminals[0].state is ToolResultState.DENIED,
+        "long round6 did not durably terminalize the stopped tool as denied",
+        evidence,
+    )
+    _require(
+        all(
+            "PULSARA_LONG_PENDING_SHOULD_NOT_RUN" not in json.dumps(payload)
+            for payload in stopped_payloads.values()
+        ),
         "long round6 executed a stopped tool",
         evidence,
     )
@@ -1360,10 +1401,20 @@ async def _run_long_round7_deny_pending(
     simulator: RealLLMUserSimulator,
     evidence: DogfoodEvidence,
 ) -> str:
-    action, sim_evidence = await simulator.next_action(
-        phase="long_round7_user_message",
-        script_step="Ask Pulsara to retry the pending command check, but say you will deny it.",
+    del simulator
+    action = DogfoodUserAction(
+        type="user_message",
+        text=(
+            f'请再次调用 terminal，command 必须严格为 "{LONG_PENDING_COMMAND}"。'
+            "这条消息本身既不是批准也不是拒绝；请先发起工具调用并等待确认，"
+            f"不要提前回答 {LONG_DENY_SENTINEL}。"
+        ),
     )
+    sim_evidence = {
+        "phase": "long_round7_user_message",
+        "action": _action_to_dict(action),
+        "source": "deterministic_denial_setup_prompt",
+    }
     evidence.simulator_actions.append(sim_evidence)
     _require(
         action.type == "user_message" and action.text,
@@ -1954,9 +2005,7 @@ async def _inject_controlled_failed_run(session, user_input: str) -> None:
     _, state_before_close = apply_rollout_event(
         account=account,
         state=rollout_state,
-        event=window_close.model_copy(
-            update={"sequence": source_through_sequence + 1}
-        ),
+        event=window_close.model_copy(update={"sequence": source_through_sequence + 1}),
     )
     assert state_before_close is not None
     rollout_close = RolloutBudgetAccountClosedEvent(
@@ -1974,9 +2023,7 @@ async def _inject_controlled_failed_run(session, user_input: str) -> None:
     # publish it through the same ordered writer as ordinary runtime events so
     # the next real run cannot catch up stale, already-discarded sequences and
     # wait forever on their delivery futures.
-    result = await runtime_session.write_events(
-        (window_close, rollout_close, run_end)
-    )
+    result = await runtime_session.write_events((window_close, rollout_close, run_end))
     if result.publication_errors:
         raise RuntimeError(
             "controlled failure events were committed but not published: "
@@ -2185,6 +2232,180 @@ def _compact_event_trace(events: list[AgentEvent]) -> list[dict[str, object]]:
             item["message"] = event.message
         compact.append(item)
     return compact
+
+
+def _provider_prompt_cache_observation(
+    events: list[AgentEvent],
+    *,
+    runtime_session,
+) -> dict[str, object]:
+    starts = {
+        event.resolved_call.resolved_model_call_id: event
+        for event in events
+        if isinstance(event, ModelCallStartEvent)
+    }
+    calls: list[dict[str, object]] = []
+    vector_units: list[tuple] = []
+    for end in events:
+        if not isinstance(end, ModelCallEndEvent):
+            continue
+        start = starts.get(end.resolved_model_call_id)
+        usage = end.usage
+        cached = usage.cached_input_tokens if usage is not None else None
+        input_tokens = usage.input_tokens if usage is not None else None
+        reference = start.provider_input_reference if start is not None else None
+        units = ()
+        if reference is not None:
+            units, _reachable = load_provider_input_vector(
+                archive=runtime_session.archive,
+                runtime_session_id=runtime_session.runtime_session_id,
+                root=reference.resulting_unit_vector_root,
+                deadline_monotonic=time.monotonic() + 30.0,
+            )
+        vector_units.append(tuple(units))
+        calls.append(
+            {
+                "run_id": end.run_id,
+                "end_sequence": end.sequence,
+                "resolved_model_call_id": end.resolved_model_call_id,
+                "purpose": (
+                    start.resolved_call.purpose.value if start is not None else None
+                ),
+                "outcome": end.outcome,
+                "usage_status": end.usage_status,
+                "input_tokens": input_tokens,
+                "cached_input_tokens": cached,
+                "cache_hit_ratio": (
+                    round(cached / input_tokens, 6)
+                    if cached is not None and input_tokens not in {None, 0}
+                    else None
+                ),
+                "generation_id": reference.generation_id if reference else None,
+                "generation_revision": (
+                    reference.committed_generation_revision if reference else None
+                ),
+                "unit_count": len(units),
+                "provider_latency_seconds": (
+                    round(
+                        (
+                            _event_created_at(end.created_at)
+                            - _event_created_at(start.created_at)
+                        ).total_seconds(),
+                        6,
+                    )
+                    if start is not None
+                    else None
+                ),
+            }
+        )
+    adjacent_prefixes: list[dict[str, object]] = []
+    prefix_invariant_holds = True
+    for index in range(1, len(calls)):
+        previous_units = vector_units[index - 1]
+        current_units = vector_units[index]
+        previous_semantics = tuple(
+            item.attribution.semantic.semantic_fingerprint for item in previous_units
+        )
+        current_semantics = tuple(
+            item.attribution.semantic.semantic_fingerprint for item in current_units
+        )
+        common = _longest_common_prefix(previous_semantics, current_semantics)
+        same_generation = (
+            calls[index - 1]["generation_id"] == calls[index]["generation_id"]
+        )
+        is_strict_prefix = previous_semantics == current_semantics[: len(previous_semantics)]
+        if same_generation and not is_strict_prefix:
+            prefix_invariant_holds = False
+        divergent = current_units[common] if common < len(current_units) else None
+        adjacent_prefixes.append(
+            {
+                "previous_resolved_model_call_id": calls[index - 1][
+                    "resolved_model_call_id"
+                ],
+                "current_resolved_model_call_id": calls[index][
+                    "resolved_model_call_id"
+                ],
+                "same_generation": same_generation,
+                "previous_unit_count": len(previous_units),
+                "current_unit_count": len(current_units),
+                "longest_common_prefix_units": common,
+                "strict_prefix_holds": is_strict_prefix,
+                "first_divergence_index": (
+                    common
+                    if common < max(len(previous_units), len(current_units))
+                    else None
+                ),
+                "first_divergence_unit_kind": (
+                    divergent.attribution.semantic.unit_kind
+                    if divergent is not None
+                    else None
+                ),
+                "first_divergence_owner_semantic_fingerprint": (
+                    divergent.attribution.owner_semantic_fingerprint
+                    if divergent is not None
+                    else None
+                ),
+            }
+        )
+    cache_reported = [item for item in calls if item["cached_input_tokens"] is not None]
+    reported_input_tokens = sum(
+        int(item["input_tokens"] or 0) for item in cache_reported
+    )
+    reported_cached_tokens = sum(
+        int(item["cached_input_tokens"] or 0) for item in cache_reported
+    )
+    rollovers = [
+        event
+        for event in events
+        if isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
+    ]
+    if not prefix_invariant_holds:
+        raise AssertionError(
+            "real provider trajectory changed an existing same-generation prefix: "
+            f"{adjacent_prefixes!r}"
+        )
+    return {
+        "model_call_count": len(calls),
+        "cache_field_reported_call_count": len(cache_reported),
+        "positive_cache_hit_call_count": sum(
+            int(item["cached_input_tokens"] or 0) > 0 for item in cache_reported
+        ),
+        "reported_input_tokens": reported_input_tokens,
+        "reported_cached_input_tokens": reported_cached_tokens,
+        "reported_cached_input_ratio": (
+            round(reported_cached_tokens / reported_input_tokens, 6)
+            if reported_input_tokens
+            else None
+        ),
+        "generation_ids": list(
+            dict.fromkeys(
+                str(item["generation_id"])
+                for item in calls
+                if item["generation_id"] is not None
+            )
+        ),
+        "rollover_reasons": [
+            event.rollover_request.intent.reason.value for event in rollovers
+        ],
+        "prefix_invariant_holds": prefix_invariant_holds,
+        "adjacent_prefixes": adjacent_prefixes,
+        "calls": calls,
+    }
+
+
+def _event_created_at(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _longest_common_prefix(left: tuple[str, ...], right: tuple[str, ...]) -> int:
+    count = 0
+    for left_item, right_item in zip(left, right):
+        if left_item != right_item:
+            break
+        count += 1
+    return count
 
 
 def _session_trace(session) -> dict[str, object]:

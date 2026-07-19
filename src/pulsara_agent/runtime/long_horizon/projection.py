@@ -173,11 +173,14 @@ def prepare_current_run_projection_planning_input(
     """Derive current-run boundaries and protection facts from one frozen slice."""
 
     messages = {message.message_id: message for message in transcript.messages}
-    pairs = {pair.tool_call_id: pair for pair in transcript.tool_pairs}
+    pairs = {
+        (pair.call_message_id, pair.tool_call_id): pair
+        for pair in transcript.tool_pairs
+    }
     current_unit_ids: set[str] = set()
     segment_by_unit: dict[str, str] = {}
     for unit in tool_result_units:
-        pair = pairs.get(unit.tool_call_id)
+        pair = pairs.get((unit.call_message_id, unit.tool_call_id))
         if (
             pair is None
             or pair.call_message_id != unit.call_message_id

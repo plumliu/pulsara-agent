@@ -382,3 +382,33 @@ Prepared FULL后 claim和locator必须同时可恢复。
 Claim、preparation、projection-outbox与evidence-rejection表属于 durable recovery state，不是可丢
 cache。数据库 reset hard cut后，缺表、claim/event payload冲突、同 candidate 双 open owner或
 terminal event仍有open claim均 fail closed。
+
+---
+
+## 14. Provider input generation atomic storage contract
+
+`ContextInputManifest` artifact是完整ordered provider projection的唯一durable artifact owner；不得另建独立
+projection artifact writer。`ContextCompiledEvent(status="compiled")`必须引用已确认manifest和prepared
+provider input，`ModelCallStartEvent`必须携带required committed provider input reference。
+
+初始generation、普通append与rollover使用互斥commit guard。RuntimeSession writer在同一事务中验证predecessor
+scope/core/preparation、持久化COW vector artifacts所需引用，并原子提交：
+
+```text
+initial:  generation start + append + ModelStart
+append:   append + ModelStart
+rollover: old close + rollover authority + new start + append + ModelStart
+```
+
+事件中的ordered projection ref、causal validation、frame placement、transcript delta proof、resulting frontier、
+vector root/prefix fingerprint与ModelStart reference必须逐项join。Accepted continuation还必须绑定exact terminal
+projection、disposition、appended ordinal range与range accumulator；只保存“consumed fingerprint”不足以清除
+pending owner。
+
+Generation ID覆盖durable scope epoch。Session close后的reopen若创建新generation，identity必须绑定前一closed
+generation，不能与旧start event ID碰撞。`NONE`保留同一stable candidate重试，`FULL`按committed reducer fold，
+`PARTIAL/UNKNOWN`保留owner并latch。Attribution-only更新不写空append；V1不生产unit-attribution supplement event。
+
+完整projection与per-unit exact refs可以引用多个ledger；aggregate horizon使用content-addressed persistent set root，
+每个unit只携带自身相关的exact ledger horizons。selection/query layout fingerprint不得冒充canonical ledger-prefix
+proof，也不得把随ledger数量增长的完整horizon tuple重复写入每个ModelStart。

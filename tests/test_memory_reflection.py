@@ -238,6 +238,46 @@ def test_reflection_failed_after_resolution_carries_call_fact() -> None:
     test_memory_reflection_invalid_json_returns_failure_event()
 
 
+def test_reflection_pre_start_failure_abandons_provider_input_owner(
+    monkeypatch,
+) -> None:
+    graph = InMemoryGraphStore()
+    pool = InMemoryCandidatePool()
+    engine = _reflection(
+        graph=graph,
+        pool=pool,
+        transport=_ScriptedTransport([]),
+    )
+
+    def reject_lifecycle(*args, **kwargs):
+        raise RuntimeError("synthetic one-shot lifecycle rejection")
+
+    monkeypatch.setattr(
+        reflection_module,
+        "prepare_model_lifecycle_start_bundle",
+        reject_lifecycle,
+    )
+
+    events = asyncio.run(
+        engine.reflect(
+            state=_state(),
+            event_store=engine.runtime_session.event_log,
+            trigger_reasons=["cheap_memory_hint"],
+            cheap_hints=[_hint()],
+        )
+    )
+
+    assert any(isinstance(event, MemoryReflectionFailedEvent) for event in events)
+    assert (
+        engine.runtime_session.provider_input_generation_coordinator.owned_preparation_count
+        == 0
+    )
+    assert (
+        engine.runtime_session.provider_input_generation_store.active_preparation_snapshots()
+        == ()
+    )
+
+
 def test_reflection_failed_before_resolution_allows_missing_call_fact(
     monkeypatch,
 ) -> None:
@@ -248,9 +288,7 @@ def test_reflection_failed_before_resolution_allows_missing_call_fact(
         llm_runtime=_make_llm_runtime(transport),
         candidate_pool=pool,
         graph=graph,
-        options=MemoryReflectionOptions(
-            llm_options=reflection_module.LLMOptions()
-        ),
+        options=MemoryReflectionOptions(llm_options=reflection_module.LLMOptions()),
     )
 
     def fail_resolution(self, **_kwargs):
@@ -751,9 +789,7 @@ def test_candidate_projection_commit_owner_survives_caller_cancellation() -> Non
         assert port.pending_owner_count == 1
 
         runtime_session.release_write.set()
-        await port.stop_admission_and_drain(
-            deadline_monotonic=monotonic() + 1.0
-        )
+        await port.stop_admission_and_drain(deadline_monotonic=monotonic() + 1.0)
         assert port.pending_owner_count == 0
 
     asyncio.run(scenario())
@@ -770,9 +806,7 @@ def test_candidate_projection_commit_owner_confirms_unknown_before_projection() 
             ).event_fields(),
             message="projection unknown probe",
         )
-        runtime_session = _ProjectionOwnerRuntimeSession(
-            unknown_first_write=True
-        )
+        runtime_session = _ProjectionOwnerRuntimeSession(unknown_first_write=True)
         port = MemoryCandidateProjectionCommitPort(
             runtime_session=runtime_session,  # type: ignore[arg-type]
             repository=_ProjectionOwnerRepository(),  # type: ignore[arg-type]
@@ -873,9 +907,7 @@ def _candidate_projection_port(
     )
 
 
-class _ReflectionTestCandidateProjectionCommitPort(
-    MemoryCandidateProjectionCommitPort
-):
+class _ReflectionTestCandidateProjectionCommitPort(MemoryCandidateProjectionCommitPort):
     async def commit_producer_bundle(self, *, producer_event, rows):
         if self.runtime_session.materialization_account_store.snapshot() is None:
             self.runtime_session._adopt_unbootstrapped_in_memory_account_for_test(

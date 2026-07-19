@@ -179,7 +179,9 @@ class CompactionSummaryReplayTemplate:
 class CompactionTerminalizationOwner:
     started_event: ContextCompactionStartedEvent
     terminal_event_id: str
-    terminal_candidate: ContextCompactionCompletedEvent | ContextCompactionFailedEvent | None
+    terminal_candidate: (
+        ContextCompactionCompletedEvent | ContextCompactionFailedEvent | None
+    )
     started_committed: bool = True
     pending_started_commit: PendingCompactionEventCommit | None = None
     state: Literal[
@@ -291,7 +293,9 @@ class ContextCompactionService:
         for raw in checkpoint_rows:
             event = raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
             if not isinstance(event, ContextCompactionCompletedEvent):
-                raise ValueError("compaction checkpoint query returned another event type")
+                raise ValueError(
+                    "compaction checkpoint query returned another event type"
+                )
             try:
                 self.archive.get_text(
                     event.summary_artifact_id,
@@ -362,7 +366,10 @@ class ContextCompactionService:
             raise RuntimeError("compaction terminal candidate has no Started owner")
         if candidate.id != owner.terminal_event_id:
             raise RuntimeError("compaction terminal candidate identity mismatch")
-        if owner.terminal_candidate is not None and owner.terminal_candidate != candidate:
+        if (
+            owner.terminal_candidate is not None
+            and owner.terminal_candidate != candidate
+        ):
             stored = self.event_log.get_by_id(owner.terminal_event_id)
             if stored is not None:
                 raise RuntimeError("compaction terminal candidate payload conflict")
@@ -443,9 +450,7 @@ class ContextCompactionService:
                 if remaining <= 0:
                     break
                 try:
-                    started_result = await pending.resolve(
-                        timeout_seconds=remaining
-                    )
+                    started_result = await pending.resolve(timeout_seconds=remaining)
                 except CompactionPendingCommitNotDurable:
                     self._pending_terminalizations.pop(started_event_id, None)
                     continue
@@ -453,9 +458,7 @@ class ContextCompactionService:
                     errors.append(exc)
                     continue
                 committed_started = started_result.committed_event
-                if not isinstance(
-                    committed_started, ContextCompactionStartedEvent
-                ):
+                if not isinstance(committed_started, ContextCompactionStartedEvent):
                     errors.append(
                         RuntimeError(
                             "pending compaction Started returned wrong event type"
@@ -615,12 +618,15 @@ class ContextCompactionService:
         )
         if basis is None:
             return None
-        estimated_before = _estimate_transcript_messages(
-            model_visible_messages_before,
-            current_user_input=current_user_input_if_not_already_represented,
-            target_model_target=target_model_target,
-            previous_summary_text=None,
-        ) + basis.budget.non_transcript_baseline_tokens
+        estimated_before = (
+            _estimate_transcript_messages(
+                model_visible_messages_before,
+                current_user_input=current_user_input_if_not_already_represented,
+                target_model_target=target_model_target,
+                previous_summary_text=None,
+            )
+            + basis.budget.non_transcript_baseline_tokens
+        )
         threshold_tokens = max(
             1,
             math.floor(
@@ -820,9 +826,7 @@ class ContextCompactionService:
                 raise
             except CompactionCommitCancelledAfterCommit as cancelled_commit:
                 committed_started = cancelled_commit.result.committed_event
-                if not isinstance(
-                    committed_started, ContextCompactionStartedEvent
-                ):
+                if not isinstance(committed_started, ContextCompactionStartedEvent):
                     raise RuntimeError(
                         "compaction Started cancellation confirmation type mismatch"
                     )
@@ -833,7 +837,9 @@ class ContextCompactionService:
                 self._pending_terminalizations.pop(started.id, None)
                 raise
             if not isinstance(committed_started, ContextCompactionStartedEvent):
-                raise RuntimeError("compaction Started commit returned wrong event type")
+                raise RuntimeError(
+                    "compaction Started commit returned wrong event type"
+                )
             started_committed = committed_started
             self._acknowledge_started_commit(committed_started)
 
@@ -989,9 +995,7 @@ class ContextCompactionService:
                 stored_event = await self._commit_event(completed)
             except CompactionCommitCancelledAfterCommit as cancelled_commit:
                 stored_event = cancelled_commit.result.committed_event
-                if not isinstance(
-                    stored_event, ContextCompactionCompletedEvent
-                ):
+                if not isinstance(stored_event, ContextCompactionCompletedEvent):
                     raise RuntimeError(
                         "compaction Completed cancellation confirmation type mismatch"
                     )
@@ -999,7 +1003,9 @@ class ContextCompactionService:
                 self._acknowledge_terminal_candidate(stored_event)
                 raise
             if not isinstance(stored_event, ContextCompactionCompletedEvent):
-                raise RuntimeError("compaction Completed commit returned wrong event type")
+                raise RuntimeError(
+                    "compaction Completed commit returned wrong event type"
+                )
             stored = stored_event
             terminal_committed = True
             self._acknowledge_terminal_candidate(stored)
@@ -1034,7 +1040,9 @@ class ContextCompactionService:
                 failure_stage = "model_validation"
             estimate = getattr(exc, "estimate", None)
             failed = ContextCompactionFailedEvent(
-                id=(terminal_event_id if started_committed is not None else uuid4().hex),
+                id=(
+                    terminal_event_id if started_committed is not None else uuid4().hex
+                ),
                 **context.event_fields(),
                 compaction_id=compaction_id,
                 trigger=trigger,
@@ -1174,24 +1182,42 @@ class ContextCompactionService:
             raise RuntimeError(
                 "context compaction model execution requires RuntimeSession ownership"
             )
-        start_bundle = prepare_model_lifecycle_start_bundle(
+        provider_input = await self.runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
             call=call,
             context=context,
             event_context=model_event_context,
-            runtime_session=self.runtime_session,
-            lifecycle_kind="direct_internal_call",
+            operation_kind="direct_model_call",
+            operation_id=context.context_id or call.fact.resolved_model_call_id,
         )
-        handle = self.llm_runtime.start_stream(
-            call=call,
-            context=context,
-            event_context=model_event_context,
-            start_bundle=start_bundle,
-            commit_port=RuntimeSessionModelStreamEventCommitPort(
+        try:
+            context = provider_input.carrier.to_llm_context(context)
+            start_bundle = prepare_model_lifecycle_start_bundle(
+                call=call,
+                context=context,
+                event_context=model_event_context,
                 runtime_session=self.runtime_session,
-                state=None,
-            ),
-            execution_registry=self.runtime_session.model_stream_execution_registry,
-        )
+                lifecycle_kind="direct_internal_call",
+                provider_input_start_bundle=provider_input,
+            )
+            handle = self.llm_runtime.start_stream(
+                call=call,
+                context=context,
+                event_context=model_event_context,
+                start_bundle=start_bundle,
+                commit_port=RuntimeSessionModelStreamEventCommitPort(
+                    runtime_session=self.runtime_session,
+                    state=None,
+                ),
+                execution_registry=(
+                    self.runtime_session.model_stream_execution_registry
+                ),
+            )
+        except BaseException:
+            await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                provider_input.prepared_candidate.preparation_ownership.preparation_id,
+                reason="one_shot_failed_before_start",
+            )
+            raise
         return await collect_direct_model_call_handle(
             handle,
             expected_call=call,
@@ -1304,9 +1330,7 @@ class ContextCompactionService:
             diagnostics=[
                 _event_diagnostic(diagnostic) for diagnostic in all_diagnostics
             ],
-            summary_content_sha256=hashlib.sha256(
-                summary.encode("utf-8")
-            ).hexdigest(),
+            summary_content_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
             summary_content_bytes=len(summary.encode("utf-8")),
             extractor_contract=compaction_extractor_contract(
                 self.policy.memory_candidates

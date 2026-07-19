@@ -68,7 +68,11 @@ from pulsara_agent.host.transcript import (
 )
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.raw_provider import RawProviderFailure, RawProviderStreamItem
-from tests.support import model_call_end_fields, model_call_start_fields, test_llm_config
+from tests.support import (
+    model_call_end_fields,
+    model_call_start_fields,
+    test_llm_config,
+)
 from tests.support.model_call import model_terminal_projection_end_reference_fixture
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
@@ -471,15 +475,15 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
                 outcome="provider_error",
                 provider_dispatch_status="dispatched",
                 usage_status="missing",
-                    usage=None,
-                    estimated_input_tokens=0,
-                    terminal_projection=(
-                        model_terminal_projection_end_reference_fixture(
-                            model_start.resolved_call.resolved_model_call_id,
-                            outcome="provider_error",
-                        )
-                    ),
+                usage=None,
+                estimated_input_tokens=0,
+                terminal_projection=(
+                    model_terminal_projection_end_reference_fixture(
+                        model_start.resolved_call.resolved_model_call_id,
+                        outcome="provider_error",
+                    )
                 ),
+            ),
             ReplyEndEvent(
                 id=model_start.recovery_plan.stable_reply_end_event_id,
                 **ctx.event_fields(),
@@ -514,7 +518,9 @@ def test_rebuild_prior_messages_injects_system_note_for_failed_last_run_with_rep
     assert "retry trace" not in rendered
 
 
-def test_rebuild_prior_messages_drops_audit_only_partial_reply_before_failure_note() -> None:
+def test_rebuild_prior_messages_drops_audit_only_partial_reply_before_failure_note() -> (
+    None
+):
     from pulsara_agent.event_log import InMemoryEventLog
 
     ctx = EventContext(
@@ -555,6 +561,89 @@ def test_rebuild_prior_messages_drops_audit_only_partial_reply_before_failure_no
 
     assert [message.role for message in messages] == ["user", "system"]
     assert messages[1].content[0].text == FAILURE_NOTE_TEXT
+
+
+def test_rebuild_prior_messages_skips_provider_error_before_successful_retry() -> None:
+    from pulsara_agent.event_log import InMemoryEventLog
+
+    failed_ctx = EventContext(
+        run_id="run:provider-retry",
+        turn_id="turn:provider-retry",
+        reply_id="reply:provider-retry",
+    )
+    completed_ctx = EventContext(
+        run_id=failed_ctx.run_id,
+        turn_id=failed_ctx.turn_id,
+        reply_id="reply:provider-retry-completed",
+    )
+    failed_start = ModelCallStartEvent(
+        **failed_ctx.event_fields(),
+        **model_call_start_fields(),
+    )
+    log = InMemoryEventLog()
+    log.extend(
+        [
+            RunStartEvent(
+                **failed_ctx.event_fields(),
+                **run_start_permission_fields(
+                    failed_ctx.run_id,
+                    user_input="retry this request",
+                ),
+                user_input_chars=len("retry this request"),
+                metadata={"user_input": "retry this request"},
+            ),
+            ReplyStartEvent(
+                id=failed_start.recovery_plan.reply_start_event_id,
+                **failed_ctx.event_fields(),
+                name="assistant",
+            ),
+            failed_start,
+            ModelCallEndEvent(
+                id=failed_start.recovery_plan.stable_model_call_end_event_id,
+                **failed_ctx.event_fields(),
+                resolved_model_call_id=(
+                    failed_start.resolved_call.resolved_model_call_id
+                ),
+                target_fingerprint=(
+                    failed_start.resolved_call.target.target_fingerprint
+                ),
+                reported_model_id=failed_start.resolved_call.target.model_id,
+                outcome="provider_error",
+                provider_dispatch_status="dispatched",
+                usage_status="missing",
+                usage=None,
+                estimated_input_tokens=0,
+                terminal_projection=model_terminal_projection_end_reference_fixture(
+                    failed_start.resolved_call.resolved_model_call_id,
+                    outcome="provider_error",
+                ),
+            ),
+            ReplyEndEvent(
+                id=failed_start.recovery_plan.stable_reply_end_event_id,
+                **failed_ctx.event_fields(),
+                model_terminal_outcome="provider_error",
+            ),
+            *_accepted_text_reply_events(
+                completed_ctx,
+                text="recovered answer",
+                block_id="text:provider-retry",
+            ),
+            RunEndEvent(
+                **run_end_contract_fields(
+                    failed_ctx.run_id,
+                    status="finished",
+                ),
+                **completed_ctx.event_fields(),
+                status="finished",
+                stop_reason="final",
+            ),
+        ]
+    )
+
+    messages = rebuild_prior_messages(log)
+
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[1].content[0].text == "recovered answer"
 
 
 def test_rebuild_prior_messages_does_not_inject_note_when_newer_run_succeeds() -> None:
@@ -807,7 +896,9 @@ def test_rebuild_prior_messages_note_mentions_started_terminal_without_completed
                 tool_call_id="call:terminal",
                 delta='{"command": "sleep 30"}',
             ),
-            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:terminal"),
+            make_tool_call_end_event(
+                **ctx.event_fields(), tool_call_id="call:terminal"
+            ),
             ToolResultStartEvent(
                 **ctx.event_fields(),
                 tool_call_id="call:terminal",
@@ -857,7 +948,9 @@ def test_rebuild_prior_messages_late_tool_result_removes_unfinished_summary() ->
                 tool_call_id="call:terminal",
                 delta='{"command": "printf done"}',
             ),
-            make_tool_call_end_event(**ctx.event_fields(), tool_call_id="call:terminal"),
+            make_tool_call_end_event(
+                **ctx.event_fields(), tool_call_id="call:terminal"
+            ),
             ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="cancelled"),
             ToolResultStartEvent(
                 **ctx.event_fields(),
@@ -986,7 +1079,9 @@ def test_rebuild_prior_messages_strips_unfinished_tool_call_from_older_terminal_
                 tool_call_id="call:danger",
                 delta='{"command": "rm -rf ./x"}',
             ),
-            make_tool_call_end_event(**aborted_ctx.event_fields(), tool_call_id="call:danger"),
+            make_tool_call_end_event(
+                **aborted_ctx.event_fields(), tool_call_id="call:danger"
+            ),
             RequireUserConfirmEvent(
                 **aborted_ctx.event_fields(),
                 tool_calls=[
@@ -1491,7 +1586,7 @@ def test_host_session_replay_events_after_sequence(tmp_path, monkeypatch) -> Non
     ]
 
 
-def test_host_session_terminal_completion_event_replays_and_injects_one_shot_note(
+def test_host_session_terminal_completion_event_replays_and_appends_canonical_note(
     tmp_path, monkeypatch
 ) -> None:
     transport = ScriptedTransport(
@@ -1559,7 +1654,8 @@ def test_host_session_terminal_completion_event_replays_and_injects_one_shot_not
     assert replayed[0].output_preview == "BG_DONE"
     assert "terminal background task update" in _context_text(second_context)
     assert replayed[0].process_id in _context_text(second_context)
-    assert "terminal background task update" not in _context_text(third_context)
+    assert "terminal background task update" in _context_text(third_context)
+    assert _context_text(third_context).count("terminal background task update") == 1
     terminal_summary = session.summary()["terminal"]
     assert terminal_summary["finished_process_count"] == 1
     assert terminal_summary["processes"][0]["process_id"] == replayed[0].process_id
@@ -1587,11 +1683,11 @@ def test_host_session_terminal_completion_during_later_turn_appears_in_following
                         "name": "terminal",
                         "arguments": json.dumps(
                             {
-                                    "command": (
-                                        "while [ ! -f "
-                                        f"{shlex.quote(str(completion_gate))}"
-                                        " ]; do sleep 0.01; done; printf LATE_DONE"
-                                    ),
+                                "command": (
+                                    "while [ ! -f "
+                                    f"{shlex.quote(str(completion_gate))}"
+                                    " ]; do sleep 0.01; done; printf LATE_DONE"
+                                ),
                                 "yield_time_ms": 0,
                             }
                         ),
@@ -1974,7 +2070,11 @@ def test_host_session_stop_terminal_access_ask_pending_approval_aborts(
     assert stopped.stop_reason == "aborted"
     assert second.final_text == "continued after ask stop"
     assert session.get_pending_approval() is None
-    assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
+    terminal_results = [
+        event for event in run_events if isinstance(event, ToolResultEndEvent)
+    ]
+    assert len(terminal_results) == 1
+    assert terminal_results[0].state is ToolResultState.DENIED
     assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == [
         "aborted"
     ]
@@ -2022,7 +2122,11 @@ def test_host_session_stop_on_request_write_pending_approval_aborts_without_file
     assert second.final_text == "continued after write stop"
     assert session.get_pending_approval() is None
     assert not (tmp_path / "stopped.txt").exists()
-    assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
+    terminal_results = [
+        event for event in run_events if isinstance(event, ToolResultEndEvent)
+    ]
+    assert len(terminal_results) == 1
+    assert terminal_results[0].state is ToolResultState.DENIED
     assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == [
         "aborted"
     ]
@@ -2220,11 +2324,11 @@ def test_accept_edits_preset_autoallows_write_but_asks_terminal(
             {
                 "tool_calls": [
                     {
-                            "id": "call:accept-terminal",
-                            "name": "terminal",
-                            "arguments": json.dumps(
-                                {"command": "touch accept_terminal_ok"}
-                            ),
+                        "id": "call:accept-terminal",
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "touch accept_terminal_ok"}
+                        ),
                     }
                 ]
             },
@@ -2516,8 +2620,7 @@ def test_fresh_durable_plan_entry_is_deferred_until_run_genesis(
         assert session.plan_state.pending_entry_audit is True
         assert runtime.event_log.next_sequence() == 1
         assert not any(
-            isinstance(event, PlanModeEnteredEvent)
-            for event in session.replay_events()
+            isinstance(event, PlanModeEnteredEvent) for event in session.replay_events()
         )
 
         result = await session.run_turn("prepare a plan")
@@ -2937,13 +3040,12 @@ def test_exit_plan_revise_keeps_plan_active_and_read_only(
     revision_authorities = [
         authority
         for prepared in prepared_snapshots
-        for authority in prepared.invocation.fact.candidate_authorities
+        for authority in prepared.invocation.fact.context_source_candidates
         if authority.source_instance_id == "plan:revision"
     ]
     assert revision_authorities
     assert all(
-        tuple(ref.event_id for ref in authority.source_fact_refs)
-        == (revise_event.id,)
+        tuple(ref.event_id for ref in authority.source_fact_refs) == (revise_event.id,)
         for authority in revision_authorities
     )
 
@@ -3343,7 +3445,11 @@ def test_host_session_stop_pending_approval_aborts_without_tool_execution(
     assert second.final_text == "continued after stop"
     assert session.get_pending_approval() is None
     assert session.suspended_run_id is None
-    assert not any(event.type.name == "TOOL_RESULT_START" for event in run_events)
+    terminal_results = [
+        event for event in run_events if isinstance(event, ToolResultEndEvent)
+    ]
+    assert len(terminal_results) == 1
+    assert terminal_results[0].state is ToolResultState.DENIED
     assert [event.status for event in run_events if isinstance(event, RunEndEvent)] == [
         "aborted"
     ]

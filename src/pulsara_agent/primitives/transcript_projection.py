@@ -566,6 +566,40 @@ TranscriptProjectionLeafEntryFact: TypeAlias = Annotated[
 ]
 
 
+class TranscriptProjectionLeafEntryReferenceFact(FrozenFactBase):
+    """Bounded exact reference to one canonical transcript projection leaf.
+
+    This reference belongs to the transcript authority layer, not to any one
+    consumer such as memory governance or provider-input planning.  Keeping the
+    canonical discriminator here prevents downstream subsystems from inventing
+    aliases for the same durable leaf kind.
+    """
+
+    schema_version: Literal["transcript_projection_leaf_entry_reference.v2"]
+    runtime_session_id: str = Field(min_length=1, max_length=256)
+    entry_kind: Literal["message", "tool_pair", "tool_result_projection_ref"]
+    ordinal: NonNegativeInt
+    entry_semantic_fingerprint: Fingerprint
+    entry_fact_fingerprint: Fingerprint
+    source_event_references: tuple[ContextEventReferenceFact, ...] = Field(
+        min_length=1,
+        max_length=32,
+    )
+    reference_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _same_session_and_ordered(
+        self,
+    ) -> "TranscriptProjectionLeafEntryReferenceFact":
+        refs = self.source_event_references
+        if any(ref.runtime_session_id != self.runtime_session_id for ref in refs):
+            raise ValueError("leaf source references must belong to one session")
+        keys = tuple((ref.sequence, ref.event_id) for ref in refs)
+        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
+            raise ValueError("leaf source references must be ordered and unique")
+        return self
+
+
 class TranscriptProjectionNodeRefFact(FrozenFactBase):
     schema_version: Literal["transcript_projection_node_ref.v1"]
     node_kind: Literal["internal", "leaf"]
@@ -1093,6 +1127,7 @@ _OWN: tuple[tuple[str, str | None, str], ...] = (
     ("transcript_message_leaf_entry.v4", "fact_fingerprint", "transcript-message-leaf-entry:v4"),
     ("transcript_tool_pair_leaf_entry.v3", "fact_fingerprint", "transcript-tool-pair-leaf-entry:v3"),
     ("transcript_tool_result_leaf_entry.v3", "fact_fingerprint", "transcript-tool-result-leaf-entry:v3"),
+    ("transcript_projection_leaf_entry_reference.v2", "reference_fingerprint", "transcript-projection-leaf-entry-reference:v2"),
     ("transcript_projection_node_ref.v1", "node_ref_fingerprint", "transcript-projection-node-ref:v1"),
     ("transcript_projection_leaf_node.v1", "node_fingerprint", "transcript-projection-leaf-node:v1"),
     ("transcript_projection_internal_node.v1", "node_fingerprint", "transcript-projection-internal-node:v1"),

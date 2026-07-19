@@ -13,6 +13,9 @@ from pulsara_agent.event import (
 )
 from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.context_source import (
+    ContextSourceId,
+)
 from pulsara_agent.primitives.long_horizon import (
     LongHorizonActionClass,
     RolloutBudgetAccountFact,
@@ -25,8 +28,13 @@ from pulsara_agent.primitives.long_horizon import (
     default_rollout_status_hint_policy,
 )
 from pulsara_agent.runtime.context_engine.types import AllocatedContextSection
-from pulsara_agent.runtime.context_input.candidate import _source_spec
 from pulsara_agent.runtime.context_input.compiler import _lower_messages
+from pulsara_agent.runtime.context_input.sources.builder import (
+    default_context_source_registry,
+)
+from pulsara_agent.runtime.context_input.sources.input import (
+    CONTEXT_SOURCE_INPUT_TYPES,
+)
 from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventSlice,
     FrozenStoredEvent,
@@ -126,7 +134,9 @@ def test_non_exploration_candidate_is_required_neutral_and_checkpoint_stable() -
     assert after_checkpoint.source_event_refs == baseline.source_event_refs
 
 
-def test_exact_recurrence_in_exploration_is_optional_and_uses_shadow_algorithm() -> None:
+def test_exact_recurrence_in_exploration_is_optional_and_uses_shadow_algorithm() -> (
+    None
+):
     account = _account()
     events: list = [_account_open(account, sequence=1)]
     for index in range(3):
@@ -176,10 +186,14 @@ def test_trailing_status_lowers_after_current_run_tail_as_runtime_observation() 
     )
     assert messages[-1].content == ("[rollout status]\nphase=restricted",)
     assert scopes == ("transcript", "transcript", "transcript", "non_transcript")
-    spec = _source_spec("rollout:status")
-    assert spec[0] == "rollout_status"
-    assert spec[1].value == "trailing_status"
-    assert spec[5] == "trailing_status"
+    binding = default_context_source_registry().resolve(
+        source_id=ContextSourceId.ROLLOUT_STATUS
+    )
+    assert binding.policy.source_id is ContextSourceId.ROLLOUT_STATUS
+    assert (
+        binding.policy.input_type
+        is CONTEXT_SOURCE_INPUT_TYPES[ContextSourceId.ROLLOUT_STATUS]
+    )
 
 
 def _account() -> RolloutBudgetAccountFact:
@@ -198,9 +212,7 @@ def _account() -> RolloutBudgetAccountFact:
     }
     return RolloutBudgetAccountFact(
         **payload,
-        semantic_fingerprint=context_fingerprint(
-            "rollout-budget-account:v1", payload
-        ),
+        semantic_fingerprint=context_fingerprint("rollout-budget-account:v1", payload),
     )
 
 

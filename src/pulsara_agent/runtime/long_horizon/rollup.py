@@ -344,7 +344,10 @@ def derive_rollup_placement_anchor(
     message_indexes = {
         message.message_id: index for index, message in enumerate(transcript.messages)
     }
-    pairs = {pair.tool_call_id: pair for pair in transcript.tool_pairs}
+    pairs = {
+        (pair.call_message_id, pair.tool_call_id): pair
+        for pair in transcript.tool_pairs
+    }
     last = max(member_units, key=lambda unit: (unit.source_sequence_end, unit.unit_id))
     call_message = messages.get(last.call_message_id)
     if call_message is None or call_message.role != "assistant":
@@ -358,7 +361,7 @@ def derive_rollup_placement_anchor(
         raise ValueError("rollup anchor pair group contains no tool calls")
     group_pairs = []
     for call_id in group_call_ids:
-        pair = pairs.get(call_id)
+        pair = pairs.get((call_message.message_id, call_id))
         if pair is None or pair.call_message_id != call_message.message_id:
             raise ValueError("rollup anchor pair group is incomplete")
         group_pairs.append(pair)

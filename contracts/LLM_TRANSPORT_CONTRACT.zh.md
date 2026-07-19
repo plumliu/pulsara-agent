@@ -306,3 +306,29 @@ Governance prompt只消费 typed bounded evidence projection和relatedness proje
 `source_events`、model stream segment、SDK/provider payload或序列化 tool-result semantics推断。
 Prompt feasibility必须用冻结 target的实际 estimator验证完整 system prompt + messages + wrapper，
 不得用 UTF-8 bytes直接冒充 token budget。
+
+---
+
+## 17. Provider input causal order 与 ModelStart join
+
+主agent的transport输入只能来自已确认的`CommittedProviderInputReferenceFact`。Context compiler先在
+`ContextInputManifest` artifact内冻结唯一ordered provider projection；ProviderInput planner不得重新
+按`current_user | prior_history | current_run_tail`分类、插入pending continuation或二次排序，只能验证
+causal edges并计算相对于committed frontier的strict suffix。
+
+`current_user | prior_history`属于invocation attribution，不进入provider unit continuity semantic。一个
+generation中已提交unit的wire fragment、causal predecessor、projection-local ordinal与semantic fingerprint
+永久不变；追加新末节点不得因successor变化改写旧节点。ContextSource frame只能插在本次prior transcript与
+current user之间，并携带preceding/following transcript identity及exact vector ordinal range proof。
+
+Generation coordinator只准备stable append/rollover companions与commit guard。`LLMRuntime`继续唯一拥有
+`ModelCallStartEvent`，并在一个atomic lifecycle batch中提交append companions、rollout reservation与
+ModelStart。ModelStart必须join committed generation/core revision、prefix/vector root、ordered projection、
+causal validation、transcript frontier、frame placement与authority-horizon roots；adapter dispatch前重算
+deep-copied carrier的wire semantic identity。retry必须复用同一prepared candidate，不能按当前context重建。
+
+Pending accepted continuation不是第二个message producer。它必须按resolved call、reply、terminal projection
+与ACCEPTED disposition精确join ordered projection中的唯一unit；尚未出现时`not_ready`，缺失、重复或semantic
+漂移时fail closed。普通run/window boundary、invocation classification变化和attribution-only drift不得触发
+rollover。只有typed compatibility change、confirmed Long-Horizon rewrite、auxiliary-frame rebase或confirmed
+offline repair authority可以开启新generation。

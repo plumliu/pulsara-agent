@@ -20,6 +20,8 @@ from pulsara_agent.event import (
     ModelCallTerminalProjectionCommittedEvent,
     PhysicalOperationChargeAppliedEvent,
     PhysicalOperationReservationSettledEvent,
+    ProviderInputAppendCommittedEvent,
+    ProviderInputGenerationStartedEvent,
     ProviderModelStreamErrorEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -185,7 +187,7 @@ async def no_retry_sleep(_delay: float) -> None:
     return None
 
 
-def _start_test_stream(
+async def _start_test_stream(
     runtime: LLMRuntime,
     *,
     call,
@@ -194,6 +196,7 @@ def _start_test_stream(
     runtime_session,
     run_execution_activation=None,
     commit_port=None,
+    provider_input=None,
 ):
     lifecycle_kind = (
         "main_assistant_reply"
@@ -206,6 +209,17 @@ def _start_test_stream(
             event_context=event_context,
             model_target=call.target.fact,
         )
+    if provider_input is None:
+        provider_input = await (
+            runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+                call=call,
+                context=context,
+                event_context=event_context,
+                operation_kind="direct_model_call",
+                operation_id=call.fact.resolved_model_call_id,
+            )
+        )
+    context = provider_input.carrier.to_llm_context(context)
     bundle = prepare_model_lifecycle_start_bundle(
         call=call,
         context=context,
@@ -213,6 +227,7 @@ def _start_test_stream(
         runtime_session=runtime_session,
         lifecycle_kind=lifecycle_kind,
         run_execution_activation=run_execution_activation,
+        provider_input_start_bundle=provider_input,
     )
     return runtime.start_stream(
         call=call,
@@ -238,7 +253,8 @@ async def collect_events(runtime: LLMRuntime, role: ModelRole, context: LLMConte
     )
     context = bind_test_context(call, context)
     session = in_memory_runtime_session(Path.cwd())
-    handle = _start_test_stream(runtime,
+    handle = await _start_test_stream(
+        runtime,
         call=call,
         context=context,
         event_context=EVENT_CONTEXT,
@@ -291,7 +307,8 @@ async def _completed_control_fixture(tmp_path):
         ),
     )
     activation = make_test_run_execution_activation()
-    handle = _start_test_stream(runtime,
+    handle = await _start_test_stream(
+        runtime,
         call=call,
         context=context,
         event_context=EVENT_CONTEXT,
@@ -391,24 +408,31 @@ def test_runtime_streams_agent_events_through_registered_transport() -> None:
 
     assert isinstance(events[0], ReplyStartEvent)
     assert isinstance(events[1], RolloutBudgetReservationCreatedEvent)
-    assert isinstance(events[2], ModelCallStartEvent)
-    assert events[2].resolved_call.target.model_id == "flash"
-    assert events[2].context_id == "context:test"
-    assert events[2].model_call_index == 3
-    assert isinstance(events[3], TextBlockStartEvent)
-    assert isinstance(events[4], TextBlockSegmentEvent)
-    assert events[4].block_id == events[3].block_id
-    assert events[4].text == "hello"
-    assert isinstance(events[5], TextBlockEndEvent)
-    assert isinstance(events[6], ModelCallTerminalProjectionCommittedEvent)
-    assert isinstance(events[7], ModelCallEndEvent)
-    assert events[7].terminal_projection is not None
-    assert (
-        events[7].terminal_projection.projection_reference
-        == events[6].projection_reference
+    start = next(item for item in events if isinstance(item, ModelCallStartEvent))
+    text_start = next(item for item in events if isinstance(item, TextBlockStartEvent))
+    text_segment = next(
+        item for item in events if isinstance(item, TextBlockSegmentEvent)
     )
-    assert isinstance(events[8], RolloutBudgetReservationSettledEvent)
-    assert isinstance(events[9], ReplyEndEvent)
+    projection = next(
+        item
+        for item in events
+        if isinstance(item, ModelCallTerminalProjectionCommittedEvent)
+    )
+    end = next(item for item in events if isinstance(item, ModelCallEndEvent))
+    assert start.resolved_call.target.model_id == "flash"
+    assert start.context_id == "context:test"
+    assert start.model_call_index == 3
+    assert text_segment.block_id == text_start.block_id
+    assert text_segment.text == "hello"
+    assert any(isinstance(item, TextBlockEndEvent) for item in events)
+    assert end.terminal_projection is not None
+    assert (
+        end.terminal_projection.projection_reference == projection.projection_reference
+    )
+    assert any(
+        isinstance(item, RolloutBudgetReservationSettledEvent) for item in events
+    )
+    assert any(isinstance(item, ReplyEndEvent) for item in events)
 
 
 def test_model_stream_actual_measurement_joins_projection_and_settlement() -> None:
@@ -456,13 +480,13 @@ def test_model_stream_actual_measurement_joins_projection_and_settlement() -> No
             ),
             genesis_profile="host_first_run",
             genesis_burst_contract=(
-                session.authority_materialization_contracts.burst_registry
-                .unique_binding_for_operation(PhysicalOperationKind.LEDGER_GENESIS)
-                .contract
+                session.authority_materialization_contracts.burst_registry.unique_binding_for_operation(
+                    PhysicalOperationKind.LEDGER_GENESIS
+                ).contract
             ),
             register_transcript_consumer=True,
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -573,7 +597,7 @@ def test_runtime_batches_model_semantic_deltas_before_durable_commit(tmp_path) -
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -618,8 +642,7 @@ def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> 
         class ObservingCommitPort(RuntimeSessionModelStreamEventCommitPort):
             async def commit_semantic(self, candidates, *, guard, live_cursor):
                 decoded = tuple(
-                    decode_event_write_candidate(candidate)
-                    for candidate in candidates
+                    decode_event_write_candidate(candidate) for candidate in candidates
                 )
                 result = await super().commit_semantic(
                     candidates,
@@ -654,7 +677,7 @@ def test_semantic_batch_age_deadline_flushes_during_provider_stall(tmp_path) -> 
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -703,7 +726,8 @@ def test_session_owned_model_stream_persists_before_notifying(tmp_path) -> None:
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -760,6 +784,16 @@ def test_main_model_start_freezes_event_safe_run_activation_in_recovery_plan(
             event_context=EVENT_CONTEXT,
             model_target=call.target.fact,
         )
+        provider_input = await (
+            session.provider_input_generation_coordinator.prepare_one_shot_call(
+                call=call,
+                context=context,
+                event_context=EVENT_CONTEXT,
+                operation_kind="direct_model_call",
+                operation_id=call.fact.resolved_model_call_id,
+            )
+        )
+        context = provider_input.carrier.to_llm_context(context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -767,6 +801,7 @@ def test_main_model_start_freezes_event_safe_run_activation_in_recovery_plan(
             runtime_session=session,
             lifecycle_kind="main_assistant_reply",
             run_execution_activation=activation,
+            provider_input_start_bundle=provider_input,
         )
 
         assert bundle.recovery_plan.run_execution_activation == activation
@@ -777,18 +812,23 @@ def test_main_model_start_freezes_event_safe_run_activation_in_recovery_plan(
             isinstance(candidate, FrozenEventWriteCandidate)
             for candidate in bundle.companion_candidates
         )
-        assert [
+        companion_types = [
             type(decode_event_write_candidate(candidate))
             for candidate in bundle.companion_candidates
-        ] == [
+        ]
+        assert companion_types[:2] == [
             ReplyStartEvent,
             RolloutBudgetReservationCreatedEvent,
         ]
+        assert ProviderInputGenerationStartedEvent in companion_types
+        assert ProviderInputAppendCommittedEvent in companion_types
 
     asyncio.run(scenario())
 
 
-def test_direct_model_start_has_no_reply_reservation_or_run_activation(tmp_path) -> None:
+def test_direct_model_start_has_no_reply_reservation_or_run_activation(
+    tmp_path,
+) -> None:
     async def scenario() -> None:
         config = test_llm_config(
             api_key="sk-test",
@@ -814,12 +854,23 @@ def test_direct_model_start_has_no_reply_reservation_or_run_activation(tmp_path)
                 model_call_index=None,
             ),
         )
+        provider_input = await (
+            session.provider_input_generation_coordinator.prepare_one_shot_call(
+                call=call,
+                context=context,
+                event_context=EVENT_CONTEXT,
+                operation_kind="direct_model_call",
+                operation_id=call.fact.resolved_model_call_id,
+            )
+        )
+        context = provider_input.carrier.to_llm_context(context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
             runtime_session=session,
             lifecycle_kind="direct_internal_call",
+            provider_input_start_bundle=provider_input,
         )
         handle = runtime.start_stream(
             call=call,
@@ -834,7 +885,8 @@ def test_direct_model_start_has_no_reply_reservation_or_run_activation(tmp_path)
         )
         completion = await handle.wait_completed()
 
-        assert bundle.companion_candidates == ()
+        assert bundle.provider_input_start_bundle == provider_input
+        assert bundle.reservation is None
         assert bundle.rollout_accounting_mode == "not_rollout_accounted"
         assert bundle.recovery_plan.run_execution_activation is None
         assert bundle.recovery_plan.control_downstream_predicate_contract is None
@@ -888,6 +940,16 @@ def test_model_call_start_allows_noop_ledger_progress_after_rollout_preparation(
             event_context=EVENT_CONTEXT,
             model_target=call.target.fact,
         )
+        provider_input = await (
+            session.provider_input_generation_coordinator.prepare_one_shot_call(
+                call=call,
+                context=context,
+                event_context=EVENT_CONTEXT,
+                operation_kind="direct_model_call",
+                operation_id=call.fact.resolved_model_call_id,
+            )
+        )
+        context = provider_input.carrier.to_llm_context(context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -895,6 +957,7 @@ def test_model_call_start_allows_noop_ledger_progress_after_rollout_preparation(
             runtime_session=session,
             lifecycle_kind="main_assistant_reply",
             run_execution_activation=activation,
+            provider_input_start_bundle=provider_input,
         )
         await session.write_event(
             RunErrorEvent(
@@ -919,8 +982,7 @@ def test_model_call_start_allows_noop_ledger_progress_after_rollout_preparation(
 
         assert completion.terminal_outcome == "completed"
         assert any(
-            isinstance(event, ModelCallStartEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallStartEvent) for event in session.event_log.iter()
         )
 
     asyncio.run(scenario())
@@ -959,6 +1021,16 @@ def test_model_call_start_rejects_semantic_rollout_state_change_after_preparatio
             event_context=EVENT_CONTEXT,
             model_target=call.target.fact,
         )
+        provider_input = await (
+            session.provider_input_generation_coordinator.prepare_one_shot_call(
+                call=call,
+                context=context,
+                event_context=EVENT_CONTEXT,
+                operation_kind="direct_model_call",
+                operation_id=call.fact.resolved_model_call_id,
+            )
+        )
+        context = provider_input.carrier.to_llm_context(context)
         bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -966,6 +1038,7 @@ def test_model_call_start_rejects_semantic_rollout_state_change_after_preparatio
             runtime_session=session,
             lifecycle_kind="main_assistant_reply",
             run_execution_activation=make_test_run_execution_activation(),
+            provider_input_start_bundle=provider_input,
         )
         assert bundle.reservation is not None
         await session.write_event(
@@ -993,8 +1066,7 @@ def test_model_call_start_rejects_semantic_rollout_state_change_after_preparatio
         ):
             await handle.wait_completed()
         assert not any(
-            isinstance(event, ModelCallStartEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallStartEvent) for event in session.event_log.iter()
         )
 
     asyncio.run(scenario())
@@ -1028,7 +1100,8 @@ def test_detaching_model_stream_observer_does_not_cancel_owner(tmp_path) -> None
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -1042,8 +1115,7 @@ def test_detaching_model_stream_observer_does_not_cancel_owner(tmp_path) -> None
         assert closed.close_reason == "detached_by_caller"
         assert completion.terminal_outcome == "completed"
         assert any(
-            isinstance(event, ModelCallEndEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallEndEvent) for event in session.event_log.iter()
         )
 
     asyncio.run(scenario())
@@ -1079,7 +1151,8 @@ def test_late_subscription_catches_up_from_model_start_without_notification_gap(
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -1129,7 +1202,8 @@ def test_subscription_break_detaches_without_stopping_transport_or_terminalizati
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -1151,8 +1225,7 @@ def test_subscription_break_detaches_without_stopping_transport_or_terminalizati
         assert closed.last_confirmed_sequence == first_event.sequence
         assert completion.terminal_outcome == "completed"
         assert any(
-            isinstance(event, ModelCallEndEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallEndEvent) for event in session.event_log.iter()
         )
 
     asyncio.run(scenario())
@@ -1188,7 +1261,8 @@ def test_subscription_task_cancel_detaches_without_cancelling_stream_worker(
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -1219,8 +1293,7 @@ def test_subscription_task_cancel_detaches_without_cancelling_stream_worker(
         assert completion.terminal_outcome == "completed"
         assert result.terminal_outcome == "completed"
         assert any(
-            isinstance(event, ModelCallEndEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallEndEvent) for event in session.event_log.iter()
         )
 
     asyncio.run(scenario())
@@ -1296,7 +1369,7 @@ def test_provider_error_terminal_waits_for_inner_physical_drain(tmp_path) -> Non
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -1307,8 +1380,7 @@ def test_provider_error_terminal_waits_for_inner_physical_drain(tmp_path) -> Non
 
         await close_started.wait()
         assert not any(
-            isinstance(event, ModelCallEndEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallEndEvent) for event in session.event_log.iter()
         )
 
         allow_close.set()
@@ -1387,7 +1459,7 @@ def test_physical_completion_blocked_untrusted_preserves_owner_and_forbids_termi
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -1402,8 +1474,7 @@ def test_physical_completion_blocked_untrusted_preserves_owner_and_forbids_termi
         assert session.reconciliation_required is True
         assert session.model_stream_execution_registry.active_handle_count() == 1
         assert not any(
-            isinstance(event, ModelCallEndEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallEndEvent) for event in session.event_log.iter()
         )
 
     asyncio.run(scenario())
@@ -1445,7 +1516,7 @@ def test_unexpected_public_wrapper_exception_before_error_uses_constant_runtime_
             raise RuntimeError("secret-token-should-never-be-retained")
 
         monkeypatch.setattr(transport, "open_stream", fail_open_stream)
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -1479,8 +1550,8 @@ def test_control_disposition_publication_after_commit_folds_full_before_permit(
     import asyncio
 
     async def scenario() -> None:
-        session, result, owner, state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, _activation = await _completed_control_fixture(
+            tmp_path
         )
         pending_projection = session.transcript_projection_state_store.snapshot()
         assert pending_projection.checkpointable is False
@@ -1522,8 +1593,8 @@ def test_projection_authority_not_raw_semantic_stream_controls_completed_result(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        session, result, _owner, _state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, _owner, _state, _activation = await _completed_control_fixture(
+            tmp_path
         )
         events = tuple(session.event_log.iter())
         drifted: list = []
@@ -1541,13 +1612,11 @@ def test_projection_authority_not_raw_semantic_stream_controls_completed_result(
             end.terminal_projection.projection_reference
         )
 
-        projected = (
-            materialize_committed_model_call_result_from_terminal_projection(
-                tuple(drifted),
-                resolved_model_call_id=result.resolved_model_call_id,
-                runtime_session_id=session.runtime_session_id,
-                document=document,
-            )
+        projected = materialize_committed_model_call_result_from_terminal_projection(
+            tuple(drifted),
+            resolved_model_call_id=result.resolved_model_call_id,
+            runtime_session_id=session.runtime_session_id,
+            document=document,
         )
 
         assert projected.combined_text == "control result"
@@ -1564,8 +1633,8 @@ def test_control_disposition_precommit_failure_retries_exact_stable_candidate(
     from pulsara_agent.runtime.session import EventCommitError
 
     async def scenario() -> None:
-        session, result, owner, state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, _activation = await _completed_control_fixture(
+            tmp_path
         )
         session_type = type(session)
         original = session_type.commit_reduce_events_from_thread
@@ -1606,8 +1675,8 @@ def test_uncommitted_model_disposition_blocks_run_end_and_remains_retryable(
     from pulsara_agent.runtime.session import EventCommitError
 
     async def scenario() -> None:
-        session, result, owner, state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, _activation = await _completed_control_fixture(
+            tmp_path
         )
         session_type = type(session)
         attempted: list[tuple[str, str]] = []
@@ -1667,9 +1736,7 @@ def test_uncommitted_model_disposition_blocks_run_end_and_remains_retryable(
                         **EVENT_CONTEXT.event_fields(),
                         status="failed",
                         stop_reason=RunStopReason.MODEL_ERROR,
-                        terminalization_kind=(
-                            RunTerminalizationKind.EXECUTION_FAILURE
-                        ),
+                        terminalization_kind=(RunTerminalizationKind.EXECUTION_FAILURE),
                         error_message="model control disposition unavailable",
                     ),
                 )
@@ -1685,8 +1752,8 @@ def test_control_disposition_cancel_after_full_adopts_session_winner(
     from pulsara_agent.runtime.event_write_service import RuntimeEventWriteCancelled
 
     async def scenario() -> None:
-        session, result, owner, state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, _activation = await _completed_control_fixture(
+            tmp_path
         )
         original_execute = session.event_write_service.execute
 
@@ -1813,8 +1880,8 @@ def test_control_disposition_observer_failure_does_not_revoke_durable_winner_or_
     import asyncio
 
     async def scenario() -> None:
-        session, result, owner, state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, _activation = await _completed_control_fixture(
+            tmp_path
         )
 
         class FailingObserver:
@@ -1848,8 +1915,8 @@ def test_control_disposition_reducer_failure_never_installs_execution_permit(
     import asyncio
 
     async def scenario() -> None:
-        session, result, owner, state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, _activation = await _completed_control_fixture(
+            tmp_path
         )
 
         def fail_fold(_events) -> None:
@@ -1887,8 +1954,8 @@ def test_control_disposition_event_requires_exact_call_result_and_start_activati
     import asyncio
 
     async def scenario() -> None:
-        session, result, _owner, state, activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, _owner, state, activation = await _completed_control_fixture(
+            tmp_path
         )
         wrong_context = EventContext(
             run_id=EVENT_CONTEXT.run_id,
@@ -1929,8 +1996,8 @@ def test_control_disposition_partial_unknown_or_conflict_latches_and_blocks_exec
     import asyncio
 
     async def scenario() -> None:
-        session, result, owner, state, _activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, _activation = await _completed_control_fixture(
+            tmp_path
         )
 
         def conflict(*_args, **_kwargs):
@@ -1971,8 +2038,8 @@ def test_termination_intent_wins_shared_control_lock_and_commits_suppressed_disp
     import asyncio
 
     async def scenario() -> None:
-        session, result, owner, state, activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, activation = await _completed_control_fixture(
+            tmp_path
         )
         intent = _termination_intent(activation)
         assert await owner.install_termination_intent(intent) == "installed"
@@ -2001,8 +2068,8 @@ def test_accepted_first_then_later_stop_does_not_rewrite_disposition_but_cancels
     import asyncio
 
     async def scenario() -> None:
-        session, result, owner, state, activation = (
-            await _completed_control_fixture(tmp_path)
+        session, result, owner, state, activation = await _completed_control_fixture(
+            tmp_path
         )
         resolution = await owner.resolve_completed_call(
             result=result,
@@ -2063,7 +2130,8 @@ def test_subscription_close_state_records_typed_reason_last_sequence_and_termina
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -2160,7 +2228,8 @@ def test_model_stream_phase_commit_baseexception_confirms_stable_batch(
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -2228,7 +2297,7 @@ def test_model_terminal_precommit_failure_retries_same_provider_outcome(
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -2298,7 +2367,7 @@ def test_model_terminal_projection_write_retries_same_provider_outcome(
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -2377,7 +2446,7 @@ def test_model_semantic_precommit_failure_retries_same_candidate(
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -2389,10 +2458,13 @@ def test_model_semantic_precommit_failure_retries_same_candidate(
 
         assert failed_candidate_payloads is not None
         assert completion.terminal_outcome == "completed"
-        assert sum(
-            isinstance(event, ModelCallEndEvent)
-            for event in session.event_log.iter()
-        ) == 1
+        assert (
+            sum(
+                isinstance(event, ModelCallEndEvent)
+                for event in session.event_log.iter()
+            )
+            == 1
+        )
 
     asyncio.run(scenario())
 
@@ -2447,7 +2519,7 @@ def test_naked_model_worker_cancellation_retains_physical_owner_until_read_exits
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(
+        handle = await _start_test_stream(
             runtime,
             call=call,
             context=context,
@@ -2552,9 +2624,7 @@ def test_semantic_partial_or_unknown_keeps_stream_owner_and_blocks_close(
             )
             if is_semantic and not injected:
                 injected = True
-                raise asyncio.CancelledError(
-                    "synthetic semantic acknowledgement loss"
-                )
+                raise asyncio.CancelledError("synthetic semantic acknowledgement loss")
             return result
 
         def unknown_confirmation(self, candidates, **kwargs):
@@ -2588,7 +2658,8 @@ def test_semantic_partial_or_unknown_keeps_stream_owner_and_blocks_close(
                 model_call_index=1,
             ),
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -2608,8 +2679,7 @@ def test_semantic_partial_or_unknown_keeps_stream_owner_and_blocks_close(
                 deadline_monotonic=asyncio.get_running_loop().time() + 1.0
             )
         assert not any(
-            isinstance(event, ModelCallEndEvent)
-            for event in session.event_log.iter()
+            isinstance(event, ModelCallEndEvent) for event in session.event_log.iter()
         )
 
     asyncio.run(scenario())
@@ -2658,7 +2728,8 @@ def test_start_stream_registers_handle_before_worker_enters_validation_or_transp
             "validate_model_context_for_call",
             reject_after_owner_install,
         )
-        handle = _start_test_stream(runtime,
+        handle = await _start_test_stream(
+            runtime,
             call=call,
             context=context,
             event_context=EVENT_CONTEXT,
@@ -2708,6 +2779,15 @@ def test_model_stream_worker_task_start_failure_removes_prestart_owner_without_r
             call,
             test_llm_context(messages=(LLMMessage.user("never starts"),)),
         )
+        provider_input = await (
+            session.provider_input_generation_coordinator.prepare_one_shot_call(
+                call=call,
+                context=context,
+                event_context=EVENT_CONTEXT,
+                operation_kind="direct_model_call",
+                operation_id=call.fact.resolved_model_call_id,
+            )
+        )
 
         def fail_task_start(*_args, **_kwargs):
             raise RuntimeError("synthetic model worker task start failure")
@@ -2717,11 +2797,13 @@ def test_model_stream_worker_task_start_failure_removes_prestart_owner_without_r
             RuntimeError,
             match="synthetic model worker task start failure",
         ):
-            _start_test_stream(runtime,
+            await _start_test_stream(
+                runtime,
                 call=call,
                 context=context,
                 event_context=EVENT_CONTEXT,
                 runtime_session=session,
+                provider_input=provider_input,
             )
 
         assert session.model_stream_execution_registry.active_handle_count() == 0
@@ -3221,8 +3303,7 @@ def test_openai_responses_transport_can_stream_mock_raw_events() -> None:
         for event in events
     )
     assert any(
-        isinstance(event, RawProviderToolCallDelta)
-        and event.delta == "{}"
+        isinstance(event, RawProviderToolCallDelta) and event.delta == "{}"
         for event in events
     )
     assert not any(isinstance(event, ModelCallEndEvent) for event in events)
@@ -3441,7 +3522,9 @@ def test_openai_responses_tool_calls_prefer_call_id_over_item_id() -> None:
     )
 
     start = next(event for event in events if isinstance(event, RawProviderBlockStart))
-    delta = next(event for event in events if isinstance(event, RawProviderToolCallDelta))
+    delta = next(
+        event for event in events if isinstance(event, RawProviderToolCallDelta)
+    )
     end = next(event for event in events if isinstance(event, RawProviderBlockEnd))
     assert start.block_id == "call_responses_1"
     assert delta.tool_call_id == "call_responses_1"
@@ -3961,10 +4044,9 @@ def test_model_stream_retry_remains_adapter_private_and_reuses_call() -> None:
 
     assert isinstance(events[0], ReplyStartEvent)
     assert isinstance(events[1], RolloutBudgetReservationCreatedEvent)
-    assert isinstance(events[2], ModelCallStartEvent)
+    assert any(isinstance(item, ModelCallStartEvent) for item in events)
     assert not any(
-        isinstance(event, CustomEvent) and event.name == "llm.retry"
-        for event in events
+        isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
     )
     assert any(
         isinstance(event, TextBlockSegmentEvent) and event.text == "ok"
@@ -3979,6 +4061,8 @@ def test_model_stream_retry_remains_adapter_private_and_reuses_call() -> None:
     assert len(fake_client.responses.calls) == 2
     assert fake_client.responses.calls[0] == fake_client.responses.calls[1]
     assert isinstance(events[-1], ReplyEndEvent)
+
+
 def test_openai_chat_completions_transport_error_emits_raw_failure() -> None:
     import asyncio
 
@@ -4071,7 +4155,9 @@ def test_openai_chat_completions_payload_uses_internal_context() -> None:
     assert payload["stream_options"] == {"include_usage": True}
 
 
-def test_openai_chat_completions_lowers_runtime_observation_with_frozen_carrier() -> None:
+def test_openai_chat_completions_lowers_runtime_observation_with_frozen_carrier() -> (
+    None
+):
     config = test_llm_config(
         api_key="sk-test",
         base_url="https://example.test/v1",
@@ -4325,9 +4411,7 @@ def test_openai_chat_completions_transport_can_stream_mock_chunks() -> None:
         for event in events
     )
     assert [
-        event.delta
-        for event in events
-        if isinstance(event, RawProviderToolCallDelta)
+        event.delta for event in events if isinstance(event, RawProviderToolCallDelta)
     ] == [
         '{"q"',
         ':"pulsara"}',
@@ -4583,8 +4667,7 @@ def test_openai_chat_completions_transport_does_not_retry_after_tool_delta() -> 
         isinstance(event, CustomEvent) and event.name == "llm.retry" for event in events
     )
     assert any(
-        isinstance(event, RawProviderToolCallDelta)
-        and event.delta == '{"q"'
+        isinstance(event, RawProviderToolCallDelta) and event.delta == '{"q"'
         for event in events
     )
     assert not any(isinstance(event, RawProviderBlockEnd) for event in events)
@@ -4712,9 +4795,7 @@ def test_openai_chat_completions_waits_for_name_after_id_and_arguments() -> None
             "choices": [
                 {
                     "delta": {
-                        "tool_calls": [
-                            {"index": 0, "function": {"name": "lookup"}}
-                        ]
+                        "tool_calls": [{"index": 0, "function": {"name": "lookup"}}]
                     },
                     "finish_reason": "tool_calls",
                 }

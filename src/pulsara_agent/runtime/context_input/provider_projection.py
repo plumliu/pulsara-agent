@@ -1,9 +1,12 @@
-"""Invocation-scoped transcript timing and provider-message projection."""
+"""Stable transcript placement and provider-message projection.
+
+Compile time remains invocation audit metadata.  It is never rendered into an
+existing transcript section and therefore cannot invalidate a provider prefix.
+"""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
 from typing import Iterable
 
 from pulsara_agent.llm.estimator import TokenEstimator
@@ -46,9 +49,7 @@ class PreparedTranscriptProviderProjectionFact(PreparedRuntimeValueBase):
             != expected
         ):
             raise ValueError("prepared transcript provider messages mismatch")
-        projected_ids = tuple(
-            item.section_id for item in self.projection_fact.sections
-        )
+        projected_ids = tuple(item.section_id for item in self.projection_fact.sections)
         rendered_ids = tuple(item.id for item in self.rendered_transcript_sections)
         if rendered_ids != projected_ids:
             raise ValueError("prepared transcript provider sections mismatch")
@@ -64,8 +65,9 @@ class PreparedTranscriptProviderProjectionFact(PreparedRuntimeValueBase):
             _validate_rendered_timing_metadata(metadata, timing)
 
 
-def build_default_transcript_invocation_rendering_contract(
-) -> TranscriptProviderInvocationRenderingContractFact:
+def build_default_transcript_invocation_rendering_contract() -> (
+    TranscriptProviderInvocationRenderingContractFact
+):
     lowering_rules = tuple(
         build_frozen_fact(
             TranscriptProviderLoweringOrderRuleFact,
@@ -98,9 +100,9 @@ def build_default_transcript_invocation_rendering_contract(
             TranscriptTimingOverlayRuleFact,
             schema_version="transcript_timing_overlay_rule.v1",
             timing_overlay_kind=kind,
-            header_policy="full",
+            header_policy="none",
             source_range_aggregation="section_min_start_max_end",
-            age_basis="compiled_at_minus_source_observed_at",
+            age_basis="not_applicable",
         )
         for kind in (
             "compacted_history",
@@ -114,12 +116,12 @@ def build_default_transcript_invocation_rendering_contract(
         TranscriptTimingOverlayContractFact,
         schema_version="transcript_timing_overlay_contract.v1",
         contract_id="pulsara.transcript-timing-overlay",
-        contract_version="1",
+        contract_version="2",
         rules=timing_rules,
         compiled_at_source="context_compile_request_compiled_at_utc",
         local_date_source="session_timezone_from_compile_request",
         age_rounding="floor_non_negative_seconds",
-        header_format_version="context-timing:v1",
+        header_format_version="context-timing:none:v2",
         max_rendered_header_characters=2_048,
         max_rendered_header_utf8_bytes=8_192,
     )
@@ -127,7 +129,7 @@ def build_default_transcript_invocation_rendering_contract(
         TranscriptProviderInvocationRenderingContractFact,
         schema_version="transcript_provider_invocation_rendering_contract.v1",
         contract_id="pulsara.transcript-provider-invocation-rendering",
-        contract_version="1",
+        contract_version="2",
         lowering_order_contract=lowering,
         timing_overlay_contract=timing,
     )
@@ -140,11 +142,14 @@ def prepare_transcript_provider_projection(
     prior_history_messages: tuple[LLMMessage, ...],
     current_user_messages: tuple[LLMMessage, ...],
     current_run_tail_messages: tuple[LLMMessage, ...],
+    chronological_messages: tuple[LLMMessage, ...],
     sections: tuple[AllocatedContextSection, ...],
     estimator: TokenEstimator,
     rendering_contract: TranscriptProviderInvocationRenderingContractFact | None = None,
 ) -> PreparedTranscriptProviderProjectionFact:
-    contract = rendering_contract or build_default_transcript_invocation_rendering_contract()
+    contract = (
+        rendering_contract or build_default_transcript_invocation_rendering_contract()
+    )
     lane_inputs = _lane_inputs(
         prior_history_messages=prior_history_messages,
         current_user_messages=current_user_messages,
@@ -160,16 +165,11 @@ def prepare_transcript_provider_projection(
     }
     projected_sections: list[TranscriptProviderSectionProjectionFact] = []
     rendered_sections: list[AllocatedContextSection] = []
-    lowered: list[LLMMessage] = []
     for lane, scope, section_id, messages in lane_inputs:
         if not messages:
             continue
         section = next(
-            (
-                item
-                for item in sections
-                if item.id == section_id and item.included
-            ),
+            (item for item in sections if item.id == section_id and item.included),
             None,
         )
         if section is None:
@@ -180,34 +180,27 @@ def prepare_transcript_provider_projection(
         timing_kind = _timing_kind(lane, source_by_lane[lane])
         timing_contract = contract.timing_overlay_contract
         rule = _timing_rule(timing_contract, timing_kind)
-        age = _age_seconds(
-            compiled_at_utc=snapshot.timing.compiled_at_utc,
-            source=source,
-        )
-        timing_payload = {
-            "compiled_at_utc": snapshot.timing.compiled_at_utc,
-            "session_timezone": snapshot.timing.session_timezone,
-            "compiled_local_date": snapshot.timing.compiled_local_date,
-            "age_seconds": age,
-            "source": source.model_dump(mode="json"),
-        }
-        header = (
-            None
-            if rule.header_policy == "none"
-            else _timing_header_text(timing_payload)
-        )
+        if rule.header_policy != "none" or rule.age_basis != "not_applicable":
+            raise ValueError("transcript dynamic timing overlay is forbidden")
+        header = None
         _validate_header_bounds(header, timing_contract)
+        stable_observed_at = (
+            source.source_ended_at_utc
+            or source.observed_at_utc
+            or source.source_started_at_utc
+            or "1970-01-01T00:00:00Z"
+        )
         timing_semantic = build_frozen_fact(
             TranscriptProviderSectionTimingSemanticFact,
             schema_version="transcript_provider_section_timing_semantic.v1",
             timing_overlay_kind=timing_kind,
-            compiled_at_utc=snapshot.timing.compiled_at_utc,
-            session_timezone=snapshot.timing.session_timezone,
-            compiled_local_date=snapshot.timing.compiled_local_date,
+            compiled_at_utc=stable_observed_at,
+            session_timezone=None,
+            compiled_local_date=None,
             source_started_at_utc=source.source_started_at_utc,
             source_ended_at_utc=source.source_ended_at_utc,
             source_observed_at_utc=source.observed_at_utc,
-            age_seconds=age,
+            age_seconds=None,
             rendered_timing_header=header,
             timing_overlay_contract_id=timing_contract.contract_id,
             timing_overlay_contract_version=timing_contract.contract_version,
@@ -256,18 +249,20 @@ def prepare_transcript_provider_projection(
             )
         )
         if header is not None:
-            lowered.append(LLMMessage.runtime_observation(header))
-        lowered.extend(messages)
+            raise ValueError("dynamic transcript timing headers require ordered lowering")
+    _validate_chronological_message_coverage(
+        chronological_messages=chronological_messages,
+        lane_inputs=lane_inputs,
+    )
     projection_semantic = build_frozen_fact(
         TranscriptProviderProjectionSemanticFact,
         schema_version="transcript_provider_projection_semantic.v1",
         stable_normalized_transcript_fingerprint=transcript.transcript_fingerprint,
         ordered_section_semantic_fingerprints=tuple(
-            item.semantic_identity.semantic_fingerprint
-            for item in projected_sections
+            item.semantic_identity.semantic_fingerprint for item in projected_sections
         ),
         lowered_provider_messages_fingerprint=provider_messages_fingerprint(
-            tuple(lowered)
+            chronological_messages
         ),
     )
     projection = build_frozen_fact(
@@ -282,7 +277,7 @@ def prepare_transcript_provider_projection(
     )
     return PreparedTranscriptProviderProjectionFact(
         projection_fact=projection,
-        lowered_provider_messages=tuple(lowered),
+        lowered_provider_messages=chronological_messages,
         rendered_transcript_sections=tuple(rendered_sections),
     )
 
@@ -295,6 +290,7 @@ def materialize_transcript_provider_projection(
     prior_history_messages: tuple[LLMMessage, ...],
     current_user_messages: tuple[LLMMessage, ...],
     current_run_tail_messages: tuple[LLMMessage, ...],
+    chronological_messages: tuple[LLMMessage, ...],
     sections: tuple[AllocatedContextSection, ...],
     estimator: TokenEstimator,
 ) -> PreparedTranscriptProviderProjectionFact:
@@ -331,7 +327,6 @@ def materialize_transcript_provider_projection(
         raise ValueError("transcript source section IDs are not unique")
     if len(projection_fact.sections) != len(expected_sections):
         raise ValueError("frozen provider projection section count mismatch")
-    lowered: list[LLMMessage] = []
     rendered_sections: list[AllocatedContextSection] = []
     seen_lanes: set[str] = set()
     for section in projection_fact.sections:
@@ -352,10 +347,8 @@ def materialize_transcript_provider_projection(
             provider_message_semantic_fingerprint(item) for item in messages
         )
         if (
-            semantic.ordered_message_semantic_fingerprints
-            != message_fingerprints
-            or len(section.ordered_message_attribution_fingerprints)
-            != len(messages)
+            semantic.ordered_message_semantic_fingerprints != message_fingerprints
+            or len(section.ordered_message_attribution_fingerprints) != len(messages)
         ):
             raise ValueError("frozen provider projection message mismatch")
         timing = semantic.timing_semantic
@@ -385,21 +378,49 @@ def materialize_transcript_provider_projection(
             )
         )
         if header is not None:
-            lowered.append(LLMMessage.runtime_observation(header))
-        lowered.extend(messages)
+            raise ValueError("dynamic transcript timing headers require ordered lowering")
     if seen_lanes != set(expected_sections):
         raise ValueError("frozen provider projection omitted a transcript lane")
+    _validate_chronological_message_coverage(
+        chronological_messages=chronological_messages,
+        lane_inputs=_lane_inputs(
+            prior_history_messages=prior_history_messages,
+            current_user_messages=current_user_messages,
+            current_run_tail_messages=current_run_tail_messages,
+        ),
+    )
     prepared = PreparedTranscriptProviderProjectionFact(
         projection_fact=projection_fact,
-        lowered_provider_messages=tuple(lowered),
+        lowered_provider_messages=chronological_messages,
         rendered_transcript_sections=tuple(rendered_sections),
     )
-    if tuple(
-        item.semantic_identity.semantic_fingerprint
-        for item in projection_fact.sections
-    ) != projection_fact.semantic_identity.ordered_section_semantic_fingerprints:
+    if (
+        tuple(
+            item.semantic_identity.semantic_fingerprint
+            for item in projection_fact.sections
+        )
+        != projection_fact.semantic_identity.ordered_section_semantic_fingerprints
+    ):
         raise ValueError("frozen provider projection section identity mismatch")
     return prepared
+
+
+def _validate_chronological_message_coverage(
+    *,
+    chronological_messages: tuple[LLMMessage, ...],
+    lane_inputs: tuple[tuple[str, str, str, tuple[LLMMessage, ...]], ...],
+) -> None:
+    lane_fingerprints = sorted(
+        provider_message_semantic_fingerprint(message)
+        for _lane, _scope, _section_id, messages in lane_inputs
+        for message in messages
+    )
+    chronological_fingerprints = sorted(
+        provider_message_semantic_fingerprint(message)
+        for message in chronological_messages
+    )
+    if chronological_fingerprints != lane_fingerprints:
+        raise ValueError("chronological transcript lowering coverage drifted")
 
 
 def provider_message_semantic_fingerprint(message: LLMMessage) -> str:
@@ -463,7 +484,10 @@ def _timing_kind(lane: str, source_messages: Iterable[object]) -> str:
         return "current_user"
     if lane == "current_run_tail":
         return "current_run_observation"
-    if any(getattr(item, "segment", None) == "compaction_summary" for item in source_messages):
+    if any(
+        getattr(item, "segment", None) == "compaction_summary"
+        for item in source_messages
+    ):
         return "compacted_history"
     return "historical_replay"
 
@@ -473,64 +497,6 @@ def _timing_rule(contract: TranscriptTimingOverlayContractFact, kind: str):
     if len(matches) != 1:
         raise ValueError("transcript timing overlay rule is unavailable")
     return matches[0]
-
-
-def _age_seconds(
-    *,
-    compiled_at_utc: str,
-    source: ContextSourceTimingFact,
-) -> int | None:
-    source_time = (
-        source.source_ended_at_utc
-        or source.observed_at_utc
-        or source.source_started_at_utc
-    )
-    if source_time is None:
-        return None
-    compiled = datetime.fromisoformat(compiled_at_utc.replace("Z", "+00:00"))
-    observed = datetime.fromisoformat(source_time.replace("Z", "+00:00"))
-    return max(0, int((compiled - observed).total_seconds()))
-
-
-def _timing_header_text(timing: dict[str, object]) -> str:
-    source = timing["source"]
-    if not isinstance(source, dict):
-        raise ValueError("transcript provider source timing is invalid")
-    parts = [
-        f"freshness={source['freshness']}",
-        f"compiled_at_utc={timing['compiled_at_utc']}",
-    ]
-    if timing.get("session_timezone"):
-        parts.append(f"session_timezone={timing['session_timezone']}")
-    if timing.get("compiled_local_date"):
-        parts.append(f"local_date={timing['compiled_local_date']}")
-    started = source.get("source_started_at_utc")
-    ended = source.get("source_ended_at_utc")
-    observed = source.get("observed_at_utc")
-    if started and ended:
-        parts.append(f"source={started}..{ended}")
-    elif observed:
-        parts.append(f"source={observed}")
-    else:
-        parts.append("source=unknown")
-    age = timing.get("age_seconds")
-    if isinstance(age, int):
-        parts.append(f"age={_format_duration(age)}")
-    return "[context timing: " + "; ".join(parts) + "]"
-
-
-def _format_duration(seconds: int) -> str:
-    whole = max(0, seconds)
-    if whole < 60:
-        return f"{whole}s"
-    minutes, second = divmod(whole, 60)
-    if minutes < 60:
-        return f"{minutes}m{second:02d}s"
-    hours, minute = divmod(minutes, 60)
-    if hours < 24:
-        return f"{hours}h{minute:02d}m"
-    days, hour = divmod(hours, 24)
-    return f"{days}d{hour:02d}h"
 
 
 def _timing_metadata(

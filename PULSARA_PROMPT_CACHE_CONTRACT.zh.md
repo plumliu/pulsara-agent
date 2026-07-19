@@ -5,6 +5,12 @@
 > 本文不阻塞当前 code review、修复与验证；当前不修改 runtime 行为。
 >
 > 记录日期：2026-07-11
+>
+> **权威更新（2026-07-19）：** ContextSource ownership、provider input generation、append-only
+> lifecycle、timing placement与实施顺序已由
+> `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md`
+> 取代。本文继续作为provider cache术语、remote continuation禁令与usage观察的背景契约；
+> “volatile suffix可在下一次调用被替换”的旧解释不再有效。
 
 ## 0. 目标
 
@@ -710,4 +716,3 @@ canonical provider input plan
 ```
 
 显式 provider cache hint 可以后置。只要完整 prompt 的前缀稳定，即使不传远端 continuation ID，provider 仍可复用 KV/prefix cache；同时 Pulsara 保留完整预算控制、durable replay 和 inspect 能力。
-

@@ -21,7 +21,6 @@ from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.context import (
     ContextAuthoritySlicePlan,
-    ContextCandidateAuthorityFact,
     ContextCandidateSourceSelectionFact,
     ContextCompileInputManifestFact,
     ContextCompilePolicyFact,
@@ -37,6 +36,7 @@ from pulsara_agent.primitives.context import (
     ContextProjectionReferenceFact,
     ContextRunEntryReferenceFact,
     ContextRuntimeEnvironmentFact,
+    ContextSectionCandidate,
     ContextStaticInstructionFact,
     ContextToolSpecFact,
     FrozenContextFact,
@@ -44,6 +44,10 @@ from pulsara_agent.primitives.context import (
     TranscriptProjectionWindowFact,
     context_fingerprint,
     freeze_json,
+)
+from pulsara_agent.primitives.context_source import (
+    CapabilityToolCatalogRootFact,
+    ResolvedContextSourcePhysicalInputPolicyFact,
 )
 from pulsara_agent.primitives.capability import CapabilityExposureSnapshotFact
 from pulsara_agent.primitives.model_call import ResolvedModelCallFact
@@ -90,7 +94,10 @@ class ContextSnapshotBuildInput(FrozenContextFact):
     subagent_graph_semantic_source: SubagentGraphSemanticSourceFact
     subagent_graph_acceleration: SubagentGraphAccelerationFact
     candidate_source_selections: tuple[ContextCandidateSourceSelectionFact, ...]
-    candidate_authorities: tuple[ContextCandidateAuthorityFact, ...]
+    context_source_candidates: tuple[ContextSectionCandidate, ...]
+    capability_tool_catalog_root: CapabilityToolCatalogRootFact
+    context_source_physical_input_policy: ResolvedContextSourcePhysicalInputPolicyFact
+    context_source_registry_fingerprint: str
     timing: ContextCompileTimingFact
     authority_slice_plan: ContextAuthoritySlicePlan
     primary_event_range: ContextEventRangeFact
@@ -277,7 +284,6 @@ def finalize_context_authority_slice_plan(
             )
         retained_from_value = terminal.keep_after_sequence + 1
         retained_through_value = min(
-            terminal.through_sequence,
             prior_transcript_through_sequence,
             run_start_ref.sequence - 1,
         )
@@ -342,14 +348,17 @@ def _active_window_compaction_lifecycle(
     *,
     event_slice: ContextEventSlice,
     run_id: str,
-) -> tuple[
-    FrozenStoredEvent,
-    ContextWindowOpenedEvent,
-    FrozenStoredEvent,
-    ContextWindowCompactionStartedEvent,
-    FrozenStoredEvent,
-    ContextWindowCompactionCompletedEvent,
-] | None:
+) -> (
+    tuple[
+        FrozenStoredEvent,
+        ContextWindowOpenedEvent,
+        FrozenStoredEvent,
+        ContextWindowCompactionStartedEvent,
+        FrozenStoredEvent,
+        ContextWindowCompactionCompletedEvent,
+    ]
+    | None
+):
     decoded = tuple(
         (stored, stored.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY))
         for stored in event_slice.events
@@ -364,7 +373,9 @@ def _active_window_compaction_lifecycle(
         for _stored, event in decoded
         if isinstance(event, ContextWindowClosedEvent) and event.run_id == run_id
     }
-    active = tuple(item for item in opened if item[1].window.window_id not in closed_ids)
+    active = tuple(
+        item for item in opened if item[1].window.window_id not in closed_ids
+    )
     if len(active) != 1:
         raise ContextEventSliceError("run requires exactly one active context window")
     open_stored, open_event = active[0]

@@ -109,8 +109,12 @@ def _reply_events(ctx: EventContext):
     return [
         ReplyStartEvent(**ctx.event_fields(), name="assistant"),
         make_text_block_start_event(**ctx.event_fields(), block_id="text:1"),
-        make_text_block_segment_event(**ctx.event_fields(), block_id="text:1", delta="hello "),
-        make_text_block_segment_event(**ctx.event_fields(), block_id="text:1", delta="world"),
+        make_text_block_segment_event(
+            **ctx.event_fields(), block_id="text:1", delta="hello "
+        ),
+        make_text_block_segment_event(
+            **ctx.event_fields(), block_id="text:1", delta="world"
+        ),
         make_text_block_end_event(**ctx.event_fields(), block_id="text:1"),
         ReplyEndEvent(**ctx.event_fields(), model_terminal_outcome="completed"),
     ]
@@ -168,6 +172,29 @@ def _append_canonical_reply_events(event_log: EventLog, ctx: EventContext) -> No
     )
 
 
+def test_model_call_start_requires_provider_input_reference() -> None:
+    fields = model_call_start_fields()
+    fields.pop("provider_input_reference")
+
+    with pytest.raises(ValueError, match="provider_input_reference"):
+        ModelCallStartEvent(**_ctx("missing-provider-input").event_fields(), **fields)
+
+
+def test_compiled_context_requires_prepared_provider_input() -> None:
+    fields = context_compiled_contract_fields(
+        status="compiled", context_id="context:missing-provider-input"
+    )
+    fields.pop("prepared_provider_input")
+
+    with pytest.raises(ValueError, match="prepared provider input"):
+        ContextCompiledEvent(
+            **_ctx("missing-prepared-provider-input").event_fields(),
+            **fields,
+            context_id="context:missing-provider-input",
+            model_call_index=1,
+        )
+
+
 @pytest.fixture
 def event_log(request, tmp_path) -> EventLog:
     dsn = StorageConfig.from_env().postgres_dsn
@@ -188,7 +215,9 @@ def test_event_log_assigns_sequences_and_filters_events(event_log: EventLog) -> 
 
     event_log.extend(_reply_events(first))
     stored = event_log.append(
-        make_text_block_segment_event(**second.event_fields(), block_id="text:2", delta="other")
+        make_text_block_segment_event(
+            **second.event_fields(), block_id="text:2", delta="other"
+        )
     )
 
     assert stored.sequence == 7
@@ -354,13 +383,14 @@ def test_context_authority_bundle_freezes_all_channels_at_one_high_water(
 
     assert bundle.through_sequence == 3
     assert tuple(item.sequence for item in bundle.primary_events) == (2, 3)
-    assert tuple(item.event_type for item in bundle.run_sparse_events) == (
-        "RUN_START",
-    )
+    assert tuple(item.event_type for item in bundle.run_sparse_events) == ("RUN_START",)
     assert tuple(item.event_type for item in bundle.session_sparse_events) == (
         "RUN_END",
     )
     assert tuple(item.event_id for item in bundle.exact_events) == (stored[1].id,)
+    assert bundle.ledger_prefix == event_log.read_raw_ledger_prefix(
+        through_sequence=bundle.through_sequence
+    )
     assert all(
         item.sequence <= bundle.through_sequence
         for channel in (
@@ -371,6 +401,23 @@ def test_context_authority_bundle_freezes_all_channels_at_one_high_water(
         )
         for item in channel
     )
+
+    differently_shaped = event_log.read_context_authority_bundle(
+        RawContextAuthorityBundleRequest(
+            primary_minimum_sequence=1,
+            run_id=ctx.run_id,
+            run_sparse_event_types=(),
+            session_sparse_event_types=(),
+            exact_event_ids=(),
+            primary_bounds=bounds,
+            run_sparse_bounds=bounds,
+            session_sparse_bounds=bounds,
+            exact_bounds=bounds,
+        )
+    )
+    assert differently_shaped.request_fingerprint != bundle.request_fingerprint
+    assert differently_shaped.through_sequence == bundle.through_sequence
+    assert differently_shaped.ledger_prefix == bundle.ledger_prefix
 
     empty_delta = event_log.read_context_authority_bundle(
         RawContextAuthorityBundleRequest(
@@ -387,6 +434,7 @@ def test_context_authority_bundle_freezes_all_channels_at_one_high_water(
     )
     assert empty_delta.through_sequence == 3
     assert empty_delta.primary_events == ()
+    assert empty_delta.ledger_prefix == bundle.ledger_prefix
 
 
 def test_raw_range_and_run_reads_enforce_physical_bounds(
@@ -1006,7 +1054,9 @@ def test_postgres_event_log_conditional_extend_conflict_writes_nothing(
         )
         ctx = _ctx("postgres:cas")
         log.append(
-            make_text_block_segment_event(**ctx.event_fields(), block_id="seed", delta="seed")
+            make_text_block_segment_event(
+                **ctx.event_fields(), block_id="seed", delta="seed"
+            )
         )
         with pytest.raises(EventLogWriteConflict) as captured:
             log.extend(
@@ -1357,9 +1407,7 @@ def test_runtime_session_can_emit_with_postgres_event_log(tmp_path: Path) -> Non
                         user_input="postgres runtime contract",
                         turn_id=ctx.turn_id,
                         reply_id=ctx.reply_id,
-                        mcp_installation_owner_runtime_session_id=(
-                            runtime_session_id
-                        ),
+                        mcp_installation_owner_runtime_session_id=(runtime_session_id),
                     ),
                     user_input_chars=len("postgres runtime contract"),
                 )
@@ -1426,12 +1474,12 @@ def test_model_call_end_usage_breakdown_round_trips_postgres(
                     output_tokens=30,
                     reasoning_output_tokens=10,
                     total_tokens=150,
-                    ),
-                    estimated_input_tokens=128,
-                    terminal_projection=model_call_end_fields(
-                        resolved_call=call
-                    )["terminal_projection"],
                 ),
+                estimated_input_tokens=128,
+                terminal_projection=model_call_end_fields(resolved_call=call)[
+                    "terminal_projection"
+                ],
+            ),
         )
     )
 
@@ -1494,6 +1542,7 @@ def test_postgres_model_call_facts_round_trip(event_log: EventLog) -> None:
                     resolved_call=call,
                     estimated_tokens=22,
                     tools_estimated_tokens=0,
+                    context_id="context:postgres:model-facts",
                 ),
                 context_id="context:postgres:model-facts",
                 model_call_index=1,

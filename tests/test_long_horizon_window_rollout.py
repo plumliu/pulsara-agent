@@ -201,6 +201,7 @@ from pulsara_agent.runtime.long_horizon.window_compaction_service import (
 )
 from pulsara_agent.inspector.service import _context_window_projection
 from tests.support.model_call import (
+    prepared_provider_input_bundle_fixture,
     model_call_start_fields,
     model_call_end_fields,
     model_terminal_projection_end_reference_fixture,
@@ -219,7 +220,9 @@ CTX = EventContext(
 )
 
 
-def test_safe_point_revision_and_compile_attempt_index_have_independent_bounds() -> None:
+def test_safe_point_revision_and_compile_attempt_index_have_independent_bounds() -> (
+    None
+):
     policy = default_long_horizon_context_policy(input_budget_tokens=64_000)
     compile_attempt_index = 0
     safe_point_revision = 0
@@ -430,9 +433,7 @@ def _rollup_unit(
     }
     pair = ToolInteractionPairFact(
         **pair_payload,
-        pair_fingerprint=context_fingerprint(
-            "tool-interaction-pair:v1", pair_payload
-        ),
+        pair_fingerprint=context_fingerprint("tool-interaction-pair:v1", pair_payload),
     )
     content_block = ToolResultTextContentFact(
         block_id=f"text:rollup:{ordinal}",
@@ -451,9 +452,7 @@ def _rollup_unit(
             "tool-result-content:v1", content_payload
         ),
     )
-    semantics = build_unknown_result_semantics(
-        result_state=ToolResultStateFact.SUCCESS
-    )
+    semantics = build_unknown_result_semantics(result_state=ToolResultStateFact.SUCCESS)
     renderer = default_observation_rollup_renderer_registry().resolve_binding(
         renderer_id="pulsara.observation_rollup.canonical",
         renderer_version="v1",
@@ -828,9 +827,7 @@ def _prepared_window_compaction_source():
 
 
 def test_window_compaction_source_document_partitions_complete_pair_groups() -> None:
-    prepared, _window_fact, _projection, _target = (
-        _prepared_window_compaction_source()
-    )
+    prepared, _window_fact, _projection, _target = _prepared_window_compaction_source()
 
     assert prepared.summarized_unit_ids
     assert prepared.retained_unit_ids == ()
@@ -851,9 +848,7 @@ def test_window_compaction_source_document_partitions_complete_pair_groups() -> 
 
 
 def test_window_compaction_summary_rejects_unknown_citation() -> None:
-    prepared, _window_fact, _projection, _target = (
-        _prepared_window_compaction_source()
-    )
+    prepared, _window_fact, _projection, _target = _prepared_window_compaction_source()
     payload = {
         "observed_facts": ["The tool returned evidence."],
         "model_inferences": [],
@@ -871,9 +866,7 @@ def test_window_compaction_summary_rejects_unknown_citation() -> None:
 
 
 def test_compacted_window_binds_exact_plan_and_summary() -> None:
-    prepared, source_window, projection, _target = (
-        _prepared_window_compaction_source()
-    )
+    prepared, source_window, projection, _target = _prepared_window_compaction_source()
     call = test_resolved_call(
         purpose=ModelCallPurpose.CONTEXT_WINDOW_COMPACTION_SUMMARY
     )
@@ -947,7 +940,9 @@ def test_compacted_window_binds_exact_plan_and_summary() -> None:
         == plan.plan_fingerprint
     )
     assert target_window.source_summary_fingerprint == summary.summary_fingerprint
-    assert target_window.stable_close_event_id == plan.stable_target_window_close_event_id
+    assert (
+        target_window.stable_close_event_id == plan.stable_target_window_close_event_id
+    )
 
 
 def test_rollup_rewrite_keeps_pairs_and_lowers_inert_observation(
@@ -1009,9 +1004,9 @@ def test_rollup_rewrite_keeps_pairs_and_lowers_inert_observation(
     assert planned is not None
     assert not isinstance(planned, ProjectionTargetUnreachable)
     assert len(planned.prepared_rollup_artifacts) == 1
-    assert {
-        item.representation for item in planned.final_state.unit_projections
-    } == {ToolObservationRepresentation.ROLLUP_MEMBER}
+    assert {item.representation for item in planned.final_state.unit_projections} == {
+        ToolObservationRepresentation.ROLLUP_MEMBER
+    }
     assert planned.final_state.total_projected_tokens == (
         sum(item.estimated_tokens for item in planned.final_state.unit_projections)
         + planned.final_state.rollups[0].estimated_tokens
@@ -1081,12 +1076,9 @@ def _account() -> RolloutBudgetAccountFact:
         resolved_model_call_id=None,
         policy=policy,
     )
-    final_agent = (
-        primary.reserved_milliunits * policy.finalization_reserved_model_calls
-    )
+    final_agent = primary.reserved_milliunits * policy.finalization_reserved_model_calls
     final_compaction = (
-        primary.reserved_milliunits
-        * policy.finalization_reserved_window_compactions
+        primary.reserved_milliunits * policy.finalization_reserved_window_compactions
     )
     final_tool = (
         policy.finalization_reserved_tool_cost_units
@@ -1111,9 +1103,7 @@ def _account() -> RolloutBudgetAccountFact:
     }
     return RolloutBudgetAccountFact(
         **payload,
-        semantic_fingerprint=context_fingerprint(
-            "rollout-budget-account:v1", payload
-        ),
+        semantic_fingerprint=context_fingerprint("rollout-budget-account:v1", payload),
     )
 
 
@@ -1225,17 +1215,16 @@ def test_warning_restricted_finalization_thresholds() -> None:
         )
 
     assert phase_at(policy.warning_consumption_ratio_ppm) is RolloutPhase.WARNING
-    assert (
-        phase_at(policy.restricted_consumption_ratio_ppm)
-        is RolloutPhase.RESTRICTED
-    )
+    assert phase_at(policy.restricted_consumption_ratio_ppm) is RolloutPhase.RESTRICTED
     assert (
         phase_at(policy.finalization_consumption_ratio_ppm)
         is RolloutPhase.FINALIZATION_ONLY
     )
 
 
-def test_exploration_admission_unreachable_transitions_to_finalization_with_actual_call() -> None:
+def test_exploration_admission_unreachable_transitions_to_finalization_with_actual_call() -> (
+    None
+):
     account = _account()
     reservation = _model_reservation()
     quote = reservation.model_call_reservation_quote
@@ -1256,7 +1245,9 @@ def test_exploration_admission_unreachable_transitions_to_finalization_with_actu
     assert plan.reason_code is RolloutTransitionReason.EXPLORATION_ADMISSION_UNREACHABLE
 
 
-def test_active_reclaimable_exploration_reservation_prevents_early_unreachable_transition() -> None:
+def test_active_reclaimable_exploration_reservation_prevents_early_unreachable_transition() -> (
+    None
+):
     account = _account()
     reservation = _model_reservation()
     quote = reservation.model_call_reservation_quote
@@ -1265,8 +1256,7 @@ def test_active_reclaimable_exploration_reservation_prevents_early_unreachable_t
         account=account,
         phase=RolloutPhase.RESTRICTED,
         exploration_charged=(
-            account.exploration_allowance_milliunits
-            - reservation.reserved_milliunits
+            account.exploration_allowance_milliunits - reservation.reserved_milliunits
         ),
         active_reservations=(reservation,),
     )
@@ -1341,7 +1331,9 @@ def test_finalization_reserve_preserves_two_calls() -> None:
     )
     assert exhausted.action == "transition"
     assert exhausted.transition_to is RolloutPhase.EXHAUSTED
-    assert exhausted.reason_code is RolloutTransitionReason.FINALIZATION_AGENT_UNAVAILABLE
+    assert (
+        exhausted.reason_code is RolloutTransitionReason.FINALIZATION_AGENT_UNAVAILABLE
+    )
 
 
 def test_finalization_reserve_separately_preserves_one_window_compaction() -> None:
@@ -1371,10 +1363,14 @@ def test_finalization_reserve_separately_preserves_one_window_compaction() -> No
     )
     assert exhausted.action == "transition"
     assert exhausted.transition_to is RolloutPhase.EXHAUSTED
-    assert exhausted.reason_code is RolloutTransitionReason.WINDOW_COMPACTION_UNAVAILABLE
+    assert (
+        exhausted.reason_code is RolloutTransitionReason.WINDOW_COMPACTION_UNAVAILABLE
+    )
 
 
-def test_finalization_reserve_separately_preserves_synthesis_and_verification_tools() -> None:
+def test_finalization_reserve_separately_preserves_synthesis_and_verification_tools() -> (
+    None
+):
     account = _account()
     state = _rollout_state(account=account, phase=RolloutPhase.FINALIZATION_ONLY)
     plan = plan_root_tool_admission(
@@ -1384,11 +1380,14 @@ def test_finalization_reserve_separately_preserves_synthesis_and_verification_to
     )
     assert plan.action == "admit"
     assert plan.budget_bucket is RolloutBudgetBucket.FINALIZATION_TOOL
-    assert rollout_bucket_remaining(
-        account=account,
-        state=state,
-        bucket=RolloutBudgetBucket.FINALIZATION_TOOL,
-    ) == account.finalization_tool_reserve_milliunits
+    assert (
+        rollout_bucket_remaining(
+            account=account,
+            state=state,
+            bucket=RolloutBudgetBucket.FINALIZATION_TOOL,
+        )
+        == account.finalization_tool_reserve_milliunits
+    )
 
 
 def test_emergency_counter_is_not_reported_as_normal_budget_exhaustion() -> None:
@@ -1603,10 +1602,9 @@ def test_long_horizon_budget_uses_exact_compiler_message_breakdown() -> None:
 
     empty_result = LLMMessage.tool_result("", tool_call_id="call:one")
     result_index = 1
-    expected_projected = (
-        estimate.message_tokens_by_index[result_index]
-        - call.target.token_estimator.estimate_message(empty_result)
-    )
+    expected_projected = estimate.message_tokens_by_index[
+        result_index
+    ] - call.target.token_estimator.estimate_message(empty_result)
     decision = measurement.decision
     assert decision.projected_tool_tokens_before == expected_projected
     assert (
@@ -1661,7 +1659,9 @@ def test_l1_projection_unit_limit_is_diagnostic_only() -> None:
         input_budget_tokens=call.target.context_budget.input_budget_tokens
     )
     projections = tuple(
-        _projection_fact(unit_id=f"unit-{index}", generation=1, result_sequence=index + 2)
+        _projection_fact(
+            unit_id=f"unit-{index}", generation=1, result_sequence=index + 2
+        )
         for index in range(policy.max_projection_units_per_window + 1)
     )
     projection_state = build_projection_state(
@@ -2008,7 +2008,9 @@ def test_missing_usage_never_uses_stream_chars_or_cached_discount() -> None:
     assert settlement.charged_milliunits == reservation.reserved_milliunits
 
 
-def test_start_committed_but_provider_not_dispatched_settles_zero_not_full_quote() -> None:
+def test_start_committed_but_provider_not_dispatched_settles_zero_not_full_quote() -> (
+    None
+):
     account = _account()
     reservation = _model_reservation()
     settlement = build_model_reservation_settlement_event(
@@ -2137,9 +2139,7 @@ def _tool_reservation(
     del action_class
     return RolloutReservationFact(
         **payload,
-        semantic_fingerprint=context_fingerprint(
-            "rollout-reservation:v1", payload
-        ),
+        semantic_fingerprint=context_fingerprint("rollout-reservation:v1", payload),
     )
 
 
@@ -2433,16 +2433,26 @@ def test_quote_rejects_target_or_policy_drift() -> None:
 def test_direct_model_stream_recovery_writes_stable_runtime_error_end() -> None:
     call = test_resolved_call(purpose=ModelCallPurpose.MEMORY_REFLECTION)
     log = InMemoryEventLog()
+    provider_input = prepared_provider_input_bundle_fixture(
+        call.fact,
+        context_id="context:test",
+        model_call_index=None,
+        event_context=CTX,
+        runtime_session_id=log.runtime_session_id,
+    )
+    start_fields = model_call_start_fields(
+        event_id=f"model_call_start:{call.fact.resolved_model_call_id}",
+        resolved_call=call.fact,
+        model_call_index=None,
+        lifecycle_kind="direct_internal_call",
+        pre_send_estimated_input_tokens=17,
+    )
+    start_fields["provider_input_reference"] = provider_input.committed_reference
     start = ModelCallStartEvent(
         **CTX.event_fields(),
-        **model_call_start_fields(
-            resolved_call=call.fact,
-            model_call_index=None,
-            lifecycle_kind="direct_internal_call",
-            pre_send_estimated_input_tokens=17,
-        ),
+        **start_fields,
     )
-    log.extend((start,))
+    log.extend((*provider_input.companion_events, start))
 
     report = ModelStreamRecoveryService(
         event_log=log,
@@ -2491,18 +2501,28 @@ def test_model_stream_recovery_atomically_settles_physical_reservation() -> None
         register_transcript_consumer=True,
     )
     call = test_resolved_call(purpose=ModelCallPurpose.MEMORY_REFLECTION)
+    provider_input = prepared_provider_input_bundle_fixture(
+        call.fact,
+        context_id="context:test",
+        model_call_index=None,
+        event_context=CTX,
+        runtime_session_id=log.runtime_session_id,
+    )
+    start_fields = model_call_start_fields(
+        event_id=f"model_call_start:{call.fact.resolved_model_call_id}",
+        resolved_call=call.fact,
+        model_call_index=None,
+        lifecycle_kind="direct_internal_call",
+        pre_send_estimated_input_tokens=17,
+    )
+    start_fields["provider_input_reference"] = provider_input.committed_reference
     start = ModelCallStartEvent(
         **CTX.event_fields(),
-        **model_call_start_fields(
-            resolved_call=call.fact,
-            model_call_index=None,
-            lifecycle_kind="direct_internal_call",
-            pre_send_estimated_input_tokens=17,
-        ),
+        **start_fields,
     )
     coordinator.reserve_and_commit_dispatch(
         context=CTX,
-        business_events=(start,),
+        business_events=(*provider_input.companion_events, start),
         reservation_id=f"model_physical:{call.fact.resolved_model_call_id[-96:]}",
         owner_id=call.fact.resolved_model_call_id,
         burst_contract=(
@@ -2535,19 +2555,29 @@ def test_model_stream_recovery_atomically_settles_physical_reservation() -> None
 def test_main_model_stream_recovery_closes_reply_envelope() -> None:
     call = test_resolved_call()
     log = InMemoryEventLog()
+    provider_input = prepared_provider_input_bundle_fixture(
+        call.fact,
+        context_id="context:test",
+        model_call_index=1,
+        event_context=CTX,
+        runtime_session_id=log.runtime_session_id,
+    )
+    start_fields = model_call_start_fields(
+        event_id=f"model_call_start:{call.fact.resolved_model_call_id}",
+        resolved_call=call.fact,
+        pre_send_estimated_input_tokens=23,
+    )
+    start_fields["provider_input_reference"] = provider_input.committed_reference
     start = ModelCallStartEvent(
         **CTX.event_fields(),
-        **model_call_start_fields(
-            resolved_call=call.fact,
-            pre_send_estimated_input_tokens=23,
-        ),
+        **start_fields,
     )
     reply_start = ReplyStartEvent(
         id=start.recovery_plan.reply_start_event_id,
         **CTX.event_fields(),
         name="assistant",
     )
-    log.extend((reply_start, start))
+    log.extend((*provider_input.companion_events, reply_start, start))
 
     ModelStreamRecoveryService(
         event_log=log,
@@ -2561,28 +2591,37 @@ def test_main_model_stream_recovery_closes_reply_envelope() -> None:
     assert end.outcome == "runtime_error"
     assert reply_end.id == start.recovery_plan.stable_reply_end_event_id
     assert reply_end.model_terminal_outcome == end.outcome
-    assert end.sequence is not None and reply_end.sequence == end.sequence + 1
+    assert end.sequence is not None
+    assert reply_end.sequence is not None and reply_end.sequence > end.sequence
 
 
 def test_model_stream_recovery_preserves_durable_provider_error_winner() -> None:
     call = test_resolved_call(purpose=ModelCallPurpose.MEMORY_REFLECTION)
     log = InMemoryEventLog()
+    provider_input = prepared_provider_input_bundle_fixture(
+        call.fact,
+        context_id="context:test",
+        model_call_index=None,
+        event_context=CTX,
+        runtime_session_id=log.runtime_session_id,
+    )
+    start_fields = model_call_start_fields(
+        event_id=f"model_call_start:{call.fact.resolved_model_call_id}",
+        resolved_call=call.fact,
+        model_call_index=None,
+        lifecycle_kind="direct_internal_call",
+    )
+    start_fields["provider_input_reference"] = provider_input.committed_reference
     start = ModelCallStartEvent(
         **CTX.event_fields(),
-        **model_call_start_fields(
-            resolved_call=call.fact,
-            model_call_index=None,
-            lifecycle_kind="direct_internal_call",
-        ),
+        **start_fields,
     )
     draft = build_semantic_draft(
         ProviderErrorDraft,
         transport_sequence_index=0,
         error=sanitize_provider_failure(message="provider unavailable"),
     )
-    source_before = sha256_fingerprint(
-        "model-stream-sanitized-source:v2", "empty"
-    )
+    source_before = sha256_fingerprint("model-stream-sanitized-source:v2", "empty")
     source_after = sha256_fingerprint(
         "model-stream-sanitized-source-receipt:v2",
         {
@@ -2609,7 +2648,7 @@ def test_model_stream_recovery_preserves_durable_provider_error_winner() -> None
     ).push(envelope)
     assert len(prepared) == 1
     provider_error = prepared[0].event
-    log.extend((start, provider_error))
+    log.extend((*provider_input.companion_events, start, provider_error))
 
     report = ModelStreamRecoveryService(
         event_log=log,
@@ -2618,9 +2657,7 @@ def test_model_stream_recovery_preserves_durable_provider_error_winner() -> None
     ).repair_incomplete_model_streams()
 
     assert report.repaired[0].terminal_outcome == "provider_error"
-    end = next(
-        event for event in log.iter() if isinstance(event, ModelCallEndEvent)
-    )
+    end = next(event for event in log.iter() if isinstance(event, ModelCallEndEvent))
     assert end.outcome == "provider_error"
 
 
@@ -2629,16 +2666,30 @@ def _commit_completed_main_model_call(
     archive: InMemoryArchiveStore,
 ) -> ModelCallStartEvent:
     call = test_resolved_call()
+    provider_input = prepared_provider_input_bundle_fixture(
+        call.fact,
+        context_id="context:test",
+        model_call_index=1,
+        event_context=CTX,
+        runtime_session_id=log.runtime_session_id,
+    )
+    start_fields = model_call_start_fields(
+        event_id=f"model_call_start:{call.fact.resolved_model_call_id}",
+        resolved_call=call.fact,
+    )
+    start_fields["provider_input_reference"] = provider_input.committed_reference
     start = ModelCallStartEvent(
         **CTX.event_fields(),
-        **model_call_start_fields(resolved_call=call.fact),
+        **start_fields,
     )
     reply_start = ReplyStartEvent(
         id=start.recovery_plan.reply_start_event_id,
         **CTX.event_fields(),
         name="assistant",
     )
-    committed_prefix = log.extend((reply_start, start))
+    committed_prefix = log.extend(
+        (*provider_input.companion_events, reply_start, start)
+    )
     committed_start = next(
         event for event in committed_prefix if isinstance(event, ModelCallStartEvent)
     )
@@ -2648,8 +2699,7 @@ def _commit_completed_main_model_call(
         start_event=committed_start,
         contracts=build_default_terminal_projection_contract_bundle(),
         model_stream_semantic_domain_contract_fingerprint=(
-            build_default_authority_materialization_contract_bundle()
-            .event_domain.contract.transcript_semantic_domain_contract_fingerprint
+            build_default_authority_materialization_contract_bundle().event_domain.contract.transcript_semantic_domain_contract_fingerprint
         ),
         segment_policy_contract_fingerprint=(
             DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT.contract_fingerprint
@@ -2751,17 +2801,13 @@ def _service_window_compaction_transcript(
     current_block = TranscriptTextBlockFact(
         block_id="text:service-current-user",
         text=current_text,
-        content_fingerprint=context_fingerprint(
-            "transcript-text:v1", current_text
-        ),
+        content_fingerprint=context_fingerprint("transcript-text:v1", current_text),
         source_events=(current_ref,),
     )
     assistant_block = TranscriptTextBlockFact(
         block_id="text:service-assistant-tail",
         text=assistant_text,
-        content_fingerprint=context_fingerprint(
-            "transcript-text:v1", assistant_text
-        ),
+        content_fingerprint=context_fingerprint("transcript-text:v1", assistant_text),
         source_events=(prior_ref,),
     )
     current = _message(
@@ -3002,9 +3048,13 @@ async def _close_window_compaction_fixture(runtime_session, service) -> None:
 async def _window_compaction_service_atomically_switches_active_window(
     tmp_path,
 ) -> None:
-    runtime_session, service, request, source_window, _transport = (
-        await _service_window_compaction_fixture(tmp_path, invalid_citation=False)
-    )
+    (
+        runtime_session,
+        service,
+        request,
+        source_window,
+        _transport,
+    ) = await _service_window_compaction_fixture(tmp_path, invalid_citation=False)
     try:
         outcome = await service.compact(request)
         assert outcome.status == "compacted"
@@ -3047,9 +3097,13 @@ def test_window_compaction_service_atomically_switches_active_window(tmp_path) -
 
 
 async def _compacted_window_live_authority_uses_bounded_delta(tmp_path) -> None:
-    runtime_session, service, request, _source_window, _transport = (
-        await _service_window_compaction_fixture(tmp_path, invalid_citation=False)
-    )
+    (
+        runtime_session,
+        service,
+        request,
+        _source_window,
+        _transport,
+    ) = await _service_window_compaction_fixture(tmp_path, invalid_citation=False)
     try:
         outcome = await service.compact(request)
         assert outcome.status == "compacted"
@@ -3058,9 +3112,7 @@ async def _compacted_window_live_authority_uses_bounded_delta(tmp_path) -> None:
         assert start is not None
         assert chain is not None and chain.active_window_id is not None
         active = chain.windows[chain.active_window_id]
-        source_through = (
-            active.transcript_basis.source_through_sequence_at_compaction
-        )
+        source_through = active.transcript_basis.source_through_sequence_at_compaction
         assert source_through is not None
         working_set = SimpleNamespace(
             run_start_event_id=start.id,
@@ -3078,14 +3130,11 @@ async def _compacted_window_live_authority_uses_bounded_delta(tmp_path) -> None:
         )
         assert authority.primary_slice.from_sequence == source_through + 1
         assert all(
-            item.sequence > source_through
-            for item in authority.primary_slice.events
+            item.sequence > source_through for item in authority.primary_slice.events
         )
         assert isinstance(authority.view, ContextEventAuthorityView)
         assert authority.view.event_by_id(start.id).sequence == start.sequence
-        assert all(
-            item.event_id != start.id for item in authority.primary_slice.events
-        )
+        assert all(item.event_id != start.id for item in authority.primary_slice.events)
     finally:
         await _close_window_compaction_fixture(runtime_session, service)
 
@@ -3097,13 +3146,19 @@ def test_compacted_window_live_authority_uses_bounded_delta(tmp_path) -> None:
 async def _window_compaction_invalid_citation_keeps_old_window_open(
     tmp_path,
 ) -> None:
-    runtime_session, service, request, source_window, _transport = (
-        await _service_window_compaction_fixture(tmp_path, invalid_citation=True)
-    )
+    (
+        runtime_session,
+        service,
+        request,
+        source_window,
+        _transport,
+    ) = await _service_window_compaction_fixture(tmp_path, invalid_citation=True)
     try:
         outcome = await service.compact(request)
         assert outcome.status == "failed"
-        assert outcome.reason_code == "context_window_compaction_summary_validation_failed"
+        assert (
+            outcome.reason_code == "context_window_compaction_summary_validation_failed"
+        )
         chain = runtime_session.long_horizon_state_store.window_state(CTX.run_id)
         assert chain is not None and chain.active_window_id is not None
         assert chain.active_window_id == source_window.window_id
@@ -3126,11 +3181,15 @@ def test_window_compaction_terminal_none_retains_owner_until_same_batch_commits(
     from pulsara_agent.runtime.session import EventCommitError
 
     async def scenario() -> None:
-        runtime_session, service, request, _source_window, _transport = (
-            await _service_window_compaction_fixture(
-                tmp_path,
-                invalid_citation=False,
-            )
+        (
+            runtime_session,
+            service,
+            request,
+            _source_window,
+            _transport,
+        ) = await _service_window_compaction_fixture(
+            tmp_path,
+            invalid_citation=False,
         )
         session_type = type(runtime_session)
         original_write = session_type.write_events
@@ -3189,11 +3248,15 @@ def test_window_compaction_source_stale_does_not_write_failure_or_charge_circuit
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        runtime_session, service, request, _source_window, _transport = (
-            await _service_window_compaction_fixture(
-                tmp_path,
-                invalid_citation=False,
-            )
+        (
+            runtime_session,
+            service,
+            request,
+            _source_window,
+            _transport,
+        ) = await _service_window_compaction_fixture(
+            tmp_path,
+            invalid_citation=False,
         )
         try:
             await runtime_session.emit(
@@ -3217,12 +3280,16 @@ def test_window_compaction_source_stale_does_not_write_failure_or_charge_circuit
 
 
 async def _window_compaction_waiter_cancellation_detaches_from_owner(tmp_path) -> None:
-    runtime_session, service, request, source_window, transport = (
-        await _service_window_compaction_fixture(
-            tmp_path,
-            invalid_citation=False,
-            blocking=True,
-        )
+    (
+        runtime_session,
+        service,
+        request,
+        source_window,
+        transport,
+    ) = await _service_window_compaction_fixture(
+        tmp_path,
+        invalid_citation=False,
+        blocking=True,
     )
     assert transport is not None
     waiter = asyncio.create_task(service.compact(request))
@@ -3272,12 +3339,16 @@ class _ArtifactLookupStore:
 
 
 async def _window_compaction_same_run_join_uses_one_owner(tmp_path) -> None:
-    runtime_session, service, request, _source_window, transport = (
-        await _service_window_compaction_fixture(
-            tmp_path,
-            invalid_citation=False,
-            blocking=True,
-        )
+    (
+        runtime_session,
+        service,
+        request,
+        _source_window,
+        transport,
+    ) = await _service_window_compaction_fixture(
+        tmp_path,
+        invalid_citation=False,
+        blocking=True,
     )
     assert transport is not None
     first = asyncio.create_task(service.compact(request))
@@ -3291,10 +3362,13 @@ async def _window_compaction_same_run_join_uses_one_owner(tmp_path) -> None:
         transport.release.set()
         first_outcome, second_outcome = await asyncio.gather(first, second)
         assert first_outcome == second_outcome
-        assert sum(
-            event.type.value == "CONTEXT_WINDOW_COMPACTION_STARTED"
-            for event in runtime_session.event_log.iter(run_id=CTX.run_id)
-        ) == 1
+        assert (
+            sum(
+                event.type.value == "CONTEXT_WINDOW_COMPACTION_STARTED"
+                for event in runtime_session.event_log.iter(run_id=CTX.run_id)
+            )
+            == 1
+        )
     finally:
         transport.release.set()
         for task in (first, second):
@@ -3351,12 +3425,16 @@ async def _real_window_compaction_same_run(
     *,
     llm_runtime: LLMRuntime,
 ) -> dict[str, object]:
-    runtime_session, service, request, source_window, _transport = (
-        await _service_window_compaction_fixture(
-            tmp_path,
-            invalid_citation=False,
-            external_llm_runtime=llm_runtime,
-        )
+    (
+        runtime_session,
+        service,
+        request,
+        source_window,
+        _transport,
+    ) = await _service_window_compaction_fixture(
+        tmp_path,
+        invalid_citation=False,
+        external_llm_runtime=llm_runtime,
     )
     try:
         outcomes = []
@@ -3408,9 +3486,13 @@ async def _real_window_compaction_same_run(
 
 
 async def _window_compaction_restart_repairs_started_without_terminal(tmp_path) -> None:
-    runtime_session, service, request, source_window, _transport = (
-        await _service_window_compaction_fixture(tmp_path, invalid_citation=False)
-    )
+    (
+        runtime_session,
+        service,
+        request,
+        source_window,
+        _transport,
+    ) = await _service_window_compaction_fixture(tmp_path, invalid_citation=False)
     recovery_session = None
     try:
         outcome = await service.compact(request)
@@ -3431,8 +3513,7 @@ async def _window_compaction_restart_repairs_started_without_terminal(tmp_path) 
             runtime_session_id=runtime_session.runtime_session_id
         )
         interrupted_log.extend(
-            event.model_copy(update={"sequence": None})
-            for event in interrupted_prefix
+            event.model_copy(update={"sequence": None}) for event in interrupted_prefix
         )
         recovery_session = in_memory_runtime_session(
             tmp_path,

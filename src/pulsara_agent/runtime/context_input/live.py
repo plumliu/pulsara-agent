@@ -29,6 +29,7 @@ from pulsara_agent.event_log.protocol import (
     RawEventLogReadSnapshot,
     RawEventSelectionBounds,
     RawStoredEventEnvelope,
+    RawTranscriptDomainPrefixFact,
 )
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.context import (
@@ -55,6 +56,12 @@ from pulsara_agent.primitives.context import (
     freeze_json,
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+from pulsara_agent.primitives.context_source import (
+    ContextArtifactReferenceFact,
+    LedgerAuthorityHorizonFact,
+    ResolvedContextSourcePhysicalInputPolicyFact,
+)
+from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.long_horizon import (
     ContextWindowFact,
     ContextWindowProjectionState,
@@ -74,10 +81,15 @@ from pulsara_agent.runtime.context_input.event_slice import (
 )
 from pulsara_agent.runtime.context_input.candidate import (
     ContextLifecycleCacheWriteCandidate,
-    ContextCandidateCollectionInput,
-    build_context_candidate_authorities,
     build_context_candidate_source_selections,
     collect_context_candidates,
+)
+from pulsara_agent.runtime.context_input.sources.builder import (
+    ContextSourceArtifactMetadata,
+    HydratedContextSourceArtifact,
+    build_context_sources,
+    default_context_source_registry,
+    hydrate_context_source_content_sidecar,
 )
 from pulsara_agent.runtime.context_input.policy import resolve_context_compile_policy
 from pulsara_agent.runtime.context_input.snapshot import (
@@ -105,6 +117,7 @@ from pulsara_agent.runtime.authority_materialization.checkpoint_service import (
     PreparedTranscriptProjectionEvidence,
 )
 from pulsara_agent.runtime.long_horizon.status import (
+    derive_rollout_status_candidate,
     derive_rollout_status_candidate_from_state,
 )
 from pulsara_agent.runtime.run_entry import RunWorkingSet
@@ -126,6 +139,7 @@ class PreparedLiveContextSnapshot:
     normalized_transcript: NormalizedContextTranscript
     prepared_tool_results: PreparedToolResultRenderInput
     prepared_candidates: PreparedContextCandidateSet
+    context_source_hydrated_contents: tuple[tuple[str, str], ...]
     transcript_projection_evidence: PreparedTranscriptProjectionEvidence
     prepared_named_fact_artifacts: tuple[PreparedNamedFactArtifact, ...]
     candidate_cache_writes: tuple[ContextLifecycleCacheWriteCandidate, ...]
@@ -147,6 +161,7 @@ class _LiveAuthorityRead:
     primary_slice: ContextEventSlice
     local_named_slices: tuple[ContextEventSlice, ...]
     run_start: RunStartEvent
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...]
 
     @property
     def view(self) -> ContextEventSlice | ContextEventAuthorityView:
@@ -162,6 +177,38 @@ class _LiveAuthorityRead:
 class _ChildAuthorityRead:
     slices: tuple[ContextEventSlice, ...]
     rollout_state: RolloutBudgetStateFact | None
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...]
+
+
+def _ledger_authority_horizon(
+    *,
+    runtime_session_id: str,
+    prefix: RawTranscriptDomainPrefixFact,
+) -> LedgerAuthorityHorizonFact:
+    """Bind one ledger's canonical prefix proof to a model-visible authority read."""
+
+    return build_frozen_fact(
+        LedgerAuthorityHorizonFact,
+        schema_version="ledger_authority_horizon.v1",
+        runtime_session_id=runtime_session_id,
+        through_sequence=prefix.through_sequence,
+        ledger_event_count_through=prefix.through_sequence,
+        ledger_continuity_accumulator_through=(prefix.ledger_continuity_accumulator),
+    )
+
+
+def _merge_authority_horizons(
+    *groups: tuple[LedgerAuthorityHorizonFact, ...],
+) -> tuple[LedgerAuthorityHorizonFact, ...]:
+    by_ledger: dict[str, LedgerAuthorityHorizonFact] = {}
+    for horizon in (item for group in groups for item in group):
+        existing = by_ledger.get(horizon.runtime_session_id)
+        if existing is not None and existing != horizon:
+            raise ContextEventSliceError(
+                "one context snapshot observed conflicting ledger authority horizons"
+            )
+        by_ledger[horizon.runtime_session_id] = horizon
+    return tuple(by_ledger[key] for key in sorted(by_ledger))
 
 
 _MAX_LIVE_AUTHORITY_EVENTS = 16_384
@@ -552,8 +599,9 @@ def collect_live_context_inputs(
     subagent_graph_semantic_source: SubagentGraphSemanticSourceFact,
     subagent_graph_acceleration: SubagentGraphAccelerationFact,
     subagent_authority_events: tuple[FrozenStoredEvent, ...],
+    source_artifact_metadata: dict[str, ContextSourceArtifactMetadata],
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...],
     projections: tuple[ContextProjectionReferenceFact, ...] = (),
-    candidate_sources: ContextCandidateCollectionInput,
     named_slices: tuple[ContextEventSlice, ...] = (),
     raw_suspended_state_token_for_validation: str | None = None,
     rollout_status_override: LongHorizonRolloutStatusCandidateFact | None = None,
@@ -688,25 +736,33 @@ def collect_live_context_inputs(
                 item for item in rollout_slices if item is not primary_rollout_slice
             ),
         )
-    candidate_authorities = build_context_candidate_authorities(
-        sources=candidate_sources,
+    rollout_status = (
+        derive_rollout_status_candidate(
+            event_slice=rollout_event_slice,
+            account_id=start.long_horizon.rollout_account_id,
+            policy=start.long_horizon.rollout_status_hint_policy,
+        )
+        if derive_rollout_status_from_events
+        else rollout_status_override
+    )
+    source_build = build_context_sources(
+        registry=default_context_source_registry(),
         static_instructions=static_instructions,
+        artifact_metadata=source_artifact_metadata,
         projections=projections,
         capability_snapshot=capability,
         plan_snapshot=plan_snapshot,
         event_slice=event_slice,
-        rollout_event_slice=rollout_event_slice,
-        rollout_account_id=start.long_horizon.rollout_account_id,
-        rollout_status_policy=start.long_horizon.rollout_status_hint_policy,
-        rollout_status_override=rollout_status_override,
-        derive_rollout_status_from_events=derive_rollout_status_from_events,
-        run_id=identity.run_id,
         runtime_environment=runtime_environment,
         compile_timing=timing,
+        resolved_model_call=resolved_call.fact,
         source_selections=candidate_source_selections,
         external_authority_events={
             event.event_id: event for event in subagent_authority_events
         },
+        rollout_status=rollout_status,
+        tool_specs=tool_specs,
+        authority_horizons=authority_horizons,
     )
     external_authority_ids = {event.event_id for event in subagent_authority_events}
     required_refs = (
@@ -716,8 +772,8 @@ def collect_live_context_inputs(
         *((plan_snapshot.entered_event,) if plan_snapshot.entered_event else ()),
         *(
             ref
-            for authority in candidate_authorities
-            for ref in authority.source_fact_refs
+            for candidate in source_build.candidates
+            for ref in candidate.attribution.source_event_refs
             if ref.event_id not in external_authority_ids
         ),
         *(
@@ -742,9 +798,7 @@ def collect_live_context_inputs(
         run_start_ref=run_entry.run_start,
         latest_compaction_terminal_ref=latest_compaction,
         prior_transcript_through_sequence=(
-            run_entry.run_entry.transcript.source_through_sequence
-            if hasattr(run_entry.run_entry, "transcript")
-            else 0
+            start.run_transcript_seed_reference.source_ledger_through_sequence
         ),
     )
     if isinstance(event_slice, ContextEventAuthorityView):
@@ -779,7 +833,10 @@ def collect_live_context_inputs(
         subagent_graph_semantic_source=subagent_graph_semantic_source,
         subagent_graph_acceleration=subagent_graph_acceleration,
         candidate_source_selections=candidate_source_selections,
-        candidate_authorities=candidate_authorities,
+        context_source_candidates=source_build.candidates,
+        capability_tool_catalog_root=source_build.tool_catalog_root,
+        context_source_physical_input_policy=source_build.physical_input_policy,
+        context_source_registry_fingerprint=source_build.registry_fingerprint,
         timing=timing,
         authority_slice_plan=authority_plan,
         primary_event_range=authority_slice.to_range_fact(),
@@ -996,7 +1053,7 @@ async def prepare_live_context_snapshot(
     terminal_current_cwd: str,
     session_timezone: str | None = None,
     compiled_local_date: str | None = None,
-    candidate_sources: ContextCandidateCollectionInput,
+    memory_scope_instruction: str | None = None,
     raw_suspended_state_token_for_validation: str | None = None,
 ) -> PreparedLiveContextSnapshot:
     progress = _ContextInputPreparationProgress()
@@ -1154,12 +1211,12 @@ async def prepare_live_context_snapshot(
                 system_prompt,
             )
         ]
-        if candidate_sources.memory_hook_prompt:
+        if memory_scope_instruction:
             instruction_sources.append(
                 (
                     "memory_scope_instruction",
                     "pulsara-memory-scope-instruction:v1",
-                    candidate_sources.memory_hook_prompt,
+                    memory_scope_instruction,
                 )
             )
         for source_id, contract_version, content in instruction_sources:
@@ -1199,10 +1256,30 @@ async def prepare_live_context_snapshot(
             observed_at_utc=compiled_at_utc,
         )
         tool_specs, materialized = build_context_tool_specs(working_set=working_set)
-        if candidate_sources.system_prompt != system_prompt:
-            raise ContextEventSliceError(
-                "typed candidate system prompt differs from static instruction"
-            )
+        source_artifact_expected_chars = {
+            item.content_artifact_id: item.chars for item in static_instructions
+        }
+        for projection in (
+            working_set.effective_exposure_fact.semantic.catalog_projection,
+            working_set.effective_exposure_fact.semantic.active_skill_projection,
+        ):
+            if projection.rendered_prompt_artifact_id is not None:
+                artifact_id = projection.rendered_prompt_artifact_id
+                existing_chars = source_artifact_expected_chars.get(artifact_id)
+                if (
+                    existing_chars is not None
+                    and existing_chars != projection.rendered_prompt_chars
+                ):
+                    raise ContextEventSliceError(
+                        "ContextSource artifact character attribution conflicts"
+                    )
+                source_artifact_expected_chars[artifact_id] = (
+                    projection.rendered_prompt_chars
+                )
+        source_artifact_metadata = await _read_context_source_artifact_metadata(
+            runtime_session=runtime_session,
+            expected_chars_by_artifact_id=source_artifact_expected_chars,
+        )
         build_input = collect_live_context_inputs(
             working_set=working_set,
             resolved_call=resolved_call,
@@ -1217,7 +1294,11 @@ async def prepare_live_context_snapshot(
             subagent_graph_semantic_source=subagent_graph_semantic_source,
             subagent_graph_acceleration=subagent_graph_acceleration,
             subagent_authority_events=subagent_authority_events,
-            candidate_sources=candidate_sources,
+            source_artifact_metadata=source_artifact_metadata,
+            authority_horizons=_merge_authority_horizons(
+                authority_read.authority_horizons,
+                child_authority.authority_horizons,
+            ),
             named_slices=child_named_slices,
             raw_suspended_state_token_for_validation=(
                 raw_suspended_state_token_for_validation
@@ -1244,11 +1325,8 @@ async def prepare_live_context_snapshot(
             runtime_session=runtime_session,
             transcript_window=build_input.authority_slice_plan.transcript_window,
         )
-        projection_evidence = await (
-            runtime_session.transcript_projection_checkpoint_service
-            .prepare_projection_evidence(
-                requested_through_sequence=full_slice.through_sequence
-            )
+        projection_evidence = await runtime_session.transcript_projection_checkpoint_service.prepare_projection_evidence(
+            requested_through_sequence=full_slice.through_sequence
         )
         stable_entries = projection_evidence.stable_entries
         terminal_content_refs = required_terminal_content_artifacts(
@@ -1260,7 +1338,9 @@ async def prepare_live_context_snapshot(
             runtime_session=runtime_session,
             references=terminal_content_refs,
         )
-        terminal_ref = build_input.authority_slice_plan.transcript_window.compaction_terminal_ref
+        terminal_ref = (
+            build_input.authority_slice_plan.transcript_window.compaction_terminal_ref
+        )
         compaction_terminal = None
         if terminal_ref is not None:
             compaction_terminal = authority_slice.event_by_id(
@@ -1268,8 +1348,7 @@ async def prepare_live_context_snapshot(
             ).decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
             if not isinstance(
                 compaction_terminal,
-                ContextCompactionCompletedEvent
-                | ContextWindowCompactionCompletedEvent,
+                ContextCompactionCompletedEvent | ContextWindowCompactionCompletedEvent,
             ):
                 raise ContextEventSliceError(
                     "transcript compaction terminal has wrong event type"
@@ -1281,9 +1360,7 @@ async def prepare_live_context_snapshot(
             projection_window=build_input.authority_slice_plan.transcript_window,
             stable_entries=stable_entries,
             documents=projection_evidence.document_registry,
-            hydrated_message_contents=(
-                projection_evidence.hydrated_message_contents
-            ),
+            hydrated_message_contents=(projection_evidence.hydrated_message_contents),
             terminal_content_text_by_artifact_id=terminal_content_texts,
             compaction_summary_text=summary_text,
             compaction_terminal_event=compaction_terminal,
@@ -1317,6 +1394,22 @@ async def prepare_live_context_snapshot(
             snapshot=build_input,
             cache=runtime_session.context_candidate_lifecycle_cache,
         )
+        selected_artifact_metadata = {
+            artifact_id: source_artifact_metadata[artifact_id]
+            for entry in prepared_candidates.prepared.entries
+            for artifact_id in entry.candidate.source_artifact_ids
+        }
+        hydrated_source_artifacts = await _hydrate_context_source_artifacts(
+            runtime_session=runtime_session,
+            artifact_metadata=selected_artifact_metadata,
+            physical_policy=build_input.context_source_physical_input_policy,
+        )
+        context_source_hydrated_contents = hydrate_context_source_content_sidecar(
+            candidates=tuple(
+                entry.candidate for entry in prepared_candidates.prepared.entries
+            ),
+            hydrated_artifacts=hydrated_source_artifacts,
+        )
         for diagnostic in prepared_candidates.operational_diagnostics:
             runtime_session.record_context_input_cache_diagnostic(
                 cache_kind="candidate_lifecycle",
@@ -1344,6 +1437,7 @@ async def prepare_live_context_snapshot(
         normalized_transcript=normalized,
         prepared_tool_results=prepared_tool_results,
         prepared_candidates=prepared_candidates.prepared,
+        context_source_hydrated_contents=context_source_hydrated_contents,
         transcript_projection_evidence=projection_evidence,
         prepared_named_fact_artifacts=prepared_named_fact_artifacts,
         candidate_cache_writes=prepared_candidates.cache_writes,
@@ -1399,9 +1493,7 @@ async def prepare_live_transcript_projection(
         run_start_ref=run_entry.run_start,
         latest_compaction_terminal_ref=latest_compaction,
         prior_transcript_through_sequence=(
-            run_entry.run_entry.transcript.source_through_sequence
-            if hasattr(run_entry.run_entry, "transcript")
-            else 0
+            start.run_transcript_seed_reference.source_ledger_through_sequence
         ),
     )
     authority_slice = full_slice
@@ -1409,11 +1501,8 @@ async def prepare_live_transcript_projection(
         runtime_session=runtime_session,
         transcript_window=authority_plan.transcript_window,
     )
-    projection_evidence = await (
-        runtime_session.transcript_projection_checkpoint_service
-        .prepare_projection_evidence(
-            requested_through_sequence=full_slice.through_sequence
-        )
+    projection_evidence = await runtime_session.transcript_projection_checkpoint_service.prepare_projection_evidence(
+        requested_through_sequence=full_slice.through_sequence
     )
     stable_entries = projection_evidence.stable_entries
     terminal_content_refs = required_terminal_content_artifacts(
@@ -1445,9 +1534,7 @@ async def prepare_live_transcript_projection(
         projection_window=authority_plan.transcript_window,
         stable_entries=stable_entries,
         documents=projection_evidence.document_registry,
-        hydrated_message_contents=(
-            projection_evidence.hydrated_message_contents
-        ),
+        hydrated_message_contents=(projection_evidence.hydrated_message_contents),
         terminal_content_text_by_artifact_id=terminal_content_texts,
         compaction_summary_text=summary_text,
         compaction_terminal_event=compaction_terminal,
@@ -1523,6 +1610,125 @@ async def _prepare_named_fact_artifacts(
 
     return await runtime_session.context_input_io_service.execute(
         operation_name="context-named-fact-artifact-read",
+        operation=read,
+        deadline_monotonic=deadline,
+    )
+
+
+async def _read_context_source_artifact_metadata(
+    *,
+    runtime_session: RuntimeSession,
+    expected_chars_by_artifact_id: dict[str, int],
+) -> dict[str, ContextSourceArtifactMetadata]:
+    if not expected_chars_by_artifact_id:
+        return {}
+    deadline = monotonic() + 30.0
+
+    def read() -> dict[str, ContextSourceArtifactMetadata]:
+        metadata: dict[str, ContextSourceArtifactMetadata] = {}
+        for artifact_id in sorted(expected_chars_by_artifact_id):
+            record = runtime_session.archive.get_info(
+                artifact_id,
+                session_id=runtime_session.runtime_session_id,
+                deadline_monotonic=deadline,
+            )
+            if not (
+                record.media_type.startswith("text/")
+                or record.media_type in {"application/json", "application/xml"}
+            ):
+                raise ContextEventSliceError(
+                    "ContextSource prose artifact is not text material"
+                )
+            reference = build_frozen_fact(
+                ContextArtifactReferenceFact,
+                schema_version="context_artifact_reference.v1",
+                artifact_id=record.id,
+                media_type=record.media_type,
+                content_sha256=record.digest,
+                content_bytes=record.size_bytes,
+                artifact_contract_fingerprint=context_fingerprint(
+                    "context-source-artifact-contract:v1", record.media_type
+                ),
+            )
+            metadata[artifact_id] = ContextSourceArtifactMetadata(
+                reference=reference,
+                expected_chars=expected_chars_by_artifact_id[artifact_id],
+            )
+        return metadata
+
+    return await runtime_session.context_input_io_service.execute(
+        operation_name="context-source-artifact-metadata-read",
+        operation=read,
+        deadline_monotonic=deadline,
+    )
+
+
+async def _hydrate_context_source_artifacts(
+    *,
+    runtime_session: RuntimeSession,
+    artifact_metadata: dict[str, ContextSourceArtifactMetadata],
+    physical_policy: ResolvedContextSourcePhysicalInputPolicyFact,
+) -> dict[str, HydratedContextSourceArtifact]:
+    if not artifact_metadata:
+        return {}
+    selected_bytes = sum(
+        item.reference.content_bytes for item in artifact_metadata.values()
+    )
+    if selected_bytes > physical_policy.max_hydrated_working_set_bytes:
+        raise ContextEventSliceError(
+            "selected ContextSource artifacts exceed resolved physical policy"
+        )
+    deadline = monotonic() + 30.0
+
+    def read() -> dict[str, HydratedContextSourceArtifact]:
+        hydrated: dict[str, HydratedContextSourceArtifact] = {}
+        page_chars = max(1, physical_policy.artifact_page_bytes // 4)
+        for artifact_id in sorted(artifact_metadata):
+            expected = artifact_metadata[artifact_id]
+            offset = 0
+            parts: list[str] = []
+            while True:
+                if monotonic() >= deadline:
+                    raise TimeoutError("ContextSource artifact hydration timed out")
+                page = runtime_session.archive.read_text(
+                    artifact_id,
+                    session_id=runtime_session.runtime_session_id,
+                    offset_chars=offset,
+                    max_chars=page_chars,
+                )
+                if (
+                    page.artifact.id != expected.reference.artifact_id
+                    or page.artifact.digest != expected.reference.content_sha256
+                    or page.artifact.size_bytes != expected.reference.content_bytes
+                ):
+                    raise ContextEventSliceError(
+                        "ContextSource artifact changed during paged hydration"
+                    )
+                if page.offset_chars != offset or page.returned_chars != len(page.text):
+                    raise ContextEventSliceError(
+                        "ContextSource artifact page cursor drifted"
+                    )
+                if not page.text and page.has_more:
+                    raise ContextEventSliceError(
+                        "ContextSource artifact page made no progress"
+                    )
+                parts.append(page.text)
+                offset += page.returned_chars
+                if not page.has_more:
+                    if page.total_chars not in {None, offset}:
+                        raise ContextEventSliceError(
+                            "ContextSource artifact total character count drifted"
+                        )
+                    break
+            hydrated[artifact_id] = HydratedContextSourceArtifact(
+                reference=expected.reference,
+                expected_chars=expected.expected_chars,
+                text="".join(parts),
+            )
+        return hydrated
+
+    return await runtime_session.context_input_io_service.execute(
+        operation_name="context-source-selected-artifact-read",
         operation=read,
         deadline_monotonic=deadline,
     )
@@ -1619,10 +1825,7 @@ async def _read_live_primary_event_slice(
         raise ContextEventSliceError(
             "event ledger requires reconciliation before context read"
         )
-    projection_delta_minimum_sequence = await (
-        runtime_session.transcript_projection_checkpoint_service
-        .projection_delta_minimum_sequence()
-    )
+    projection_delta_minimum_sequence = await runtime_session.transcript_projection_checkpoint_service.projection_delta_minimum_sequence()
     deadline = monotonic() + 30.0
 
     def read() -> _LiveAuthorityRead:
@@ -1841,9 +2044,7 @@ async def _read_live_primary_event_slice(
         }
         frozen = tuple(
             FrozenStoredEvent.from_raw_envelope(item)
-            for item in sorted(
-                sparse_by_id.values(), key=lambda item: item.sequence
-            )
+            for item in sorted(sparse_by_id.values(), key=lambda item: item.sequence)
             if item.sequence < authority_slice.from_sequence
         )
         local_named_slices = _contiguous_exact_slices(
@@ -1854,6 +2055,12 @@ async def _read_live_primary_event_slice(
             primary_slice=authority_slice,
             local_named_slices=local_named_slices,
             run_start=start,
+            authority_horizons=(
+                _ledger_authority_horizon(
+                    runtime_session_id=runtime_session.runtime_session_id,
+                    prefix=bundle.ledger_prefix,
+                ),
+            ),
         )
 
     authority = await runtime_session.context_input_io_service.execute(
@@ -1900,6 +2107,7 @@ async def _child_named_context_slices(
         return _ChildAuthorityRead(
             slices=(),
             rollout_state=None,
+            authority_horizons=(),
         )
     locator = runtime_session.context_event_log_locator
     if locator is None:
@@ -1920,6 +2128,10 @@ async def _child_named_context_slices(
         )
 
     def read_parent_authority() -> _ChildAuthorityRead:
+        parent_prefix = parent_log.read_raw_ledger_prefix(
+            through_sequence=owner_through_sequence,
+            deadline_monotonic=deadline,
+        )
         sparse_key = (
             entry.parent_runtime_session_id,
             f"parent-run:{entry.parent_run_id}:child:{entry.subagent_run_id}",
@@ -2027,6 +2239,12 @@ async def _child_named_context_slices(
                 events=frozen_relevant,
             ),
             rollout_state=rollout_state,
+            authority_horizons=(
+                _ledger_authority_horizon(
+                    runtime_session_id=entry.parent_runtime_session_id,
+                    prefix=parent_prefix,
+                ),
+            ),
         )
 
     read = await runtime_session.context_input_io_service.execute(

@@ -198,9 +198,7 @@ class MemoryReflectionOutput(BaseModel):
 @dataclass(frozen=True, slots=True)
 class MemoryReflectionOptions:
     model_role: ModelRole = ModelRole.FLASH
-    llm_options: LLMOptions = field(
-        default_factory=LLMOptions
-    )
+    llm_options: LLMOptions = field(default_factory=LLMOptions)
     max_summary_chars: int = 4_000
     tool_call_threshold: int = 3
     turn_threshold: int = 5
@@ -257,12 +255,13 @@ class MemoryReflectionEngine:
                 target=target,
                 purpose=ModelCallPurpose.MEMORY_REFLECTION,
             )
-            failure_stage = "model_stream"
+            failure_stage = "model_validation"
             call_result = await self._call_flash(
                 reflection_id,
                 reflection_input,
                 call=resolved_call,
             )
+            failure_stage = "model_stream"
             if call_result.outcome != "completed":
                 raise RuntimeError(
                     call_result.error.message if call_result.error else "provider error"
@@ -282,15 +281,11 @@ class MemoryReflectionEngine:
 
             failure_stage = "candidate_append"
             quote_indices = tuple(
-                index
-                for index, value in enumerate(output.quoted_evidence)
-                if value
+                index for index, value in enumerate(output.quoted_evidence) if value
             )
             quote_index = quote_indices[0] if quote_indices else None
             quote = (
-                output.quoted_evidence[quote_index]
-                if quote_index is not None
-                else None
+                output.quoted_evidence[quote_index] if quote_index is not None else None
             )
             for candidate_index, raw_candidate in enumerate(raw_candidates):
                 normalized = _candidate_with_id(
@@ -541,24 +536,42 @@ class MemoryReflectionEngine:
             raise RuntimeError(
                 "memory reflection model execution requires RuntimeSession ownership"
             )
-        start_bundle = prepare_model_lifecycle_start_bundle(
+        provider_input = await self.runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
             call=call,
             context=context,
             event_context=event_context,
-            runtime_session=self.runtime_session,
-            lifecycle_kind="direct_internal_call",
+            operation_kind="direct_model_call",
+            operation_id=reflection_id,
         )
-        handle = self.llm_runtime.start_stream(
-            call=call,
-            context=context,
-            event_context=event_context,
-            start_bundle=start_bundle,
-            commit_port=RuntimeSessionModelStreamEventCommitPort(
+        try:
+            context = provider_input.carrier.to_llm_context(context)
+            start_bundle = prepare_model_lifecycle_start_bundle(
+                call=call,
+                context=context,
+                event_context=event_context,
                 runtime_session=self.runtime_session,
-                state=None,
-            ),
-            execution_registry=self.runtime_session.model_stream_execution_registry,
-        )
+                lifecycle_kind="direct_internal_call",
+                provider_input_start_bundle=provider_input,
+            )
+            handle = self.llm_runtime.start_stream(
+                call=call,
+                context=context,
+                event_context=event_context,
+                start_bundle=start_bundle,
+                commit_port=RuntimeSessionModelStreamEventCommitPort(
+                    runtime_session=self.runtime_session,
+                    state=None,
+                ),
+                execution_registry=(
+                    self.runtime_session.model_stream_execution_registry
+                ),
+            )
+        except BaseException:
+            await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                provider_input.prepared_candidate.preparation_ownership.preparation_id,
+                reason="one_shot_failed_before_start",
+            )
+            raise
         return await collect_direct_model_call_handle(
             handle,
             expected_call=call,

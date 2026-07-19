@@ -47,6 +47,9 @@ from pulsara_agent.primitives.run_boundary import (
 if TYPE_CHECKING:
     from pulsara_agent.llm.request import LLMContext
     from pulsara_agent.llm.resolution import ResolvedModelCall
+    from pulsara_agent.runtime.provider_input.planner import (
+        PreparedProviderInputStartBundle,
+    )
     from pulsara_agent.runtime.session import RuntimeSession
 
 
@@ -75,6 +78,7 @@ class ModelLifecycleStartCommitBundle:
     recovery_plan: ModelStreamRecoveryPlanFact
     companion_candidates: tuple[FrozenEventWriteCandidate, ...]
     governance_input_attribution: GovernanceModelInputAttributionFact | None
+    provider_input_start_bundle: PreparedProviderInputStartBundle | None
     bundle_fingerprint: str
 
     @property
@@ -114,9 +118,17 @@ def prepare_model_lifecycle_start_bundle(
     extra_companion_candidates: tuple[AgentEvent, ...] = (),
     prepared_rollout_reservation: PreparedModelRolloutReservation | None = None,
     governance_input_attribution: GovernanceModelInputAttributionFact | None = None,
+    provider_input_start_bundle: PreparedProviderInputStartBundle | None = None,
 ) -> ModelLifecycleStartCommitBundle:
     """Freeze estimate-only lifecycle facts without starting provider I/O."""
 
+    if (
+        not runtime_session.allow_unbootstrapped_test_events
+        and provider_input_start_bundle is None
+    ):
+        raise ValueError(
+            "production model lifecycle requires a prepared provider input bundle"
+        )
     estimate = estimate_model_context_for_call(call=call, context=context)
     prepared_reservation = (
         prepared_rollout_reservation
@@ -157,6 +169,8 @@ def prepare_model_lifecycle_start_bundle(
                 reservation=reservation,
             )
         )
+    if provider_input_start_bundle is not None:
+        companions.extend(provider_input_start_bundle.companion_events)
     companions.extend(extra_companion_candidates)
     frozen_companions = tuple(
         freeze_event_write_candidate(event) for event in companions
@@ -175,6 +189,7 @@ def prepare_model_lifecycle_start_bundle(
         ),
         companion_candidates=frozen_companions,
         governance_input_attribution=governance_input_attribution,
+        provider_input_start_bundle=provider_input_start_bundle,
     )
     bundle = ModelLifecycleStartCommitBundle(
         **payload,
@@ -189,6 +204,10 @@ def prepare_model_lifecycle_start_bundle(
         context=context,
         event_context=event_context,
     )
+    if provider_input_start_bundle is not None:
+        runtime_session.provider_input_generation_coordinator.activate_preparation(
+            provider_input_start_bundle
+        )
     return bundle
 
 
@@ -233,9 +252,7 @@ def validate_model_lifecycle_start_bundle(
             or call.fact.context_mode is not ModelContextMode.COMPILED
             or bundle.rollout_accounting_mode == "not_rollout_accounted"
         ):
-            raise ValueError(
-                "main lifecycle requires an accounted compiled agent call"
-            )
+            raise ValueError("main lifecycle requires an accounted compiled agent call")
         if context.model_call_index is None:
             raise ValueError("main lifecycle requires a model call index")
         if (
@@ -252,14 +269,11 @@ def validate_model_lifecycle_start_bundle(
         raise ValueError("direct/window lifecycle cannot carry reply identity")
     elif window:
         if (
-            call.fact.purpose
-            is not ModelCallPurpose.CONTEXT_WINDOW_COMPACTION_SUMMARY
+            call.fact.purpose is not ModelCallPurpose.CONTEXT_WINDOW_COMPACTION_SUMMARY
             or call.fact.context_mode is not ModelContextMode.DIRECT
             or bundle.rollout_accounting_mode == "not_rollout_accounted"
         ):
-            raise ValueError(
-                "window lifecycle requires an accounted compaction call"
-            )
+            raise ValueError("window lifecycle requires an accounted compaction call")
     elif (
         call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP
         or call.fact.context_mode is not ModelContextMode.DIRECT
@@ -282,9 +296,7 @@ def validate_model_lifecycle_start_bundle(
         raise ValueError("unreserved model bundle must be not-rollout-accounted")
     companion_events = bundle._companion_events()
     reply_starts = tuple(
-        event
-        for event in companion_events
-        if isinstance(event, ReplyStartEvent)
+        event for event in companion_events if isinstance(event, ReplyStartEvent)
     )
     if main != (len(reply_starts) == 1):
         raise ValueError("model lifecycle reply companion mismatch")
@@ -307,15 +319,23 @@ def validate_model_lifecycle_start_bundle(
         for event in companion_events
         if isinstance(event, RolloutBudgetReservationCreatedEvent)
     )
+    provider_bundle = bundle.provider_input_start_bundle
+    provider_event_ids = (
+        tuple(event.id for event in provider_bundle.companion_events)
+        if provider_bundle is not None
+        else ()
+    )
+    provider_event_id_set = frozenset(provider_event_ids)
+    base_companions = tuple(
+        event for event in companion_events if event.id not in provider_event_id_set
+    )
     if main:
         if (
-            len(companion_events) != 2
-            or not isinstance(companion_events[0], ReplyStartEvent)
+            len(base_companions) != 2
+            or not isinstance(base_companions[0], ReplyStartEvent)
             or len(reservation_events) != 1
         ):
-            raise ValueError(
-                "main lifecycle requires reply-start plus one reservation"
-            )
+            raise ValueError("main lifecycle requires reply-start plus one reservation")
     elif window:
         started = tuple(
             event
@@ -324,15 +344,33 @@ def validate_model_lifecycle_start_bundle(
             and event.type.value == "CONTEXT_WINDOW_COMPACTION_STARTED"
         )
         if (
-            len(companion_events) != 2
+            len(base_companions) != 2
             or len(reservation_events) != 1
             or len(started) != 1
         ):
             raise ValueError(
                 "window lifecycle requires reservation plus matching started fact"
             )
-    elif companion_events:
+    elif base_companions:
         raise ValueError("direct lifecycle cannot carry start companions")
+    if provider_bundle is not None:
+        from pulsara_agent.runtime.provider_input.materialization import (
+            validate_dispatch_context_against_plan,
+        )
+
+        prepared = provider_bundle.prepared_candidate
+        if (
+            prepared.provider_input_plan.resolved_model_call_fact != call.fact
+            or prepared.preparation_ownership.resolved_model_call_id
+            != call.fact.resolved_model_call_id
+            or provider_event_ids != prepared.stable_companion_event_ids
+            or provider_bundle.carrier.to_llm_context(context) != context
+        ):
+            raise ValueError("provider input lifecycle bundle identity drifted")
+        validate_dispatch_context_against_plan(
+            context=context,
+            plan=prepared.provider_input_plan,
+        )
     governance = call.fact.purpose is ModelCallPurpose.MEMORY_GOVERNANCE
     if governance != (bundle.governance_input_attribution is not None):
         raise ValueError("governance model lifecycle attribution matrix mismatch")
@@ -357,6 +395,7 @@ def validate_model_lifecycle_start_bundle(
         reservation_quote=bundle.reservation_quote,
         companion_candidates=bundle.companion_candidates,
         governance_input_attribution=bundle.governance_input_attribution,
+        provider_input_start_bundle=bundle.provider_input_start_bundle,
     )
     expected = context_fingerprint(
         "model-lifecycle-start-bundle:v1",
@@ -381,9 +420,7 @@ def _prepare_model_reservation(
         ModelCallPurpose.CONTEXT_WINDOW_COMPACTION_SUMMARY,
     }:
         return None, "not_rollout_accounted", None
-    run_start = runtime_session.long_horizon_state_store.run_start(
-        event_context.run_id
-    )
+    run_start = runtime_session.long_horizon_state_store.run_start(event_context.run_id)
     if run_start is None:
         return None, "not_rollout_accounted", None
     binding = resolve_run_rollout_binding(
@@ -407,7 +444,9 @@ def _prepare_model_reservation(
                 "child model call is unavailable after parent finalization"
             )
         if quote.reserved_milliunits > binding.child_state.remaining_milliunits:
-            raise RuntimeError("child model call exceeds its rollout subaccount hard ceiling")
+            raise RuntimeError(
+                "child model call exceeds its rollout subaccount hard ceiling"
+            )
         bucket = "exploration"
         source_sequence = binding.child_state.through_sequence
         accounting_mode: RolloutAccountingMode = "child_subaccount"
@@ -533,6 +572,7 @@ def _bundle_payload(
     reservation_quote: ModelCallReservationQuoteFact | None,
     companion_candidates: tuple[FrozenEventWriteCandidate, ...],
     governance_input_attribution: GovernanceModelInputAttributionFact | None,
+    provider_input_start_bundle: PreparedProviderInputStartBundle | None,
 ) -> dict[str, object]:
     return {
         "resolved_model_call_id": call_id,
@@ -548,12 +588,28 @@ def _bundle_payload(
         "recovery_plan": recovery_plan,
         "companion_candidates": companion_candidates,
         "governance_input_attribution": governance_input_attribution,
+        "provider_input_start_bundle": provider_input_start_bundle,
     }
 
 
 def _bundle_fingerprint_payload(payload: dict[str, object]) -> dict[str, object]:
     candidates = payload["companion_candidates"]
     assert isinstance(candidates, tuple)
+    provider = payload.get("provider_input_start_bundle")
+    provider_payload = None
+    if provider is not None:
+        provider_payload = {
+            "prepared_candidate_fingerprint": (
+                provider.prepared_candidate.candidate_fingerprint
+            ),
+            "committed_reference_fingerprint": (
+                provider.committed_reference.reference_fingerprint
+            ),
+            "carrier_fingerprint": provider.carrier.carrier_fingerprint,
+            "companion_event_ids": tuple(
+                event.id for event in provider.companion_events
+            ),
+        }
     return {
         **payload,
         "companion_candidates": tuple(
@@ -561,6 +617,7 @@ def _bundle_fingerprint_payload(payload: dict[str, object]) -> dict[str, object]
             for candidate in candidates
             if isinstance(candidate, FrozenEventWriteCandidate)
         ),
+        "provider_input_start_bundle": provider_payload,
     }
 
 

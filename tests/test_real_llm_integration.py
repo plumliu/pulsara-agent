@@ -43,6 +43,9 @@ from pulsara_agent.event import (
     PlanExitResolvedEvent,
     PlanModeEnteredEvent,
     PlanModeExitedEvent,
+    ProviderInputAppendCommittedEvent,
+    ProviderInputGenerationRolloverResolvedEvent,
+    ProviderInputGenerationStartedEvent,
     RequireUserConfirmEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -215,9 +218,7 @@ async def _bootstrap_direct_real_runtime_session(
         user_input=user_input,
         turn_id=context.turn_id,
         reply_id=context.reply_id,
-        mcp_installation_owner_runtime_session_id=(
-            runtime_session.runtime_session_id
-        ),
+        mcp_installation_owner_runtime_session_id=(runtime_session.runtime_session_id),
         model_target=model_target,
     )
     fields.update(
@@ -267,14 +268,19 @@ def test_real_flash_model_emits_replayable_agent_events():
     result = asyncio.run(_run_real_flash_smoke())
 
     assert result["errors"] == []
-    assert result["event_type_names"][0] == "ModelCallStartEvent"
+    assert result["event_type_names"][:3] == [
+        "ProviderInputGenerationStartedEvent",
+        "ProviderInputAppendCommittedEvent",
+        "ModelCallStartEvent",
+    ]
     assert "ModelCallStartEvent" in result["event_type_names"]
     assert "TextBlockSegmentEvent" in result["event_type_names"]
     assert "ModelCallEndEvent" in result["event_type_names"]
     assert result["event_type_names"][-1] == "PhysicalOperationReservationSettledEvent"
-    assert result["event_type_names"].index("ModelCallEndEvent") < len(
-        result["event_type_names"]
-    ) - 1
+    assert (
+        result["event_type_names"].index("ModelCallEndEvent")
+        < len(result["event_type_names"]) - 1
+    )
     assert "PULSARA_OK" in result["text"]
     assert result["replayed_text"]
     assert "PULSARA_OK" in result["replayed_text"]
@@ -313,9 +319,10 @@ def test_real_flash_model_accepts_message_level_system_item():
     assert "ModelCallStartEvent" in result["event_type_names"]
     assert "ModelCallEndEvent" in result["event_type_names"]
     assert result["event_type_names"][-1] == "PhysicalOperationReservationSettledEvent"
-    assert result["event_type_names"].index("ModelCallEndEvent") < len(
-        result["event_type_names"]
-    ) - 1
+    assert (
+        result["event_type_names"].index("ModelCallEndEvent")
+        < len(result["event_type_names"]) - 1
+    )
     assert "PULSARA_SYSTEM_MSG_OK" in result["text"]
     assert "PULSARA_SYSTEM_MSG_OK" in result["replayed_text"]
 
@@ -384,6 +391,23 @@ def test_real_agent_runtime_completes_tool_loop_with_responses_api(tmp_path):
     assert result["tool_result_ids"] == result["tool_call_ids"]
     assert result["final_text"]
     assert "PULSARA_RESPONSES_TOOL_OK" in result["final_text"]
+    assert len(set(result["provider_generation_ids"])) == 1
+    assert len(result["provider_generation_revisions"]) >= 2
+    assert result["provider_generation_revisions"] == list(
+        range(1, len(result["provider_generation_revisions"]) + 1)
+    )
+    assert result["provider_rollover_reasons"] == []
+    print(
+        "\nREAL_LLM_PROVIDER_INPUT_CACHE_OBSERVATION="
+        + json.dumps(
+            {
+                "generation_ids": result["provider_generation_ids"],
+                "generation_revisions": result["provider_generation_revisions"],
+                "cached_input_tokens": result["cached_input_tokens"],
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def test_real_agent_runtime_read_only_policy_keeps_tools_visible_but_blocks_them(
@@ -1119,12 +1143,12 @@ def test_real_llm_trajectory_suite_covers_narrow_memory_tools(tmp_path):
     multi_tool = trajectories[4]
     assert multi_tool["event_type_names"][0] == "RunStartEvent"
     assert (
-        multi_tool["event_type_names"][-1]
-        == "PhysicalOperationReservationSettledEvent"
+        multi_tool["event_type_names"][-1] == "PhysicalOperationReservationSettledEvent"
     )
-    assert multi_tool["event_type_names"].index("RunEndEvent") < len(
-        multi_tool["event_type_names"]
-    ) - 1
+    assert (
+        multi_tool["event_type_names"].index("RunEndEvent")
+        < len(multi_tool["event_type_names"]) - 1
+    )
     assert multi_tool["tool_names"].count("read_file") >= 2
     assert "search_files" in multi_tool["tool_names"]
     tool_result_text = "\n".join(multi_tool["tool_result_summaries"])
@@ -1548,7 +1572,7 @@ async def _run_real_flash_smoke() -> dict:
             target=target,
             purpose=ModelCallPurpose.MEMORY_REFLECTION,
         )
-        handle = start_test_direct_model_stream(
+        handle = await start_test_direct_model_stream(
             runtime,
             call=call,
             context=bind_test_context(call, context),
@@ -1985,6 +2009,16 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
             if isinstance(event, ToolResultStartEvent)
         ]
         errors = _run_error_diagnostics(events)
+        appends = [
+            event
+            for event in events
+            if isinstance(event, ProviderInputAppendCommittedEvent)
+        ]
+        rollovers = [
+            event
+            for event in events
+            if isinstance(event, ProviderInputGenerationRolloverResolvedEvent)
+        ]
         return {
             "status": result.status.value,
             "stop_reason": result.stop_reason,
@@ -1992,6 +2026,18 @@ async def _run_real_agent_tool_loop_smoke(tmp_path: Path) -> dict:
             "tool_call_ids": tool_call_ids,
             "tool_result_ids": tool_result_ids,
             "errors": errors,
+            "provider_generation_ids": [event.generation_id for event in appends],
+            "provider_generation_revisions": [
+                event.resulting_revision for event in appends
+            ],
+            "provider_rollover_reasons": [
+                event.rollover_request.intent.reason.value for event in rollovers
+            ],
+            "cached_input_tokens": [
+                event.usage.cached_input_tokens
+                for event in events
+                if isinstance(event, ModelCallEndEvent) and event.usage is not None
+            ],
         }
     finally:
         await _cleanup_real_durable_wiring_async(wiring)
@@ -5277,7 +5323,7 @@ async def _collect_real_events(
             target=target,
             purpose=ModelCallPurpose.MEMORY_REFLECTION,
         )
-        handle = start_test_direct_model_stream(
+        handle = await start_test_direct_model_stream(
             runtime,
             call=call,
             context=bind_test_context(call, context),
@@ -5297,11 +5343,21 @@ async def _collect_real_events(
         events = log.iter(reply_id=event_context.reply_id)
         assert any(isinstance(event, ModelCallStartEvent) for event in events)
         assert any(isinstance(event, ModelCallEndEvent) for event in events) or errors
-        assert isinstance(events[0], ModelCallStartEvent)
+        assert tuple(type(event) for event in events[:3]) == (
+            ProviderInputGenerationStartedEvent,
+            ProviderInputAppendCommittedEvent,
+            ModelCallStartEvent,
+        )
         if not errors:
             event_type_names = [type(event).__name__ for event in events]
+            assert "ProviderInputGenerationClosedEvent" in event_type_names
+            assert event_type_names.index("ModelCallEndEvent") < event_type_names.index(
+                "ProviderInputGenerationClosedEvent"
+            )
             assert event_type_names[-1] == "PhysicalOperationReservationSettledEvent"
-            assert event_type_names.index("ModelCallEndEvent") < len(event_type_names) - 1
+            assert (
+                event_type_names.index("ModelCallEndEvent") < len(event_type_names) - 1
+            )
         return {
             "events": events,
             "model_result": model_result,
@@ -5413,7 +5469,7 @@ async def _run_real_flash_memory_reflection_smoke() -> dict:
         )
         governance_result = await governance_engine.run_pending(
             trigger_reason="real_memory_reflection",
-            governance_batch_id=governance_batch_id
+            governance_batch_id=governance_batch_id,
         )
         outbox_applied_count = _replay_real_graph_outbox(settings, graph_id=graph_id)
         governance_events = [

@@ -13,6 +13,9 @@ from pulsara_agent.memory.foundation.records import ArtifactContentConflict
 from pulsara_agent.llm import LLMRuntime, ModelRole
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.context_source import (
+    ArtifactContextSourceContentSemanticFact,
+)
 from pulsara_agent.primitives.long_horizon import (
     LongHorizonContextAllocationPolicyFact,
 )
@@ -48,7 +51,7 @@ from tests.test_agent_runtime_loop import (
 )
 
 
-async def _candidate(tmp_path, monkeypatch):
+async def _candidate(tmp_path, monkeypatch, *, system_prompt: str | None = None):
     import pulsara_agent.runtime.agent as agent_module
 
     captured = []
@@ -64,6 +67,7 @@ async def _candidate(tmp_path, monkeypatch):
         capability_runtime=CapabilityRuntime(),
         runtime_session=in_memory_runtime_session(tmp_path),
         llm_runtime=make_llm_runtime(ScriptedTransport([{"text": "done"}])),
+        system_prompt=system_prompt,
     )
     await run_agent_task(agent, "manifest me")
     prepared = captured[0]
@@ -361,7 +365,7 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         )
         assert replayed.prepared_tool_results.cache_hints == ()
         assert replayed.prepared_candidates == prepared.prepared_candidates
-        assert replayed.manifest.schema_version == "context-input-manifest:v6"
+        assert replayed.manifest.schema_version == "context-input-manifest:v8"
         frozen_projection = replayed.manifest.transcript_provider_projection
 
         def reject_timing_recomputation(**_kwargs):
@@ -376,11 +380,7 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
             "prepare_transcript_provider_projection",
             reject_timing_recomputation,
         )
-        monkeypatch.setattr(
-            projection_module,
-            "_timing_header_text",
-            reject_timing_recomputation,
-        )
+        assert not hasattr(projection_module, "_timing_header_text")
         monkeypatch.setattr(
             restore_module,
             "_checkpoint_candidates",
@@ -400,8 +400,7 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         assert exact.status is ContextInputReplayStatus.EXACT_REPLAY
         assert exact.inputs == replayed
         assert (
-            exact.compiled_context.transcript_provider_projection
-            == frozen_projection
+            exact.compiled_context.transcript_provider_projection == frozen_projection
         )
         transcript_sections = {
             section.id: section
@@ -414,16 +413,65 @@ def test_context_input_manifest_replays_same_snapshot_transcript_and_units(
         for projection_section in frozen_projection.sections:
             timing = projection_section.semantic_identity.timing_semantic
             compiled_section = transcript_sections[projection_section.section_id]
-            assert (
-                compiled_section.metadata["timing_header_text"]
-                == timing.rendered_timing_header
-            )
-            assert compiled_section.metadata["timing"]["age_seconds"] == (
-                timing.age_seconds
-            )
+            assert timing.rendered_timing_header is None
+            assert timing.age_seconds is None
+            assert "timing_header_text" not in compiled_section.metadata
+            assert compiled_section.metadata["timing"]["age_seconds"] is None
         assert (
             compiled.provider_neutral_payload_fingerprint
             == provider_neutral_payload_fingerprint(exact.compiled_context.llm_context)
+        )
+
+    asyncio.run(scenario())
+
+
+def test_exact_replay_hydrates_artifact_backed_context_source(
+    tmp_path, monkeypatch
+) -> None:
+    async def scenario() -> None:
+        system_prompt = "artifact-backed system source\n" + ("x" * 70_000)
+        _, prepared, agent = await _candidate(
+            tmp_path,
+            monkeypatch,
+            system_prompt=system_prompt,
+        )
+        system_candidate = next(
+            item
+            for item in prepared.invocation.fact.context_source_candidates
+            if item.source_instance_id == "system:prompt"
+        )
+        assert isinstance(
+            system_candidate.model_visible_content,
+            ArtifactContextSourceContentSemanticFact,
+        )
+        compiled = next(
+            event
+            for event in agent.runtime_session.event_log.iter()
+            if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
+        )
+        assert compiled.input_audit is not None
+        audit = compiled.input_audit
+        event_slice = ContextEventSlice.from_read_snapshot(
+            runtime_session_id=audit.source_runtime_session_id,
+            minimum_sequence=audit.authority_from_sequence,
+            snapshot=agent.runtime_session.event_log.read_raw_range_snapshot(
+                minimum_sequence=audit.authority_from_sequence,
+                through_sequence=audit.source_through_sequence,
+            ),
+        )
+
+        replayed = replay_compiled_context(
+            event=compiled,
+            archive=agent.runtime_session.archive,
+            event_log=agent.runtime_session.event_log,
+            event_slice=event_slice,
+        )
+
+        assert replayed.status is ContextInputReplayStatus.EXACT_REPLAY
+        assert replayed.compiled_context.llm_context.system_prompt == system_prompt
+        assert (
+            provider_neutral_payload_fingerprint(replayed.compiled_context.llm_context)
+            == compiled.provider_neutral_payload_fingerprint
         )
 
     asyncio.run(scenario())
@@ -504,15 +552,16 @@ def test_rollup_exact_replay_matches_live_payload(tmp_path, monkeypatch) -> None
             llm_runtime=LLMRuntime(config=config, registry=registry),
         )
 
-        result = await run_agent_task(agent, "Read twelve pages from the same large file")
+        result = await run_agent_task(
+            agent, "Read twelve pages from the same large file"
+        )
         assert result.status.value == "finished", result.error_message
         compiled = next(
             event
             for event in reversed(
                 runtime_session.event_log.iter(run_id=result.state.run_id)
             )
-            if isinstance(event, ContextCompiledEvent)
-            and event.status == "compiled"
+            if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
         )
         assert compiled.input_audit is not None
         manifest = load_context_input_manifest(
@@ -545,9 +594,10 @@ def test_rollup_exact_replay_matches_live_payload(tmp_path, monkeypatch) -> None
             event_slice=event_slice,
         )
         assert replayed.status is ContextInputReplayStatus.EXACT_REPLAY
-        assert provider_neutral_payload_fingerprint(
-            replayed.compiled_context.llm_context
-        ) == compiled.provider_neutral_payload_fingerprint
+        assert (
+            provider_neutral_payload_fingerprint(replayed.compiled_context.llm_context)
+            == compiled.provider_neutral_payload_fingerprint
+        )
 
         import pulsara_agent.runtime.context_input.replay as replay_module
 
@@ -567,8 +617,7 @@ def test_rollup_exact_replay_matches_live_payload(tmp_path, monkeypatch) -> None
                 event_slice=event_slice,
             )
         assert (
-            contract_mismatch.value.status
-            is ContextInputReplayStatus.CONTRACT_MISMATCH
+            contract_mismatch.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
         )
         assert (
             contract_mismatch.value.reason_code
@@ -589,10 +638,11 @@ def test_rollup_exact_replay_matches_live_payload(tmp_path, monkeypatch) -> None
                 event_log=runtime_session.event_log,
                 event_slice=event_slice,
             )
-        assert artifact_missing.value.status is ContextInputReplayStatus.ARTIFACT_MISSING
         assert (
-            artifact_missing.value.reason_code
-            == "observation_rollup_artifact_missing"
+            artifact_missing.value.status is ContextInputReplayStatus.ARTIFACT_MISSING
+        )
+        assert (
+            artifact_missing.value.reason_code == "observation_rollup_artifact_missing"
         )
 
     asyncio.run(scenario())
@@ -611,9 +661,7 @@ def test_current_run_recent_protection_moves_to_latest_tool_batch(tmp_path) -> N
                         "id": f"call:{name}:{offset}",
                         "name": "read_file",
                         "arguments": (
-                            '{"path":"pages.txt","offset":'
-                            f"{offset}"
-                            ',"limit":1}'
+                            f'{{"path":"pages.txt","offset":{offset},"limit":1}}'
                         ),
                     }
                     for offset in offsets
@@ -670,8 +718,7 @@ def test_current_run_recent_protection_moves_to_latest_tool_batch(tmp_path) -> N
             for event in reversed(
                 runtime_session.event_log.iter(run_id=result.state.run_id)
             )
-            if isinstance(event, ContextCompiledEvent)
-            and event.status == "compiled"
+            if isinstance(event, ContextCompiledEvent) and event.status == "compiled"
         )
         assert compiled.input_audit is not None
         manifest = load_context_input_manifest(
@@ -683,9 +730,7 @@ def test_current_run_recent_protection_moves_to_latest_tool_batch(tmp_path) -> N
             for projection in manifest.projection_state.unit_projections
             if "current_run_recent" in projection.protected_reason_codes
         }
-        assert recent_call_ids == {
-            f"call:second:{offset}" for offset in range(5, 9)
-        }
+        assert recent_call_ids == {f"call:second:{offset}" for offset in range(5, 9)}
         assert all(
             "current_run_recent" not in projection.protected_reason_codes
             for projection in manifest.projection_state.unit_projections
@@ -778,9 +823,7 @@ def test_replay_unknown_or_unsupported_graph_domain_event_is_contract_mismatch(
                 event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
-        assert raised.value.reason_code == (
-            "subagent_graph_reducer_contract_mismatch"
-        )
+        assert raised.value.reason_code == ("subagent_graph_reducer_contract_mismatch")
 
     asyncio.run(scenario())
 
@@ -807,11 +850,11 @@ def test_context_input_replay_classifies_missing_manifest_artifact(
             snapshot=read,
         )
         with pytest.raises(ContextInputReplayError) as raised:
-                replay_context_input(
-                    audit=audit,
-                    archive=InMemoryArchiveStore(),
-                    event_log=agent.runtime_session.event_log,
-                    event_slice=event_slice,
+            replay_context_input(
+                audit=audit,
+                archive=InMemoryArchiveStore(),
+                event_log=agent.runtime_session.event_log,
+                event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.ARTIFACT_MISSING
         assert raised.value.reason_code == "context_input_manifest_missing"
@@ -843,11 +886,11 @@ def test_context_input_replay_classifies_audit_contract_mismatch(
             snapshot=read,
         )
         with pytest.raises(ContextInputReplayError) as raised:
-                replay_context_input(
-                    audit=audit,
-                    archive=agent.runtime_session.archive,
-                    event_log=agent.runtime_session.event_log,
-                    event_slice=event_slice,
+            replay_context_input(
+                audit=audit,
+                archive=agent.runtime_session.archive,
+                event_log=agent.runtime_session.event_log,
+                event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
         assert raised.value.reason_code == "context_input_manifest_audit_mismatch"
@@ -878,11 +921,11 @@ def test_context_input_replay_classifies_wrong_authority_range_as_untrusted(
         )
         wrong_slice = event_slice.subslice(from_sequence=event_slice.from_sequence + 1)
         with pytest.raises(ContextInputReplayError) as raised:
-                replay_context_input(
-                    audit=audit,
-                    archive=agent.runtime_session.archive,
-                    event_log=agent.runtime_session.event_log,
-                    event_slice=wrong_slice,
+            replay_context_input(
+                audit=audit,
+                archive=agent.runtime_session.archive,
+                event_log=agent.runtime_session.event_log,
+                event_slice=wrong_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.LEDGER_UNTRUSTED
         assert raised.value.reason_code == "context_input_event_slice_untrusted"
@@ -924,13 +967,15 @@ def test_exact_replay_rederives_selection_and_candidate_authority(
             lambda **_kwargs: (),
         )
         with pytest.raises(ContextInputReplayError) as selection_error:
-                replay_context_input(
-                    audit=audit,
-                    archive=agent.runtime_session.archive,
-                    event_log=agent.runtime_session.event_log,
-                    event_slice=event_slice,
+            replay_context_input(
+                audit=audit,
+                archive=agent.runtime_session.archive,
+                event_log=agent.runtime_session.event_log,
+                event_slice=event_slice,
             )
-        assert selection_error.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
+        assert (
+            selection_error.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
+        )
         assert selection_error.value.reason_code == (
             "context_input_candidate_selection_mismatch"
         )
@@ -940,19 +985,25 @@ def test_exact_replay_rederives_selection_and_candidate_authority(
             original_selection_builder,
         )
 
-        monkeypatch.setattr(
-            replay_module,
-            "build_context_candidate_authorities",
-            lambda **_kwargs: (),
-        )
+        original_source_builder = replay_module.build_context_sources
+
+        def forge_empty_sources(**kwargs):
+            from dataclasses import replace
+
+            built = original_source_builder(**kwargs)
+            return replace(built, candidates=())
+
+        monkeypatch.setattr(replay_module, "build_context_sources", forge_empty_sources)
         with pytest.raises(ContextInputReplayError) as authority_error:
-                replay_context_input(
-                    audit=audit,
-                    archive=agent.runtime_session.archive,
-                    event_log=agent.runtime_session.event_log,
-                    event_slice=event_slice,
+            replay_context_input(
+                audit=audit,
+                archive=agent.runtime_session.archive,
+                event_log=agent.runtime_session.event_log,
+                event_slice=event_slice,
             )
-        assert authority_error.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
+        assert (
+            authority_error.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
+        )
         assert authority_error.value.reason_code == (
             "context_input_candidate_authority_mismatch"
         )
@@ -991,6 +1042,7 @@ def test_inspector_reports_exact_only_after_payload_replay(
                 "PostgresEventLog",
                 lambda **_kwargs: agent.runtime_session.event_log,
             )
+
         projection = inspector_service._context_input_replay_projection(  # noqa: SLF001
             compiled,
             _Store(),
@@ -1036,9 +1088,7 @@ def test_inspector_distinguishes_zero_cap_omitted_subagent_selection(
         open_test_root_rollout_run(
             runtime_session,
             event_context=seed_context,
-            model_target=agent.llm_runtime.resolve_target(
-                role=ModelRole.PRO
-            ).fact,
+            model_target=agent.llm_runtime.resolve_target(role=ModelRole.PRO).fact,
         )
         seeded = await agent.subagent_runtime.spawn_fake(
             task="inspector omitted result",
@@ -1075,6 +1125,7 @@ def test_inspector_distinguishes_zero_cap_omitted_subagent_selection(
                 "PostgresEventLog",
                 lambda **_kwargs: runtime_session.event_log,
             )
+
         projection = inspector_service._context_input_replay_projection(  # noqa: SLF001
             compiled,
             _Store(),
@@ -1121,11 +1172,11 @@ def test_exact_replay_rejects_provider_neutral_payload_drift(
             update={"provider_neutral_payload_fingerprint": "sha256:" + "f" * 64}
         )
         with pytest.raises(ContextInputReplayError) as raised:
-                replay_compiled_context(
-                    event=drifted,
-                    archive=agent.runtime_session.archive,
-                    event_log=agent.runtime_session.event_log,
-                    event_slice=event_slice,
+            replay_compiled_context(
+                event=drifted,
+                archive=agent.runtime_session.archive,
+                event_log=agent.runtime_session.event_log,
+                event_slice=event_slice,
             )
         assert raised.value.status is ContextInputReplayStatus.CONTRACT_MISMATCH
         assert raised.value.reason_code == "compiled_context_payload_mismatch"

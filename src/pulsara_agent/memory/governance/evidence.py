@@ -28,6 +28,7 @@ from pulsara_agent.memory.candidates.pool import (
 )
 from pulsara_agent.memory.foundation.protocols import ArtifactStore
 from pulsara_agent.primitives import context_fingerprint
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.model_call import ModelCallControlDisposition
@@ -1340,15 +1341,25 @@ def _leaf_entry_ref(
     entry: TranscriptProjectionLeafEntryFact,
     source_refs: tuple[GovernanceStoredEventReferenceFact, ...],
 ) -> TranscriptProjectionLeafEntryReferenceFact:
+    context_refs = tuple(
+        ContextEventReferenceFact(
+            runtime_session_id=ref.stable_identity.runtime_session_id,
+            event_id=ref.stable_identity.event_id,
+            sequence=ref.sequence,
+            event_type=ref.stable_identity.event_type,
+            payload_fingerprint=ref.stable_identity.payload_fingerprint,
+        )
+        for ref in source_refs
+    )
     return build_frozen_fact(
         TranscriptProjectionLeafEntryReferenceFact,
-        schema_version="transcript_projection_leaf_entry_reference.v1",
+        schema_version="transcript_projection_leaf_entry_reference.v2",
         runtime_session_id=runtime_session_id,
         entry_kind=entry.entry_kind,
         ordinal=int(entry.ordinal.value_hex, 16),
         entry_semantic_fingerprint=entry.semantic_identity.semantic_fingerprint,
         entry_fact_fingerprint=entry.fact_fingerprint,
-        source_event_references=source_refs,
+        source_event_references=context_refs,
     )
 
 

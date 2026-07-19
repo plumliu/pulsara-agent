@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from pulsara_agent.llm.estimator import TokenEstimate
@@ -23,8 +23,16 @@ from pulsara_agent.primitives.transcript_projection import (
 )
 
 if TYPE_CHECKING:
+    from pulsara_agent.primitives._context_base import ContextEventReferenceFact
+    from pulsara_agent.primitives.context import ContextSectionCandidate
     from pulsara_agent.runtime.context_input.provider_projection import (
         PreparedTranscriptProviderProjectionFact,
+    )
+    from pulsara_agent.runtime.provider_input.causal import (
+        PreparedOrderedProviderTranscriptProjection,
+    )
+    from pulsara_agent.primitives.provider_input import (
+        ResolvedProviderInputCausalAndPhysicalPolicyFact,
     )
 
 ContextChannel = Literal[
@@ -160,6 +168,39 @@ class CompiledToolSpecUnit:
 
 
 @dataclass(frozen=True, slots=True)
+class CompiledProviderSystemFragment:
+    """One source-owned fragment before final provider system lowering."""
+
+    source_id: str
+    source_instance_id: str
+    owner_semantic_fingerprint: str
+    rendered_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledProviderSourceFragment:
+    """One exact source-owned fragment accepted by compiler allocation."""
+
+    candidate: ContextSectionCandidate
+    render_mode: ContextRenderMode
+    provider_lane: str
+    message: LLMMessage
+    estimated_tokens: int
+
+    @property
+    def source_id(self) -> str:
+        return self.candidate.source_id.value
+
+    @property
+    def source_instance_id(self) -> str:
+        return self.candidate.source_instance_id
+
+    @property
+    def owner_semantic_fingerprint(self) -> str:
+        return self.candidate.semantic_fingerprint
+
+
+@dataclass(frozen=True, slots=True)
 class ContextBudgetReport:
     target_fingerprint: str
     resolved_model_call_id: str
@@ -200,8 +241,12 @@ class CompiledContext:
     resolved_model_call: ResolvedModelCallFact
     final_token_estimate: TokenEstimate
     message_budget_scopes: tuple[Literal["transcript", "non_transcript"], ...]
-    prepared_transcript_provider_projection: (
-        PreparedTranscriptProviderProjectionFact
+    prepared_transcript_provider_projection: PreparedTranscriptProviderProjectionFact
+    prepared_ordered_transcript_projection: (
+        PreparedOrderedProviderTranscriptProjection | None
+    )
+    provider_causal_physical_policy: (
+        ResolvedProviderInputCausalAndPhysicalPolicyFact
     )
     model_visible_named_fact_semantic_selection: (
         ModelVisibleNamedFactSemanticSelectionFact
@@ -212,6 +257,28 @@ class CompiledContext:
     tool_result_render_operational_facts: tuple[
         ToolResultRenderOperationalFact, ...
     ] = ()
+    provider_source_fragments: tuple[CompiledProviderSourceFragment, ...] = ()
+    transcript_source_event_refs_by_message: tuple[
+        tuple[ContextEventReferenceFact, ...], ...
+    ] = ()
+
+    @property
+    def provider_system_fragments(self) -> tuple[CompiledProviderSystemFragment, ...]:
+        fragments: list[CompiledProviderSystemFragment] = []
+        for fragment in self.provider_source_fragments:
+            if fragment.provider_lane != "system_prompt":
+                continue
+            if len(fragment.message.content) != 1:
+                raise ValueError("compiled system source must contain one text block")
+            fragments.append(
+                CompiledProviderSystemFragment(
+                    source_id=fragment.source_id,
+                    source_instance_id=fragment.source_instance_id,
+                    owner_semantic_fingerprint=(fragment.owner_semantic_fingerprint),
+                    rendered_text=fragment.message.content[0],
+                )
+            )
+        return tuple(fragments)
 
     @property
     def transcript_provider_projection(self) -> TranscriptProviderProjectionFact:
@@ -219,6 +286,9 @@ class CompiledContext:
 
     @property
     def transcript_provider_messages(self) -> tuple[LLMMessage, ...]:
+        ordered = self.prepared_ordered_transcript_projection
+        if ordered is not None:
+            return ordered.lowered_messages
         return self.prepared_transcript_provider_projection.lowered_provider_messages
 
     def to_event_value(self) -> dict[str, Any]:
@@ -245,3 +315,55 @@ class CompiledContext:
                 self.tool_result_render_operational_facts
             ),
         }
+
+
+def bind_compiled_context_to_provider_carrier(
+    *,
+    compiled_context: CompiledContext,
+    provider_context: LLMContext,
+    token_estimate: TokenEstimate,
+    message_budget_scopes: tuple[Literal["transcript", "non_transcript"], ...],
+) -> CompiledContext:
+    """Bind compiler attribution to the exact provider-input carrier."""
+
+    if len(message_budget_scopes) != len(provider_context.messages):
+        raise ValueError("provider carrier message/scope projection drifted")
+    transcript_tokens = sum(
+        token_estimate.message_tokens_by_index[index]
+        for index, scope in enumerate(message_budget_scopes)
+        if scope == "transcript"
+    )
+    non_transcript_message_tokens = sum(
+        token_estimate.message_tokens_by_index[index]
+        for index, scope in enumerate(message_budget_scopes)
+        if scope == "non_transcript"
+    )
+    non_transcript_baseline = (
+        token_estimate.system_tokens
+        + token_estimate.tool_tokens
+        + token_estimate.envelope_tokens
+        + non_transcript_message_tokens
+    )
+    section_tokens = token_estimate.system_tokens + non_transcript_message_tokens
+    bound_context = replace(
+        provider_context,
+        compiler_estimated_input_tokens=token_estimate.total_input_tokens,
+    )
+    budget = replace(
+        compiled_context.budget,
+        sections_estimated_tokens=section_tokens,
+        tools_estimated_tokens=token_estimate.tool_tokens,
+        envelope_estimated_tokens=token_estimate.envelope_tokens,
+        allocation_estimated_tokens=section_tokens + token_estimate.tool_tokens,
+        final_payload_estimated_tokens=token_estimate.total_input_tokens,
+        non_transcript_baseline_tokens=non_transcript_baseline,
+        transcript_estimated_tokens=transcript_tokens,
+    )
+    return replace(
+        compiled_context,
+        llm_context=bound_context,
+        estimated_tokens=token_estimate.total_input_tokens,
+        budget=budget,
+        final_token_estimate=token_estimate,
+        message_budget_scopes=message_budget_scopes,
+    )

@@ -124,13 +124,6 @@ def project_stable_context_transcript(
             raise TranscriptNormalizationError(
                 "window baseline current-user anchor mismatch"
             )
-    prior_run_starts = tuple(
-        entry.source_event_refs[0].sequence
-        for entry in selected_entries
-        if isinstance(entry, TranscriptMessageLeafEntryFact)
-        and entry.attribution.segment == "current_user"
-        and entry.attribution.message_id != current_user_anchor
-    )
     current_user_candidates = tuple(
         entry
         for entry in selected_entries
@@ -153,38 +146,25 @@ def project_stable_context_transcript(
     ):
         raise TranscriptNormalizationError(
             "stable transcript requires one exact current-user anchor"
-        )
+    )
     if current_user_candidates:
-        current_run_start = current_user_candidates[0].source_event_refs[0].sequence
         current_run_id = current_user_candidates[0].attribution.run_id
     else:
         baseline_current_user = baseline_current_user_candidates[0]
-        current_run_start = baseline_current_user.source_sequence_start
         current_run_id = baseline_current_user.run_id
     if current_run_id is None:
         raise TranscriptNormalizationError(
             "stable transcript current-user anchor lacks run attribution"
         )
-    previous_run_start = prior_run_starts[-1] if prior_run_starts else None
-    selected_entries = tuple(
-        entry
-        for entry in selected_entries
-        if not isinstance(entry, TranscriptMessageLeafEntryFact)
-        or entry.attribution.segment
-        not in {"recovery_note", "terminal_lifecycle_note"}
-        or (
-            previous_run_start is not None
-            and current_run_start is not None
-            and previous_run_start
-            < entry.source_event_refs[0].sequence
-            < current_run_start
-        )
-    )
     messages: list[TranscriptMessageFact] = []
     message_entries: dict[str, TranscriptMessageLeafEntryFact] = {}
-    result_entries: dict[str, TranscriptToolResultLeafEntryFact] = {}
+    result_entries: dict[int, TranscriptToolResultLeafEntryFact] = {}
     pair_entries: dict[str, TranscriptToolPairLeafEntryFact] = {}
-    units_by_call: dict[str, ToolResultRenderUnit] = {}
+    pair_entries_by_interaction: dict[
+        tuple[str, str], TranscriptToolPairLeafEntryFact
+    ] = {}
+    units_by_interaction: dict[tuple[str, str], ToolResultRenderUnit] = {}
+    message_entries_by_ordinal: dict[int, TranscriptMessageLeafEntryFact] = {}
 
     for entry in selected_entries:
         if isinstance(entry, TranscriptMessageLeafEntryFact):
@@ -199,33 +179,41 @@ def project_stable_context_transcript(
             if message.message_id in message_entries:
                 raise TranscriptNormalizationError("duplicate stable message identity")
             message_entries[message.message_id] = entry
+            message_entries_by_ordinal[entry.ordinal.value] = entry
             messages.append(message)
         elif isinstance(entry, TranscriptToolResultLeafEntryFact):
-            call_id = entry.semantic_identity.tool_call_id
-            if call_id in result_entries:
+            ordinal = entry.ordinal.value
+            if ordinal in result_entries:
                 raise ToolResultPairingError("duplicate stable tool-result projection")
-            result_entries[call_id] = entry
+            result_entries[ordinal] = entry
         else:
-            call_id = entry.semantic_identity.assistant_tool_call_id
-            if call_id in pair_entries:
+            if entry.pair_id in pair_entries:
                 raise ToolResultPairingError("duplicate stable tool-pair projection")
-            pair_entries[call_id] = entry
+            pair_entries[entry.pair_id] = entry
 
-    if set(result_entries) != set(pair_entries):
+    paired_result_ordinals = {
+        entry.semantic_identity.result_block_position
+        for entry in pair_entries.values()
+    }
+    if set(result_entries) != paired_result_ordinals:
         raise ToolResultPairingError("stable result/pair projection cardinality mismatch")
 
-    message_by_semantic = {
-        entry.semantic_identity.semantic_fingerprint: message
-        for message in messages
-        for entry in (message_entries[message.message_id],)
-    }
-    for call_id, pair_entry in pair_entries.items():
+    messages_by_id = {message.message_id: message for message in messages}
+    for pair_entry in sorted(
+        pair_entries.values(), key=lambda item: item.ordinal.value
+    ):
         semantic = pair_entry.semantic_identity
-        assistant = message_by_semantic.get(
-            semantic.assistant_message_semantic_fingerprint
-        )
-        if assistant is None:
+        assistant_entry = message_entries_by_ordinal.get(semantic.call_block_position)
+        if (
+            assistant_entry is None
+            or assistant_entry.semantic_identity.semantic_fingerprint
+            != semantic.assistant_message_semantic_fingerprint
+        ):
             raise ToolResultPairingError("stable tool pair has no assistant message")
+        assistant = messages_by_id.get(assistant_entry.attribution.message_id)
+        if assistant is None:
+            raise ToolResultPairingError("stable tool pair assistant was not normalized")
+        call_id = semantic.assistant_tool_call_id
         matching_calls = tuple(
             (index, block)
             for index, block in enumerate(assistant.blocks)
@@ -235,7 +223,7 @@ def project_stable_context_transcript(
         if len(matching_calls) != 1:
             raise ToolResultPairingError("stable assistant tool-call join is ambiguous")
         call_block_index, call_block = matching_calls[0]
-        result_entry = result_entries[call_id]
+        result_entry = result_entries[semantic.result_block_position]
         document = documents.resolve(result_entry.projection_reference)
         if not isinstance(document.payload, ToolTerminalProjectionPayloadFact):
             raise ToolResultPairingError("stable tool-result document kind drifted")
@@ -271,7 +259,11 @@ def project_stable_context_transcript(
             call_block_index=call_block_index,
             terminal_content_texts=terminal_texts,
         )
-        units_by_call[call_id] = unit
+        interaction_key = (assistant.message_id, call_id)
+        if interaction_key in units_by_interaction:
+            raise ToolResultPairingError("duplicate stable tool interaction")
+        units_by_interaction[interaction_key] = unit
+        pair_entries_by_interaction[interaction_key] = pair_entry
 
     messages.sort(key=_message_sort_key)
     compacted_window = _compaction_window(
@@ -302,10 +294,12 @@ def project_stable_context_transcript(
     pairs = list(baseline_pairs)
     units: list[ToolResultRenderUnit] = []
     baseline_pair_by_call = {
-        pair.tool_call_id: pair for pair in baseline_pairs
+        (pair.call_message_id, pair.tool_call_id): pair for pair in baseline_pairs
     }
     for unit in baseline_units:
-        pair = baseline_pair_by_call.get(unit.tool_call_id)
+        pair = baseline_pair_by_call.get(
+            (unit.call_message_id, unit.tool_call_id)
+        )
         if pair is None:
             raise TranscriptNormalizationError(
                 "window baseline result unit lacks its durable pair"
@@ -334,11 +328,11 @@ def project_stable_context_transcript(
                 ),
             )
         )
-    for call_id, unit in units_by_call.items():
+    for (call_message_id, call_id), unit in units_by_interaction.items():
         assistant = next(
             message
             for message in messages
-            if message.message_id == unit.call_message_id
+            if message.message_id == call_message_id
         )
         call_index = next(
             index
@@ -348,7 +342,10 @@ def project_stable_context_transcript(
         )
         call_position = positions[(assistant.message_id, call_index)]
         result_position = positions[(unit.result_message_id, 0)]
-        result_entry = result_entries[call_id]
+        pair_entry = pair_entries_by_interaction[(call_message_id, call_id)]
+        result_entry = result_entries[
+            pair_entry.semantic_identity.result_block_position
+        ]
         pair_payload = {
             "tool_call_id": call_id,
             "model_tool_name": unit.model_tool_name,
@@ -529,7 +526,9 @@ def _message_from_entry(
         raise TranscriptNormalizationError("unknown stable message content carrier")
     attribution = entry.attribution
     segment = (
-        "current_user"
+        attribution.segment
+        if attribution.segment in {"recovery_note", "terminal_lifecycle_note"}
+        else "current_user"
         if attribution.message_id == current_user_anchor
         else "current_run_tail"
         if attribution.run_id == current_run_id

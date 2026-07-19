@@ -64,8 +64,6 @@ def resolve_context_compile_policy(budget: LoopBudget) -> ContextCompilePolicyFa
         "max_subagent_results_per_parent_compile": max(
             0, budget.max_subagent_results_per_parent_compile
         ),
-        "max_inline_candidate_chars": 64_000,
-        "max_aggregate_candidate_chars": 256_000,
         "max_candidate_source_refs": 1_024,
         "max_candidate_artifact_refs": 512,
         "max_input_manifest_chars": 1_048_576,

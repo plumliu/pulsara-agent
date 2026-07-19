@@ -64,9 +64,11 @@ from pulsara_agent.llm import LLMRuntime
 from tests.support import (
     model_call_start_fields,
     run_agent_task,
+    test_resolved_call,
     test_llm_config,
     test_model_limits,
 )
+from tests.support.model_call import prepared_provider_input_bundle_fixture
 from pulsara_agent.llm.registry import LLMTransportRegistry
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.message import ToolResultState
@@ -789,9 +791,7 @@ def test_subagent_task_can_exist_without_child_run_and_projects_to_list_agents(
             type(event)
             for event in parent.event_log.iter()
             if not isinstance(event, RunStartEvent)
-        ] == [
-            SubagentTaskCreatedEvent
-        ]
+        ] == [SubagentTaskCreatedEvent]
         graph = runtime.graph()
         assert len(graph.tasks) == 1
         assert graph.tasks[0].task_id == task.task_id
@@ -2772,15 +2772,26 @@ def test_restart_preserves_consumed_and_delivered_sets_from_facts(tmp_path) -> N
             summary="delivered result",
             event_context=CTX,
         )
-        await parent.write_event(
-            ModelCallStartEvent(
-                **CTX.event_fields(),
-                **model_call_start_fields(
-                    context_id="context:restart-delivery",
-                    model_call_index=3,
-                ),
-            )
+        call = test_resolved_call()
+        provider_input = prepared_provider_input_bundle_fixture(
+            call.fact,
+            context_id="context:restart-delivery",
+            model_call_index=3,
+            event_context=CTX,
+            runtime_session_id=parent.runtime_session_id,
         )
+        start_fields = model_call_start_fields(
+            event_id=f"model_call_start:{call.fact.resolved_model_call_id}",
+            resolved_call=call.fact,
+            context_id="context:restart-delivery",
+            model_call_index=3,
+        )
+        start_fields["provider_input_reference"] = provider_input.committed_reference
+        start = ModelCallStartEvent(
+            **CTX.event_fields(),
+            **start_fields,
+        )
+        await parent.write_events((*provider_input.companion_events, start))
         await runtime.mark_results_delivered(
             (delivered_result,),
             event_context=CTX,
@@ -3436,9 +3447,7 @@ def test_subagent_events_round_trip_through_agent_event_serialization(tmp_path) 
 def test_parent_transcript_rebuild_ignores_subagent_graph_events_after_run_end(
     tmp_path,
 ) -> None:
-    parent, _locator, _child_logs, runtime = _runtime(
-        tmp_path, seed_parent_run=False
-    )
+    parent, _locator, _child_logs, runtime = _runtime(tmp_path, seed_parent_run=False)
 
     async def run() -> None:
         from pulsara_agent.event import RunEndEvent, RunStartEvent
@@ -3786,14 +3795,15 @@ def test_child_enter_plan_finalizes_without_parent_pending_slot(tmp_path) -> Non
         result = await run_agent_task(agent, "spawn a child that needs approval")
         assert result.status is LoopStatus.FINISHED
         assert result.state.pending_interaction_kind is None
-        for _ in range(200):
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
             if any(
                 isinstance(event, SubagentRunCompletedEvent)
                 and event.summary == "(child agent finished without final text)"
                 for event in parent_session.event_log.iter()
             ):
                 return
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(0.01)
         raise AssertionError("child enter_plan completion was not recorded")
 
     asyncio.run(run_parent())
@@ -3959,8 +3969,12 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
 
         async def fail_first_parent_terminal(runtime_session, events, **kwargs):
             nonlocal failed_once
-            if runtime_session is parent_session and not failed_once and any(
-                isinstance(event, SubagentRunCancelledEvent) for event in events
+            if (
+                runtime_session is parent_session
+                and not failed_once
+                and any(
+                    isinstance(event, SubagentRunCancelledEvent) for event in events
+                )
             ):
                 failed_once = True
                 raise RuntimeError("synthetic parent terminal commit NONE")
@@ -3985,11 +3999,14 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
             )
             is handle
         )
-        assert next(
-            item
-            for item in agent.subagent_runtime.runs
-            if item.subagent_run_id == run.subagent_run_id
-        ).status == "running"
+        assert (
+            next(
+                item
+                for item in agent.subagent_runtime.runs
+                if item.subagent_run_id == run.subagent_run_id
+            ).status
+            == "running"
+        )
         parent_start = next(
             event
             for event in parent_session.event_log.iter(run_id=run.parent_run_id)
@@ -4051,7 +4068,9 @@ def test_native_child_cancel_keeps_owner_until_atomic_parent_handoff(
         if isinstance(event, ChildRolloutSubaccountClosedEvent)
     )
     child_end = next(event for event in child_events if isinstance(event, RunEndEvent))
-    assert child_close.run_end_event_id == child_end.id == terminal_ref.terminal_event_id
+    assert (
+        child_close.run_end_event_id == child_end.id == terminal_ref.terminal_event_id
+    )
     assert (
         child_close.settlement_aggregate
         == settlement.child_usage_handoff.settlement_aggregate
@@ -4132,9 +4151,11 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
 
     async def capture_repair_batch(runtime_session, events, **kwargs):
         outcome = await original_write_events(runtime_session, events, **kwargs)
-        if runtime_session is parent_session and sum(
-            isinstance(event, SubagentRunCancelledEvent) for event in events
-        ) == 2:
+        if (
+            runtime_session is parent_session
+            and sum(isinstance(event, SubagentRunCancelledEvent) for event in events)
+            == 2
+        ):
             committed_repair_batches.append(tuple(events))
             batch_repair_committed.set()
             raise asyncio.CancelledError
@@ -4196,14 +4217,10 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
         "child_not_started_zero",
     }
     handoff_settlement = next(
-        event
-        for event in settlements
-        if event.usage_status == "child_terminal_handoff"
+        event for event in settlements if event.usage_status == "child_terminal_handoff"
     )
     zero_settlement = next(
-        event
-        for event in settlements
-        if event.usage_status == "child_not_started_zero"
+        event for event in settlements if event.usage_status == "child_not_started_zero"
     )
     assert handoff_settlement.child_usage_handoff is not None
     assert zero_settlement.child_usage_handoff is None
@@ -4223,8 +4240,7 @@ def test_materialized_batch_repair_atomically_settles_mixed_children_after_cance
     assert any(isinstance(event, RunStartEvent) for event in child_a_events)
     assert any(isinstance(event, RunEndEvent) for event in child_a_events)
     assert any(
-        isinstance(event, ChildRolloutSubaccountClosedEvent)
-        for event in child_a_events
+        isinstance(event, ChildRolloutSubaccountClosedEvent) for event in child_a_events
     )
     assert not any(isinstance(event, RunStartEvent) for event in child_b_events)
     assert not any(isinstance(event, RunEndEvent) for event in child_b_events)
@@ -4662,7 +4678,8 @@ class _BackgroundSubagentResultTransport:
         text = _context_text(context)
         assert "## Subagent Results" in text
         assert "background child summary" in text
-        assert "[context timing: freshness=subagent_result;" in text
+        assert "[context timing:" not in text
+        assert "<runtime-clock>" in text
         async for event in _text_reply(
             event_context, "parent used background child result"
         ):
@@ -4737,17 +4754,17 @@ def test_background_subagent_result_enters_parent_context_and_marks_delivered(
         if isinstance(event, ContextCompiledEvent)
     )
     subagent_section = next(
-        section for section in compiled.sections if section["id"] == "subagent:results"
+        section
+        for section in compiled.sections
+        if section["source_id"] == "subagent_results"
     )
-    assert subagent_section["metadata"]["source_timing"]["freshness"] == (
-        "subagent_result"
-    )
-    assert subagent_section["metadata"]["source_timing"]["clock_source"] == (
-        "event_created_at"
-    )
-    assert (
-        subagent_section["metadata"]["source_timing"]["source_sequence_start"]
-        == completed.sequence
+    source_timing = subagent_section["metadata"]["source_absolute_timing"]
+    assert source_timing["freshness_kind"] == "current_run_tail"
+    assert source_timing["clock_source"] == ("event_created_at")
+    assert any(
+        item["first_sequence"] == completed.sequence
+        and item["last_sequence"] == completed.sequence
+        for item in source_timing["source_sequence_ranges"]
     )
     graph = subagent_runtime.graph()
     assert graph.nodes[0].delivered is True
@@ -4769,9 +4786,11 @@ class _MismatchedModelStartBackgroundTransport(_BackgroundSubagentResultTranspor
         text = _context_text(context)
         yield ModelCallStartEvent(
             **event_context.event_fields(),
-            resolved_call=call.fact,
-            context_id="context:not-this-call",
-            model_call_index=(context.model_call_index or 0) + 100,
+            **model_call_start_fields(
+                resolved_call=call.fact,
+                context_id="context:not-this-call",
+                model_call_index=(context.model_call_index or 0) + 100,
+            ),
         )
         assert "## Subagent Results" in text
         assert "background child summary" in text
@@ -4837,8 +4856,7 @@ def test_transport_cannot_forge_second_model_start_or_duplicate_background_deliv
     assert delivered[0].context_id != "context:not-this-call"
     assert delivered[0].model_call_index != 100
     assert any(
-        isinstance(event, ModelCallEndEvent)
-        and event.outcome == "provider_error"
+        isinstance(event, ModelCallEndEvent) and event.outcome == "provider_error"
         for event in parent.event_log.iter()
     )
     graph = subagent_runtime.graph()
@@ -4874,7 +4892,9 @@ async def _tool_reply(
         tool_call_id=tool_call_id,
         delta=json.dumps(arguments),
     )
-    yield RawProviderToolCallEnd(**event_context.event_fields(), tool_call_id=tool_call_id)
+    yield RawProviderToolCallEnd(
+        **event_context.event_fields(), tool_call_id=tool_call_id
+    )
 
 
 def _context_text(context: LLMContext) -> str:

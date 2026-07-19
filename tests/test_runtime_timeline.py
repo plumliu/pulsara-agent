@@ -14,8 +14,10 @@ from tests.conftest import (
 from tests.support import (
     model_call_end_fields,
     model_call_start_fields,
+    test_resolved_call,
     test_resolved_call_fact,
 )
+from tests.support.model_call import prepared_provider_input_bundle_fixture
 
 from tests.support.model_stream import (
     make_text_block_segment_event,
@@ -92,7 +94,9 @@ async def _emit_tool_terminal_projection(
         tool_name=tool_name,
         state=state,
     )
-    prepared = await runtime.tool_terminal_projection_service.prepare_batch((candidate,))
+    prepared = await runtime.tool_terminal_projection_service.prepare_batch(
+        (candidate,)
+    )
     await runtime.emit_many(prepared)
 
 
@@ -170,9 +174,29 @@ def test_build_run_timeline_marks_unresolved_permission_request_waiting_user() -
     runtime = in_memory_runtime_session(Path("."))
 
     async def run() -> None:
+        call = test_resolved_call()
+        provider_input = prepared_provider_input_bundle_fixture(
+            call.fact,
+            context_id="context:timeline",
+            model_call_index=1,
+            event_context=CTX,
+            runtime_session_id=runtime.runtime_session_id,
+        )
+        start_fields = model_call_start_fields(
+            event_id=f"model_call_start:{call.fact.resolved_model_call_id}",
+            resolved_call=call.fact,
+            context_id="context:timeline",
+            model_call_index=1,
+        )
+        start_fields["provider_input_reference"] = provider_input.committed_reference
+        await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
+        await runtime.write_events(
+            (
+                *provider_input.companion_events,
+                ModelCallStartEvent(**CTX.event_fields(), **start_fields),
+            )
+        )
         for event in [
-            ReplyStartEvent(**CTX.event_fields(), name="assistant"),
-            ModelCallStartEvent(**CTX.event_fields(), **model_call_start_fields()),
             make_tool_call_start_event(
                 **CTX.event_fields(),
                 tool_call_id="call:danger",
@@ -362,7 +386,9 @@ def test_run_timeline_persistence_hook_archives_and_indexes_completed_run(
         await runtime.emit(_run_start())
         await runtime.emit(ReplyStartEvent(**CTX.event_fields(), name="assistant"))
         await runtime.emit(
-            make_text_block_segment_event(**CTX.event_fields(), block_id="text:1", delta="done")
+            make_text_block_segment_event(
+                **CTX.event_fields(), block_id="text:1", delta="done"
+            )
         )
         await runtime.emit(
             ReplyEndEvent(**CTX.event_fields(), model_terminal_outcome="completed")

@@ -154,9 +154,7 @@ class DeterministicTextStreamTransport(RawLLMTransport):
         )
 
 
-class RecordingModelStreamCommitPort(
-    RuntimeSessionModelStreamEventCommitPort
-):
+class RecordingModelStreamCommitPort(RuntimeSessionModelStreamEventCommitPort):
     def __init__(self, *, runtime_session: RuntimeSession) -> None:
         super().__init__(runtime_session=runtime_session, state=None)
         self.start_commit_port_wall_seconds = 0.0
@@ -267,6 +265,20 @@ async def run_model_semantic_batch_sample(
             event_context=event_context,
             model_target=target.fact,
         )
+        provider_input = await runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+            call=call,
+            context=context,
+            event_context=event_context,
+            operation_kind="direct_model_call",
+            operation_id=call_id,
+        )
+        context = provider_input.carrier.to_llm_context(context)
+        context = replace(
+            context,
+            compiler_estimated_input_tokens=(
+                target.token_estimator.estimate_context(context).total_input_tokens
+            ),
+        )
         start_bundle = prepare_model_lifecycle_start_bundle(
             call=call,
             context=context,
@@ -274,6 +286,7 @@ async def run_model_semantic_batch_sample(
             runtime_session=runtime_session,
             lifecycle_kind="main_assistant_reply",
             run_execution_activation=activation,
+            provider_input_start_bundle=provider_input,
         )
         port = RecordingModelStreamCommitPort(runtime_session=runtime_session)
         before = event_log.read_ledger_usage_snapshot()
@@ -312,15 +325,9 @@ async def run_model_semantic_batch_sample(
         return ModelSemanticBatchObservation(
             case_id=execution_case.case_id,
             model_stream_wall_seconds=model_stream_wall_seconds,
-            start_commit_port_wall_seconds=(
-                port.start_commit_port_wall_seconds
-            ),
-            semantic_commit_port_wall_seconds=(
-                port.semantic_commit_port_wall_seconds
-            ),
-            terminal_commit_port_wall_seconds=(
-                port.terminal_commit_port_wall_seconds
-            ),
+            start_commit_port_wall_seconds=(port.start_commit_port_wall_seconds),
+            semantic_commit_port_wall_seconds=(port.semantic_commit_port_wall_seconds),
+            terminal_commit_port_wall_seconds=(port.terminal_commit_port_wall_seconds),
             logical_semantic_batch_count=len(port.semantic_batch_sizes),
             semantic_batch_sizes=tuple(port.semantic_batch_sizes),
             source_item_count=block.delta_events_per_block + 2,
@@ -335,9 +342,7 @@ async def run_model_semantic_batch_sample(
                 wal_after,
             ),
             ordered_semantic_content_fingerprint=(
-                _ordered_semantic_content_fingerprint(
-                    completion.committed_events
-                )
+                _ordered_semantic_content_fingerprint(completion.committed_events)
             ),
             raw_reference_semantic_content_fingerprint=(
                 _semantic_content_fingerprint(
@@ -352,9 +357,7 @@ async def run_model_semantic_batch_sample(
                 )
             ),
             terminal_projection_semantic_fingerprint=(
-                _terminal_projection_semantic_fingerprint(
-                    completion.committed_events
-                )
+                _terminal_projection_semantic_fingerprint(completion.committed_events)
             ),
             physical_settlement_valid=physical_settlement.valid,
             physical_charged_candidate_events=(
@@ -363,18 +366,14 @@ async def run_model_semantic_batch_sample(
             physical_charged_candidate_payload_bytes=(
                 physical_settlement.charged_candidate_payload_bytes
             ),
-            physical_charged_wrapper_bytes=(
-                physical_settlement.charged_wrapper_bytes
-            ),
+            physical_charged_wrapper_bytes=(physical_settlement.charged_wrapper_bytes),
             physical_charged_bookkeeping_events=(
                 physical_settlement.charged_bookkeeping_events
             ),
             physical_charged_bookkeeping_bytes=(
                 physical_settlement.charged_bookkeeping_bytes
             ),
-            physical_total_charged_events=(
-                physical_settlement.total_charged_events
-            ),
+            physical_total_charged_events=(physical_settlement.total_charged_events),
             physical_total_charged_payload_bytes=(
                 physical_settlement.total_charged_payload_bytes
             ),
@@ -456,10 +455,9 @@ def _terminal_projection_semantic_fingerprint(
     ends = tuple(event for event in events if isinstance(event, ModelCallEndEvent))
     if len(ends) != 1:
         raise RuntimeError("benchmark requires exactly one ModelCallEndEvent")
-    return (
-        ends[0]
-        .terminal_projection.projection_reference.semantic_join.semantic_fingerprint
-    )
+    return ends[
+        0
+    ].terminal_projection.projection_reference.semantic_join.semantic_fingerprint
 
 
 def _physical_settlement_observation(
@@ -499,8 +497,7 @@ def _physical_settlement_observation(
     )
     valid = (
         settlement.reservation_id == reservation.reservation_id
-        and settlement.reservation_fingerprint
-        == reservation.reservation_fingerprint
+        and settlement.reservation_fingerprint == reservation.reservation_fingerprint
         and settlement.terminal_outcome == "completed"
         and settlement.total_charged_events + released_events
         == reservation.reserved_events
@@ -511,9 +508,7 @@ def _physical_settlement_observation(
     return PhysicalSettlementObservation(
         valid=valid,
         charged_candidate_events=settlement.charged_candidate_events,
-        charged_candidate_payload_bytes=(
-            settlement.charged_candidate_payload_bytes
-        ),
+        charged_candidate_payload_bytes=(settlement.charged_candidate_payload_bytes),
         charged_wrapper_bytes=settlement.charged_wrapper_bytes,
         charged_bookkeeping_events=settlement.charged_bookkeeping_events,
         charged_bookkeeping_bytes=settlement.charged_bookkeeping_bytes,
@@ -574,9 +569,7 @@ def observation_payload(
                 observation.terminal_projection_semantic_fingerprint
             ),
             "physical_settlement_valid": observation.physical_settlement_valid,
-            "accounted_writer_path_only": (
-                observation.accounted_writer_path_only
-            ),
+            "accounted_writer_path_only": (observation.accounted_writer_path_only),
         }
     )
 

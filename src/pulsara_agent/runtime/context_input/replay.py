@@ -40,11 +40,23 @@ from pulsara_agent.primitives.context import (
     context_fingerprint,
     freeze_json,
 )
+from pulsara_agent.primitives.context_source import (
+    ContextArtifactReferenceFact,
+    LedgerAuthorityHorizonFact,
+)
+from pulsara_agent.primitives.frozen import build_frozen_fact
 from pulsara_agent.primitives.long_horizon import (
     SubagentGraphAccelerationFact,
     default_subagent_graph_checkpoint_policy,
 )
 from pulsara_agent.primitives.tool_result import PreparedToolResultRenderInput
+from pulsara_agent.primitives.transcript_projection import (
+    TranscriptProjectionLeafEntryFact,
+)
+from pulsara_agent.primitives.provider_input import (
+    ProviderInputReplayBindingIdentityFact,
+    ProviderInputUnitMaterializationFact,
+)
 from pulsara_agent.runtime.context_input.event_slice import (
     ContextEventAuthorityView,
     ContextEventSlice,
@@ -71,6 +83,9 @@ from pulsara_agent.runtime.context_input.compiler import (
     compile_context_from_facts,
     provider_neutral_payload_fingerprint,
 )
+from pulsara_agent.runtime.context_engine.types import (
+    bind_compiled_context_to_provider_carrier,
+)
 from pulsara_agent.runtime.context_input.transcript import (
     NormalizedContextTranscript,
 )
@@ -79,14 +94,18 @@ from pulsara_agent.runtime.context_input.stable_transcript import (
     required_terminal_content_artifacts,
 )
 from pulsara_agent.runtime.context_input.candidate import (
-    ContextCandidateCollectionInput,
-    build_context_candidate_authorities,
     collect_context_candidates,
+)
+from pulsara_agent.runtime.context_input.sources.builder import (
+    ContextSourceArtifactMetadata,
+    HydratedContextSourceArtifact,
+    build_context_sources,
+    default_context_source_registry,
+    hydrate_context_source_content_sidecar,
 )
 from pulsara_agent.runtime.context_input.live import (
     collect_context_projection_references,
 )
-from pulsara_agent.runtime.plan import PLAN_ACTIVE_INSTRUCTION
 from pulsara_agent.runtime.long_horizon.context_budget import (
     long_horizon_context_diagnostics,
     measure_long_horizon_context_budget,
@@ -102,6 +121,15 @@ from pulsara_agent.runtime.long_horizon.projection_reducer import (
 from pulsara_agent.runtime.long_horizon.status import (
     derive_rollout_status_candidate_from_state,
     fold_sparse_rollout_state,
+)
+from pulsara_agent.runtime.provider_input.materialization import (
+    hydrate_carrier,
+    validate_carrier_against_plan,
+)
+from pulsara_agent.runtime.provider_input.vector import (
+    load_ledger_horizon_set,
+    load_provider_input_vector,
+    load_replay_binding_set,
 )
 from pulsara_agent.runtime.authority_materialization import (
     build_default_authority_materialization_contract_bundle,
@@ -138,8 +166,10 @@ class ReplayedContextInput:
     manifest: ContextCompileInputManifestFact
     snapshot_build_input: ContextSnapshotBuildInput
     normalized_transcript: NormalizedContextTranscript
+    transcript_stable_entries: tuple[TranscriptProjectionLeafEntryFact, ...]
     prepared_tool_results: PreparedToolResultRenderInput
     prepared_candidates: PreparedContextCandidateSet
+    context_source_hydrated_contents: tuple[tuple[str, str], ...]
     subagent_graph_acceleration: SubagentGraphAccelerationFact
 
 
@@ -326,17 +356,25 @@ def _validate_replayed_transcript_authority(
         if ref.runtime_session_id == manifest.snapshot.identity.runtime_session_id:
             row = local.get(ref.event_id)
             actual = (
-                row.sequence,
-                row.event_type,
-                row.payload_fingerprint,
-            ) if row is not None else None
+                (
+                    row.sequence,
+                    row.event_type,
+                    row.payload_fingerprint,
+                )
+                if row is not None
+                else None
+            )
         else:
             event = supplied.get((ref.runtime_session_id, ref.event_id))
             actual = (
-                event.sequence,
-                event.event_type,
-                event.payload_fingerprint,
-            ) if event is not None else None
+                (
+                    event.sequence,
+                    event.event_type,
+                    event.payload_fingerprint,
+                )
+                if event is not None
+                else None
+            )
         if actual != (ref.sequence, ref.event_type, ref.payload_fingerprint):
             raise ContextInputReplayError(
                 ContextInputReplayStatus.CONTRACT_MISMATCH,
@@ -455,16 +493,19 @@ def replay_context_input(
             "context_input_event_slice_untrusted",
             "context input event slice is not the audited authority range",
         ) from exc
-    if build_context_snapshot(
-        build_input,
-        long_horizon_attribution=manifest.snapshot.long_horizon_attribution,
-    ) != manifest.snapshot:
+    if (
+        build_context_snapshot(
+            build_input,
+            long_horizon_attribution=manifest.snapshot.long_horizon_attribution,
+        )
+        != manifest.snapshot
+    ):
         raise ContextInputReplayError(
             ContextInputReplayStatus.CONTRACT_MISMATCH,
             "context_input_snapshot_mismatch",
             "replayed context snapshot differs from manifest",
         )
-    _validate_replayed_candidates(
+    context_source_hydrated_contents = _validate_replayed_candidates(
         manifest=manifest,
         archive=archive,
         event_slice=authority_view,
@@ -486,10 +527,7 @@ def replay_context_input(
                 "context compaction summary artifact is unavailable",
             ) from exc
     source_document = None
-    source_id = (
-        manifest.snapshot.authority_slice_plan.transcript_window
-        .window_compaction_source_document_artifact_id
-    )
+    source_id = manifest.snapshot.authority_slice_plan.transcript_window.window_compaction_source_document_artifact_id
     if source_id is not None:
         try:
             source_document = WindowCompactionSourceDocumentFact.model_validate(
@@ -506,10 +544,7 @@ def replay_context_input(
                 "context_window_compaction_source_missing",
                 "window compaction source document artifact is unavailable",
             ) from exc
-        expected_source_fingerprint = (
-            manifest.snapshot.authority_slice_plan.transcript_window
-            .window_compaction_source_document_fingerprint
-        )
+        expected_source_fingerprint = manifest.snapshot.authority_slice_plan.transcript_window.window_compaction_source_document_fingerprint
         if source_document.document_fingerprint != expected_source_fingerprint:
             raise ContextInputReplayError(
                 ContextInputReplayStatus.CONTRACT_MISMATCH,
@@ -561,8 +596,7 @@ def replay_context_input(
         compaction_terminal = _read_replay_compaction_terminal(
             event_log=event_log,
             terminal_ref=(
-                manifest.snapshot.authority_slice_plan.transcript_window
-                .compaction_terminal_ref
+                manifest.snapshot.authority_slice_plan.transcript_window.compaction_terminal_ref
             ),
         )
         normalized = project_stable_context_transcript(
@@ -574,9 +608,7 @@ def replay_context_input(
             ),
             stable_entries=stable_entries,
             documents=restored_transcript.document_registry,
-            hydrated_message_contents=(
-                restored_transcript.hydrated_message_contents
-            ),
+            hydrated_message_contents=(restored_transcript.hydrated_message_contents),
             terminal_content_text_by_artifact_id=terminal_content_texts,
             compaction_summary_text=summary_text,
             compaction_terminal_event=compaction_terminal,
@@ -631,8 +663,10 @@ def replay_context_input(
         manifest=manifest,
         snapshot_build_input=build_input,
         normalized_transcript=normalized,
+        transcript_stable_entries=stable_entries,
         prepared_tool_results=prepared,
         prepared_candidates=manifest.prepared_candidate_set,
+        context_source_hydrated_contents=context_source_hydrated_contents,
         subagent_graph_acceleration=replay_acceleration,
     )
 
@@ -830,16 +864,11 @@ def _validate_replayed_long_horizon_facts(
         frozen.to_reference(event_slice.runtime_session_id)
         for frozen in event_slice.events
         if frozen.event_type == EventType.CONTEXT_PROJECTION_REWRITE_PAGE
-        and (
-            event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
-        ).window_id
+        and (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).window_id
         == window.window_id
         and event.to_projection_generation <= projection.projection_generation
     )
-    if (
-        rewrite_refs
-        != snapshot.long_horizon_attribution.projection_rewrite_event_refs
-    ):
+    if rewrite_refs != snapshot.long_horizon_attribution.projection_rewrite_event_refs:
         raise ContextInputReplayError(
             ContextInputReplayStatus.CONTRACT_MISMATCH,
             "long_horizon_projection_rewrite_refs_mismatch",
@@ -918,9 +947,7 @@ def _validate_compacted_window_replay(
         frozen.to_reference(authority.runtime_session_id)
         for frozen in authority.events
         if frozen.event_type == EventType.CONTEXT_PROJECTION_REWRITE_PAGE
-        and (
-            event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
-        ).window_id
+        and (event := frozen.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).window_id
         == active_window.window_id
         and event.to_projection_generation
         <= manifest.projection_state.projection_generation
@@ -961,9 +988,7 @@ def _restore_replay_subagent_graph(
         binding = DEFAULT_SUBAGENT_GRAPH_REDUCER_REGISTRY.resolve_binding(
             reducer_id=semantic.graph_reducer_id,
             reducer_version=semantic.graph_reducer_version,
-            reducer_contract_fingerprint=(
-                semantic.graph_reducer_contract_fingerprint
-            ),
+            reducer_contract_fingerprint=(semantic.graph_reducer_contract_fingerprint),
         )
     except Exception as exc:
         raise ContextInputReplayError(
@@ -996,9 +1021,7 @@ def _restore_replay_subagent_graph(
         build_default_authority_materialization_contract_bundle,
     )
 
-    authority_limits = (
-        build_default_authority_materialization_contract_bundle().limits
-    )
+    authority_limits = build_default_authority_materialization_contract_bundle().limits
     policy = default_subagent_graph_checkpoint_policy(
         max_unreclaimable_ledger_events=(
             authority_limits.max_unreclaimable_ledger_events
@@ -1016,9 +1039,7 @@ def _restore_replay_subagent_graph(
             manifest.subagent_graph_acceleration.ledger_through_sequence
         ),
         reducer_contract=binding.contract,
-        preferred_checkpoint_id=(
-            manifest.subagent_graph_acceleration.checkpoint_id
-        ),
+        preferred_checkpoint_id=(manifest.subagent_graph_acceleration.checkpoint_id),
         max_delta_events=policy.checkpoint_max_delta_events,
         max_delta_bytes=policy.checkpoint_max_delta_bytes,
         max_checkpoint_candidates=policy.rebase_max_checkpoint_candidates,
@@ -1035,11 +1056,9 @@ def _restore_replay_subagent_graph(
             "subagent graph checkpoint acceleration is unavailable",
         )
     try:
-        graph, replay_semantic, acceleration = (
-            restore_subagent_graph_from_checkpoint(
-                snapshot=read,
-                reducer_binding=binding,
-            )
+        graph, replay_semantic, acceleration = restore_subagent_graph_from_checkpoint(
+            snapshot=read,
+            reducer_binding=binding,
         )
     except SubagentGraphCheckpointLedgerUntrusted as exc:
         raise ContextInputReplayError(
@@ -1066,7 +1085,9 @@ def _restore_replay_subagent_graph(
             "replayed subagent graph semantic source differs from manifest",
         )
     selection = manifest.snapshot.candidate_source_selections[0]
-    results = tuple(graph.results[result_id] for result_id in selection.selected_source_ids)
+    results = tuple(
+        graph.results[result_id] for result_id in selection.selected_source_ids
+    )
     event_ids = tuple(result.provenance.terminal_event_id or "" for result in results)
     if any(not event_id for event_id in event_ids):
         raise ContextInputReplayError(
@@ -1109,7 +1130,7 @@ def _validate_replayed_candidates(
     event_slice: ContextEventSlice | ContextEventAuthorityView,
     named_slices: tuple[ContextEventSlice, ...],
     subagent_authority_events: tuple[FrozenStoredEvent, ...],
-) -> None:
+) -> tuple[tuple[str, str], ...]:
     snapshot = manifest.snapshot
     capability_matches = [
         (frozen, event)
@@ -1144,32 +1165,9 @@ def _validate_replayed_candidates(
             subagent_result_ids=selection.selected_source_ids,
             subagent_authority_events=subagent_authority_events,
         )
-        sources = ContextCandidateCollectionInput(
-            system_prompt=_replay_static_instruction_text(
-                snapshot=snapshot,
-                source_id="base_system_instruction",
-                archive=archive,
-                required=True,
-            ),
-            memory_hook_prompt=_replay_static_instruction_text(
-                snapshot=snapshot,
-                source_id="memory_scope_instruction",
-                archive=archive,
-                required=False,
-            ),
-            capability_catalog=_replay_capability_projection_text(
-                snapshot=snapshot,
-                projection_kind="catalog",
-                archive=archive,
-            ),
-            capability_active_skill=_replay_capability_projection_text(
-                snapshot=snapshot,
-                projection_kind="active_skill",
-                archive=archive,
-            ),
-            plan_workflow=(
-                PLAN_ACTIVE_INSTRUCTION if snapshot.plan_snapshot.active else None
-            ),
+        hydrated_source_artifacts = _replay_context_source_artifacts(
+            snapshot=snapshot,
+            archive=archive,
         )
         run_starts = tuple(
             event
@@ -1236,29 +1234,32 @@ def _validate_replayed_candidates(
             state=manifest.rollout_state,
             policy=run_start.long_horizon.rollout_status_hint_policy,
         )
-        authorities = build_context_candidate_authorities(
-            sources=sources,
+        source_build = build_context_sources(
+            registry=default_context_source_registry(),
             static_instructions=snapshot.static_instructions,
+            artifact_metadata={
+                artifact_id: ContextSourceArtifactMetadata(
+                    reference=artifact.reference,
+                    expected_chars=artifact.expected_chars,
+                )
+                for artifact_id, artifact in hydrated_source_artifacts.items()
+            },
             projections=projections,
             capability_snapshot=snapshot.capability_snapshot,
             plan_snapshot=snapshot.plan_snapshot,
             event_slice=event_slice,
-            rollout_event_slice=rollout_event_slice,
-            rollout_account_id=(
-                snapshot.long_horizon_attribution.rollout_account_id
-            ),
-            rollout_status_policy=(
-                run_start.long_horizon.rollout_status_hint_policy
-            ),
-            rollout_status_override=rollout_status_override,
-            derive_rollout_status_from_events=False,
-            run_id=snapshot.identity.run_id,
             runtime_environment=snapshot.runtime_environment,
             compile_timing=snapshot.timing,
+            resolved_model_call=snapshot.resolved_model_call,
             source_selections=snapshot.candidate_source_selections,
             external_authority_events={
                 event.event_id: event for event in subagent_authority_events
             },
+            rollout_status=rollout_status_override,
+            tool_specs=snapshot.tool_specs,
+            authority_horizons=(
+                snapshot.capability_tool_catalog_root.authority_horizons
+            ),
         )
     except ContextInputReplayError:
         raise
@@ -1280,14 +1281,34 @@ def _validate_replayed_candidates(
             "context_input_candidate_projection_mismatch",
             "replayed candidate projections differ from manifest",
         )
-    if authorities != snapshot.candidate_authorities:
+    if source_build.candidates != snapshot.context_source_candidates:
         raise ContextInputReplayError(
             ContextInputReplayStatus.CONTRACT_MISMATCH,
             "context_input_candidate_authority_mismatch",
-            "replayed candidate authorities differ from manifest",
+            "replayed ContextSource candidates differ from manifest",
+        )
+    if (
+        source_build.tool_catalog_root != snapshot.capability_tool_catalog_root
+        or source_build.physical_input_policy
+        != snapshot.context_source_physical_input_policy
+        or source_build.registry_fingerprint
+        != snapshot.context_source_registry_fingerprint
+    ):
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "context_input_source_contract_mismatch",
+            "replayed ContextSource contract/root differs from manifest",
         )
     try:
-        replayed = collect_context_candidates(snapshot=snapshot, cache=None).prepared
+        hydrated_contents = hydrate_context_source_content_sidecar(
+            candidates=source_build.candidates,
+            hydrated_artifacts=hydrated_source_artifacts,
+        )
+        replayed = collect_context_candidates(
+            snapshot=snapshot,
+            cache=None,
+            hydrated_contents=dict(hydrated_contents),
+        ).prepared
     except (KeyError, TypeError, ValueError) as exc:
         raise ContextInputReplayError(
             ContextInputReplayStatus.CONTRACT_MISMATCH,
@@ -1298,66 +1319,60 @@ def _validate_replayed_candidates(
     if (
         tuple(entry.candidate for entry in replayed.entries)
         != tuple(entry.candidate for entry in manifest_candidates.entries)
-        or replayed.collection_decisions
-        != manifest_candidates.collection_decisions
+        or replayed.collection_decisions != manifest_candidates.collection_decisions
     ):
         raise ContextInputReplayError(
             ContextInputReplayStatus.CONTRACT_MISMATCH,
             "context_input_prepared_candidate_mismatch",
             "replayed prepared candidate facts differ from manifest",
         )
+    return hydrated_contents
 
 
-def _replay_static_instruction_text(
-    *, snapshot, source_id: str, archive, required: bool
-) -> str | None:
-    fact = next(
-        (item for item in snapshot.static_instructions if item.source_id == source_id),
-        None,
-    )
-    if fact is None:
-        if required:
-            raise ContextInputReplayError(
-                ContextInputReplayStatus.CONTRACT_MISMATCH,
-                "context_input_static_instruction_missing",
-                f"required static instruction is missing: {source_id}",
+def _replay_context_source_artifacts(
+    *, snapshot, archive
+) -> dict[str, HydratedContextSourceArtifact]:
+    artifact_ids = {item.content_artifact_id for item in snapshot.static_instructions}
+    for projection in (
+        snapshot.capability_snapshot.semantic.catalog_projection,
+        snapshot.capability_snapshot.semantic.active_skill_projection,
+    ):
+        if projection.rendered_prompt_artifact_id is not None:
+            artifact_ids.add(projection.rendered_prompt_artifact_id)
+    hydrated: dict[str, HydratedContextSourceArtifact] = {}
+    for artifact_id in sorted(artifact_ids):
+        try:
+            record = archive.get_info(
+                artifact_id,
+                session_id=snapshot.identity.runtime_session_id,
             )
-        return None
-    try:
-        return archive.get_text(
-            fact.content_artifact_id,
-            session_id=snapshot.identity.runtime_session_id,
+            text = archive.get_text(
+                artifact_id,
+                session_id=snapshot.identity.runtime_session_id,
+            )
+        except Exception as exc:
+            raise ContextInputReplayError(
+                ContextInputReplayStatus.ARTIFACT_MISSING,
+                "context_input_source_artifact_missing",
+                f"ContextSource artifact is unavailable: {artifact_id}",
+            ) from exc
+        reference = build_frozen_fact(
+            ContextArtifactReferenceFact,
+            schema_version="context_artifact_reference.v1",
+            artifact_id=record.id,
+            media_type=record.media_type,
+            content_sha256=record.digest,
+            content_bytes=record.size_bytes,
+            artifact_contract_fingerprint=context_fingerprint(
+                "context-source-artifact-contract:v1", record.media_type
+            ),
         )
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.ARTIFACT_MISSING,
-            "context_input_static_instruction_artifact_missing",
-            f"static instruction artifact is unavailable: {source_id}",
-        ) from exc
-
-
-def _replay_capability_projection_text(
-    *, snapshot, projection_kind: str, archive
-) -> str | None:
-    projection = (
-        snapshot.capability_snapshot.semantic.catalog_projection
-        if projection_kind == "catalog"
-        else snapshot.capability_snapshot.semantic.active_skill_projection
-    )
-    artifact_id = projection.rendered_prompt_artifact_id
-    if artifact_id is None:
-        return None
-    try:
-        return archive.get_text(
-            artifact_id,
-            session_id=snapshot.identity.runtime_session_id,
+        hydrated[artifact_id] = HydratedContextSourceArtifact(
+            reference=reference,
+            expected_chars=len(text),
+            text=text,
         )
-    except Exception as exc:
-        raise ContextInputReplayError(
-            ContextInputReplayStatus.ARTIFACT_MISSING,
-            "context_input_capability_projection_artifact_missing",
-            f"capability {projection_kind} projection artifact is unavailable",
-        ) from exc
+    return hydrated
 
 
 def replay_compiled_context(
@@ -1426,9 +1441,9 @@ def replay_compiled_context(
         rendered_tool_results=rendered,
         prepared_rollups=prepared_rollups,
         section_candidates=inputs.prepared_candidates,
-        transcript_provider_projection=(
-            manifest.transcript_provider_projection
-        ),
+        transcript_provider_projection=(manifest.transcript_provider_projection),
+        transcript_stable_entries=inputs.transcript_stable_entries,
+        context_source_hydrated_contents=(inputs.context_source_hydrated_contents),
     )
     if (
         compiled.model_visible_named_fact_semantic_selection
@@ -1439,7 +1454,94 @@ def replay_compiled_context(
             "context_input_named_fact_semantics_mismatch",
             "replayed named provider facts differ from manifest authority",
         )
-    expected_payload_fp = provider_neutral_payload_fingerprint(compiled.llm_context)
+    try:
+        prepared_provider_input = event.prepared_provider_input
+        manifest_reference = event.manifest_projection_reference
+        if prepared_provider_input is None or manifest_reference is None:
+            raise ValueError("compiled context lacks provider manifest carrier")
+        if (
+            prepared_provider_input.manifest_projection_reference
+            != manifest_reference
+            or manifest_reference.input_manifest_artifact_id
+            != event.input_audit.input_manifest_artifact_id
+            or manifest_reference.input_manifest_fact_fingerprint
+            != manifest.manifest_fingerprint
+            or manifest_reference.projection_identity
+            != manifest.ordered_transcript_projection_identity
+            or prepared_provider_input.prepared_plan
+            != manifest.prepared_provider_input_plan
+        ):
+            raise ValueError("compiled provider manifest reference mismatch")
+        provider_plan = prepared_provider_input.provider_input_plan
+        provider_deadline = monotonic() + 30.0
+        provider_units, _ = load_provider_input_vector(
+            archive=archive,
+            runtime_session_id=event.input_audit.source_runtime_session_id,
+            root=provider_plan.unit_vector_root,
+            deadline_monotonic=provider_deadline,
+        )
+        provider_horizons, _ = load_ledger_horizon_set(
+            archive=archive,
+            runtime_session_id=event.input_audit.source_runtime_session_id,
+            reference=provider_plan.authority_horizon_set,
+            deadline_monotonic=provider_deadline,
+        )
+        provider_bindings, _ = load_replay_binding_set(
+            archive=archive,
+            runtime_session_id=event.input_audit.source_runtime_session_id,
+            reference=provider_plan.replay_binding_set,
+            deadline_monotonic=provider_deadline,
+        )
+        _validate_provider_input_authority_roots(
+            units=provider_units,
+            horizons=provider_horizons,
+            bindings=provider_bindings,
+        )
+        provider_carrier = hydrate_carrier(provider_units)
+        validate_carrier_against_plan(
+            carrier=provider_carrier,
+            plan=provider_plan,
+        )
+    except KeyError as exc:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.ARTIFACT_MISSING,
+            "provider_input_plan_artifact_missing",
+            "canonical provider-input plan artifact is unavailable",
+        ) from exc
+    except ContextInputReplayError:
+        raise
+    except Exception as exc:
+        raise ContextInputReplayError(
+            ContextInputReplayStatus.CONTRACT_MISMATCH,
+            "provider_input_plan_materialization_mismatch",
+            "canonical provider-input plan cannot be materialized exactly",
+        ) from exc
+    canonical_provider_context = provider_carrier.to_llm_context(compiled.llm_context)
+    provider_estimate = (
+        invocation.resolved_call.target.token_estimator.estimate_context(
+            canonical_provider_context
+        )
+    )
+    provider_scopes = tuple(
+        "transcript"
+        if unit.attribution.semantic.unit_kind == "transcript_message"
+        else "non_transcript"
+        for unit in provider_units
+        if unit.attribution.semantic.unit_kind != "tool_catalog"
+        and not (
+            unit.attribution.semantic.unit_kind == "context_source"
+            and getattr(unit.canonical_provider_fragment, "role", None) == "system"
+        )
+    )
+    compiled = bind_compiled_context_to_provider_carrier(
+        compiled_context=compiled,
+        provider_context=canonical_provider_context,
+        token_estimate=provider_estimate,
+        message_budget_scopes=provider_scopes,
+    )
+    expected_payload_fp = provider_neutral_payload_fingerprint(
+        canonical_provider_context
+    )
     expected_decisions_fp = canonical_render_decisions_fingerprint(
         compiled.tool_result_render_decision_facts
     )
@@ -1461,8 +1563,7 @@ def replay_compiled_context(
             "replayed long-horizon budget decision differs from manifest",
         )
     if (
-        event.long_horizon_context_budget_decision
-        != manifest.context_budget_decision
+        event.long_horizon_context_budget_decision != manifest.context_budget_decision
         or event.long_horizon_projection_pressure_shadow
         != manifest.projection_pressure_shadow
     ):
@@ -1648,6 +1749,35 @@ def _rebind_replay_invocation(
         resolved_call=ResolvedModelCall(target=target, fact=call_fact),
         materialized_tool_specs=materialized,
     )
+
+
+def _validate_provider_input_authority_roots(
+    *,
+    units: tuple[ProviderInputUnitMaterializationFact, ...],
+    horizons: tuple[LedgerAuthorityHorizonFact, ...],
+    bindings: tuple[ProviderInputReplayBindingIdentityFact, ...],
+) -> None:
+    horizon_by_ledger = {item.runtime_session_id: item for item in horizons}
+    binding_by_identity = {item.identity_fingerprint: item for item in bindings}
+    if len(horizon_by_ledger) != len(horizons):
+        raise ValueError("provider authority root contains duplicate ledgers")
+    if len(binding_by_identity) != len(bindings):
+        raise ValueError("provider replay root contains duplicate bindings")
+    for unit in units:
+        for unit_horizon in unit.attribution.authority_horizons:
+            aggregate = horizon_by_ledger.get(unit_horizon.runtime_session_id)
+            if (
+                aggregate is None
+                or aggregate.through_sequence < unit_horizon.through_sequence
+                or aggregate.ledger_event_count_through
+                < unit_horizon.ledger_event_count_through
+            ):
+                raise ValueError(
+                    "provider authority root does not cover a unit horizon"
+                )
+        for required in unit.attribution.required_replay_bindings:
+            if binding_by_identity.get(required.identity_fingerprint) != required:
+                raise ValueError("provider replay root does not cover a unit binding")
 
 
 def _materialize_tool_spec(*, fact, archive, runtime_session_id: str):

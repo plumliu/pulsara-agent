@@ -215,6 +215,7 @@ def _compiled_call_events(*, reported_usage: bool = True):
                         resolved_call=call,
                         estimated_tokens=12,
                         tools_estimated_tokens=0,
+                        context_id="context:model-contract",
                     ),
                     context_id="context:model-contract",
                     model_call_index=1,
@@ -1229,6 +1230,7 @@ def test_inspect_run_reports_context_compilation_and_model_call_join(
         compiled_fields = context_compiled_contract_fields(
             estimated_tokens=321,
             tools_estimated_tokens=42,
+            context_id=context_id,
         )
         log.extend(
             [

@@ -180,7 +180,14 @@ class NormalizedContextTranscript:
             matching = tuple(
                 unit
                 for unit in self.tool_result_units
-                if unit.tool_call_id == pair.tool_call_id
+                if (
+                    unit.call_message_id,
+                    unit.tool_call_id,
+                )
+                == (
+                    pair.call_message_id,
+                    pair.tool_call_id,
+                )
             )
             if len(matching) != 1:
                 raise ValueError("tool pair does not resolve to one normalized unit")
@@ -1293,10 +1300,12 @@ def _reposition_tool_result_units(
     pairs: tuple[ToolInteractionPairFact, ...],
     positions: dict[tuple[str, int], int],
 ) -> list[ToolResultRenderUnit]:
-    pair_by_call = {pair.tool_call_id: pair for pair in pairs}
+    pair_by_call = {
+        (pair.call_message_id, pair.tool_call_id): pair for pair in pairs
+    }
     repositioned: list[ToolResultRenderUnit] = []
     for unit in units:
-        pair = pair_by_call.get(unit.tool_call_id)
+        pair = pair_by_call.get((unit.call_message_id, unit.tool_call_id))
         if pair is None:
             raise TranscriptNormalizationError(
                 "tool result unit lacks its normalized interaction pair"

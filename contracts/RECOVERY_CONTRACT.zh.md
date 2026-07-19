@@ -188,3 +188,25 @@ fail closed。
 active context window、projection、rollout state与status hint必须从 confirmed checkpoint + bounded contiguous delta exact replay；checkpoint只是
 versioned reducer memoization，不是第二权威。window compaction Started-without-terminal由service-owned recovery补稳定 failed terminal，成功的
 close-old/open-new batch不得被拆开。PARTIAL/UNKNOWN ledger state、unsupported historical event domain或无法证明 continuity时禁止恢复执行。
+
+---
+
+## 12. Provider input generation recovery
+
+Recovery从session ledger重建`generation start/append/close/rollover`、committed core、preparation ownership、
+transcript frontier和persistent vector root；不得从当前compiler重新生成历史prefix，也不得以run-scoped子集
+替代完整session generation lifecycle。
+
+Prepared-without-ModelStart由session-owned preparation owner按原stable candidate处理：manifest/append artifact尚未
+FULL时继续confirm；`NONE`重试原字节；`FULL`完成原子ModelStart；`PARTIAL/UNKNOWN`保留owner并latch。RunEnd、
+Host close或rejected-before-start必须先consume或typed abandon preparation，不能留下永久阻塞scope的active owner。
+
+Terminal projection与control disposition分批到达时，reducer先保存awaiting-disposition状态。只有ACCEPTED才产生
+pending continuation；SUPPRESSED消费等待态但不进入prefix。下一次prepare只能将pending continuation exact join
+ordered projection中的同一个unit，不能回查raw model stream、按fragment模糊匹配或自行插入。RunEnd前仍有无法
+解释的completed projection/disposition或continuation必须fail closed。
+
+普通session resume若前一generation已因`session_close`关闭，必须建立绑定旧closed epoch的新generation ID；不能
+复用旧start carrier。Explicit compaction rollover必须恢复old-close + authority + new-start + append + ModelStart的
+完整atomic矩阵。缺artifact、prefix/frontier mismatch或invalid causal proof时不得报告exact replay；cache/resident
+丢失可以从durable vector exact restore，但canonical authority conflict必须latch而非静默rollover。

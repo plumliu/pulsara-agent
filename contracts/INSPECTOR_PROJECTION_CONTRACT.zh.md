@@ -333,3 +333,26 @@ Batch artifact preview必须 bounded，并分别展示 evidence semantic fingerp
 attribution refs和prompt projection fingerprint；不得把三者折叠成一个 fingerprint。Artifact
 missing、hash conflict、open claim无Prepared、terminal batch仍有open claim、projection outbox
 永久failed应产生稳定 diagnostic，但 Inspector不得自行修复或终结候选。
+
+---
+
+## 16. Provider input causal projection
+
+ProviderInput Inspector必须从完整session ledger重建generation lifecycle，再按run引用筛选，不能只用当前run的
+events猜测generation。每个generation至少展示：scope/epoch、revision、unit-vector root、prefix fingerprint、
+transcript frontier、source heads、authority-horizon root、open/closed状态、ModelStart joins与typed rollover reason。
+
+每次model call必须并列展示三种不同视图：
+
+- canonical transcript：stable message/tool-result/pair/compaction replacement事实；
+- context frames：非transcript source fragments及preceding/following placement proof；
+- linear provider wire view：adapter实际收到的ordered immutable fragments。
+
+Inspector不得把ContextSource frame伪装成user/assistant trajectory，也不得按`current_user | prior_history`重新排
+canonical transcript。它应显示causal predecessor、projection-local ordinal、tool result leaf + pair leaf + terminal
+projection三方join、pending continuation exact join，以及相邻revision的strict-prefix验证结果。
+
+只有generation start/root、每次append proof、committed frontier、ModelStart reference、manifest nested projection和
+hydrated vector全部一致时才报告`exact_replay`。缺少generation start、artifact、causal validation、frame range或
+continuation proof时输出稳定diagnostic；不得从live compiler/cache补造缺失事实。Attribution-only drift可显示为
+manifest-local audit，但不得表现为durable append、rollover或provider semantic变化。

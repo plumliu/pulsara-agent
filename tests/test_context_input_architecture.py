@@ -115,27 +115,14 @@ def test_immutable_renderer_has_no_msg_or_loop_state_input() -> None:
     assert "TranscriptToolResultRefFact" in compiler_text
 
 
-def test_agent_uses_typed_candidate_sources_not_component_string_facade() -> None:
+def test_agent_uses_context_source_registry_not_legacy_candidate_facade() -> None:
     text = (ROOT / "src/pulsara_agent/runtime/agent.py").read_text(encoding="utf-8")
-    assert "ContextCandidateCollectionInput(" in text
+    assert "ContextCandidateCollectionInput" not in text
+    assert "candidate_sources=" not in text
     assert "ContextCandidateSourceText" not in text
     assert "candidate_texts=" not in text
     assert "shadow_snapshot" not in text
     assert "render_runtime_context_prompt" not in text
-    agent_tree = ast.parse(text)
-    candidate_input_calls = [
-        node
-        for node in ast.walk(agent_tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "ContextCandidateCollectionInput"
-    ]
-    assert candidate_input_calls
-    for call in candidate_input_calls:
-        keyword_names = {keyword.arg for keyword in call.keywords}
-        assert "runtime_context" not in keyword_names
-        assert "plan_revision" not in keyword_names
-
     candidate_tree = ast.parse(
         (ROOT / "src/pulsara_agent/runtime/context_input/candidate.py").read_text(
             encoding="utf-8"
@@ -148,6 +135,18 @@ def test_agent_uses_typed_candidate_sources_not_component_string_facade() -> Non
         and node.name == "collect_context_candidates"
     )
     assert "sources" not in {argument.arg for argument in collector.args.kwonlyargs}
+
+    source_root = ROOT / "src/pulsara_agent/runtime/context_input/sources"
+    for path in source_root.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imported_names = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        assert "ContextFactSnapshotFact" not in imported_names
+        assert "LLMMessage" not in imported_names
     candidate_text = (
         ROOT / "src/pulsara_agent/runtime/context_input/candidate.py"
     ).read_text(encoding="utf-8")
@@ -165,6 +164,204 @@ def test_agent_uses_typed_candidate_sources_not_component_string_facade() -> Non
     assert "ContextSection" not in class_names
     assert "ContextSectionSourceTiming" not in class_names
     assert "ContextSectionRenderTiming" not in class_names
+
+
+def test_all_production_model_lifecycle_callers_supply_provider_input() -> None:
+    callers = (
+        ROOT / "src/pulsara_agent/runtime/agent.py",
+        ROOT / "src/pulsara_agent/runtime/compaction/service.py",
+        ROOT / "src/pulsara_agent/runtime/long_horizon/window_compaction_service.py",
+        ROOT / "src/pulsara_agent/memory/reflection/engine.py",
+        ROOT / "src/pulsara_agent/memory/governance/engine.py",
+    )
+    for path in callers:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        calls = tuple(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "prepare_model_lifecycle_start_bundle"
+                or isinstance(node.func, ast.Attribute)
+                and node.func.attr == "prepare_model_lifecycle_start_bundle"
+            )
+        )
+        assert calls, f"{path} has no model lifecycle preparation"
+        for call in calls:
+            keywords = {item.arg for item in call.keywords}
+            assert "provider_input_start_bundle" in keywords, (
+                f"{path} bypasses canonical provider-input preparation"
+            )
+
+    coordinator = (
+        ROOT / "src/pulsara_agent/runtime/provider_input/coordinator.py"
+    ).read_text(encoding="utf-8")
+    assert "ModelCallStartEvent" not in coordinator
+    assert ".write_events(" not in coordinator
+
+
+def test_new_context_source_and_provider_input_facts_declare_schema_version() -> None:
+    for path in (
+        ROOT / "src/pulsara_agent/primitives/context_source.py",
+        ROOT / "src/pulsara_agent/primitives/provider_input.py",
+    ):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if not any(
+                isinstance(base, ast.Name) and base.id == "FrozenFactBase"
+                for base in node.bases
+            ):
+                continue
+            annotated = {
+                item.target.id
+                for item in node.body
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+            }
+            assert "schema_version" in annotated, (
+                f"{path}:{node.name} lacks a frozen schema_version"
+            )
+
+
+def test_provider_input_generation_hard_cut_has_no_remote_or_clock_ingress() -> None:
+    source_root = ROOT / "src/pulsara_agent"
+    forbidden_remote_ingress = (
+        "previous_response_id",
+        "context_management",
+    )
+    for path in source_root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert not any(item in text for item in forbidden_remote_ingress), (
+            f"{path} reintroduced provider-owned continuation state"
+        )
+
+    pure_modules = (
+        ROOT / "src/pulsara_agent/runtime/provider_input/materialization.py",
+        ROOT / "src/pulsara_agent/runtime/provider_input/planner.py",
+        ROOT / "src/pulsara_agent/runtime/provider_input/vector.py",
+    )
+    for path in pure_modules:
+        text = path.read_text(encoding="utf-8")
+        assert "utc_now(" not in text
+        assert "datetime.now(" not in text
+        assert "time.time(" not in text
+        assert "ContextSourceRegistry" not in text
+        assert "prepare_transcript_provider_projection" not in text
+        assert "materialize_transcript_provider_projection" not in text
+
+
+def test_provider_input_event_safe_state_keeps_bounded_references_only() -> None:
+    primitives = ast.parse(
+        (ROOT / "src/pulsara_agent/primitives/provider_input.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    classes = {
+        node.name: node
+        for node in ast.walk(primitives)
+        if isinstance(node, ast.ClassDef)
+    }
+
+    core_fields = {
+        item.target.id
+        for item in classes["CommittedProviderInputGenerationCoreStateFact"].body
+        if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+    }
+    assert "latest_model_start_event_ref" not in core_fields
+    assert "preparation_ownership" not in core_fields
+    assert "authority_horizons" not in core_fields
+
+    for class_name in (
+        "CanonicalProviderInputPlanFact",
+        "ProviderTranscriptFrontierFact",
+        "ProviderInputPendingContinuationFact",
+        "ProviderInputAwaitingControlDispositionFact",
+    ):
+        fields = {
+            item.target.id
+            for item in classes[class_name].body
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+        }
+        assert "authority_horizons" not in fields, (
+            f"{class_name} embeds an unbounded cross-ledger horizon tuple"
+        )
+
+    event_text = (ROOT / "src/pulsara_agent/event/events.py").read_text(
+        encoding="utf-8"
+    )
+    provider_event_region = event_text[
+        event_text.index(
+            "class ProviderInputGenerationStartedEvent"
+        ) : event_text.index("class ModelCallTerminalProjectionCommittedEvent")
+    ]
+    assert "LLMContext" not in provider_event_region
+    assert "ordered_messages" not in provider_event_region
+    assert "materialized_input" not in provider_event_region
+
+
+def test_provider_input_causal_order_hard_cut_cannot_regress() -> None:
+    primitive_path = ROOT / "src/pulsara_agent/primitives/provider_input.py"
+    primitive_tree = ast.parse(
+        primitive_path.read_text(encoding="utf-8"), filename=str(primitive_path)
+    )
+    classes = {
+        node.name: node
+        for node in ast.walk(primitive_tree)
+        if isinstance(node, ast.ClassDef)
+    }
+
+    def fields(class_name: str) -> set[str]:
+        return {
+            item.target.id
+            for item in classes[class_name].body
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+        }
+
+    assert not any(
+        "successor" in field for field in fields("ProviderProjectionPositionFact")
+    )
+    unit_semantic_fields = fields("ProviderInputUnitSemanticFact")
+    assert "provider_lane" not in unit_semantic_fields
+    assert "invocation_classification" not in unit_semantic_fields
+
+    planner_path = ROOT / "src/pulsara_agent/runtime/provider_input/planner.py"
+    planner_text = planner_path.read_text(encoding="utf-8")
+    for forbidden in (
+        "current_trigger_units",
+        "transcript_before_trigger",
+        "current-trigger-unit",
+        "ProviderInputTranscriptFrontierFact",
+        "SessionWindowGenerationScopeFact",
+    ):
+        assert forbidden not in planner_text
+    assert 'provider_lane != "current_user"' not in planner_text
+    assert 'provider_lane == "current_user"' not in planner_text
+
+    event_text = (ROOT / "src/pulsara_agent/event/events.py").read_text(
+        encoding="utf-8"
+    )
+    assert "ProviderInputUnitAttributionSupplementedEvent" not in event_text
+
+    provider_runtime_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "src/pulsara_agent/runtime/provider_input").glob("*.py")
+    )
+    assert '"provider-ordered-transcript-projection"' not in provider_runtime_text
+
+    planner_tree = ast.parse(planner_text, filename=str(planner_path))
+    rollover = next(
+        node
+        for node in ast.walk(planner_tree)
+        if isinstance(node, ast.ClassDef) and node.name == "ProviderInputRolloverRequired"
+    )
+    initializer = next(
+        node
+        for node in rollover.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    )
+    assert [item.arg for item in initializer.args.args] == ["self", "request"]
 
 
 def test_no_context_test_helper_infers_semantics_from_serialized_result_json() -> None:

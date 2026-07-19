@@ -29,6 +29,15 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.provider_input import (
+    ContextInputManifestProjectionReferenceFact,
+)
+from pulsara_agent.primitives.provider_input import (
+    PreparedProviderInputPlanFact,
+    ProviderOrderedTranscriptProjectionFact,
+    ProviderOrderedTranscriptProjectionIdentityFact,
+)
 from pulsara_agent.primitives.long_horizon import (
     ContextWindowFact,
     ContextWindowProjectionState,
@@ -51,7 +60,7 @@ if TYPE_CHECKING:
 
 
 CONTEXT_INPUT_MANIFEST_MEDIA_TYPE = (
-    "application/vnd.pulsara.context-input-manifest+json; version=6"
+    "application/vnd.pulsara.context-input-manifest+json; version=8"
 )
 
 
@@ -719,6 +728,11 @@ def build_context_input_manifest(
     projection_target_unreachable: ProjectionTargetUnreachableAuditFact | None,
     safe_point_revision: int,
     prepared_candidates: PreparedContextCandidateSet,
+    ordered_transcript_projection: ProviderOrderedTranscriptProjectionFact,
+    ordered_transcript_projection_identity: (
+        ProviderOrderedTranscriptProjectionIdentityFact
+    ),
+    prepared_provider_input_plan: PreparedProviderInputPlanFact,
 ) -> ContextCompileInputManifestFact:
     """Build the exact event-safe input aggregate consumed by one compile."""
 
@@ -745,7 +759,7 @@ def build_context_input_manifest(
         projection_state=projection_state,
     )
     aggregate = context_fingerprint(
-        "context-compile-input-aggregate:v6",
+        "context-compile-input-aggregate:v8",
         [
             snapshot.snapshot_semantic_fingerprint,
             transcript.transcript_fingerprint,
@@ -753,6 +767,9 @@ def build_context_input_manifest(
             transcript_authority.provider_semantic_identity.provider_semantic_fingerprint,
             prepared_tool_results.render_input_fingerprint,
             prepared_candidates.candidate_set_fingerprint,
+            ordered_transcript_projection.fact_fingerprint,
+            ordered_transcript_projection_identity.identity_fingerprint,
+            prepared_provider_input_plan.plan_fingerprint,
             active_window.window_semantic_fingerprint,
             window_policy.policy_fingerprint,
             projection_state.state_semantic_fingerprint,
@@ -768,14 +785,17 @@ def build_context_input_manifest(
         ],
     )
     payload = {
-        "schema_version": "context-input-manifest:v6",
+        "schema_version": "context-input-manifest:v8",
         "input_aggregate_fingerprint": aggregate,
         "snapshot": snapshot,
-        "subagent_graph_semantic_source": (
-            snapshot.subagent_graph_semantic_source
-        ),
+        "subagent_graph_semantic_source": (snapshot.subagent_graph_semantic_source),
         "subagent_graph_acceleration": snapshot.subagent_graph_acceleration,
         "prepared_candidate_set": prepared_candidates,
+        "ordered_transcript_projection": ordered_transcript_projection,
+        "ordered_transcript_projection_identity": (
+            ordered_transcript_projection_identity
+        ),
+        "prepared_provider_input_plan": prepared_provider_input_plan,
         "transcript_fingerprint": transcript.transcript_fingerprint,
         "transcript_provider_projection": transcript_provider_projection,
         "transcript_authority": transcript_authority,
@@ -796,9 +816,7 @@ def build_context_input_manifest(
         "safe_point_revision": safe_point_revision,
         "compiler_contract_version": snapshot.identity.compiler_contract_version,
     }
-    return ContextCompileInputManifestFact.from_trusted_factory_payload(
-        payload
-    )
+    return ContextCompileInputManifestFact.from_trusted_factory_payload(payload)
 
 
 def build_long_horizon_context_attribution(
@@ -819,9 +837,7 @@ def build_long_horizon_context_attribution(
         "window_generation": active_window.generation,
         "window_semantic_fingerprint": active_window.window_semantic_fingerprint,
         "projection_generation": projection_state.projection_generation,
-        "projection_state_fingerprint": (
-            projection_state.state_semantic_fingerprint
-        ),
+        "projection_state_fingerprint": (projection_state.state_semantic_fingerprint),
         "projection_rewrite_event_refs": projection_rewrite_event_refs,
         "rollout_account_id": rollout_state.account_id,
         "rollout_account_owner_runtime_session_id": (
@@ -863,7 +879,9 @@ def build_projected_tool_result_compile_refs(
             projection = projections.get(block.tool_result_unit_id)
             fragment = fragments.get(block.tool_result_unit_id)
             if projection is None or fragment is None:
-                raise ValueError("projected tool-result ref lacks projection or fragment")
+                raise ValueError(
+                    "projected tool-result ref lacks projection or fragment"
+                )
             if (
                 projection.tool_call_id != block.tool_call_id
                 or fragment.tool_call_id != block.tool_call_id
@@ -881,9 +899,7 @@ def build_projected_tool_result_compile_refs(
                     tool_result_unit_id=block.tool_result_unit_id,
                     window_id=projection.window_id,
                     projection_generation=projection.projection_generation,
-                    projected_fragment_fingerprint=(
-                        fragment.rendered_text_fingerprint
-                    ),
+                    projected_fragment_fingerprint=(fragment.rendered_text_fingerprint),
                     representation=projection.representation,
                     rollup_id=projection.source_rollup_id,
                 )
@@ -943,8 +959,38 @@ def build_context_input_manifest_candidate(
         semantic_metadata=metadata,
         content_fingerprint=content_fingerprint,
         metadata_fingerprint=context_fingerprint(
-            "context-input-manifest-metadata:v6", metadata
+            "context-input-manifest-metadata:v8", metadata
         ),
+    )
+
+
+def build_context_input_manifest_projection_reference(
+    *,
+    manifest: ContextCompileInputManifestFact,
+    candidate: ContextInputManifestWriteCandidate,
+    write_result: ContextInputManifestWriteResult,
+) -> ContextInputManifestProjectionReferenceFact:
+    """Bind the nested ordered projection to one confirmed manifest artifact."""
+
+    if write_result.outcome not in {"stored", "confirmed_existing"}:
+        raise ValueError("manifest projection reference requires a FULL write outcome")
+    if (
+        candidate.context_id != manifest.snapshot.identity.context_id
+        or candidate.artifact_id != write_result.artifact_id
+        or candidate.content_fingerprint != write_result.content_fingerprint
+    ):
+        raise ValueError("manifest projection acknowledgement drifted")
+    rebuilt = build_context_input_manifest_candidate(manifest)
+    if rebuilt != candidate:
+        raise ValueError("manifest projection candidate is not canonical")
+    return build_frozen_fact(
+        ContextInputManifestProjectionReferenceFact,
+        schema_version="context_input_manifest_projection_reference.v1",
+        context_id=candidate.context_id,
+        input_manifest_artifact_id=candidate.artifact_id,
+        input_manifest_content_fingerprint=candidate.content_fingerprint,
+        input_manifest_fact_fingerprint=manifest.manifest_fingerprint,
+        projection_identity=manifest.ordered_transcript_projection_identity,
     )
 
 

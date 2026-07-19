@@ -14,7 +14,13 @@ from tests.conftest import (
     run_start_permission_fields,
     tool_result_end_candidate,
 )
-from tests.support import model_call_end_fields, model_call_start_fields
+from tests.support import (
+    bind_test_context,
+    model_call_end_fields,
+    model_call_start_fields,
+    test_llm_context,
+    test_resolved_call,
+)
 from tests.support.context_input import render_event_log_transcript
 
 from tests.support.model_stream import (
@@ -53,6 +59,7 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import PostgresEventLog
 from pulsara_agent.host.transcript import rebuild_prior_messages
 from pulsara_agent.llm import ModelRole, build_llm_runtime
+from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.terminal_projection import (
     ModelTerminalProjectionReducer,
@@ -79,6 +86,9 @@ from pulsara_agent.runtime.compaction.service import (
     ContextCompactionService,
 )
 from pulsara_agent.runtime.session import RuntimeSession
+from pulsara_agent.runtime.provider_input.planner import (
+    build_one_shot_generation_close_event,
+)
 from pulsara_agent.runtime.state import LoopBudget, LoopState, LoopTransition
 from pulsara_agent.runtime.tool_artifacts import PostgresToolResultArtifactIndex
 from pulsara_agent.primitives.model_call import (
@@ -120,12 +130,19 @@ class _CapturingLLMRuntime:
 
         self.capture_tasks.append(asyncio.create_task(capture_committed()))
         return handle
-
     def resolve_target(self, **kwargs):
         return self.inner.resolve_target(**kwargs)
 
     def resolve_call(self, **kwargs):
         return self.inner.resolve_call(**kwargs)
+
+
+def _captured_user_input(context) -> str:
+    user_messages = tuple(
+        message for message in context.messages if message.role is MessageRole.USER
+    )
+    assert len(user_messages) == 1
+    return "\n".join(user_messages[0].content)
 
 
 async def _compact_with_empty_summary_retry(
@@ -201,9 +218,7 @@ def test_real_llm_context_compaction_summary_and_resume(tmp_path: Path) -> None:
             llm_runtime=build_llm_runtime(settings.llm),
             runtime_session_id=runtime_session_id,
             runtime_session=runtime_session,
-            event_commit_port=RuntimeSessionCompactionEventCommitPort(
-                runtime_session
-            ),
+            event_commit_port=RuntimeSessionCompactionEventCommitPort(runtime_session),
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 keep_recent_runs=1,
@@ -298,9 +313,7 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
             llm_runtime=capture,
             runtime_session_id=runtime_session_id,
             runtime_session=runtime_session,
-            event_commit_port=RuntimeSessionCompactionEventCommitPort(
-                runtime_session
-            ),
+            event_commit_port=RuntimeSessionCompactionEventCommitPort(runtime_session),
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 keep_recent_runs=2,
@@ -333,7 +346,7 @@ def test_real_llm_long_pr4_style_dogfood_manual_compaction(tmp_path: Path) -> No
         )
 
         compact_context = capture.contexts[0]
-        compact_user_input = compact_context.messages[1].content[0]
+        compact_user_input = _captured_user_input(compact_context)
         raw_output = "".join(capture.raw_parts)
         assert "long_round1_orientation" in compact_user_input
         # keep_recent_runs=2 intentionally leaves the final inspection round in
@@ -445,9 +458,7 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
             llm_runtime=capture,
             runtime_session_id=runtime_session_id,
             runtime_session=runtime_session,
-            event_commit_port=RuntimeSessionCompactionEventCommitPort(
-                runtime_session
-            ),
+            event_commit_port=RuntimeSessionCompactionEventCommitPort(runtime_session),
             policy=ContextCompactionPolicy(
                 min_events_after_last_compact=1,
                 auto_trigger_ratio=0.006,
@@ -488,6 +499,7 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
                 ),
             )
         )
+
         async def append_current_tool_result() -> None:
             await runtime_session.emit_many(
                 (
@@ -568,7 +580,7 @@ def test_real_llm_mid_turn_inline_compaction_preserves_current_tail(
         summary = archive.get_text(
             completed.summary_artifact_id, session_id=runtime_session_id
         )
-        compact_input = capture.contexts[0].messages[1].content[0]
+        compact_input = _captured_user_input(capture.contexts[0])
         assert "Historical requirement A" in compact_input
         assert "Recent requirement B" not in compact_input
         assert "Current request" not in compact_input
@@ -677,9 +689,7 @@ def _bind_model_semantic_events(
     semantic_events: tuple,
 ) -> tuple:
     bound = []
-    source_accumulator = sha256_fingerprint(
-        "model-stream-sanitized-source:v2", "empty"
-    )
+    source_accumulator = sha256_fingerprint("model-stream-sanitized-source:v2", "empty")
     for index, event in enumerate(semantic_events):
         draft_kind = _semantic_draft_kind(event)
         fixture_attribution = event.model_stream_attribution
@@ -756,9 +766,51 @@ async def _append_accepted_reply(
     ctx: EventContext,
     semantic_events: tuple = (),
 ) -> tuple:
+    call = test_resolved_call()
+    context = bind_test_context(
+        call,
+        test_llm_context(
+            messages=(
+                LLMMessage.user(
+                    "Synthetic provider input for a durable compaction fixture reply."
+                ),
+            ),
+        ),
+    )
+    provider_input = await runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
+        call=call,
+        context=context,
+        event_context=ctx,
+        operation_kind="direct_model_call",
+        operation_id=f"compaction-fixture:{ctx.reply_id}",
+    )
+    start_fields = model_call_start_fields(
+        context_id=context.context_id,
+        model_call_index=context.model_call_index,
+        resolved_call=call.fact,
+        pre_send_estimated_input_tokens=(context.compiler_estimated_input_tokens or 0),
+    )
+    stable_start_id = f"model_call_start:{call.fact.resolved_model_call_id}"
+    recovery_plan = start_fields["recovery_plan"]
+    recovery_payload = recovery_plan.model_dump(
+        mode="python",
+        exclude={"recovery_plan_fingerprint"},
+    )
+    recovery_payload["model_call_start_event_id"] = stable_start_id
+    start_fields.update(
+        id=stable_start_id,
+        recovery_plan=type(recovery_plan)(
+            **recovery_payload,
+            recovery_plan_fingerprint=sha256_fingerprint(
+                "model-stream-recovery-plan:v1",
+                recovery_payload,
+            ),
+        ),
+        provider_input_reference=provider_input.committed_reference,
+    )
     start = ModelCallStartEvent(
         **ctx.event_fields(),
-        **model_call_start_fields(),
+        **start_fields,
     )
     opened = await runtime_session.emit_many(
         (
@@ -767,6 +819,7 @@ async def _append_accepted_reply(
                 **ctx.event_fields(),
                 name="assistant",
             ),
+            *provider_input.companion_events,
             start,
         )
     )
@@ -809,9 +862,7 @@ async def _append_accepted_reply(
         projection.projection_reference,
         projection.document,
     )
-    end_fields = model_call_end_fields(
-        resolved_call=committed_start.resolved_call
-    )
+    end_fields = model_call_end_fields(resolved_call=committed_start.resolved_call)
     end_fields.update(
         {
             "reported_model_id": None,
@@ -829,6 +880,10 @@ async def _append_accepted_reply(
         (
             projection.committed_event,
             end,
+            build_one_shot_generation_close_event(
+                bundle=provider_input,
+                event_context=ctx,
+            ),
             ReplyEndEvent(
                 id=committed_start.recovery_plan.stable_reply_end_event_id,
                 **ctx.event_fields(),
@@ -880,9 +935,7 @@ async def _append_finished_run(
     _, state_before_close = apply_rollout_event(
         account=account,
         state=rollout_state,
-        event=window_close.model_copy(
-            update={"sequence": source_through_sequence + 1}
-        ),
+        event=window_close.model_copy(update={"sequence": source_through_sequence + 1}),
     )
     assert state_before_close is not None
     rollout_close = RolloutBudgetAccountClosedEvent(
@@ -927,13 +980,17 @@ def _append_turn(
             runtime_session,
             ctx,
             (
-                make_text_block_start_event(**ctx.event_fields(), block_id=f"text:{label}"),
+                make_text_block_start_event(
+                    **ctx.event_fields(), block_id=f"text:{label}"
+                ),
                 make_text_block_segment_event(
                     **ctx.event_fields(),
                     block_id=f"text:{label}",
                     delta=assistant_text,
                 ),
-                make_text_block_end_event(**ctx.event_fields(), block_id=f"text:{label}"),
+                make_text_block_end_event(
+                    **ctx.event_fields(), block_id=f"text:{label}"
+                ),
             ),
         )
         await _append_finished_run(runtime_session, ctx)

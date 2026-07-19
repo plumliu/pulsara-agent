@@ -1,22 +1,30 @@
 # Pulsara 下一阶段六步 Hard-Cut 总路线
 
-> 状态：冻结的阶段顺序与跨阶段契约；每一阶段仍需自己的实施规格。
+> 状态：历史总路线与跨阶段背景；ContextSource之后的实施顺序已由新的两阶段规格取代。
 > 基线：ResolvedModelTarget / ResolvedModelCall hard cut 已完成；Subagent graph reducer hard cut 已完成。
-> 进度：阶段一 MCP Startup Latency、阶段二 Host Run-Boundary Safe Point、阶段三 Context Compiler Input Hard Cut、阶段四 Long-Horizon Context Windows 已完成；下一实施章固定为阶段五 ContextSource Ownership Hard Cut。
+> 进度：阶段一 MCP Startup Latency、阶段二 Host Run-Boundary Safe Point、阶段三 Context Compiler Input Hard Cut、阶段四 Long-Horizon Context Windows 已完成；下一实施章改为 `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md` 中的两阶段 hard cut。
 > 阶段二已通过归档后 durable-ownership 复审：RunStart/RunEnd confirmation、boundary payload conflict、迟到 compaction commit owner、frozen execution truth、Prepared carrier、child native evidence与deferred-borrow handle retirement均已补齐。
 > 原则：项目尚未上线，不为旧 event、旧数据库、旧 constructor 或旧 runtime facade 保留生产兼容路径。
 > 文件名说明：为保持既有链接稳定，文件仍保留 NEXT_FIVE；正文路线已正式扩展为六阶段。
 
 ## 0. 结论
 
-下一阶段固定为六个相互依赖、但必须独立全绿的 hard-cut 章节：
+原路线将工作拆成六个相互依赖的章节：
 
 1. **MCP Startup Latency Hard Cut（已完成）**
 2. **Host Run-Boundary Safe Point Hard Cut（已完成）**
 3. **Context Compiler Input Hard Cut（已完成）**
-4. **Long-Horizon Context Windows**
-5. **ContextSource Ownership Hard Cut**
-6. **Prompt Cache**
+4. **Long-Horizon Context Windows（已完成）**
+5. **ContextSource Ownership Hard Cut（实施顺序已取代）**
+6. **Prompt Cache（实施顺序已取代）**
+
+当前权威实施顺序为：
+
+```text
+Append-aware ContextSource Ownership Hard Cut
+-> Incremental ProviderInput Generation Hard Cut
+-> provider-specific cache observation/hints（后置）
+```
 
 依赖关系如下：
 
@@ -39,14 +47,14 @@ Subagent RunEntry ────┴── CommittedRunEntry
                                     └── Long-Horizon Context Windows
                                            │  context-window / rollup / compaction identity
                                            │
-                                           └── ContextSource Ownership Hard Cut
+                                           └── Append-aware ContextSource Ownership Hard Cut
                                                   │
-                                                  └── Canonical ProviderInputPlan
+                                                  └── Incremental ProviderInput Generation Hard Cut
                                                          │
-                                                         └── Prompt Cache
+                                                         └── provider cache observation/hints
 ```
 
-Prompt Cache 不能越过第 2、3、4、5 步直接实施。否则 cache identity 会把 mutable
+Incremental ProviderInput不能越过第 2、3、4 步与append-aware ContextSource contract直接实施。否则 input identity 会把 mutable
 `LoopState`、旧字符串包装 facade、未稳定的 tool-result rollup 或临时 section ownership
 误当作长期输入契约。
 
@@ -114,6 +122,14 @@ resume何时已经合法继续，也不能解释MCP installation、preflight com
 - primitives不得import runtime permission；preset mapping只有primitives.permission一个真源；
 - production resume不得以空user input、空active skills重新解析capability exposure；
 - ContextSource 不返回预渲染 provider message 或任意字符串 facade；
+- ContextSource只接收source-specific discriminated input，不得import完整 `ContextFactSnapshot`；
+- provider tool definitions由独立 `CapabilityToolCatalogRootFact`拥有，不得混入capability prose source；
+- source canonical revision不读取ProviderInput generation head；generation supersession只归pure append planner/reducer；
+- ProviderInput跨parent/child authority必须使用per-ledger horizons，禁止裸single high-water；
+- committed ProviderInput core不包含ModelStart/ContextCompiled/close event refs；event refs只进入独立attribution envelope；
+- prepared append ownership与committed core物理分离，ModelStart guard同时CAS两者；
+- ModelStart只保存bounded authority-horizon/replay-binding set roots，不重复完整cross-ledger tuple；
+- LLMRuntime继续是ModelStart与完整model lifecycle唯一writer；generation coordinator只准备stable companions与guard；
 - provider adapter 不重新解释 context budget、cache identity 或 compaction generation；
 - `tool_result_context_chars=36_000` 不再是 run-ending 独立真源；
 - Prompt Cache 不读取 live manager、scratchpad 或当前 wall clock 重算 identity。
@@ -858,6 +874,10 @@ exploration
 
 ## 7. 阶段五：ContextSource Ownership Hard Cut
 
+> **实施顺序已被取代。** ContextSource ownership 与增量 ProviderInput 现在按
+> `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md`
+> 的两阶段路线实施。以下内容只保留历史范围说明，不再作为开工顺序或验收真值。
+
 ### 7.1 目标
 
 将非 transcript context 的所有权从 AgentRuntime 中散落的字符串拼接，迁移为结构化 source
@@ -944,6 +964,10 @@ class ContextSectionCandidate(BaseModel):
 - production不存在旧字符串重包装路径。
 
 ## 8. 阶段六：Prompt Cache
+
+> **实施顺序已被取代。** Canonical ProviderInputPlan、stable prefix与timing placement已经并入
+> `PULSARA_CONTEXT_SOURCE_AND_INCREMENTAL_PROVIDER_INPUT_HARD_CUT_IMPLEMENTATION.zh.md`
+> 的第二阶段。以下内容只保留provider cache背景；provider-specific hint与usage观察后置。
 
 ### 8.1 前置条件
 

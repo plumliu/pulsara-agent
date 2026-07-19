@@ -113,7 +113,11 @@ from pulsara_agent.primitives.model_call import (
 )
 from pulsara_agent.primitives.long_horizon import ToolActionClassificationFact
 from pulsara_agent.primitives.mcp import McpInstallationReferenceFact
-from pulsara_agent.runtime.context_engine.types import ContextBudgetExceeded
+from pulsara_agent.runtime.context_engine.types import (
+    CompiledContext,
+    ContextBudgetExceeded,
+    bind_compiled_context_to_provider_carrier,
+)
 from pulsara_agent.runtime.tool_action import (
     ToolActionClassifierRegistry,
     default_tool_action_classifier_registry,
@@ -154,7 +158,6 @@ from pulsara_agent.runtime.permission import (
 from pulsara_agent.runtime.execution_handles import BoundaryExecutionHandles
 from pulsara_agent.runtime.context_input.candidate import (
     DEFAULT_SYSTEM_PROMPT,
-    ContextCandidateCollectionInput,
     render_plan_revision_instruction,
 )
 from pulsara_agent.runtime.context_input.compiler import (
@@ -179,6 +182,7 @@ from pulsara_agent.runtime.context_input.manifest import (
     build_context_compile_input_audit,
     build_context_input_manifest,
     build_context_input_manifest_candidate,
+    build_context_input_manifest_projection_reference,
     build_long_horizon_context_attribution,
 )
 from pulsara_agent.runtime.context_input.transcript_authority import (
@@ -245,7 +249,6 @@ from pulsara_agent.runtime.permission_snapshot import (
     validate_preset_policy_payload,
 )
 from pulsara_agent.runtime.plan import (
-    PLAN_ACTIVE_INSTRUCTION,
     McpInputRequiredInteractionResolution,
     PlanExitResolution,
     PlanInteractionResolution,
@@ -868,9 +871,7 @@ class AgentRuntime:
                 llm_runtime=llm_runtime,
             )
             runtime_session.window_compaction_service = existing_window_compactor
-        elif not isinstance(
-            existing_window_compactor, ContextWindowCompactionService
-        ):
+        elif not isinstance(existing_window_compactor, ContextWindowCompactionService):
             raise TypeError(
                 "RuntimeSession carries an incompatible window compaction service"
             )
@@ -1144,6 +1145,12 @@ class AgentRuntime:
                 reason=reason,
             ):
                 yield event
+        elif state.status is LoopStatus.WAITING_USER and state.pending_tool_calls:
+            async for event in self._terminalize_pending_approval_for_abort(
+                state,
+                reason=reason,
+            ):
+                yield event
         state.status = LoopStatus.ABORTED
         state.stop_reason = RunStopReason.ABORTED
         state.error_message = None
@@ -1154,6 +1161,41 @@ class AgentRuntime:
         state.abort_kind = reason
         async for event in self._finalize_run(state):
             yield event
+
+    async def _terminalize_pending_approval_for_abort(
+        self,
+        state: LoopState,
+        *,
+        reason: AbortKind,
+    ) -> AsyncIterator[AgentEvent]:
+        """Close accepted tool calls before an approval-suspended run aborts."""
+
+        reason_code = f"pending_approval_aborted:{reason.value}"
+        for block in tuple(state.pending_tool_calls):
+            stored_events = await self.runtime_session.emit_many(
+                self._typed_tool_result_error_events(
+                    state,
+                    tool_call_id=block.id,
+                    tool_call_name=block.name,
+                    message=(
+                        "tool call denied because the pending approval "
+                        "was stopped before execution"
+                    ),
+                    result_state=ToolResultState.DENIED,
+                    arguments=_tool_block_arguments_for_semantics(block),
+                    failure_stage="permission_denied",
+                    reason_code=reason_code,
+                ),
+                state=state,
+            )
+            for event in stored_events:
+                yield event
+            self._record_tool_result_events(
+                state,
+                stored_events=list(stored_events),
+                tool_call_id=block.id,
+                tool_call_name=block.name,
+            )
 
     async def _terminalize_pending_mcp_for_abort(
         self,
@@ -1213,9 +1255,7 @@ class AgentRuntime:
             "pending plan tool call id",
         )
         tool_name = (
-            "ask_plan_question"
-            if payload.get("kind") == "question"
-            else "exit_plan"
+            "ask_plan_question" if payload.get("kind") == "question" else "exit_plan"
         )
         try:
             async for event in self._emit_tool_result_and_record(
@@ -1395,8 +1435,7 @@ class AgentRuntime:
             )
             if account_state is None:
                 admission = self.runtime_session.event_log.get_by_id(
-                    "subagent_rollout_budget_resolved:"
-                    f"{terminal.subagent_run_id}"
+                    f"subagent_rollout_budget_resolved:{terminal.subagent_run_id}"
                 )
                 if not isinstance(admission, SubagentRolloutBudgetResolvedEvent):
                     continue
@@ -1422,9 +1461,7 @@ class AgentRuntime:
                 else terminal.child_terminal_reference
             )
             handoff: ChildRolloutUsageHandoffFact | None = None
-            usage_status: Literal[
-                "child_terminal_handoff", "child_not_started_zero"
-            ]
+            usage_status: Literal["child_terminal_handoff", "child_not_started_zero"]
             charged_milliunits: int
             synthetic_test_terminal = (
                 child_terminal_reference is not None
@@ -1458,9 +1495,7 @@ class AgentRuntime:
                 ):
                     raise RuntimeError("child handoff exceeds parent reservation")
                 usage_status = "child_terminal_handoff"
-                charged_milliunits = (
-                    handoff.settlement_aggregate.charged_milliunits
-                )
+                charged_milliunits = handoff.settlement_aggregate.charged_milliunits
 
             augmented.append(
                 RolloutBudgetReservationSettledEvent(
@@ -1491,8 +1526,10 @@ class AgentRuntime:
     ) -> ChildRolloutUsageHandoffFact:
         if self.subagent_runtime is None:
             raise RuntimeError("child rollout handoff requires SubagentRuntime")
-        child_log = self.subagent_runtime.event_log_locator.event_log_for_runtime_session(
-            child_terminal_reference.child_runtime_session_id
+        child_log = (
+            self.subagent_runtime.event_log_locator.event_log_for_runtime_session(
+                child_terminal_reference.child_runtime_session_id
+            )
         )
         child_snapshot = child_log.read_raw_events_by_types(
             (
@@ -1630,9 +1667,10 @@ class AgentRuntime:
             if account_state is not None
             else ()
         )
-        if not isinstance(
-            resolved_budget_event, SubagentRolloutBudgetResolvedEvent
-        ) or len(reservations) != 1:
+        if (
+            not isinstance(resolved_budget_event, SubagentRolloutBudgetResolvedEvent)
+            or len(reservations) != 1
+        ):
             raise RuntimeError("child start lost its atomic rollout admission facts")
         reservation = reservations[0]
         stored_reservation = self.runtime_session.event_log.get_by_id(
@@ -2324,10 +2362,7 @@ class AgentRuntime:
             raise RuntimeError(
                 "active observation rollups require a resolved runtime carrier"
             )
-        units = {
-            unit.unit_id: unit
-            for unit in normalized_transcript.tool_result_units
-        }
+        units = {unit.unit_id: unit for unit in normalized_transcript.tool_result_units}
         policy = self._require_run_working_set(
             state
         ).long_horizon_contract.window_policy
@@ -2729,10 +2764,8 @@ class AgentRuntime:
             self._mark_mcp_terminal_commit_attempt(state, call.id)
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         if rollout_reservation is not None:
-            write_candidates = (
-                await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-                    write_candidates
-                )
+            write_candidates = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                write_candidates
             )
             terminal_registry.freeze_terminal(
                 run_id=state.run_id,
@@ -2746,9 +2779,7 @@ class AgentRuntime:
                     state=state,
                 ).commit_terminal_batch_and_settlement(
                     terminal_candidates=tuple(
-                        event
-                        for event in write_candidates
-                        if event.id != settlement.id
+                        event for event in write_candidates if event.id != settlement.id
                     ),
                     settlement_candidate=settlement,
                     expected_reservation_fingerprint=(
@@ -2875,15 +2906,10 @@ class AgentRuntime:
                     return None, "child_rollout_parent_finalization"
                 quote = calculate_model_call_reservation(
                     target=resolved_call.target.fact,
-                    resolved_model_call_id=(
-                        resolved_call.fact.resolved_model_call_id
-                    ),
+                    resolved_model_call_id=(resolved_call.fact.resolved_model_call_id),
                     policy=binding.account.policy,
                 )
-                if (
-                    quote.reserved_milliunits
-                    > binding.child_state.remaining_milliunits
-                ):
+                if quote.reserved_milliunits > binding.child_state.remaining_milliunits:
                     return None, "child_rollout_subaccount_exhausted"
                 return None, None
 
@@ -2910,8 +2936,7 @@ class AgentRuntime:
             if plan.action == "terminal":
                 reason = (
                     "rollout_emergency_hard_stop"
-                    if binding.parent_state.phase
-                    is RolloutPhase.EMERGENCY_HARD_STOP
+                    if binding.parent_state.phase is RolloutPhase.EMERGENCY_HARD_STOP
                     else "rollout_budget_exhausted"
                 )
                 return None, reason
@@ -2948,15 +2973,15 @@ class AgentRuntime:
                 if item.budget_bucket is budget_bucket
             )
             if not blockers:
-                return binding.parent_state.model_stream_reconciliation_blocker_count == 0
+                return (
+                    binding.parent_state.model_stream_reconciliation_blocker_count == 0
+                )
             if loop.time() < cancellation_takeover_at:
                 # A terminal owner or batch-repair path may already be folding
                 # the exact settlement. Give that owner a bounded opportunity
                 # to finish before the rollout coordinator takes over child
                 # cancellation; competing terminal owners corrupt attribution.
-                await asyncio.sleep(
-                    min(0.05, cancellation_takeover_at - loop.time())
-                )
+                await asyncio.sleep(min(0.05, cancellation_takeover_at - loop.time()))
                 continue
             child_ids = tuple(
                 sorted(
@@ -3021,11 +3046,12 @@ class AgentRuntime:
                     raise RuntimeError("phase restart lost its model call index")
                 resolved_call = phase_restart_call
                 model_call_index = phase_restart_model_call_index
-            phase_event, rollout_terminal_reason = (
-                await self._prepare_rollout_phase_for_model_call(
-                    state=state,
-                    resolved_call=resolved_call,
-                )
+            (
+                phase_event,
+                rollout_terminal_reason,
+            ) = await self._prepare_rollout_phase_for_model_call(
+                state=state,
+                resolved_call=resolved_call,
             )
             if phase_event is not None:
                 phase_restart_call = resolved_call
@@ -3074,8 +3100,12 @@ class AgentRuntime:
             compile_attempt_index = 0
             context_retry_index = 0
             safe_point_revision = 0
+            provider_input_planning_bundle = None
+            provider_input_start_bundle = None
             while state.status is LoopStatus.RUNNING:
                 context_id = f"context:{uuid4().hex}"
+                provider_input_planning_bundle = None
+                provider_input_start_bundle = None
                 input_audit = None
                 render_output = None
                 prepared_context_input = None
@@ -3129,17 +3159,7 @@ class AgentRuntime:
                         raw_suspended_state_token_for_validation=(
                             state.scratchpad.get("suspended_state_token")
                         ),
-                        candidate_sources=ContextCandidateCollectionInput(
-                            system_prompt=(self.system_prompt or DEFAULT_SYSTEM_PROMPT),
-                            memory_hook_prompt=memory_prompt,
-                            capability_catalog=exposure.catalog_prompt,
-                            capability_active_skill=exposure.active_skill_prompt,
-                            plan_workflow=(
-                                PLAN_ACTIVE_INSTRUCTION
-                                if self._plan_state(state).active
-                                else None
-                            ),
-                        ),
+                        memory_scope_instruction=memory_prompt,
                     )
                     pre_manifest_failure_stage = (
                         ContextCompileFailureStage.LONG_HORIZON_FOLD
@@ -3167,9 +3187,7 @@ class AgentRuntime:
                         ),
                         token_estimator=resolved_call.target.token_estimator,
                     )
-                    long_horizon_store = (
-                        self.runtime_session.long_horizon_state_store
-                    )
+                    long_horizon_store = self.runtime_session.long_horizon_state_store
                     base_render_output = render_output
                     pre_manifest_failure_stage = (
                         ContextCompileFailureStage.TOOL_OBSERVATION_PROJECTION
@@ -3194,15 +3212,13 @@ class AgentRuntime:
                     pre_manifest_failure_reason = (
                         ContextInputFailureReasonCode.OBSERVATION_ROLLUP_FAILED
                     )
-                    prepared_rollups = await (
-                        self._prepare_active_observation_rollups(
-                            state=state,
-                            resolved_call=resolved_call,
-                            normalized_transcript=(
-                                prepared_context_input.normalized_transcript
-                            ),
-                            projection_state=projection_state,
-                        )
+                    prepared_rollups = await self._prepare_active_observation_rollups(
+                        state=state,
+                        resolved_call=resolved_call,
+                        normalized_transcript=(
+                            prepared_context_input.normalized_transcript
+                        ),
+                        projection_state=projection_state,
                     )
                     pre_manifest_failure_stage = (
                         ContextCompileFailureStage.WINDOW_COMPACTION_PLANNING
@@ -3210,31 +3226,27 @@ class AgentRuntime:
                     pre_manifest_failure_reason = (
                         ContextInputFailureReasonCode.WINDOW_COMPACTION_PLANNING_FAILED
                     )
-                    current_run_planning = (
-                        prepare_current_run_projection_planning_input(
-                            run_id=state.run_id,
-                            run_start_sequence=(
-                                self._require_run_working_set(
-                                    state
-                                ).run_start_sequence
-                            ),
-                            window=active_window,
-                            current_projection=projection_state,
-                            canonical_slice=prepared_context_input.authority_slice,
-                            transcript=(
-                                prepared_context_input.normalized_transcript.transcript
-                            ),
-                            tool_result_units=(
-                                prepared_context_input.normalized_transcript.tool_result_units
-                            ),
-                            context_budget=resolved_call.target.context_budget,
-                            allocation_policy=window_policy,
-                            estimator=resolved_call.target.fact.token_estimator,
-                            pending_interaction=(
-                                state.pending_interaction_kind is not None
-                            ),
-                            tool_call_in_flight=_tool_call_in_flight(state),
-                        )
+                    current_run_planning = prepare_current_run_projection_planning_input(
+                        run_id=state.run_id,
+                        run_start_sequence=(
+                            self._require_run_working_set(state).run_start_sequence
+                        ),
+                        window=active_window,
+                        current_projection=projection_state,
+                        canonical_slice=prepared_context_input.authority_slice,
+                        transcript=(
+                            prepared_context_input.normalized_transcript.transcript
+                        ),
+                        tool_result_units=(
+                            prepared_context_input.normalized_transcript.tool_result_units
+                        ),
+                        context_budget=resolved_call.target.context_budget,
+                        allocation_policy=window_policy,
+                        estimator=resolved_call.target.fact.token_estimator,
+                        pending_interaction=(
+                            state.pending_interaction_kind is not None
+                        ),
+                        tool_call_in_flight=_tool_call_in_flight(state),
                     )
                     projected_soft_target = (
                         resolved_call.target.context_budget.input_budget_tokens
@@ -3247,10 +3259,7 @@ class AgentRuntime:
                         // 1_000_000
                     )
                     projection_unreachable = None
-                    if (
-                        projection_state.total_projected_tokens
-                        > projected_soft_target
-                    ):
+                    if projection_state.total_projected_tokens > projected_soft_target:
                         planning = plan_deterministic_projection_rewrite(
                             event_context=self._event_context(state),
                             window=active_window,
@@ -3267,16 +3276,12 @@ class AgentRuntime:
                             ),
                             token_estimator=resolved_call.target.token_estimator,
                             policy=window_policy,
-                            protection_facts=(
-                                current_run_planning.protection_facts
-                            ),
+                            protection_facts=(current_run_planning.protection_facts),
                             target_projected_tokens=projected_post_target,
                             source_through_sequence=(
                                 prepared_context_input.authority_slice.through_sequence
                             ),
-                            rollup_registry=(
-                                self.observation_rollup_renderer_registry
-                            ),
+                            rollup_registry=(self.observation_rollup_renderer_registry),
                             runtime_observation_carrier_available=(
                                 resolved_call.target.fact.runtime_observation_carrier
                                 is not None
@@ -3291,11 +3296,9 @@ class AgentRuntime:
                             projection_unreachable = planning
                         if plan is not None:
                             try:
-                                next_safe_point_revision = (
-                                    advance_safe_point_revision(
-                                        safe_point_revision,
-                                        policy=window_policy,
-                                    )
+                                next_safe_point_revision = advance_safe_point_revision(
+                                    safe_point_revision,
+                                    policy=window_policy,
                                 )
                             except LongHorizonPreparationBoundExceeded as exc:
                                 raise _long_horizon_preparation_error(
@@ -3332,9 +3335,12 @@ class AgentRuntime:
                                 raise RuntimeError(
                                     "projection rewrite committed unexpected events"
                                 )
-                            if long_horizon_store.projection_state(
-                                active_window.window_id
-                            ) != plan.final_state:
+                            if (
+                                long_horizon_store.projection_state(
+                                    active_window.window_id
+                                )
+                                != plan.final_state
+                            ):
                                 raise RuntimeError(
                                     "projection rewrite reducer differs from plan"
                                 )
@@ -3360,6 +3366,12 @@ class AgentRuntime:
                         rendered_tool_results=render_output,
                         prepared_rollups=prepared_rollups,
                         section_candidates=prepared_context_input.prepared_candidates,
+                        context_source_hydrated_contents=(
+                            prepared_context_input.context_source_hydrated_contents
+                        ),
+                        transcript_stable_entries=(
+                            prepared_context_input.transcript_projection_evidence.stable_entries
+                        ),
                     )
                     pre_manifest_failure_stage = (
                         ContextCompileFailureStage.CONTEXT_BUDGET
@@ -3399,9 +3411,7 @@ class AgentRuntime:
                             WindowCompactionRequest(
                                 event_context=self._event_context(state),
                                 state=state,
-                                run_contract=(
-                                    working_set.long_horizon_contract
-                                ),
+                                run_contract=(working_set.long_horizon_contract),
                                 source_window=active_window,
                                 source_projection=projection_state,
                                 transcript=(
@@ -3475,31 +3485,29 @@ class AgentRuntime:
                     pre_manifest_failure_reason = (
                         ContextInputFailureReasonCode.PAYLOAD_CONSISTENCY_FAILED
                     )
-                    long_horizon_attribution = (
-                        build_long_horizon_context_attribution(
-                            run_contract_fingerprint=(
-                                working_set.long_horizon_contract.contract_fingerprint
-                            ),
-                            active_window=active_window,
-                            projection_state=projection_state,
-                            projection_rewrite_event_refs=(
-                                _active_projection_rewrite_refs(
-                                    prepared_context_input=prepared_context_input,
-                                    window_id=active_window.window_id,
-                                    projection_generation=(
-                                        projection_state.projection_generation
-                                    ),
-                                )
-                            ),
-                            rollout_account_owner_runtime_session_id=(
-                                working_set.long_horizon_contract.rollout_account_owner_runtime_session_id
-                            ),
-                            rollout_state=rollout_state,
-                            subagent_graph_semantic_source=(
-                                prepared_context_input.snapshot_build_input.subagent_graph_semantic_source
-                            ),
-                            context_budget_decision=long_horizon_budget.decision,
-                        )
+                    long_horizon_attribution = build_long_horizon_context_attribution(
+                        run_contract_fingerprint=(
+                            working_set.long_horizon_contract.contract_fingerprint
+                        ),
+                        active_window=active_window,
+                        projection_state=projection_state,
+                        projection_rewrite_event_refs=(
+                            _active_projection_rewrite_refs(
+                                prepared_context_input=prepared_context_input,
+                                window_id=active_window.window_id,
+                                projection_generation=(
+                                    projection_state.projection_generation
+                                ),
+                            )
+                        ),
+                        rollout_account_owner_runtime_session_id=(
+                            working_set.long_horizon_contract.rollout_account_owner_runtime_session_id
+                        ),
+                        rollout_state=rollout_state,
+                        subagent_graph_semantic_source=(
+                            prepared_context_input.snapshot_build_input.subagent_graph_semantic_source
+                        ),
+                        context_budget_decision=long_horizon_budget.decision,
                     )
                     try:
                         snapshot_fact = build_context_snapshot(
@@ -3531,6 +3539,12 @@ class AgentRuntime:
                         rendered_tool_results=render_output,
                         prepared_rollups=prepared_rollups,
                         section_candidates=prepared_context_input.prepared_candidates,
+                        context_source_hydrated_contents=(
+                            prepared_context_input.context_source_hydrated_contents
+                        ),
+                        transcript_stable_entries=(
+                            prepared_context_input.transcript_projection_evidence.stable_entries
+                        ),
                     )
                     if (
                         provider_neutral_payload_fingerprint(
@@ -3549,49 +3563,122 @@ class AgentRuntime:
                         prepared_context_input=prepared_context_input,
                         compiled_context=final_compiled_context,
                     )
-                    try:
-                        projection_unreachable_audit = (
-                            projection_target_unreachable_audit(
-                                projection_unreachable
+                    provider_input_planning_bundle = await self.runtime_session.provider_input_generation_coordinator.prepare_compiled_call(
+                        call=resolved_call,
+                        compiled_context=final_compiled_context,
+                        prepared_context_input=prepared_context_input,
+                        event_context=self._event_context(state),
+                    )
+                    final_compiled_context = _bind_compiled_context_to_provider_input(
+                        compiled_context=final_compiled_context,
+                        provider_input_start_bundle=provider_input_planning_bundle,
+                        resolved_call=resolved_call,
+                    )
+                    actual_long_horizon_budget = measure_long_horizon_context_budget(
+                        call=resolved_call,
+                        context=final_compiled_context.llm_context,
+                        estimate=final_compiled_context.final_token_estimate,
+                        window=active_window,
+                        projection_state=projection_state,
+                        policy=window_policy,
+                    )
+                    if (
+                        actual_long_horizon_budget.decision.decision
+                        == "window_compaction_required"
+                        and long_horizon_budget.decision.decision
+                        != "window_compaction_required"
+                    ):
+                        provider_input_planning_bundle = None
+                        raise _long_horizon_preparation_error(
+                            prepared_context_input=prepared_context_input,
+                            reason_code=(
+                                ContextInputFailureReasonCode.CONTEXT_BUDGET_EXCEEDED
+                            ),
+                            message=(
+                                "canonical provider input crossed the window "
+                                "compaction trigger after generation planning"
+                            ),
+                        )
+                    long_horizon_budget = actual_long_horizon_budget
+                    long_horizon_attribution = build_long_horizon_context_attribution(
+                        run_contract_fingerprint=(
+                            working_set.long_horizon_contract.contract_fingerprint
+                        ),
+                        active_window=active_window,
+                        projection_state=projection_state,
+                        projection_rewrite_event_refs=(
+                            _active_projection_rewrite_refs(
+                                prepared_context_input=prepared_context_input,
+                                window_id=active_window.window_id,
+                                projection_generation=(
+                                    projection_state.projection_generation
+                                ),
                             )
+                        ),
+                        rollout_account_owner_runtime_session_id=(
+                            working_set.long_horizon_contract.rollout_account_owner_runtime_session_id
+                        ),
+                        rollout_state=rollout_state,
+                        subagent_graph_semantic_source=(
+                            prepared_context_input.snapshot_build_input.subagent_graph_semantic_source
+                        ),
+                        context_budget_decision=long_horizon_budget.decision,
+                    )
+                    snapshot_fact = build_context_snapshot(
+                        prepared_context_input.snapshot_build_input,
+                        long_horizon_attribution=long_horizon_attribution,
+                    )
+                    prepared_context_input = replace(
+                        prepared_context_input,
+                        invocation=bind_context_invocation(
+                            fact=snapshot_fact,
+                            resolved_call=resolved_call,
+                            materialized_tool_specs=(
+                                prepared_context_input.invocation.materialized_tool_specs
+                            ),
+                        ),
+                    )
+                    try:
+                        if (
+                            final_compiled_context.prepared_ordered_transcript_projection
+                            is None
+                            or provider_input_planning_bundle is None
+                        ):
+                            raise RuntimeError(
+                                "compiled session call lacks ordered provider-input plan"
+                            )
+                        projection_unreachable_audit = (
+                            projection_target_unreachable_audit(projection_unreachable)
                             if projection_unreachable is not None
                             else None
                         )
-                        prepared_transcript_projection = (
-                            prepare_transcript_projection_input(
-                                evidence=(
-                                    prepared_context_input.transcript_projection_evidence
+                        prepared_transcript_projection = prepare_transcript_projection_input(
+                            evidence=(
+                                prepared_context_input.transcript_projection_evidence
+                            ),
+                            normalized=(prepared_context_input.normalized_transcript),
+                            provider_projection=(
+                                final_compiled_context.prepared_transcript_provider_projection
+                            ),
+                            semantic_selection=(
+                                final_compiled_context.model_visible_named_fact_semantic_selection
+                            ),
+                            prepared_candidates=(
+                                prepared_context_input.prepared_candidates
+                            ),
+                            prepared_artifacts=(
+                                prepared_context_input.prepared_named_fact_artifacts
+                            ),
+                            fallback_source_ref=(snapshot_fact.run_entry.run_start),
+                            authority_events=(
+                                *tuple(prepared_context_input.authority_slice.events),
+                                *tuple(
+                                    event
+                                    for event_slice in prepared_context_input.named_slices
+                                    for event in event_slice.events
                                 ),
-                                normalized=(
-                                    prepared_context_input.normalized_transcript
-                                ),
-                                provider_projection=(
-                                    final_compiled_context.prepared_transcript_provider_projection
-                                ),
-                                semantic_selection=(
-                                    final_compiled_context.model_visible_named_fact_semantic_selection
-                                ),
-                                prepared_candidates=(
-                                    prepared_context_input.prepared_candidates
-                                ),
-                                prepared_artifacts=(
-                                    prepared_context_input.prepared_named_fact_artifacts
-                                ),
-                                fallback_source_ref=(
-                                    snapshot_fact.run_entry.run_start
-                                ),
-                                authority_events=(
-                                    *tuple(
-                                        prepared_context_input.authority_slice.events
-                                    ),
-                                    *tuple(
-                                        event
-                                        for event_slice in prepared_context_input.named_slices
-                                        for event in event_slice.events
-                                    ),
-                                    *prepared_context_input.exact_named_authority_events,
-                                ),
-                            )
+                                *prepared_context_input.exact_named_authority_events,
+                            ),
                         )
                         input_manifest = build_context_input_manifest(
                             snapshot=snapshot_fact,
@@ -3617,6 +3704,15 @@ class AgentRuntime:
                             safe_point_revision=safe_point_revision,
                             prepared_candidates=(
                                 prepared_context_input.prepared_candidates
+                            ),
+                            ordered_transcript_projection=(
+                                final_compiled_context.prepared_ordered_transcript_projection.projection
+                            ),
+                            ordered_transcript_projection_identity=(
+                                final_compiled_context.prepared_ordered_transcript_projection.identity
+                            ),
+                            prepared_provider_input_plan=(
+                                provider_input_planning_bundle.prepared_plan
                             ),
                         )
                         manifest_candidate = build_context_input_manifest_candidate(
@@ -3684,6 +3780,25 @@ class AgentRuntime:
                                 "context_input_latch_after_terminalization"
                             ] = True
                         break
+                    manifest_projection_reference = (
+                        build_context_input_manifest_projection_reference(
+                            manifest=input_manifest,
+                            candidate=manifest_candidate,
+                            write_result=ContextInputManifestWriteResult(
+                                outcome=manifest_write.outcome,
+                                artifact_id=manifest_write.artifact_id,
+                                content_fingerprint=manifest_write.content_fingerprint,
+                            ),
+                        )
+                    )
+                    provider_input_start_bundle = await self.runtime_session.provider_input_generation_coordinator.finalize_compiled_call(
+                        call=resolved_call,
+                        compiled_context=final_compiled_context,
+                        prepared_context_input=prepared_context_input,
+                        event_context=self._event_context(state),
+                        planning_bundle=provider_input_planning_bundle,
+                        manifest_projection_reference=manifest_projection_reference,
+                    )
                     input_audit = build_context_compile_input_audit(
                         manifest=input_manifest,
                         candidate=manifest_candidate,
@@ -3930,7 +4045,58 @@ class AgentRuntime:
                     )
                     break
             if compiled_context is None:
+                if provider_input_start_bundle is not None:
+                    await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                        provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
+                        reason="run_terminated_before_start",
+                    )
                 break
+            if provider_input_start_bundle is None:
+                raise RuntimeError(
+                    "compiled context lacks its prepared provider-input owner"
+                )
+            context = provider_input_start_bundle.carrier.to_llm_context(
+                replace(
+                    compiled_context.llm_context,
+                    resolved_model_call_id=(resolved_call.fact.resolved_model_call_id),
+                    target_fingerprint=(resolved_call.target.fact.target_fingerprint),
+                )
+            )
+            actual_provider_estimate = (
+                resolved_call.target.token_estimator.estimate_context(context)
+            )
+            if (
+                actual_provider_estimate.total_input_tokens
+                > resolved_call.target.context_budget.input_budget_tokens
+            ):
+                await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                    provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
+                    reason="resolved_target_invalidated_before_start",
+                )
+                raise ContextBudgetExceeded(
+                    "Canonical append-only provider input exceeds the resolved input budget.",
+                    context_id=compiled_context.context_id,
+                    model_call_index=model_call_index,
+                    diagnostics=(),
+                    tool_result_render_decisions=(
+                        compiled_context.tool_result_render_decisions
+                    ),
+                    tool_result_budget_report=dict(
+                        compiled_context.tool_result_budget_report
+                    ),
+                    budget_report=replace(
+                        compiled_context.budget,
+                        final_payload_estimated_tokens=(
+                            actual_provider_estimate.total_input_tokens
+                        ),
+                    ),
+                )
+            context = replace(
+                context,
+                compiler_estimated_input_tokens=(
+                    actual_provider_estimate.total_input_tokens
+                ),
+            )
             long_horizon_diagnostics = list(
                 long_horizon_context_diagnostics(
                     measurement=long_horizon_budget,
@@ -3974,20 +4140,28 @@ class AgentRuntime:
                 tool_result_render_operational_facts=(
                     compiled_context.tool_result_render_operational_facts
                 ),
-                long_horizon_context_budget_decision=(
-                    long_horizon_budget.decision
-                ),
+                long_horizon_context_budget_decision=(long_horizon_budget.decision),
                 long_horizon_projection_pressure_shadow=(
                     long_horizon_budget.pressure_shadow
                 ),
                 input_audit=input_audit,
                 provider_neutral_payload_fingerprint=(
-                    provider_neutral_payload_fingerprint(compiled_context.llm_context)
+                    provider_neutral_payload_fingerprint(context)
                 ),
                 canonical_render_decisions_fingerprint=(
                     canonical_render_decisions_fingerprint(
                         compiled_context.tool_result_render_decision_facts
                     )
+                ),
+                prepared_provider_input=(
+                    provider_input_start_bundle.prepared_candidate
+                ),
+                manifest_projection_reference=manifest_projection_reference,
+                prepared_provider_input_plan_fingerprint=(
+                    provider_input_start_bundle.prepared_plan.plan_fingerprint
+                ),
+                prepared_provider_input_candidate_fingerprint=(
+                    provider_input_start_bundle.prepared_candidate.candidate_fingerprint
                 ),
             )
             try:
@@ -4010,11 +4184,6 @@ class AgentRuntime:
                 render_output=render_output,
             )
             yield stored_context_compiled
-            context = replace(
-                compiled_context.llm_context,
-                resolved_model_call_id=resolved_call.fact.resolved_model_call_id,
-                target_fingerprint=resolved_call.target.fact.target_fingerprint,
-            )
             selected_subagent_result_ids = (
                 prepared_context_input.invocation.fact.candidate_source_selections[
                     0
@@ -4033,9 +4202,7 @@ class AgentRuntime:
             )
             deliverable_subagent_results = (
                 selected_subagent_results
-                if _compiled_section_included(
-                    compiled_context, _SUBAGENT_RESULTS_SECTION_ID
-                )
+                if _compiled_source_included(compiled_context, "subagent_results")
                 else ()
             )
             delivered_subagent_results = False
@@ -4055,6 +4222,7 @@ class AgentRuntime:
                     runtime_session=self.runtime_session,
                     lifecycle_kind="main_assistant_reply",
                     run_execution_activation=run_activation,
+                    provider_input_start_bundle=provider_input_start_bundle,
                 )
                 model_stream_handle = self.llm_runtime.start_stream(
                     call=resolved_call,
@@ -4205,6 +4373,15 @@ class AgentRuntime:
                 )
                 reply_had_run_error = True
                 yield event
+            finally:
+                await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                    provider_input_start_bundle.prepared_candidate.preparation_ownership.preparation_id,
+                    reason=(
+                        "run_terminated_before_start"
+                        if state.status is not LoopStatus.RUNNING
+                        else "caller_cancelled_before_start"
+                    ),
+                )
 
             if self._apply_stop_request(state):
                 break
@@ -5036,6 +5213,10 @@ class AgentRuntime:
     ) -> AsyncIterator[AgentEvent]:
         if state.finalized:
             return
+        await self.runtime_session.provider_input_generation_coordinator.settle_run_preparations(
+            state.run_id,
+            reason="run_terminated_before_start",
+        )
         hook_done = bool(state.scratchpad.get("run_finalization_hook_done"))
         if run_session_end_hook and not hook_done:
             _ok, hook_events = await self._run_memory_hook_and_emit_events(
@@ -5989,9 +6170,7 @@ class AgentRuntime:
             self.runtime_session.event_log,
             run_id=state.run_id,
             tool_call_id=tool_call_id,
-            start_event_id=_tool_timing_start_event_id(
-                tool_observation_timing_seed
-            ),
+            start_event_id=_tool_timing_start_event_id(tool_observation_timing_seed),
         )
         prior_starts = [
             event
@@ -6122,10 +6301,8 @@ class AgentRuntime:
             self._mark_mcp_terminal_commit_attempt(state, tool_call_id)
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
         if rollout_reservation is not None:
-            write_candidates = (
-                await self.runtime_session.tool_terminal_projection_service.prepare_batch(
-                    write_candidates
-                )
+            write_candidates = await self.runtime_session.tool_terminal_projection_service.prepare_batch(
+                write_candidates
             )
             terminal_registry.freeze_terminal(
                 run_id=state.run_id,
@@ -6144,9 +6321,7 @@ class AgentRuntime:
                     state=state,
                 ).commit_terminal_batch_and_settlement(
                     terminal_candidates=tuple(
-                        event
-                        for event in write_candidates
-                        if event.id != settlement.id
+                        event for event in write_candidates if event.id != settlement.id
                     ),
                     settlement_candidate=settlement,
                     expected_reservation_fingerprint=(
@@ -6312,10 +6487,13 @@ class AgentRuntime:
         ):
             raise RuntimeError("pending tool rollout reservation identity mismatch")
         terminal_registry = self.runtime_session.tool_execution_terminal_registry
-        if terminal_registry.owner_for_call(
-            run_id=run_id,
-            tool_call_id=tool_call_id,
-        ) is None:
+        if (
+            terminal_registry.owner_for_call(
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+            )
+            is None
+        ):
             terminal_registry.restore_suspended(
                 run_id=run_id,
                 reservation=reservation,
@@ -6715,9 +6893,7 @@ class AgentRuntime:
             _remember_tool_result_event_span(state, batch_events, call.id)
             state.tool_results.append(result_block)
             state.messages.append(
-                _tool_result_message_from_events(
-                    batch_events, call.name, result_block
-                )
+                _tool_result_message_from_events(batch_events, call.name, result_block)
             )
             if call.id in reservations:
                 state.tool_call_count += 1
@@ -7337,9 +7513,7 @@ class AgentRuntime:
                     )
                     or None,
                     tool_arguments=dict(
-                        (payload.get("original_request") or {}).get(
-                            "arguments", {}
-                        )
+                        (payload.get("original_request") or {}).get("arguments", {})
                     ),
                     rollout_reservation=reservation,
                 ):
@@ -7409,6 +7583,13 @@ def _context_budget_pressure_is_recoverable(exc: ContextBudgetExceeded) -> bool:
 def _compiled_section_included(compiled_context, section_id: str) -> bool:
     return any(
         section.id == section_id and section.included
+        for section in compiled_context.sections
+    )
+
+
+def _compiled_source_included(compiled_context, source_id: str) -> bool:
+    return any(
+        section.source_id == source_id and section.included
         for section in compiled_context.sections
     )
 
@@ -7772,6 +7953,41 @@ def _validate_prepared_context_input(
         )
 
 
+def _bind_compiled_context_to_provider_input(
+    *,
+    compiled_context: CompiledContext,
+    provider_input_start_bundle,
+    resolved_call: ResolvedModelCall,
+) -> CompiledContext:
+    """Make the canonical resident carrier the final budget/payload truth."""
+
+    context = provider_input_start_bundle.carrier.to_llm_context(
+        replace(
+            compiled_context.llm_context,
+            resolved_model_call_id=resolved_call.fact.resolved_model_call_id,
+            target_fingerprint=resolved_call.target.fact.target_fingerprint,
+        )
+    )
+    estimate = resolved_call.target.token_estimator.estimate_context(context)
+    scopes = tuple(
+        "transcript"
+        if unit.attribution.semantic.unit_kind == "transcript_message"
+        else "non_transcript"
+        for unit in provider_input_start_bundle.resident.units
+        if unit.attribution.semantic.unit_kind != "tool_catalog"
+        and not (
+            unit.attribution.semantic.unit_kind == "context_source"
+            and getattr(unit.canonical_provider_fragment, "role", None) == "system"
+        )
+    )
+    return bind_compiled_context_to_provider_carrier(
+        compiled_context=compiled_context,
+        provider_context=context,
+        token_estimate=estimate,
+        message_budget_scopes=scopes,
+    )
+
+
 def _optional_scratchpad_str(state: LoopState, key: str) -> str | None:
     value = state.scratchpad.get(key)
     return value if isinstance(value, str) else None
@@ -7832,11 +8048,7 @@ def _completed_tool_result_events(
         raise RuntimeError("completed tool result lacks unique boundaries")
     start_sequence = starts[0].sequence
     end_sequence = ends[0].sequence
-    if (
-        start_sequence is None
-        or end_sequence is None
-        or end_sequence < start_sequence
-    ):
+    if start_sequence is None or end_sequence is None or end_sequence < start_sequence:
         raise RuntimeError("completed tool-result sequence range is invalid")
     snapshot = event_log.read_raw_range_snapshot(
         minimum_sequence=start_sequence,
@@ -7847,8 +8059,7 @@ def _completed_tool_result_events(
     return [
         decoded
         for raw in snapshot.events
-        if (decoded := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).run_id
-        == run_id
+        if (decoded := raw.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)).run_id == run_id
         and getattr(decoded, "tool_call_id", None) == tool_call_id
         and isinstance(
             decoded,

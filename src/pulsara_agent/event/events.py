@@ -116,6 +116,7 @@ from pulsara_agent.primitives.context import (
     ContextCompileFailureStage,
     ContextCompileInputFailureFact,
 )
+from pulsara_agent.primitives._context_base import ContextEventReferenceFact
 from pulsara_agent.primitives.run_boundary import (
     InteractionResumeBoundaryFact,
     ModelStreamRecoveryPlanFact,
@@ -157,6 +158,25 @@ from pulsara_agent.primitives.governance_evidence import (
     GovernanceModelInputAttributionFact,
     MemoryCandidateEvidenceRejectedRecord,
     ReflectionCandidateAttributionFact,
+)
+from pulsara_agent.primitives.provider_input import (
+    CommittedProviderInputGenerationCoreStateFact,
+    CommittedProviderInputReferenceFact,
+    ContextInputManifestProjectionReferenceFact,
+    PreparedProviderInputAppendCandidateFact,
+    ProviderInputAppendBatchReferenceFact,
+    ProviderInputCausalValidationResult,
+    ProviderInputContinuationMaterializationProofFact,
+    ProviderInputGenerationFact,
+    ProviderInputGenerationRootReferenceFact,
+    ProviderInvocationContextFramePlacementFact,
+    ProviderInputRolloverRequestFact,
+    ProviderTranscriptDeltaCommitProofFact,
+    ProviderInputUnitVectorRootReferenceFact,
+)
+from pulsara_agent.primitives.context_source import (
+    LedgerAuthorityHorizonFact,
+    LedgerAuthorityHorizonSetReferenceFact,
 )
 from pulsara_agent.primitives.run_lifecycle import (
     FAILURE_STOP_REASONS,
@@ -217,61 +237,55 @@ class EventType(StrEnum):
     )
     MODEL_CALL_REJECTED = "MODEL_CALL_REJECTED"
     PROVIDER_MODEL_STREAM_ERROR = "PROVIDER_MODEL_STREAM_ERROR"
-    MODEL_CALL_CONTROL_DISPOSITION_RESOLVED = (
-        "MODEL_CALL_CONTROL_DISPOSITION_RESOLVED"
+    MODEL_CALL_CONTROL_DISPOSITION_RESOLVED = "MODEL_CALL_CONTROL_DISPOSITION_RESOLVED"
+    PROVIDER_INPUT_GENERATION_STARTED = "PROVIDER_INPUT_GENERATION_STARTED"
+    PROVIDER_INPUT_APPEND_COMMITTED = "PROVIDER_INPUT_APPEND_COMMITTED"
+    PROVIDER_INPUT_EXISTING_PREPARATION_ABANDONED = (
+        "PROVIDER_INPUT_EXISTING_PREPARATION_ABANDONED"
     )
+    PROVIDER_INPUT_SCOPED_PREPARATION_ABANDONED = (
+        "PROVIDER_INPUT_SCOPED_PREPARATION_ABANDONED"
+    )
+    PROVIDER_INPUT_GENERATION_ROLLOVER_RESOLVED = (
+        "PROVIDER_INPUT_GENERATION_ROLLOVER_RESOLVED"
+    )
+    PROVIDER_INPUT_GENERATION_CLOSED = "PROVIDER_INPUT_GENERATION_CLOSED"
     CONTEXT_COMPILED = "CONTEXT_COMPILED"
     CAPABILITY_GATE_DECISION = "CAPABILITY_GATE_DECISION"
     CAPABILITY_EXPOSURE_RESOLVED = "CAPABILITY_EXPOSURE_RESOLVED"
     RUN_INTERACTION_RESUME_BOUNDARY = "RUN_INTERACTION_RESUME_BOUNDARY"
     MCP_CAPABILITY_SNAPSHOT_INSTALLED = "MCP_CAPABILITY_SNAPSHOT_INSTALLED"
 
-    TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT = (
-        "TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT"
-    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT = "TRANSCRIPT_PROJECTION_CHECKPOINT_INTENT"
     TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED = (
         "TRANSCRIPT_PROJECTION_CHECKPOINT_COMMITTED"
     )
-    TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED = (
-        "TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED"
-    )
+    TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED = "TRANSCRIPT_PROJECTION_CHECKPOINT_FAILED"
     TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED = (
         "TRANSCRIPT_PROJECTION_CHECKPOINT_CANCELLED"
     )
     TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED = (
         "TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED"
     )
-    LEDGER_MATERIALIZATION_ACCOUNT_GENESIS = (
-        "LEDGER_MATERIALIZATION_ACCOUNT_GENESIS"
-    )
+    LEDGER_MATERIALIZATION_ACCOUNT_GENESIS = "LEDGER_MATERIALIZATION_ACCOUNT_GENESIS"
     LEDGER_MATERIALIZATION_CONSUMER_REGISTERED = (
         "LEDGER_MATERIALIZATION_CONSUMER_REGISTERED"
     )
     LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED = (
         "LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED"
     )
-    LEDGER_MATERIALIZATION_CONSUMER_RETIRED = (
-        "LEDGER_MATERIALIZATION_CONSUMER_RETIRED"
-    )
+    LEDGER_MATERIALIZATION_CONSUMER_RETIRED = "LEDGER_MATERIALIZATION_CONSUMER_RETIRED"
     LEDGER_MATERIALIZATION_GENERATION_ADVANCED = (
         "LEDGER_MATERIALIZATION_GENERATION_ADVANCED"
     )
-    PHYSICAL_OPERATION_RESERVATION_CREATED = (
-        "PHYSICAL_OPERATION_RESERVATION_CREATED"
-    )
+    PHYSICAL_OPERATION_RESERVATION_CREATED = "PHYSICAL_OPERATION_RESERVATION_CREATED"
     PHYSICAL_OPERATION_CHARGE_APPLIED = "PHYSICAL_OPERATION_CHARGE_APPLIED"
     PHYSICAL_OPERATION_RESERVATION_SUSPENDED = (
         "PHYSICAL_OPERATION_RESERVATION_SUSPENDED"
     )
-    PHYSICAL_OPERATION_RESERVATION_SETTLED = (
-        "PHYSICAL_OPERATION_RESERVATION_SETTLED"
-    )
-    CHECKPOINT_DISPATCH_BARRIER_INSTALLED = (
-        "CHECKPOINT_DISPATCH_BARRIER_INSTALLED"
-    )
-    CHECKPOINT_DISPATCH_BARRIER_RELEASED = (
-        "CHECKPOINT_DISPATCH_BARRIER_RELEASED"
-    )
+    PHYSICAL_OPERATION_RESERVATION_SETTLED = "PHYSICAL_OPERATION_RESERVATION_SETTLED"
+    CHECKPOINT_DISPATCH_BARRIER_INSTALLED = "CHECKPOINT_DISPATCH_BARRIER_INSTALLED"
+    CHECKPOINT_DISPATCH_BARRIER_RELEASED = "CHECKPOINT_DISPATCH_BARRIER_RELEASED"
 
     TEXT_BLOCK_START = "TEXT_BLOCK_START"
     TEXT_BLOCK_SEGMENT = "TEXT_BLOCK_SEGMENT"
@@ -812,7 +826,9 @@ class ContextWindowCompactionFailedEvent(EventBase):
             if self.rollout_settlement_event_id is not None:
                 raise ValueError("pre-Started window failure cannot settle reservation")
         elif self.started_event_id is None or self.rollout_settlement_event_id is None:
-            raise ValueError("post-Started window failure requires terminal attribution")
+            raise ValueError(
+                "post-Started window failure requires terminal attribution"
+            )
         if self.failure_stage in {"planning", "summarizer_resolution"}:
             if self.plan_fingerprint is not None:
                 raise ValueError("early window failure cannot claim a completed plan")
@@ -1050,6 +1066,7 @@ class ModelCallStartEvent(EventBase):
     context_id: str
     model_call_index: int | None = None
     recovery_plan: ModelStreamRecoveryPlanFact
+    provider_input_reference: CommittedProviderInputReferenceFact
     governance_input_attribution: GovernanceModelInputAttributionFact | None = None
 
     @model_validator(mode="after")
@@ -1123,6 +1140,12 @@ class ContextCompiledEvent(EventBase):
     long_horizon_projection_pressure_shadow: (
         LongHorizonProjectionPressureShadowFact | None
     ) = None
+    prepared_provider_input: PreparedProviderInputAppendCandidateFact | None = None
+    manifest_projection_reference: (
+        ContextInputManifestProjectionReferenceFact | None
+    ) = None
+    prepared_provider_input_plan_fingerprint: str | None = None
+    prepared_provider_input_candidate_fingerprint: str | None = None
 
     @model_validator(mode="after")
     def _validate_budget_stage(self) -> "ContextCompiledEvent":
@@ -1133,9 +1156,7 @@ class ContextCompiledEvent(EventBase):
                 raise ValueError("failed context compile requires failure stage")
         elif self.status == "pressure" and self.input_failure is not None:
             if self.failure_stage is None:
-                raise ValueError(
-                    "pre-manifest context pressure requires failure stage"
-                )
+                raise ValueError("pre-manifest context pressure requires failure stage")
         elif self.failure_stage is not None:
             raise ValueError("non-failed context compile cannot carry failure stage")
         if self.status == "compiled" and self.input_audit is None:
@@ -1147,10 +1168,41 @@ class ContextCompiledEvent(EventBase):
         if self.status == "compiled":
             if any(item is None for item in exact_fingerprints):
                 raise ValueError("compiled context requires exact replay fingerprints")
+            if self.prepared_provider_input is None:
+                raise ValueError("compiled context requires prepared provider input")
+            prepared = self.prepared_provider_input
+            if (
+                prepared.candidate_kind != "compiled_manifest"
+                or self.manifest_projection_reference is None
+                or self.manifest_projection_reference.context_id != self.context_id
+                or self.input_audit.input_manifest_artifact_id
+                != self.manifest_projection_reference.input_manifest_artifact_id
+                or prepared.manifest_projection_reference
+                != self.manifest_projection_reference
+                or prepared.prepared_plan is None
+                or self.prepared_provider_input_plan_fingerprint
+                != prepared.prepared_plan.plan_fingerprint
+                or self.prepared_provider_input_candidate_fingerprint
+                != prepared.candidate_fingerprint
+            ):
+                raise ValueError("compiled context provider manifest join mismatch")
         elif any(item is not None for item in exact_fingerprints):
             raise ValueError(
                 "non-compiled context cannot carry exact replay fingerprints"
             )
+        elif self.prepared_provider_input is not None:
+            raise ValueError(
+                "non-compiled context cannot carry prepared provider input"
+            )
+        elif any(
+            item is not None
+            for item in (
+                self.manifest_projection_reference,
+                self.prepared_provider_input_plan_fingerprint,
+                self.prepared_provider_input_candidate_fingerprint,
+            )
+        ):
+            raise ValueError("non-compiled context cannot carry provider manifest joins")
         if self.input_audit is not None:
             audit = self.input_audit
             if (
@@ -1242,6 +1294,292 @@ class ContextCompiledEvent(EventBase):
         return self
 
 
+class ProviderInputGenerationStartedEvent(EventBase):
+    type: Literal[EventType.PROVIDER_INPUT_GENERATION_STARTED] = (
+        EventType.PROVIDER_INPUT_GENERATION_STARTED
+    )
+    schema_version: Literal["provider_input_generation_started_event.v1"] = (
+        "provider_input_generation_started_event.v1"
+    )
+    generation: ProviderInputGenerationFact
+    root_reference: ProviderInputGenerationRootReferenceFact
+    initial_vector_root: ProviderInputUnitVectorRootReferenceFact
+    initial_prefix_fingerprint: str = Field(min_length=1)
+    authority_horizon_set: LedgerAuthorityHorizonSetReferenceFact
+    expected_initial_append_event_id: str = Field(min_length=1)
+    expected_model_start_event_id: str = Field(min_length=1)
+    genesis_core_state: CommittedProviderInputGenerationCoreStateFact
+
+    @model_validator(mode="after")
+    def _generation_join(self) -> "ProviderInputGenerationStartedEvent":
+        if (
+            self.root_reference.generation != self.generation
+            or self.initial_vector_root != self.root_reference.initial_unit_vector_root
+            or self.authority_horizon_set != self.root_reference.authority_horizon_set
+            or self.genesis_core_state.generation != self.generation
+            or self.genesis_core_state.root_reference != self.root_reference
+            or self.genesis_core_state.revision != 0
+            or self.genesis_core_state.committed_prefix_fingerprint
+            != self.initial_prefix_fingerprint
+        ):
+            raise ValueError("provider generation Start identity drifted")
+        return self
+
+
+class ProviderInputAppendCommittedEvent(EventBase):
+    type: Literal[EventType.PROVIDER_INPUT_APPEND_COMMITTED] = (
+        EventType.PROVIDER_INPUT_APPEND_COMMITTED
+    )
+    schema_version: Literal["provider_input_append_committed_event.v3"] = (
+        "provider_input_append_committed_event.v3"
+    )
+    append_kind: Literal["compiled_manifest", "one_shot"]
+    generation_id: str = Field(min_length=1)
+    generation_fingerprint: str = Field(min_length=1)
+    expected_revision: int = Field(ge=0)
+    resulting_revision: int = Field(ge=1)
+    append_batch_reference: ProviderInputAppendBatchReferenceFact
+    consumed_preparation_id: str = Field(min_length=1)
+    consumed_preparation_ownership_fingerprint: str = Field(min_length=1)
+    consumed_pending_continuation_fingerprint: str | None
+    continuation_materialization_proof: (
+        ProviderInputContinuationMaterializationProofFact | None
+    )
+    manifest_projection_reference: (
+        ContextInputManifestProjectionReferenceFact | None
+    )
+    causal_validation: ProviderInputCausalValidationResult | None
+    frame_placement: ProviderInvocationContextFramePlacementFact | None
+    transcript_delta_proof: ProviderTranscriptDeltaCommitProofFact | None
+    prepared_provider_input_candidate_fingerprint: str | None
+    predecessor_core_state_fingerprint: str
+    resulting_core_state: CommittedProviderInputGenerationCoreStateFact
+    authority_horizons: tuple[LedgerAuthorityHorizonFact, ...]
+    resolved_model_call_id: str = Field(min_length=1)
+    expected_model_start_event_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _append_join(self) -> "ProviderInputAppendCommittedEvent":
+        batch = self.append_batch_reference
+        state = self.resulting_core_state
+        if (
+            self.generation_id != batch.generation.generation_id
+            or self.generation_id != state.generation.generation_id
+            or self.generation_fingerprint != batch.generation.generation_fingerprint
+            or self.generation_fingerprint != state.generation.generation_fingerprint
+            or self.resulting_revision != self.expected_revision + 1
+            or self.resulting_revision != batch.append_index
+            or self.resulting_revision != state.revision
+            or self.expected_revision != batch.expected_generation_revision
+            or state.committed_prefix_fingerprint != batch.resulting_prefix_fingerprint
+            or state.unit_vector_root != batch.resulting_unit_vector_root
+            or state.committed_authority_horizon_set
+            != batch.resulting_authority_horizon_set
+            or self.authority_horizons != batch.authority_horizons
+        ):
+            raise ValueError("provider input append transition drifted")
+        proof = self.continuation_materialization_proof
+        if (self.consumed_pending_continuation_fingerprint is None) != (proof is None):
+            raise ValueError("provider append continuation proof matrix mismatch")
+        if proof is not None:
+            if (
+                proof.pending_continuation_fingerprint
+                != self.consumed_pending_continuation_fingerprint
+                or proof.resulting_transcript_frontier_fingerprint
+                != state.transcript_frontier.provider_semantic_frontier_fingerprint
+            ):
+                raise ValueError("provider append continuation proof join mismatch")
+            append_semantics = batch.append_semantic.ordered_unit_semantic_fingerprints
+            predecessor_unit_count = state.unit_count - len(append_semantics)
+            if predecessor_unit_count < 0:
+                raise ValueError("provider append predecessor unit count is invalid")
+            offsets = tuple(
+                ordinal - predecessor_unit_count
+                for ordinal in proof.appended_unit_ordinals
+            )
+            if any(offset < 0 or offset >= len(append_semantics) for offset in offsets):
+                raise ValueError("provider continuation proof ordinal exceeds append")
+            if tuple(append_semantics[offset] for offset in offsets) != (
+                proof.ordered_appended_unit_semantic_fingerprints
+            ):
+                raise ValueError("provider continuation proof semantic range drifted")
+        if self.append_kind == "compiled_manifest":
+            if (
+                self.manifest_projection_reference is None
+                or self.causal_validation is None
+                or self.transcript_delta_proof is None
+                or self.prepared_provider_input_candidate_fingerprint is None
+            ):
+                raise ValueError("compiled append requires manifest causal proof")
+            if (
+                self.manifest_projection_reference.projection_identity.identity_fingerprint
+                != self.causal_validation.projection_identity_fingerprint
+                or self.manifest_projection_reference.projection_identity.identity_fingerprint
+                != self.transcript_delta_proof.projection_identity_fingerprint
+                or self.transcript_delta_proof.resulting_frontier
+                != state.transcript_frontier
+            ):
+                raise ValueError("compiled append projection proof mismatch")
+        elif any(
+            item is not None
+            for item in (
+                self.manifest_projection_reference,
+                self.causal_validation,
+                self.frame_placement,
+                self.transcript_delta_proof,
+                self.prepared_provider_input_candidate_fingerprint,
+            )
+        ):
+            raise ValueError("one-shot append cannot carry compiled manifest proof")
+        return self
+
+    @property
+    def resulting_core_state_fingerprint(self) -> str:
+        return self.resulting_core_state.core_state_fingerprint
+
+
+class ExistingGenerationPreparationAbandonedEvent(EventBase):
+    type: Literal[EventType.PROVIDER_INPUT_EXISTING_PREPARATION_ABANDONED] = (
+        EventType.PROVIDER_INPUT_EXISTING_PREPARATION_ABANDONED
+    )
+    schema_version: Literal["existing_generation_preparation_abandoned_event.v1"] = (
+        "existing_generation_preparation_abandoned_event.v1"
+    )
+    abandonment_kind: Literal["existing_append"] = "existing_append"
+    generation_id: str = Field(min_length=1)
+    preparation_id: str = Field(min_length=1)
+    preparation_ownership_fingerprint: str = Field(min_length=1)
+    context_compiled_event_ref: ContextEventReferenceFact
+    resolved_model_call_id: str = Field(min_length=1)
+    expected_committed_core_state_fingerprint: str = Field(min_length=1)
+    abandonment_reason: Literal[
+        "caller_cancelled_before_start",
+        "run_terminated_before_start",
+        "prepared_candidate_stale",
+        "resolved_target_invalidated_before_start",
+        "recovery_confirmed_not_started",
+    ]
+    predecessor_preparation_attribution_fingerprint: str = Field(min_length=1)
+    predecessor_scope_binding_fingerprint: str = Field(min_length=1)
+    resulting_scope_binding_fingerprint: str = Field(min_length=1)
+
+
+class ScopedGenerationPreparationAbandonedEvent(EventBase):
+    type: Literal[EventType.PROVIDER_INPUT_SCOPED_PREPARATION_ABANDONED] = (
+        EventType.PROVIDER_INPUT_SCOPED_PREPARATION_ABANDONED
+    )
+    schema_version: Literal["scoped_generation_preparation_abandoned_event.v1"] = (
+        "scoped_generation_preparation_abandoned_event.v1"
+    )
+    abandonment_kind: Literal["initial_start", "rollover_start"]
+    scope_fingerprint: str = Field(min_length=1)
+    proposed_generation_id: str = Field(min_length=1)
+    preparation_id: str = Field(min_length=1)
+    old_generation_id: str | None
+    expected_old_core_state_fingerprint: str | None
+    preparation_ownership_fingerprint: str = Field(min_length=1)
+    context_compiled_event_ref: ContextEventReferenceFact
+    resolved_model_call_id: str = Field(min_length=1)
+    abandonment_reason: Literal[
+        "caller_cancelled_before_start",
+        "run_terminated_before_start",
+        "prepared_candidate_stale",
+        "resolved_target_invalidated_before_start",
+        "recovery_confirmed_not_started",
+    ]
+    predecessor_preparation_attribution_fingerprint: str = Field(min_length=1)
+    predecessor_scope_binding_fingerprint: str = Field(min_length=1)
+    resulting_scope_binding_fingerprint: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _scope_kind(self) -> "ScopedGenerationPreparationAbandonedEvent":
+        old_present = self.old_generation_id is not None
+        if old_present != (self.expected_old_core_state_fingerprint is not None):
+            raise ValueError("scoped abandonment old-generation matrix mismatch")
+        if (self.abandonment_kind == "initial_start") == old_present:
+            raise ValueError("scoped abandonment kind/old-generation mismatch")
+        return self
+
+
+class ProviderInputGenerationRolloverResolvedEvent(EventBase):
+    type: Literal[EventType.PROVIDER_INPUT_GENERATION_ROLLOVER_RESOLVED] = (
+        EventType.PROVIDER_INPUT_GENERATION_ROLLOVER_RESOLVED
+    )
+    schema_version: Literal["provider_input_generation_rollover_resolved_event.v2"] = (
+        "provider_input_generation_rollover_resolved_event.v2"
+    )
+    old_generation_id: str = Field(min_length=1)
+    old_generation_fingerprint: str = Field(min_length=1)
+    old_final_core_state_fingerprint: str = Field(min_length=1)
+    new_generation: ProviderInputGenerationFact
+    new_root_reference: ProviderInputGenerationRootReferenceFact
+    rollover_request: ProviderInputRolloverRequestFact
+    authority_horizon_set: LedgerAuthorityHorizonSetReferenceFact
+    expected_old_close_event_id: str = Field(min_length=1)
+    expected_new_start_event_id: str = Field(min_length=1)
+    expected_initial_append_event_id: str = Field(min_length=1)
+    expected_model_start_event_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _rollover_join(self) -> "ProviderInputGenerationRolloverResolvedEvent":
+        if (
+            self.new_generation.predecessor_generation_id != self.old_generation_id
+            or self.new_generation.predecessor_generation_fingerprint
+            != self.old_generation_fingerprint
+            or self.new_generation.rollover_reason
+            != self.rollover_request.intent.reason
+            or self.rollover_request.intent.predecessor_generation_id
+            != self.old_generation_id
+            or self.new_root_reference.generation != self.new_generation
+            or self.new_root_reference.authority_horizon_set
+            != self.authority_horizon_set
+        ):
+            raise ValueError("provider input rollover identity drifted")
+        return self
+
+
+class ProviderInputGenerationClosedEvent(EventBase):
+    type: Literal[EventType.PROVIDER_INPUT_GENERATION_CLOSED] = (
+        EventType.PROVIDER_INPUT_GENERATION_CLOSED
+    )
+    schema_version: Literal["provider_input_generation_closed_event.v1"] = (
+        "provider_input_generation_closed_event.v1"
+    )
+    generation_id: str = Field(min_length=1)
+    generation_fingerprint: str = Field(min_length=1)
+    final_revision: int = Field(ge=0)
+    final_prefix_fingerprint: str = Field(min_length=1)
+    final_vector_root: ProviderInputUnitVectorRootReferenceFact
+    close_reason: Literal["rollover", "session_close", "one_shot_terminal"]
+    successor_generation_id: str | None
+    unconsumed_continuation_fingerprint: str | None
+    predecessor_core_state_fingerprint: str = Field(min_length=1)
+    resulting_closed_core_state: CommittedProviderInputGenerationCoreStateFact
+
+    @model_validator(mode="after")
+    def _closed(self) -> "ProviderInputGenerationClosedEvent":
+        if (self.close_reason == "rollover") != (
+            self.successor_generation_id is not None
+        ):
+            raise ValueError("provider generation close successor matrix mismatch")
+        state = self.resulting_closed_core_state
+        if (
+            state.status != "closed"
+            or state.generation.generation_id != self.generation_id
+            or state.revision != self.final_revision
+            or state.committed_prefix_fingerprint != self.final_prefix_fingerprint
+            or state.unit_vector_root != self.final_vector_root
+        ):
+            raise ValueError("provider generation closed state drifted")
+        return self
+
+
+ProviderInputPreparationAbandonedEvent: TypeAlias = (
+    ExistingGenerationPreparationAbandonedEvent
+    | ScopedGenerationPreparationAbandonedEvent
+)
+
+
 class CapabilityGateDecisionEvent(EventBase):
     type: Literal[EventType.CAPABILITY_GATE_DECISION] = (
         EventType.CAPABILITY_GATE_DECISION
@@ -1303,7 +1641,10 @@ class ModelCallEndEvent(EventBase):
             raise ValueError("reported model usage requires a usage fact")
         if self.usage_status == "missing" and self.usage is not None:
             raise ValueError("missing model usage cannot contain a usage fact")
-        if self.usage_status == "reported" and self.provider_dispatch_status != "dispatched":
+        if (
+            self.usage_status == "reported"
+            and self.provider_dispatch_status != "dispatched"
+        ):
             raise ValueError("reported model usage requires provider dispatch")
         if self.outcome in {"completed", "provider_error"} and (
             self.provider_dispatch_status != "dispatched"
@@ -1330,7 +1671,9 @@ class ModelCallTerminalProjectionCommittedEvent(EventBase):
     @model_validator(mode="after")
     def _projection_identity(self) -> "ModelCallTerminalProjectionCommittedEvent":
         if self.projection_reference.projection_kind != "model_call":
-            raise ValueError("model projection event requires model projection reference")
+            raise ValueError(
+                "model projection event requires model projection reference"
+            )
         if (
             self.model_call_start_event_identity.event_type
             != EventType.MODEL_CALL_START.value
@@ -1352,7 +1695,9 @@ class ProviderModelStreamErrorEvent(EventBase):
             self.model_stream_attribution.durable_kind
             is not ModelStreamDurableSemanticKind.PROVIDER_ERROR
         ):
-            raise ValueError("provider stream error requires provider_error attribution")
+            raise ValueError(
+                "provider stream error requires provider_error attribution"
+            )
         return self
 
 
@@ -1368,19 +1713,24 @@ class ModelCallControlDispositionResolvedEvent(EventBase):
     run_execution_activation: RunExecutionActivationFact
     disposition: ModelCallControlDisposition
     termination_intent: RunTerminationIntentAttributionFact | None
-    recovery_reason_code: Literal[
-        "process_restarted_before_control_resolution"
-    ] | None
+    recovery_reason_code: Literal["process_restarted_before_control_resolution"] | None
     event_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _validate_disposition(self) -> "ModelCallControlDispositionResolvedEvent":
         if self.disposition is ModelCallControlDisposition.ACCEPTED:
-            if self.termination_intent is not None or self.recovery_reason_code is not None:
-                raise ValueError("accepted disposition cannot carry suppression attribution")
+            if (
+                self.termination_intent is not None
+                or self.recovery_reason_code is not None
+            ):
+                raise ValueError(
+                    "accepted disposition cannot carry suppression attribution"
+                )
         elif self.disposition is ModelCallControlDisposition.SUPPRESSED_BY_TERMINATION:
             if self.termination_intent is None or self.recovery_reason_code is not None:
-                raise ValueError("termination suppression requires termination attribution")
+                raise ValueError(
+                    "termination suppression requires termination attribution"
+                )
             if (
                 self.termination_intent.target_run_execution_activation_fingerprint
                 != self.run_execution_activation.activation_fingerprint
@@ -1397,7 +1747,9 @@ class ModelCallControlDispositionResolvedEvent(EventBase):
             self.model_dump(mode="json", exclude={"event_fingerprint", "sequence"}),
         )
         if self.event_fingerprint != expected:
-            raise ValueError("model call control disposition event fingerprint mismatch")
+            raise ValueError(
+                "model call control disposition event fingerprint mismatch"
+            )
         return self
 
 
@@ -1842,9 +2194,7 @@ class ExternalExecutionResultEvent(EventBase):
         EventType.EXTERNAL_EXECUTION_RESULT
     )
     external_results: tuple[ExternalToolResultIngressFact, ...]
-    terminal_projections: tuple[
-        ToolResultTerminalProjectionEndReferenceFact, ...
-    ]
+    terminal_projections: tuple[ToolResultTerminalProjectionEndReferenceFact, ...]
 
     @model_validator(mode="after")
     def _validate_external_results(self) -> "ExternalExecutionResultEvent":
@@ -2066,9 +2416,9 @@ class MemoryReflectionCompletedEvent(EventBase):
     reflection_model_call_end_event_identity: StableEventIdentityFact
     reflection_model_result_semantic_fingerprint: str = Field(min_length=1)
     reflection_policy_contract_fingerprint: str = Field(min_length=1)
-    ordered_candidate_attributions: tuple[
-        ReflectionCandidateAttributionFact, ...
-    ] = Field(max_length=256)
+    ordered_candidate_attributions: tuple[ReflectionCandidateAttributionFact, ...] = (
+        Field(max_length=256)
+    )
 
     @model_validator(mode="after")
     def _validate_usage(self) -> "MemoryReflectionCompletedEvent":
@@ -2429,9 +2779,9 @@ class ContextCompactionMemoryCandidatesProposedEvent(EventBase):
     summary_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     summary_content_bytes: int = Field(ge=0, le=16 * 1024 * 1024)
     extractor_contract: CompactionMemoryCandidateExtractorContractFact
-    ordered_candidate_attributions: tuple[
-        CompactionCandidateAttributionFact, ...
-    ] = Field(max_length=256)
+    ordered_candidate_attributions: tuple[CompactionCandidateAttributionFact, ...] = (
+        Field(max_length=256)
+    )
     completed_compaction_event_identity: StableEventIdentityFact
 
     @model_validator(mode="after")
@@ -3358,9 +3708,7 @@ class TranscriptProjectionCheckpointIntentEvent(EventBase):
     source_ledger_materialization_generation: int = Field(ge=0)
     source_consumer_horizon_revision: int = Field(ge=0)
     frozen_ledger_through_sequence: int = Field(ge=0)
-    frozen_ledger_continuity_accumulator: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    frozen_ledger_continuity_accumulator: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     maintenance_reservation_id: str = Field(min_length=1, max_length=128)
     intent_contract_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     terminal_contract: CheckpointTerminalContractFact
@@ -3430,9 +3778,9 @@ class TranscriptProjectionCheckpointCancelledEvent(EventBase):
 
 
 class TranscriptProjectionCheckpointRecoveredInterruptedEvent(EventBase):
-    type: Literal[
+    type: Literal[EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED] = (
         EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED
-    ] = EventType.TRANSCRIPT_PROJECTION_CHECKPOINT_RECOVERED_INTERRUPTED
+    )
     checkpoint_id: str = Field(min_length=1, max_length=128)
     checkpoint_candidate_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     checkpoint_intent_event_identity: StableEventIdentityFact
@@ -3473,22 +3821,18 @@ class LedgerMaterializationConsumerRegisteredEvent(EventBase):
     consumer: LedgerMaterializationConsumerHorizonFact
     cause: LedgerMaterializationConsumerRegistrationCauseFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class LedgerMaterializationConsumerHorizonAdvancedEvent(EventBase):
-    type: Literal[
+    type: Literal[EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED] = (
         EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED
-    ] = EventType.LEDGER_MATERIALIZATION_CONSUMER_HORIZON_ADVANCED
+    )
     previous_horizon: LedgerMaterializationConsumerHorizonFact
     resulting_horizon: LedgerMaterializationConsumerHorizonFact
     cause: CheckpointConsumerCauseFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _horizon_identity(
@@ -3513,9 +3857,7 @@ class LedgerMaterializationConsumerRetiredEvent(EventBase):
     retired_horizon: LedgerMaterializationConsumerHorizonFact
     cause: ConsumerRetirementCauseFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class LedgerMaterializationGenerationAdvancedEvent(EventBase):
@@ -3525,9 +3867,7 @@ class LedgerMaterializationGenerationAdvancedEvent(EventBase):
     previous_generation: LedgerMaterializationGenerationFact
     resulting_generation: LedgerMaterializationGenerationFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class PhysicalOperationReservationCreatedEvent(EventBase):
@@ -3536,9 +3876,7 @@ class PhysicalOperationReservationCreatedEvent(EventBase):
     )
     reservation: PhysicalOperationReservationFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class PhysicalOperationChargeAppliedEvent(EventBase):
@@ -3547,9 +3885,7 @@ class PhysicalOperationChargeAppliedEvent(EventBase):
     )
     charge: PhysicalOperationChargeAppliedFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class PhysicalOperationReservationSuspendedEvent(EventBase):
@@ -3558,9 +3894,7 @@ class PhysicalOperationReservationSuspendedEvent(EventBase):
     )
     suspension: PhysicalOperationSuspensionTailFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class PhysicalOperationReservationSettledEvent(EventBase):
@@ -3569,9 +3903,7 @@ class PhysicalOperationReservationSettledEvent(EventBase):
     )
     settlement: PhysicalOperationSettlementFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class CheckpointDispatchBarrierInstalledEvent(EventBase):
@@ -3580,9 +3912,7 @@ class CheckpointDispatchBarrierInstalledEvent(EventBase):
     )
     barrier: CheckpointDispatchBarrierFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class CheckpointDispatchBarrierReleasedEvent(EventBase):
@@ -3591,9 +3921,7 @@ class CheckpointDispatchBarrierReleasedEvent(EventBase):
     )
     release: CheckpointDispatchBarrierReleaseFact
     transition: LedgerMaterializationAccountTransitionFact
-    resulting_account_state_fingerprint: str = Field(
-        pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    resulting_account_state_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class CustomEvent(EventBase):
@@ -3627,6 +3955,12 @@ AgentEvent: TypeAlias = (
     | ContextCompiledEvent
     | CapabilityGateDecisionEvent
     | ModelCallStartEvent
+    | ProviderInputGenerationStartedEvent
+    | ProviderInputAppendCommittedEvent
+    | ExistingGenerationPreparationAbandonedEvent
+    | ScopedGenerationPreparationAbandonedEvent
+    | ProviderInputGenerationRolloverResolvedEvent
+    | ProviderInputGenerationClosedEvent
     | ModelCallTerminalProjectionCommittedEvent
     | ModelCallEndEvent
     | ProviderModelStreamErrorEvent

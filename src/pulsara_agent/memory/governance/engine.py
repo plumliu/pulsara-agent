@@ -200,11 +200,7 @@ class MemoryGovernanceEngine:
             else new_governance_batch_id()
         )
         recoverable = next(
-            (
-                item
-                for item in open_batches
-                if item.governance_batch_id == batch_id
-            ),
+            (item for item in open_batches if item.governance_batch_id == batch_id),
             None,
         )
         return await self.execution_owners.run(
@@ -258,18 +254,18 @@ class MemoryGovernanceEngine:
                     "governance batch input artifact is untrusted",
                 )
             if recoverable.claim_status is GovernanceCandidateClaimStatus.PREPARING:
-                prepared_event, attribution, preparation_record = (
-                    await self.preparation_commit_port.commit_prepared_bundle(
-                        prepared=prepared,
-                        claims=recoverable.claims,
-                        preparation_record=recoverable.preparation,
-                    )
+                (
+                    prepared_event,
+                    attribution,
+                    preparation_record,
+                ) = await self.preparation_commit_port.commit_prepared_bundle(
+                    prepared=prepared,
+                    claims=recoverable.claims,
+                    preparation_record=recoverable.preparation,
                 )
                 claims = await self._prepared_claims(
                     governance_batch_id=governance_batch_id,
-                    expected_candidate_entry_ids=(
-                        prepared_event.candidate_entry_ids
-                    ),
+                    expected_candidate_entry_ids=(prepared_event.candidate_entry_ids),
                 )
             else:
                 if recoverable.prepared_event is None:
@@ -309,10 +305,7 @@ class MemoryGovernanceEngine:
                 decisions=[],
                 applied=[],
             )
-        authority = (
-            self.runtime_session.transcript_projection_state_store
-            .capture_governance_authority_snapshot()
-        )
+        authority = self.runtime_session.transcript_projection_state_store.capture_governance_authority_snapshot()
         preparations = await self._prepare_evidence(claimed, authority)
         if any(
             item.result.status is GovernanceEvidenceBuildStatus.AUTHORITY_UNTRUSTED
@@ -444,12 +437,14 @@ class MemoryGovernanceEngine:
             "governance-preparation-stage",
             lambda: self.preparation_repository.stage(record),
         )
-        prepared_event, attribution, preparation_record = (
-            await self.preparation_commit_port.commit_prepared_bundle(
-                prepared=prepared,
-                claims=tuple(surviving_claims),
-                preparation_record=record,
-            )
+        (
+            prepared_event,
+            attribution,
+            preparation_record,
+        ) = await self.preparation_commit_port.commit_prepared_bundle(
+            prepared=prepared,
+            claims=tuple(surviving_claims),
+            preparation_record=record,
         )
         prepared_claims = await self._prepared_claims(
             governance_batch_id=governance_batch_id,
@@ -645,16 +640,12 @@ class MemoryGovernanceEngine:
                             batch_input_reference_fingerprint=(
                                 prepared.reference.reference_fingerprint
                             ),
-                            governance_model_call_id=(
-                                call.fact.resolved_model_call_id
-                            ),
+                            governance_model_call_id=(call.fact.resolved_model_call_id),
                             decision_index=index,
                             allowed_candidate_entry_ids=frozenset(
                                 claim.candidate_entry_id for claim in claims
                             ),
-                            allowed_scopes=frozenset(
-                                prepared.snapshot.allowed_scopes
-                            ),
+                            allowed_scopes=frozenset(prepared.snapshot.allowed_scopes),
                         ),
                     )
                 )
@@ -714,7 +705,9 @@ class MemoryGovernanceEngine:
             envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
             for envelope in raw_events
         )
-        starts = tuple(event for event in events if isinstance(event, ModelCallStartEvent))
+        starts = tuple(
+            event for event in events if isinstance(event, ModelCallStartEvent)
+        )
         ends = tuple(event for event in events if isinstance(event, ModelCallEndEvent))
         if not starts:
             return _GovernanceModelResult.from_direct(
@@ -772,25 +765,43 @@ class MemoryGovernanceEngine:
             turn_id=f"turn:governance/{batch_id}",
             reply_id=f"reply:governance/{batch_id}",
         )
-        start_bundle = prepare_model_lifecycle_start_bundle(
+        provider_input = await self.runtime_session.provider_input_generation_coordinator.prepare_one_shot_call(
             call=call,
             context=context,
             event_context=event_context,
-            runtime_session=self.runtime_session,
-            lifecycle_kind="direct_internal_call",
-            governance_input_attribution=attribution,
+            operation_kind="governance_model_call",
+            operation_id=batch_id,
         )
-        handle = self.llm_runtime.start_stream(
-            call=call,
-            context=context,
-            event_context=event_context,
-            start_bundle=start_bundle,
-            commit_port=RuntimeSessionModelStreamEventCommitPort(
+        try:
+            context = provider_input.carrier.to_llm_context(context)
+            start_bundle = prepare_model_lifecycle_start_bundle(
+                call=call,
+                context=context,
+                event_context=event_context,
                 runtime_session=self.runtime_session,
-                state=None,
-            ),
-            execution_registry=self.runtime_session.model_stream_execution_registry,
-        )
+                lifecycle_kind="direct_internal_call",
+                governance_input_attribution=attribution,
+                provider_input_start_bundle=provider_input,
+            )
+            handle = self.llm_runtime.start_stream(
+                call=call,
+                context=context,
+                event_context=event_context,
+                start_bundle=start_bundle,
+                commit_port=RuntimeSessionModelStreamEventCommitPort(
+                    runtime_session=self.runtime_session,
+                    state=None,
+                ),
+                execution_registry=(
+                    self.runtime_session.model_stream_execution_registry
+                ),
+            )
+        except BaseException:
+            await self.runtime_session.provider_input_generation_coordinator.abandon_uncommitted_preparation(
+                provider_input.prepared_candidate.preparation_ownership.preparation_id,
+                reason="one_shot_failed_before_start",
+            )
+            raise
         return await collect_direct_model_call_handle(
             handle,
             expected_call=call,
@@ -949,7 +960,9 @@ class MemoryGovernanceEngine:
         )
         by_candidate_id = {claim.candidate_entry_id: claim for claim in claims}
         if len(by_candidate_id) != len(claims):
-            raise RuntimeError("governance claim repository returned duplicate candidates")
+            raise RuntimeError(
+                "governance claim repository returned duplicate candidates"
+            )
         try:
             prepared = tuple(
                 by_candidate_id[candidate_entry_id]
@@ -1148,6 +1161,7 @@ def _execution_context_from_snapshot(
         node_revisions=MappingProxyType(node_revisions),
         verified_evidence_refs=MappingProxyType(verified_refs),
     )
+
 
 __all__ = [
     "MemoryGovernanceEngine",

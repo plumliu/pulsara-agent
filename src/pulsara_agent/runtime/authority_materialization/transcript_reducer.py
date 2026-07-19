@@ -737,7 +737,19 @@ class TranscriptProjectionStateStore:
             schema_version="transcript_tool_pair_leaf_entry.v3",
             entry_kind="tool_pair",
             ordinal=_ordinal(len(self._stable_entries)),
-            pair_id=f"tool-pair:{tool_call_id}",
+            pair_id=(
+                "tool-pair:"
+                + context_fingerprint(
+                    "transcript-tool-pair-identity:v1",
+                    {
+                        "assistant_entry_fact_fingerprint": (
+                            assistant_entry.fact_fingerprint
+                        ),
+                        "tool_call_id": tool_call_id,
+                        "result_entry_fact_fingerprint": result_entry.fact_fingerprint,
+                    },
+                )
+            ),
             semantic_identity=pair_semantic,
             source_event_refs=(_event_ref(self.runtime_session_id, record.committed_event),),
         )

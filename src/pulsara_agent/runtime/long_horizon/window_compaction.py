@@ -346,7 +346,7 @@ def prepare_window_compaction_source_document(
     entries: list[WindowCompactionSourceEntryFact] = []
     entry_ids_by_message: dict[str, list[str]] = {}
     result_entry_id_by_unit: dict[str, str] = {}
-    tool_call_entry_id_by_call: dict[str, str] = {}
+    tool_call_entry_id_by_call: dict[tuple[str, str], str] = {}
     message_by_id = {message.message_id: message for message in transcript.messages}
 
     for message in transcript.messages:
@@ -389,7 +389,9 @@ def prepare_window_compaction_source_document(
                     ),
                     timing=timing,
                 )
-                tool_call_entry_id_by_call[block.tool_call_id] = entry.source_entry_id
+                tool_call_entry_id_by_call[
+                    (message.message_id, block.tool_call_id)
+                ] = entry.source_entry_id
             elif isinstance(block, TranscriptTextBlockFact):
                 entry = _source_entry(
                     source_entry_id=_source_entry_id(
@@ -472,7 +474,9 @@ def prepare_window_compaction_source_document(
                 raise ValueError("window compaction pair group lacks result unit")
             result_unit_ids.append(unit.unit_id)
             protection_classes.update(protection_by_id[unit.unit_id].classes)
-            call_entry_id = tool_call_entry_id_by_call.get(pair.tool_call_id)
+            call_entry_id = tool_call_entry_id_by_call.get(
+                (pair.call_message_id, pair.tool_call_id)
+            )
             result_entry_id = result_entry_id_by_unit.get(unit.unit_id)
             if call_entry_id is None or result_entry_id is None:
                 raise ValueError("window compaction pair group lacks source entries")

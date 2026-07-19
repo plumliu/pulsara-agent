@@ -234,6 +234,8 @@ def rebuild_prior_messages(
             if event.reply_id in seen_replies:
                 continue
             seen_replies.add(event.reply_id)
+            if event.model_terminal_outcome != "completed":
+                continue
             try:
                 message = event_log.replay(event.reply_id)
             except MessageReplayControlError:
@@ -351,6 +353,8 @@ def _rebuild_messages_from_events(
             if event.reply_id in seen_replies:
                 continue
             seen_replies.add(event.reply_id)
+            if event.model_terminal_outcome != "completed":
+                continue
             try:
                 message = (
                     reply_loader(event.reply_id)

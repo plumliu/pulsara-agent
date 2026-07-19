@@ -18,6 +18,8 @@ from pulsara_agent.event import (
     ModelCallStartEvent,
     ModelCallTerminalProjectionCommittedEvent,
     PhysicalOperationReservationCreatedEvent,
+    ProviderInputAppendCommittedEvent,
+    ProviderInputGenerationClosedEvent,
     ProviderModelStreamErrorEvent,
     ReplyEndEvent,
     ReplyStartEvent,
@@ -28,6 +30,10 @@ from pulsara_agent.event import (
 from pulsara_agent.event_log import EventLog, InMemoryEventLog
 from pulsara_agent.event_log.serialization import DEFAULT_EVENT_SCHEMA_REGISTRY
 from pulsara_agent.primitives.model_call import ModelCallDiagnosticFact
+from pulsara_agent.primitives.frozen import build_frozen_fact
+from pulsara_agent.primitives.provider_input import (
+    CommittedProviderInputGenerationCoreStateFact,
+)
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.terminal_projection import (
     TERMINAL_PROJECTION_MEDIA_TYPE,
@@ -159,9 +165,7 @@ class ModelStreamRecoveryService:
                 )
             repaired.append(
                 RecoveredModelStream(
-                    resolved_model_call_id=(
-                        start.resolved_call.resolved_model_call_id
-                    ),
+                    resolved_model_call_id=(start.resolved_call.resolved_model_call_id),
                     lifecycle_kind=start.recovery_plan.lifecycle_kind,
                     terminal_outcome=outcome,
                     terminal_event_ids=expected_ids,
@@ -222,11 +226,9 @@ class ModelStreamRecoveryService:
         reservation: PhysicalOperationReservationFact = reservation_event.reservation
         if (
             reservation.reservation_id != active[0].reservation_id
-            or reservation.reservation_fingerprint
-            != active[0].reservation_fingerprint
+            or reservation.reservation_fingerprint != active[0].reservation_fingerprint
             or reservation.owner_kind is not PhysicalOperationKind.MODEL_CALL
-            or reservation.owner_id
-            != start.resolved_call.resolved_model_call_id
+            or reservation.owner_id != start.resolved_call.resolved_model_call_id
         ):
             raise ModelStreamRecoveryStructuralError(
                 "model recovery physical reservation identity drifted"
@@ -349,16 +351,13 @@ class ModelStreamRecoveryService:
             semantic_commit_measurements=(
                 rebuild_model_stream_semantic_commit_measurements(
                     runtime_session_id=self._event_log.runtime_session_id,
-                    resolved_model_call_id=(
-                        start.resolved_call.resolved_model_call_id
-                    ),
+                    resolved_model_call_id=(start.resolved_call.resolved_model_call_id),
                     semantic_events=semantic,
                     ledger_events=events,
                 )
                 if any(
                     isinstance(event, PhysicalOperationReservationCreatedEvent)
-                    and event.reservation.owner_kind
-                    is PhysicalOperationKind.MODEL_CALL
+                    and event.reservation.owner_kind is PhysicalOperationKind.MODEL_CALL
                     and event.reservation.owner_id
                     == start.resolved_call.resolved_model_call_id
                     for event in events
@@ -369,8 +368,7 @@ class ModelStreamRecoveryService:
                 "accounted"
                 if any(
                     isinstance(event, PhysicalOperationReservationCreatedEvent)
-                    and event.reservation.owner_kind
-                    is PhysicalOperationKind.MODEL_CALL
+                    and event.reservation.owner_kind is PhysicalOperationKind.MODEL_CALL
                     and event.reservation.owner_id
                     == start.resolved_call.resolved_model_call_id
                     for event in events
@@ -436,9 +434,7 @@ class ModelStreamRecoveryService:
             envelope.decode_owned(DEFAULT_EVENT_SCHEMA_REGISTRY)
             for envelope in raw.events
         )
-        if tuple(event.sequence for event in events) != tuple(
-            range(1, high_water + 1)
-        ):
+        if tuple(event.sequence for event in events) != tuple(range(1, high_water + 1)):
             raise ModelStreamRecoveryStructuralError(
                 "model recovery input is not one contiguous ledger prefix"
             )
@@ -450,7 +446,9 @@ class ModelStreamRecoveryService:
             raise TimeoutError("model stream recovery exceeded its deadline")
 
 
-def _unique_model_starts(events: tuple[AgentEvent, ...]) -> dict[str, ModelCallStartEvent]:
+def _unique_model_starts(
+    events: tuple[AgentEvent, ...],
+) -> dict[str, ModelCallStartEvent]:
     starts: dict[str, ModelCallStartEvent] = {}
     for event in events:
         if not isinstance(event, ModelCallStartEvent):
@@ -499,8 +497,7 @@ def _validate_existing_terminal(
         event
         for event in events
         if isinstance(event, ModelCallTerminalProjectionCommittedEvent)
-        and event.resolved_model_call_id
-        == start.resolved_call.resolved_model_call_id
+        and event.resolved_model_call_id == start.resolved_call.resolved_model_call_id
     )
     if (
         len(projections) != 1
@@ -513,6 +510,9 @@ def _validate_existing_terminal(
             "model terminal lacks its atomic projection"
         )
     expected: list[AgentEvent] = [end]
+    close = _required_one_shot_close(events=events, start=start)
+    if close is not None:
+        expected.append(close)
     if plan.stable_settlement_event_id is not None:
         settlements = tuple(
             event
@@ -589,6 +589,13 @@ def _build_recovery_terminal_batch(
         terminal_projection=terminal_projection,
     )
     batch: list[AgentEvent] = [model_end]
+    one_shot_close = _build_recovered_one_shot_close_event(
+        events=events,
+        start=start,
+        event_context=event_context,
+    )
+    if one_shot_close is not None:
+        batch.append(one_shot_close)
     reservation = _matching_reservation(events=events, start=start)
     if reservation is not None:
         accounts = tuple(
@@ -622,6 +629,120 @@ def _build_recovery_terminal_batch(
             )
         )
     return tuple(batch), outcome
+
+
+def _provider_input_append_for_start(
+    *,
+    events: tuple[AgentEvent, ...],
+    start: ModelCallStartEvent,
+) -> ProviderInputAppendCommittedEvent | None:
+    reference = start.provider_input_reference
+    if reference is None:
+        return None
+    matches = tuple(
+        event
+        for event in events
+        if isinstance(event, ProviderInputAppendCommittedEvent)
+        and event.id == reference.append_committed_event_identity.event_id
+    )
+    if len(matches) != 1:
+        raise ModelStreamRecoveryStructuralError(
+            "model provider-input reference lacks one exact append event"
+        )
+    append = matches[0]
+    if (
+        append.generation_id != reference.generation_id
+        or append.resulting_core_state_fingerprint
+        != reference.resulting_generation_core_state_fingerprint
+    ):
+        raise ModelStreamRecoveryStructuralError(
+            "model provider-input append/reference identity drifted"
+        )
+    compiled = append.append_kind == "compiled_manifest"
+    if compiled != (reference.reference_kind == "compiled_manifest"):
+        raise ModelStreamRecoveryStructuralError(
+            "model provider-input append/reference kind drifted"
+        )
+    if compiled and (
+        append.manifest_projection_reference is None
+        or append.causal_validation is None
+        or reference.manifest_projection_reference_fingerprint
+        != append.manifest_projection_reference.reference_fingerprint
+        or reference.causal_validation_fingerprint
+        != append.causal_validation.result_fingerprint
+        or reference.transcript_frontier_fingerprint
+        != append.resulting_core_state.transcript_frontier.provider_semantic_frontier_fingerprint
+    ):
+        raise ModelStreamRecoveryStructuralError(
+            "model provider-input manifest proof drifted"
+        )
+    return append
+
+
+def _required_one_shot_close(
+    *,
+    events: tuple[AgentEvent, ...],
+    start: ModelCallStartEvent,
+) -> ProviderInputGenerationClosedEvent | None:
+    append = _provider_input_append_for_start(events=events, start=start)
+    if (
+        append is None
+        or append.resulting_core_state.generation.scope.scope_kind != "one_shot"
+    ):
+        return None
+    matches = tuple(
+        event
+        for event in events
+        if isinstance(event, ProviderInputGenerationClosedEvent)
+        and event.generation_id == append.generation_id
+        and event.close_reason == "one_shot_terminal"
+    )
+    if len(matches) != 1:
+        raise ModelStreamRecoveryStructuralError(
+            "one-shot model terminal lacks one exact generation close"
+        )
+    return matches[0]
+
+
+def _build_recovered_one_shot_close_event(
+    *,
+    events: tuple[AgentEvent, ...],
+    start: ModelCallStartEvent,
+    event_context: EventContext,
+) -> ProviderInputGenerationClosedEvent | None:
+    append = _provider_input_append_for_start(events=events, start=start)
+    if (
+        append is None
+        or append.resulting_core_state.generation.scope.scope_kind != "one_shot"
+    ):
+        return None
+    core = append.resulting_core_state
+    payload = {
+        name: getattr(core, name)
+        for name in core.__class__.model_fields
+        if name not in {"schema_version", "core_state_fingerprint"}
+    }
+    payload.update(status="closed", reconciliation_reason=None)
+    closed = build_frozen_fact(
+        CommittedProviderInputGenerationCoreStateFact,
+        schema_version="committed_provider_input_generation_core_state.v1",
+        **payload,
+    )
+    return ProviderInputGenerationClosedEvent(
+        id=f"provider_input_generation_closed:{core.generation.generation_id}",
+        **event_context.event_fields(),
+        created_at=start.created_at,
+        generation_id=core.generation.generation_id,
+        generation_fingerprint=core.generation.generation_fingerprint,
+        final_revision=core.revision,
+        final_prefix_fingerprint=core.committed_prefix_fingerprint,
+        final_vector_root=core.unit_vector_root,
+        close_reason="one_shot_terminal",
+        successor_generation_id=None,
+        unconsumed_continuation_fingerprint=None,
+        predecessor_core_state_fingerprint=core.core_state_fingerprint,
+        resulting_closed_core_state=closed,
+    )
 
 
 def _recovery_terminal_outcome(
@@ -684,9 +805,7 @@ def _validate_start_bundle(
     if tuple(_required_sequence(item) for item in expected) != tuple(
         range(first, _required_sequence(start) + 1)
     ):
-        raise ModelStreamRecoveryStructuralError(
-            "model Start bundle is not contiguous"
-        )
+        raise ModelStreamRecoveryStructuralError("model Start bundle is not contiguous")
 
 
 def _matching_reservation(
@@ -708,8 +827,7 @@ def _matching_reservation(
     event = matches[0]
     quote = event.reservation.model_call_reservation_quote
     if (
-        event.reservation.owner_id
-        != start.resolved_call.resolved_model_call_id
+        event.reservation.owner_id != start.resolved_call.resolved_model_call_id
         or quote is None
         or quote.quote_fact_fingerprint != plan.reservation_quote_fingerprint
     ):
