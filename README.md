@@ -379,10 +379,15 @@ uv run ruff check src tests
 uv run pytest -q
 ```
 
-Opt-in real model tests:
+Frozen real-provider dogfood suite:
 
 ```bash
-PULSARA_RUN_REAL_LLM=1 uv run pytest -m real_llm
+uv run python -m benchmarks.suites.run_core_dogfood validate
+
+PULSARA_RUN_CORE_DOGFOOD=1 \
+uv run python -m benchmarks.suites.run_core_dogfood run \
+  --env-file .env \
+  --confirm-network
 ```
 
 ## License

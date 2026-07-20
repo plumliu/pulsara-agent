@@ -1,0 +1,54 @@
+{
+  "schema_version": "pulsara.core-dogfood-scenario.v1",
+  "scenario_id": "subagent-delegation",
+  "description": "Require one child task to inspect three files, return an explicit result, and let the parent write the verified sum.",
+  "model_role": "flash",
+  "reasoning_effort": null,
+  "timeout_seconds": 720,
+  "memory_reflection": false,
+  "system_prompt": "You are running Pulsara's frozen subagent dogfood. Obey delegation constraints literally. The parent must not inspect delegated source files itself. Wait for an explicit child result before using it. Never inspect .env or credentials.",
+  "fixture": {
+    "fixture_kind": "directory_copy",
+    "workdir": "workdir"
+  },
+  "workflow": {
+    "workflow_kind": "subagent_delegation",
+    "prompt": "The data directory contains alpha.txt, beta.txt, and gamma.txt. Call the task tool exactly once and instruct that child to read all three files and explicitly report their three integer values. As the parent, do not call read_file, search_files, or terminal to inspect data. After the child result is delivered, add the values and write only the integer total to result.txt."
+  },
+  "verifier": {
+    "path": "verify.py",
+    "timeout_seconds": 20
+  },
+  "evidence_gate": {
+    "min_root_runs": 1,
+    "max_root_runs": 1,
+    "min_all_runs": 2,
+    "max_all_runs": 4,
+    "min_model_calls": 2,
+    "max_model_calls": 16,
+    "min_tool_calls": 5,
+    "max_tool_calls": 24,
+    "max_total_tokens": 240000,
+    "event_count_minimums": [
+      {"event_type": "SUBAGENT_RESULT_CONSUMED", "minimum": 1},
+      {"event_type": "SUBAGENT_TASK_COMPLETED", "minimum": 1},
+      {"event_type": "SUBAGENT_TASK_CREATED", "minimum": 1}
+    ],
+    "forbidden_event_types": [
+      "MODEL_CALL_REJECTED",
+      "PROVIDER_MODEL_STREAM_ERROR",
+      "RUN_ERROR",
+      "SUBAGENT_RUN_FAILED",
+      "SUBAGENT_TASK_FAILED"
+    ],
+    "root_run_tool_gate": {
+      "run_selector": "first",
+      "required_exact_counts": [
+        {"tool_name": "task", "exact_count": 1}
+      ],
+      "forbidden_tool_names": ["read_file", "search_files", "terminal"]
+    },
+    "require_positive_cached_input_tokens": false,
+    "max_provider_input_rollovers": 2
+  }
+}

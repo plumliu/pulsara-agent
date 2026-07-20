@@ -1,4 +1,4 @@
-# Eval / Real-LLM Dogfood Gate Contract
+# Eval / Core Real-Provider Dogfood Gate Contract
 
 _Created: 2026-07-04_
 
@@ -12,12 +12,8 @@ _Created: 2026-07-04_
 - [evals/governance_relatedness/config.yaml](/Users/plumliu/Desktop/python_workspace/pulsara_agent/evals/governance_relatedness/config.yaml)
 - [tests/test_recall_eval_runner.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_recall_eval_runner.py)
 - [tests/test_governance_relatedness_eval_runner.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_governance_relatedness_eval_runner.py)
-- [tests/test_real_llm_memory_recall_dogfood.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_real_llm_memory_recall_dogfood.py)
-- [tests/test_real_llm_governance_relatedness.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_real_llm_governance_relatedness.py)
-- [tests/test_real_llm_integration.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_real_llm_integration.py)
-- [tests/test_real_llm_context_compaction.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_real_llm_context_compaction.py)
-- [tests/test_real_llm_resume.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_real_llm_resume.py)
-- [tests/test_real_llm_hf_cli_skill_dogfood.py](/Users/plumliu/Desktop/python_workspace/pulsara_agent/tests/test_real_llm_hf_cli_skill_dogfood.py)
+- [benchmarks/suites/README.md](/Users/plumliu/Desktop/python_workspace/pulsara_agent/benchmarks/suites/README.md)
+- [benchmarks/suites/core/v1/manifest.json](/Users/plumliu/Desktop/python_workspace/pulsara_agent/benchmarks/suites/core/v1/manifest.json)
 
 ---
 
@@ -151,27 +147,59 @@ Relatedness eval 不能只测 destructive-action precision。
 
 ## 4. Real-LLM dogfood
 
-### 4.1 Opt-in 环境变量
+### 4.0 冻结的核心 suite 是发布真源
 
-Real-LLM tests 默认必须 skip。
-
-最低开关：
+Real-LLM 发布门禁的长期真源是：
 
 ```text
-PULSARA_RUN_REAL_LLM=1
+benchmarks/suites/core/v1
 ```
 
-更昂贵或更具外部依赖的 dogfood 必须有额外开关，例如：
+它与 `evals/` 的边界是：
 
-- `PULSARA_RUN_DOGFOOD_LLM=1`
-- `PULSARA_RUN_DOGFOOD_LONG=1`
-- `PULSARA_RUN_DOGFOOD_PLAN_LONG=1`
-- `PULSARA_RUN_DOGFOOD_COMPACTION=1`
-- `PULSARA_RUN_DOGFOOD_COMPACTION_LONG=1`
-- `PULSARA_RUN_DOGFOOD_COMPACTION_MID_TURN=1`
-- `PULSARA_RUN_HF_CLI_DOGFOOD=1`
+- `evals/` 保存可重复的质量数据集与 deterministic grader；
+- `benchmarks/suites/` 保存会启动真实 Pulsara、真实 provider、真实本地 durable
+  services 和 workspace tools 的昂贵产品轨迹。
 
-缺少 provider key、embedding/rerank key、Postgres/Oxigraph 等外部服务时，dogfood 可以 skip，但必须给出明确 skip reason。
+Core v1 固定六条轨迹：
+
+1. ordinary workspace patch；
+2. append-only provider cache continuity；
+3. cross-process durable resume；
+4. explicit long-horizon compaction；
+5. subagent delegation/result delivery；
+6. typed Plan question/approval/implementation。
+
+每条轨迹必须：
+
+- 在独立工作区运行；
+- 不把 hidden verifier 暴露给模型；
+- 使用 `HostCore` / `HostSession` 产品边界，不手工构造 durable events；
+- 会话 close drain 后再由 `InspectorService` 读取证据；
+- 保存 suite、scenario、runner fingerprint；
+- 同时通过 workspace verifier 与 durable lifecycle grader。
+
+Core suite 必须串行运行。并行真实 provider trajectory 会让 PostgreSQL、provider cache、
+限流和成本证据难以归因，不属于 v1 合法执行模式。
+
+旧 real-LLM pytest 已物理删除。pytest 只承载离线 correctness tests 和独立的
+`retrieval_live` API 检查；任何新的真实 Agent trajectory 必须进入版本化 core suite，
+不得重新建立按功能散落的联网 pytest fixture。
+
+### 4.1 显式执行门禁
+
+Core suite 默认拒绝联网执行。离线 `validate` / `list` 不读取 API key；真实执行必须同时
+提供环境变量和命令行确认：
+
+```bash
+PULSARA_RUN_CORE_DOGFOOD=1 \
+uv run python -m benchmarks.suites.run_core_dogfood run \
+  --env-file .env \
+  --confirm-network
+```
+
+缺少 provider key、Postgres、Oxigraph 或其它场景依赖时，runner 必须在 preflight 或场景
+结果中给出明确失败原因；不得把缺失发布证据静默解释为通过。
 
 ### 4.2 Real dogfood 证明什么
 
@@ -181,9 +209,9 @@ Real-LLM dogfood 证明的是 provider-facing trajectory：
 - 中转站 / provider 是否会填默认参数或空语义参数；
 - tool schema fallback 是否稳健；
 - LLM transport 是否兼容 provider event stream；
-- real embedding/rerank 是否能召回 semantic target；
+- append-only provider input 是否真的形成可缓存前缀；
 - real plan/resume/compaction trajectory 是否可恢复；
-- active skill + terminal 是否能完成真实 CLI 任务。
+- subagent result delivery 与 workspace tool execution 是否闭环。
 
 它不证明：
 
@@ -212,57 +240,24 @@ Real dogfood 不应只断言 final text。
 
 ---
 
-## 5. Memory recall long dogfood
+## 5. Core trajectory coverage
 
-Long memory recall dogfood 是 semantic recall 发布证据之一。
+Core v1 的覆盖责任固定如下：
 
-最低断言：
+- `workspace-patch`：Host tool loop、文件修改、隐藏 verifier；
+- `cache-continuity`：连续三轮 strict-suffix input 与 provider cache telemetry；
+- `durable-resume`：detach、进程替换、durable reopen；
+- `manual-compaction-trail`：长证据链、显式 compaction、无需重读的召回；
+- `subagent-delegation`：child task、result delivery、parent isolation；
+- `plan-workflow`：typed question、exit、approval 与 implementation continuation。
 
-- vector index materialized row count 符合 seed；
-- retrieval resources closed；
-- all turns finished；
-- automatic recall 仅在相关 user turn 注入；
-- explicit `memory_search` 命中目标 memory id；
-- hidden scope memory 不出现在 projection / tool result；
-- unrelated negative 不调用 memory_search；
-- explicit traces 有 `trigger_kind=explicit_search`；
-- explicit traces 包含 reranker / vector metadata；
-- usage rows 产生。
-
-这类 dogfood 需要 real embedding + rerank provider；缺 key 时 skip 是合法的。
+Memory recall 和 governance relatedness 的质量 floor 继续由第 2、3 节的 versioned
+deterministic eval 负责。`retrieval_live` 只验证 retrieval provider API compatibility，
+不是 Agent trajectory，也不能替代 core suite。
 
 ---
 
-## 6. Real governance relatedness dogfood
-
-Real relatedness dogfood 用真实 embedding/reranker 跑 versioned fixture。
-
-最低断言：
-
-- overall recall@k >= config floor；
-- miss rate <= config floor；
-- positive slice recall >= config floor；
-- batch embedding 调用被批量化，而非 per-candidate N 次；
-- hard-negative 不误授权 destructive lifecycle。
-
-真实 dogfood 可以只覆盖当前 lifecycle-enabled 类型路径；其它类型必须由 deterministic tests 补足。
-
----
-
-## 7. Plan / resume / compaction / CLI skill dogfood
-
-这些 dogfood 属于 runtime trajectory 证据：
-
-- plan dogfood：必须覆盖 structured question、exit_plan、approve/resume、pending interaction 清空。
-- resume dogfood：必须覆盖 durable thread reopen 后上下文仍可用。
-- compaction dogfood：必须覆盖 summary artifact、boundary replay、manual/mid-turn safe point。
-- HF CLI skill dogfood：必须覆盖 active skill injection、terminal usage、真实下载、删除、cleanup。
-
-它们的 gating 应按改动范围选择，不得要求每个普通 PR 都运行全部真实 dogfood。
-
----
-
-## 8. 禁止事项
+## 6. 禁止事项
 
 - 不允许用 root design doc 中的手写指标替代 eval config。
 - 不允许 `--gate` 在缺 planner destructive-action predictions 时通过。
@@ -274,7 +269,7 @@ Real relatedness dogfood 用真实 embedding/reranker 跑 versioned fixture。
 
 ---
 
-## 9. 最低命令
+## 7. 最低命令
 
 Deterministic gates：
 
@@ -299,26 +294,24 @@ uv run python evals/governance_relatedness/runner.py \
   --gate
 ```
 
-Representative real dogfood examples：
+Core dogfood entrypoint：
 
 ```bash
-PULSARA_RUN_REAL_LLM=1 \
-uv run pytest tests/test_real_llm_memory_recall_dogfood.py::test_real_llm_long_memory_recall_dogfood -q -s
+uv run python -m benchmarks.suites.run_core_dogfood validate
 
-PULSARA_RUN_REAL_LLM=1 \
-uv run pytest tests/test_real_llm_governance_relatedness.py::test_real_embedding_reranker_relatedness_fixture_recall_and_noise -q -s
+PULSARA_RUN_CORE_DOGFOOD=1 \
+uv run python -m benchmarks.suites.run_core_dogfood run \
+  --env-file .env \
+  --confirm-network
 ```
 
 Real dogfood 命令不得被写成默认 CI 必跑项，除非 CI 环境明确提供 provider、Postgres、Oxigraph、keys 与成本预算。
 
 ---
 
-## Long-horizon trajectory gate
+## 8. Long-horizon trajectory gate
 
-阶段四的真实 dogfood 必须覆盖：repeated research、artifact write before finalization、超过旧 36K 字符的 tool observations、current-run
-pairing、same-run window compaction、finalization deny 后保留 final call、parent-bounded subagent usage，以及 live/exact-replay manifest
-一致性。
-
-真实轨迹不能只断言最终文本出现。每条轨迹必须保存或打印 phase、model/tool counts、bucket charged/reserved/remaining、projection
-generation、window transition、neutral status hint、exact recurrence、artifact facts 与 child settlement aggregate。recurrence 只能作为事实展示，
-不能被测试解释成“无进展”或自动停止理由。real provider gate 继续由显式环境开关控制；deterministic fake/postgres parity tests 必须默认运行。
+Long-Horizon 的发布轨迹由 `manual-compaction-trail` 冻结。它必须证明显式 rewrite
+authority、summary artifact、window transition、close drain，以及 compaction 后无需重读原始
+长证据仍能完成隐藏 verifier。更细的 pairing、settlement、mid-turn cancellation 和
+fake/PostgreSQL parity 继续由默认离线测试覆盖；不得为每个内部边界重新增加联网 pytest。

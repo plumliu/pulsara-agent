@@ -32,7 +32,6 @@ packages = ["src/pulsara_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "real_llm: opt-in tests that call a configured real LLM provider",
     "retrieval_live: opt-in tests that call live retrieval-side model APIs",
 ]
 

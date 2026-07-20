@@ -1,0 +1,57 @@
+{
+  "schema_version": "pulsara.core-dogfood-scenario.v1",
+  "scenario_id": "cache-continuity",
+  "description": "Exercise three append-only Host turns and require a provider-reported prompt-cache hit without rereading the source.",
+  "model_role": "flash",
+  "reasoning_effort": null,
+  "timeout_seconds": 600,
+  "memory_reflection": false,
+  "system_prompt": "You are running Pulsara's frozen provider-prefix continuity dogfood. Use workspace tools exactly as requested. Preserve facts learned in prior turns and do not reread files when the user forbids it. Never inspect .env or credentials. Keep responses concise after completing each file operation.",
+  "fixture": {
+    "fixture_kind": "directory_copy",
+    "workdir": "workdir"
+  },
+  "workflow": {
+    "workflow_kind": "cache_continuity",
+    "prompts": [
+      "Read project_notes.md once. Find the authoritative project codename, then write cache_round1.txt whose entire contents are CODENAME|phase-one using that exact codename. Do not modify project_notes.md.",
+      "Do not read or search any file in this turn. Using only the prior conversation, write cache_round2.txt whose entire contents are the same authoritative CODENAME followed by |phase-two.",
+      "Do not read or search any file in this turn. Using only the retained conversation, write cache_final.txt whose entire contents are the same authoritative CODENAME followed by |phase-three. Use write_file exactly once."
+    ],
+    "inter_turn_delay_seconds": 1.0
+  },
+  "verifier": {
+    "path": "verify.py",
+    "timeout_seconds": 20
+  },
+  "evidence_gate": {
+    "min_root_runs": 3,
+    "max_root_runs": 3,
+    "min_all_runs": 3,
+    "max_all_runs": 3,
+    "min_model_calls": 3,
+    "max_model_calls": 10,
+    "min_tool_calls": 4,
+    "max_tool_calls": 16,
+    "max_total_tokens": 180000,
+    "event_count_minimums": [
+      {"event_type": "MODEL_CALL_END", "minimum": 3},
+      {"event_type": "PROVIDER_INPUT_APPEND_COMMITTED", "minimum": 3},
+      {"event_type": "RUN_END", "minimum": 3}
+    ],
+    "forbidden_event_types": [
+      "MODEL_CALL_REJECTED",
+      "PROVIDER_MODEL_STREAM_ERROR",
+      "RUN_ERROR"
+    ],
+    "root_run_tool_gate": {
+      "run_selector": "last",
+      "required_exact_counts": [
+        {"tool_name": "write_file", "exact_count": 1}
+      ],
+      "forbidden_tool_names": ["read_file", "search_files", "terminal"]
+    },
+    "require_positive_cached_input_tokens": true,
+    "max_provider_input_rollovers": 1
+  }
+}

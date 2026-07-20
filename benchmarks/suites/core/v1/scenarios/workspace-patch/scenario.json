@@ -1,0 +1,45 @@
+{
+  "schema_version": "pulsara.core-dogfood-scenario.v1",
+  "scenario_id": "workspace-patch",
+  "description": "Fix a bounded retry queue through the public Host tool loop and satisfy a hidden behavioral verifier.",
+  "model_role": "pro",
+  "reasoning_effort": null,
+  "timeout_seconds": 480,
+  "memory_reflection": false,
+  "system_prompt": "You are running a frozen Pulsara engineering dogfood. Work only in the current project. Inspect the relevant source and visible tests, make the smallest correct patch, and run the visible tests. Never inspect .env or credentials. A hidden verifier exists outside the workspace, so prove behavior rather than claiming success.",
+  "fixture": {
+    "fixture_kind": "directory_copy",
+    "workdir": "workdir"
+  },
+  "workflow": {
+    "workflow_kind": "workspace_task",
+    "prompt": "Fix retry_queue.py. drain_with_retries must preserve input order, call worker at most max_retries + 1 times per item, stop retrying an item after success, and return one Result per input item. Invalid negative max_retries must raise ValueError. Keep the public API unchanged, run the visible tests, and write PATCH_NOTES.md containing the exact line RETRY_QUEUE_FIXED_V1 when finished."
+  },
+  "verifier": {
+    "path": "verify.py",
+    "timeout_seconds": 30
+  },
+  "evidence_gate": {
+    "min_root_runs": 1,
+    "max_root_runs": 1,
+    "min_all_runs": 1,
+    "max_all_runs": 1,
+    "min_model_calls": 1,
+    "max_model_calls": 8,
+    "min_tool_calls": 2,
+    "max_tool_calls": 24,
+    "max_total_tokens": 100000,
+    "event_count_minimums": [
+      {"event_type": "MODEL_CALL_END", "minimum": 1},
+      {"event_type": "RUN_END", "minimum": 1}
+    ],
+    "forbidden_event_types": [
+      "MODEL_CALL_REJECTED",
+      "PROVIDER_MODEL_STREAM_ERROR",
+      "RUN_ERROR"
+    ],
+    "root_run_tool_gate": null,
+    "require_positive_cached_input_tokens": false,
+    "max_provider_input_rollovers": 1
+  }
+}
