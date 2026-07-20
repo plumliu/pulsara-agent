@@ -166,7 +166,9 @@ from pulsara_agent.primitives.provider_input import (
     PreparedProviderInputAppendCandidateFact,
     ProviderInputAppendBatchReferenceFact,
     ProviderInputCausalValidationResult,
+    ProviderInputContinuationConsumptionProofFact,
     ProviderInputContinuationMaterializationProofFact,
+    ProviderInputContinuationRewriteCoverageProofFact,
     ProviderInputGenerationFact,
     ProviderInputGenerationRootReferenceFact,
     ProviderInvocationContextFramePlacementFact,
@@ -1207,7 +1209,9 @@ class ContextCompiledEvent(EventBase):
                 self.prepared_provider_input_candidate_fingerprint,
             )
         ):
-            raise ValueError("non-compiled context cannot carry provider manifest joins")
+            raise ValueError(
+                "non-compiled context cannot carry provider manifest joins"
+            )
         if self.input_audit is not None:
             audit = self.input_audit
             if (
@@ -1335,8 +1339,8 @@ class ProviderInputAppendCommittedEvent(EventBase):
     type: Literal[EventType.PROVIDER_INPUT_APPEND_COMMITTED] = (
         EventType.PROVIDER_INPUT_APPEND_COMMITTED
     )
-    schema_version: Literal["provider_input_append_committed_event.v7"] = (
-        "provider_input_append_committed_event.v7"
+    schema_version: Literal["provider_input_append_committed_event.v8"] = (
+        "provider_input_append_committed_event.v8"
     )
     append_kind: Literal["compiled_manifest", "one_shot"]
     generation_id: str = Field(min_length=1)
@@ -1347,18 +1351,12 @@ class ProviderInputAppendCommittedEvent(EventBase):
     consumed_preparation_id: str = Field(min_length=1)
     consumed_preparation_ownership_fingerprint: str = Field(min_length=1)
     consumed_pending_continuation_fingerprint: str | None
-    continuation_materialization_proof: (
-        ProviderInputContinuationMaterializationProofFact | None
-    )
-    manifest_projection_reference: (
-        ContextInputManifestProjectionReferenceFact | None
-    )
+    continuation_consumption_proof: ProviderInputContinuationConsumptionProofFact | None
+    manifest_projection_reference: ContextInputManifestProjectionReferenceFact | None
     causal_validation: ProviderInputCausalValidationResult | None
     frame_placement: ProviderInvocationContextFramePlacementFact | None
     transcript_delta_proof: ProviderTranscriptDeltaCommitProofFact | None
-    runtime_observation_units: tuple[
-        PreparedRuntimeObservationProviderUnitFact, ...
-    ]
+    runtime_observation_units: tuple[PreparedRuntimeObservationProviderUnitFact, ...]
     runtime_observation_semantic_noop_count: int = Field(ge=0)
     source_dispositions: tuple[ContextSourceDispositionFact, ...]
     prepared_provider_input_candidate_fingerprint: str | None
@@ -1393,8 +1391,10 @@ class ProviderInputAppendCommittedEvent(EventBase):
             for item in self.source_dispositions
         )
         if disposition_keys != tuple(sorted(set(disposition_keys))):
-            raise ValueError("provider append source dispositions are not ordered/unique")
-        proof = self.continuation_materialization_proof
+            raise ValueError(
+                "provider append source dispositions are not ordered/unique"
+            )
+        proof = self.continuation_consumption_proof
         if (self.consumed_pending_continuation_fingerprint is None) != (proof is None):
             raise ValueError("provider append continuation proof matrix mismatch")
         if proof is not None:
@@ -1409,16 +1409,42 @@ class ProviderInputAppendCommittedEvent(EventBase):
             predecessor_unit_count = state.unit_count - len(append_semantics)
             if predecessor_unit_count < 0:
                 raise ValueError("provider append predecessor unit count is invalid")
-            offsets = tuple(
-                ordinal - predecessor_unit_count
-                for ordinal in proof.appended_unit_ordinals
-            )
-            if any(offset < 0 or offset >= len(append_semantics) for offset in offsets):
-                raise ValueError("provider continuation proof ordinal exceeds append")
-            if tuple(append_semantics[offset] for offset in offsets) != (
-                proof.ordered_appended_unit_semantic_fingerprints
-            ):
-                raise ValueError("provider continuation proof semantic range drifted")
+            if isinstance(proof, ProviderInputContinuationMaterializationProofFact):
+                offsets = tuple(
+                    ordinal - predecessor_unit_count
+                    for ordinal in proof.appended_unit_ordinals
+                )
+                if any(
+                    offset < 0 or offset >= len(append_semantics) for offset in offsets
+                ):
+                    raise ValueError(
+                        "provider continuation proof ordinal exceeds append"
+                    )
+                if tuple(append_semantics[offset] for offset in offsets) != (
+                    proof.ordered_appended_unit_semantic_fingerprints
+                ):
+                    raise ValueError(
+                        "provider continuation proof semantic range drifted"
+                    )
+            elif isinstance(proof, ProviderInputContinuationRewriteCoverageProofFact):
+                offset = proof.replacement_summary_unit_ordinal - predecessor_unit_count
+                if (
+                    self.expected_revision != 0
+                    or self.causal_validation is None
+                    or proof.ordered_projection_identity_fingerprint
+                    != self.causal_validation.projection_identity_fingerprint
+                    or offset < 0
+                    or offset >= len(append_semantics)
+                    or append_semantics[offset]
+                    != proof.replacement_summary_unit_semantic_fingerprint
+                    or append_semantics.count(
+                        proof.replacement_summary_unit_semantic_fingerprint
+                    )
+                    != 1
+                ):
+                    raise ValueError("provider continuation rewrite proof drifted")
+            else:  # pragma: no cover - discriminated union is closed
+                raise ValueError("unknown provider continuation proof kind")
         remaining_semantics = list(
             batch.append_semantic.ordered_unit_semantic_fingerprints
         )
@@ -1582,7 +1608,9 @@ class ProviderInputGenerationRolloverResolvedEvent(EventBase):
                 or parent
                 != authority.rewrite_authority_reference.compaction_completed_event_reference
             ):
-                raise ValueError("provider rollover observation rewrite lacks authority")
+                raise ValueError(
+                    "provider rollover observation rewrite lacks authority"
+                )
         return self
 
 
@@ -2661,7 +2689,9 @@ class ProjectionReadyEvent(ProjectionEventBase):
             self.recalled_memory_entries
         )
         if self.summary != expected_summary:
-            raise ValueError("recalled memory summary is not derived from typed entries")
+            raise ValueError(
+                "recalled memory summary is not derived from typed entries"
+            )
         return self
 
 

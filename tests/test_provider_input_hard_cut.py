@@ -47,6 +47,9 @@ from pulsara_agent.runtime.provider_input.materialization import (
     hydrate_carrier,
     validate_dispatch_context_against_plan,
 )
+from pulsara_agent.runtime.provider_input.observation_rewrite import (
+    validate_runtime_observation_source_head_transition,
+)
 from pulsara_agent.runtime.provider_input.causal import (
     build_default_resolved_causal_physical_policy,
 )
@@ -549,9 +552,12 @@ def test_system_prompt_retains_per_source_fragment_ownership(
         "runtime:environment",
     )
     assert len({item.owner_semantic_fingerprint for item in fragments}) == 3
-    assert compose_provider_root_policy(
-        "\n\n".join(item.rendered_text for item in fragments)
-    ) == final.llm_context.system_prompt
+    assert (
+        compose_provider_root_policy(
+            "\n\n".join(item.rendered_text for item in fragments)
+        )
+        == final.llm_context.system_prompt
+    )
 
 
 def test_compiler_omission_is_final_provider_payload_truth(
@@ -663,10 +669,13 @@ def test_provider_units_preserve_exact_compiler_source_authority(
         candidate = fragment.candidate
         unit = by_owner.get(fragment.owner_semantic_fingerprint)
         if unit is None:
-            assert context_source_transition_kind(
-                candidate.source_id,
-                candidate.attribution.semantic.payload,
-            ) == "explicit_empty"
+            assert (
+                context_source_transition_kind(
+                    candidate.source_id,
+                    candidate.attribution.semantic.payload,
+                )
+                == "explicit_empty"
+            )
             continue
         assert (
             unit.attribution.source_event_refs
@@ -792,9 +801,7 @@ def test_provider_vector_append_path_copies_at_most_five_leaves() -> None:
 
 def test_provider_vector_accepts_512_units_and_rejects_513() -> None:
     initial = prepare_provider_input_vector((_message_unit(0),))
-    maximum = tuple(
-        _message_unit(index) for index in range(1, APPEND_MAX_UNITS + 1)
-    )
+    maximum = tuple(_message_unit(index) for index in range(1, APPEND_MAX_UNITS + 1))
 
     appended = append_provider_input_vector(initial.state, maximum)
 
@@ -806,7 +813,9 @@ def test_provider_vector_accepts_512_units_and_rejects_513() -> None:
         )
 
 
-def test_provider_append_canonical_byte_bound_accepts_limit_and_rejects_overflow() -> None:
+def test_provider_append_canonical_byte_bound_accepts_limit_and_rejects_overflow() -> (
+    None
+):
     policy = build_default_resolved_causal_physical_policy()
     _validate_append_artifact_physical_bound(
         canonical_text="x" * policy.max_append_candidate_canonical_bytes,
@@ -820,7 +829,9 @@ def test_provider_append_canonical_byte_bound_accepts_limit_and_rejects_overflow
         )
 
 
-def test_tool_loop_projection_is_causal_and_strict_prefix(tmp_path, monkeypatch) -> None:
+def test_tool_loop_projection_is_causal_and_strict_prefix(
+    tmp_path, monkeypatch
+) -> None:
     import pulsara_agent.runtime.agent as agent_module
 
     compiled = []
@@ -879,16 +890,19 @@ def test_tool_loop_projection_is_causal_and_strict_prefix(tmp_path, monkeypatch)
         item.wire_semantic.provider_message.role for item in after.ordered_units
     ) == ("user", "assistant", "tool_result")
     tool_result = after.ordered_units[-1]
-    assert tool_result.causal_placement.visible_causal_predecessor_node_identity_fingerprints == (
-        after.ordered_units[-2]
-        .causal_placement.node_identity.node_identity_fingerprint,
+    assert (
+        tool_result.causal_placement.visible_causal_predecessor_node_identity_fingerprints
+        == (
+            after.ordered_units[
+                -2
+            ].causal_placement.node_identity.node_identity_fingerprint,
+        )
     )
     first_frame = plans[0].prepared_plan.frame_placement
     assert first_frame is not None
     assert first_frame.insertion_kind == "before_new_current_user"
     assert first_frame.following_transcript_node_identity_fingerprint == (
-        before.ordered_units[0]
-        .causal_placement.node_identity.node_identity_fingerprint
+        before.ordered_units[0].causal_placement.node_identity.node_identity_fingerprint
     )
 
 
@@ -959,9 +973,9 @@ def test_accepted_continuation_commits_exact_materialization_proof(tmp_path) -> 
         event
         for event in runtime_session.event_log.iter()
         if isinstance(event, ProviderInputAppendCommittedEvent)
-        and event.continuation_materialization_proof is not None
+        and event.continuation_consumption_proof is not None
     )
-    proof = append.continuation_materialization_proof
+    proof = append.continuation_consumption_proof
     assert proof is not None
     assert (
         proof.pending_continuation_fingerprint
@@ -1016,15 +1030,16 @@ def test_same_memory_snapshot_is_a_durable_semantic_noop(tmp_path) -> None:
     )
     assert noop_disposition.disposition == "retain"
     assert noop_disposition.reason == "semantic_noop"
-    assert sum(
-        text.count("SEMANTICALLY_STABLE_RECALLED_MEMORY")
-        for message in transport.contexts[-1].messages
-        for text in message.content
-    ) == 1
-    snapshot = (
-        runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
-            call_lane="main_agent"
+    assert (
+        sum(
+            text.count("SEMANTICALLY_STABLE_RECALLED_MEMORY")
+            for message in transport.contexts[-1].messages
+            for text in message.content
         )
+        == 1
+    )
+    snapshot = runtime_session.provider_input_generation_store.latest_open_session_continuity_snapshot(
+        call_lane="main_agent"
     )
     assert snapshot is not None and snapshot.core_state is not None
     memory_head = next(
@@ -1032,9 +1047,7 @@ def test_same_memory_snapshot_is_a_durable_semantic_noop(tmp_path) -> None:
         for item in snapshot.core_state.committed_source_heads
         if item.effective_snapshot.source_id is ContextSourceId.MEMORY_PROJECTION
     )
-    core_payload = json.dumps(
-        memory_head.model_dump(mode="json"), sort_keys=True
-    )
+    core_payload = json.dumps(memory_head.model_dump(mode="json"), sort_keys=True)
     for forbidden in (
         "source_event_references",
         "source_artifact_references",
@@ -1055,6 +1068,97 @@ def test_same_memory_snapshot_is_a_durable_semantic_noop(tmp_path) -> None:
         placement.hydration_attribution.semantic_materialization.canonical_wire_utf8_sha256
         == memory_head.effective_snapshot.unit_document_identity.canonical_wire_utf8_sha256
     )
+    observation = memory_observations[0]
+    prior_placement = observation.causal_placement
+    rebound_placement = build_frozen_fact(
+        type(prior_placement),
+        schema_version=prior_placement.schema_version,
+        causal_scope_kind=prior_placement.causal_scope_kind,
+        causal_scope_semantic_id=prior_placement.causal_scope_semantic_id,
+        placement_phase=prior_placement.placement_phase,
+        stable_predecessor_transcript_node=(
+            prior_placement.stable_predecessor_transcript_node
+        ),
+        source_occurrence_semantic_fingerprint=(
+            prior_placement.source_occurrence_semantic_fingerprint
+        ),
+        intra_boundary_order=prior_placement.intra_boundary_order + 1,
+        placement_contract_fingerprint=(prior_placement.placement_contract_fingerprint),
+    )
+    rebound_unit_causal = context_fingerprint(
+        "runtime-observation-provider-unit-causal:v1",
+        (
+            observation.wire_semantic.wire_semantic_fingerprint,
+            rebound_placement.placement_semantic_fingerprint,
+            observation.provider_fragment_semantic_fingerprint,
+            observation.provider_unit_semantic_fingerprint,
+        ),
+    )
+    rebound_observation = build_frozen_fact(
+        type(observation),
+        schema_version=observation.schema_version,
+        wire_semantic=observation.wire_semantic,
+        causal_placement=rebound_placement,
+        source_attribution=observation.source_attribution,
+        source_id=observation.source_id,
+        source_candidate_key=observation.source_candidate_key,
+        source_payload_semantic_fingerprint=(
+            observation.source_payload_semantic_fingerprint
+        ),
+        owner_semantic_fingerprint=observation.owner_semantic_fingerprint,
+        provider_fragment_semantic_fingerprint=(
+            observation.provider_fragment_semantic_fingerprint
+        ),
+        provider_unit_semantic_fingerprint=(
+            observation.provider_unit_semantic_fingerprint
+        ),
+        unit_causal_semantic_fingerprint=rebound_unit_causal,
+    )
+    prior_snapshot = memory_head.effective_snapshot
+    rebound_snapshot = build_frozen_fact(
+        type(prior_snapshot),
+        schema_version=prior_snapshot.schema_version,
+        source_id=prior_snapshot.source_id,
+        source_instance_id=prior_snapshot.source_instance_id,
+        lifecycle_class=prior_snapshot.lifecycle_class,
+        committed_revision=prior_snapshot.committed_revision,
+        observation_semantic_id=prior_snapshot.observation_semantic_id,
+        predecessor_observation_semantic_id=(
+            prior_snapshot.predecessor_observation_semantic_id
+        ),
+        snapshot_semantic_fingerprint=prior_snapshot.snapshot_semantic_fingerprint,
+        canonical_wire_semantic_fingerprint=(
+            prior_snapshot.canonical_wire_semantic_fingerprint
+        ),
+        causal_placement_semantic_fingerprint=(
+            rebound_placement.placement_semantic_fingerprint
+        ),
+        unit_causal_semantic_fingerprint=rebound_unit_causal,
+        effective_status=prior_snapshot.effective_status,
+        unit_document_identity=prior_snapshot.unit_document_identity,
+    )
+    rebound_head = build_frozen_fact(
+        type(memory_head),
+        schema_version=memory_head.schema_version,
+        effective_snapshot=rebound_snapshot,
+    )
+    validate_runtime_observation_source_head_transition(
+        predecessor_heads=(memory_head,),
+        source_dispositions=(noop_disposition,),
+        appended_observations=(rebound_observation,),
+        resulting_heads=(rebound_head,),
+        allow_rewrite_drop=True,
+        allow_placement_rebind=True,
+    )
+    with pytest.raises(ValueError, match="retain disposition changed its source head"):
+        validate_runtime_observation_source_head_transition(
+            predecessor_heads=(memory_head,),
+            source_dispositions=(noop_disposition,),
+            appended_observations=(rebound_observation,),
+            resulting_heads=(rebound_head,),
+            allow_rewrite_drop=True,
+            allow_placement_rebind=False,
+        )
 
 
 def test_memory_nonempty_to_empty_commits_explicit_replacement(tmp_path) -> None:
@@ -1071,10 +1175,14 @@ def test_memory_nonempty_to_empty_commits_explicit_replacement(tmp_path) -> None
     second = asyncio.run(run_agent_task(agent, "clear recalled memory"))
 
     assert first.status is second.status is LoopStatus.FINISHED
-    observations = tuple(
-        observation
+    appends = tuple(
+        event
         for event in runtime_session.event_log.iter()
         if isinstance(event, ProviderInputAppendCommittedEvent)
+    )
+    observations = tuple(
+        observation
+        for event in appends
         for observation in event.runtime_observation_units
         if observation.source_id is ContextSourceId.MEMORY_PROJECTION
     )
@@ -1092,6 +1200,23 @@ def test_memory_nonempty_to_empty_commits_explicit_replacement(tmp_path) -> None
     assert wire_bodies[-1]["payload"]["predecessor_observation_semantic_id"] == (
         observations[0].wire_semantic.observation_semantic_id
     )
+    validate_runtime_observation_source_head_transition(
+        predecessor_heads=appends[0].resulting_core_state.committed_source_heads,
+        source_dispositions=appends[1].source_dispositions,
+        appended_observations=observations,
+        resulting_heads=appends[1].resulting_core_state.committed_source_heads,
+        allow_rewrite_drop=True,
+    )
+    with pytest.raises(
+        ValueError, match="carried runtime observation lacks retain disposition"
+    ):
+        validate_runtime_observation_source_head_transition(
+            predecessor_heads=appends[0].resulting_core_state.committed_source_heads,
+            source_dispositions=appends[1].source_dispositions,
+            appended_observations=observations,
+            resulting_heads=appends[1].resulting_core_state.committed_source_heads,
+            allow_rewrite_drop=False,
+        )
 
 
 def test_memory_failure_explicitly_retains_the_committed_source_head(tmp_path) -> None:
@@ -1126,11 +1251,14 @@ def test_memory_failure_explicitly_retains_the_committed_source_head(tmp_path) -
         if isinstance(event, ProviderInputAppendCommittedEvent)
     )[-1]
     assert disposition in append.source_dispositions
-    assert sum(
-        text.count("MEMORY_THAT_IS_EXPLICITLY_CLEARED")
-        for message in transport.contexts[-1].messages
-        for text in message.content
-    ) == 1
+    assert (
+        sum(
+            text.count("MEMORY_THAT_IS_EXPLICITLY_CLEARED")
+            for message in transport.contexts[-1].messages
+            for text in message.content
+        )
+        == 1
+    )
 
 
 def test_budget_omitted_changed_memory_uses_typed_rollover(tmp_path) -> None:
@@ -1299,9 +1427,7 @@ def test_runtime_session_close_durably_closes_open_provider_generation(
     )
     result = asyncio.run(run_agent_task(agent, "close generation"))
     assert result.status is LoopStatus.FINISHED
-    assert (
-        runtime_session.provider_input_generation_store.open_session_continuity_snapshots()
-    )
+    assert runtime_session.provider_input_generation_store.open_session_continuity_snapshots()
 
     runtime_session.close()
 

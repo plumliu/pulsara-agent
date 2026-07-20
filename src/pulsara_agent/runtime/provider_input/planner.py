@@ -56,6 +56,8 @@ from pulsara_agent.primitives.provider_input import (
     ProviderInputClockHeadFact,
     EffectiveProviderSourceSemanticSnapshotFact,
     ProviderInputContinuationMaterializationProofFact,
+    ProviderInputContinuationConsumptionProofFact,
+    ProviderInputContinuationRewriteCoverageProofFact,
     ProviderInputGenerationCompatibilityFact,
     ProviderInputGenerationFact,
     ProviderInputGenerationRootReferenceFact,
@@ -263,9 +265,7 @@ def build_session_generation_close_event(
     core: CommittedProviderInputGenerationCoreStateFact,
     event_context: EventContext,
 ) -> ProviderInputGenerationClosedEvent:
-    if not isinstance(
-        core.generation.scope, SessionProviderInputContinuityScopeFact
-    ):
+    if not isinstance(core.generation.scope, SessionProviderInputContinuityScopeFact):
         raise ValueError("one-shot generation cannot use session close")
     if core.status != "open":
         raise ValueError("session close requires an open provider generation")
@@ -706,7 +706,7 @@ def plan_one_shot_provider_input(
         consumed_preparation_id=preparation_id,
         consumed_preparation_ownership_fingerprint=ownership.ownership_fingerprint,
         consumed_pending_continuation_fingerprint=None,
-        continuation_materialization_proof=None,
+        continuation_consumption_proof=None,
         manifest_projection_reference=None,
         causal_validation=None,
         frame_placement=None,
@@ -886,12 +886,28 @@ def plan_provider_input_append(
     ordered_projection = compiled_context.prepared_ordered_transcript_projection
     if ordered_projection is None:
         raise ValueError("provider append lacks ordered transcript projection")
-    rewrite_dispositions = tuple(
-        item
-        for item in source_dispositions
-        if item.disposition == "rewrite_required"
+    projection_predecessor = rollover_predecessor or predecessor
+    transcript_rewrite_required = (
+        projection_predecessor is not None
+        and not _projection_extends_frontier(
+            projection=ordered_projection.projection,
+            frontier=projection_predecessor.transcript_frontier,
+        )
     )
-    if rewrite_dispositions:
+    if transcript_rewrite_required:
+        expected_rollover_intent = _long_horizon_rollover_intent(
+            predecessor=projection_predecessor,
+            scope_fingerprint=scope.scope_fingerprint,
+            ordered_projection=ordered_projection,
+        )
+        if rollover_from is None:
+            raise ProviderInputRolloverPlanningRequired(expected_rollover_intent)
+        if rollover_intent != expected_rollover_intent:
+            raise ValueError("Long-Horizon rollover intent drifted during retry")
+    rewrite_dispositions = tuple(
+        item for item in source_dispositions if item.disposition == "rewrite_required"
+    )
+    if rewrite_dispositions and not transcript_rewrite_required:
         source_predecessor = rollover_predecessor or predecessor
         if source_predecessor is None:
             raise ValueError("source-disposition rewrite lacks one open predecessor")
@@ -940,18 +956,17 @@ def plan_provider_input_append(
         if predecessor is not None
         else None
     )
-
-    if predecessor is not None and not _projection_extends_frontier(
-        projection=ordered_projection.projection,
-        frontier=predecessor.transcript_frontier,
-    ):
-        raise ProviderInputRolloverPlanningRequired(
-            _long_horizon_rollover_intent(
-                predecessor=predecessor,
-                scope_fingerprint=scope.scope_fingerprint,
-                ordered_projection=ordered_projection,
-            )
+    continuation_rewrite_authority = (
+        rollover_intent.authority
+        if rollover_intent is not None
+        and rollover_intent.reason
+        is ProviderInputRolloverReason.EXPLICIT_LONG_HORIZON_REWRITE
+        and isinstance(
+            rollover_intent.authority,
+            ProviderLongHorizonRewriteRolloverAuthorityFact,
         )
+        else None
+    )
 
     if initial:
         root_units = _root_units(
@@ -1000,9 +1015,7 @@ def plan_provider_input_append(
         generation_id = _generation_id(
             scope.scope_fingerprint,
             compatibility,
-            identity_predecessor_generation_id=(
-                identity_predecessor_generation_id
-            ),
+            identity_predecessor_generation_id=(identity_predecessor_generation_id),
             root_semantic_fingerprint=root_semantic.root_semantic_fingerprint,
         )
         generation = build_frozen_fact(
@@ -1118,6 +1131,7 @@ def plan_provider_input_append(
         transcript_owner_fingerprints,
         continuation_transcript_unit_index,
         continuation_projection_join,
+        continuation_rewrite_summary_projection_index,
     ) = _new_transcript_units(
         compiled_context=compiled_context,
         horizons=horizons,
@@ -1126,6 +1140,7 @@ def plan_provider_input_append(
         required_replay_bindings=current_replay_bindings,
         pending=pending_continuation,
         pending_materialization=pending_continuation_materialization,
+        continuation_rewrite_authority=continuation_rewrite_authority,
     )
     runtime_observation_rewrite_plan = None
     if (
@@ -1287,9 +1302,7 @@ def plan_provider_input_append(
         ),
     )
     runtime_observation_rewrite = None
-    resulting_effective_head_artifacts: tuple[
-        PreparedProviderInputArtifact, ...
-    ] = ()
+    resulting_effective_head_artifacts: tuple[PreparedProviderInputArtifact, ...] = ()
     append_artifact = prepared_json_artifact(
         "provider-input-append",
         {
@@ -1367,9 +1380,7 @@ def plan_provider_input_append(
         delta_last_projection_index=delta_last if delta_units else None,
         ordered_delta_wire_accumulator=_ordered_fingerprint_accumulator(
             "provider-ordered-transcript-wire:v2",
-            tuple(
-                item.wire_semantic.wire_semantic_fingerprint for item in delta_units
-            ),
+            tuple(item.wire_semantic.wire_semantic_fingerprint for item in delta_units),
         ),
         ordered_delta_causal_accumulator=_ordered_fingerprint_accumulator(
             "provider-ordered-transcript-causal:v2",
@@ -1437,8 +1448,9 @@ def plan_provider_input_append(
         accepted_but_not_appended_continuation=None,
         reconciliation_reason=None,
     )
-    continuation_proof = _continuation_materialization_proof(
+    continuation_proof = _continuation_consumption_proof(
         pending=pending_continuation,
+        pending_materialization=pending_continuation_materialization,
         predecessor_frontier=(
             rollover_predecessor.transcript_frontier
             if rollover_predecessor is not None
@@ -1458,6 +1470,18 @@ def plan_provider_input_append(
             if continuation_transcript_unit_index is not None
             else None
         ),
+        continuation_rewrite_summary_append_unit_index=(
+            next(
+                index
+                for index, unit in enumerate(append_units)
+                if unit
+                is transcript_units[continuation_rewrite_summary_projection_index]
+            )
+            if continuation_rewrite_summary_projection_index is not None
+            else None
+        ),
+        continuation_rewrite_authority=continuation_rewrite_authority,
+        ordered_projection=ordered_projection,
     )
     carrier = (
         hydrate_carrier(all_units)
@@ -1580,8 +1604,7 @@ def plan_provider_input_append(
     if manifest_projection_reference is None:
         return planning_bundle
     if (
-        manifest_projection_reference.projection_identity
-        != ordered_projection.identity
+        manifest_projection_reference.projection_identity != ordered_projection.identity
         or manifest_projection_reference.context_id != compiled_context.context_id
     ):
         raise ValueError("provider plan manifest projection reference drifted")
@@ -1829,7 +1852,7 @@ def plan_provider_input_append(
             if pending_continuation is not None
             else None
         ),
-        continuation_materialization_proof=continuation_proof,
+        continuation_consumption_proof=continuation_proof,
         manifest_projection_reference=manifest_projection_reference,
         causal_validation=causal_validation,
         frame_placement=frame_placement,
@@ -2065,7 +2088,9 @@ def _compatibility_rollover_intent(
             ),
         )
     else:
-        raise ValueError("provider compatibility changed without visible component drift")
+        raise ValueError(
+            "provider compatibility changed without visible component drift"
+        )
     return build_frozen_fact(
         ProviderInputRolloverIntentFact,
         schema_version="provider_input_rollover_intent.v1",
@@ -2198,25 +2223,98 @@ class ProviderInputResidentRestoreRequired(RuntimeError):
         super().__init__(f"provider input generation {generation_id} requires restore")
 
 
-def _continuation_materialization_proof(
+def _continuation_consumption_proof(
     *,
     pending: ProviderInputPendingContinuationFact | None,
+    pending_materialization: PreparedProviderInputContinuationMaterialization | None,
     predecessor_frontier: ProviderTranscriptFrontierFact | None,
     resulting_frontier: ProviderTranscriptFrontierFact,
     previous_unit_count: int,
     append_units,
     continuation_append_unit_index: int | None,
-) -> ProviderInputContinuationMaterializationProofFact | None:
+    continuation_rewrite_summary_append_unit_index: int | None,
+    continuation_rewrite_authority: (
+        ProviderLongHorizonRewriteRolloverAuthorityFact | None
+    ),
+    ordered_projection,
+) -> ProviderInputContinuationConsumptionProofFact | None:
     if pending is None:
-        if continuation_append_unit_index is not None:
+        if (
+            continuation_append_unit_index is not None
+            or continuation_rewrite_summary_append_unit_index is not None
+        ):
             raise ValueError("continuation unit exists without pending authority")
         return None
     if predecessor_frontier is None:
         raise ValueError("pending continuation lacks predecessor transcript frontier")
-    if continuation_append_unit_index is None:
+    if (continuation_append_unit_index is None) == (
+        continuation_rewrite_summary_append_unit_index is None
+    ):
         raise ValueError(
-            "accepted continuation has no exact appended terminal transcript units"
+            "accepted continuation must have one exact consumption proof branch"
         )
+    if continuation_rewrite_summary_append_unit_index is not None:
+        if pending_materialization is None or continuation_rewrite_authority is None:
+            raise ValueError("continuation rewrite lacks materialization/authority")
+        index = continuation_rewrite_summary_append_unit_index
+        selected = append_units[index]
+        projection_summaries = tuple(
+            item
+            for item in ordered_projection.projection.ordered_units
+            if isinstance(
+                item.source_attribution,
+                CompactionReplacementSummarySourceAttributionFact,
+            )
+            and item.source_attribution.rewrite_authority_reference
+            == continuation_rewrite_authority.rewrite_authority_reference
+        )
+        if len(projection_summaries) != 1:
+            raise ValueError("continuation rewrite lacks one replacement summary")
+        source_attribution = projection_summaries[0].source_attribution
+        rewritten_leaf = pending_materialization.matched_stable_entry_reference
+        terminal_refs = tuple(
+            ref
+            for ref in rewritten_leaf.source_event_references
+            if ref.event_type == "MODEL_CALL_TERMINAL_PROJECTION_COMMITTED"
+        )
+        if len(terminal_refs) != 1:
+            raise ValueError("continuation rewrite leaf lacks one terminal event")
+        return build_frozen_fact(
+            ProviderInputContinuationRewriteCoverageProofFact,
+            schema_version=("provider_input_continuation_rewrite_coverage_proof.v1"),
+            proof_kind="long_horizon_rewrite_coverage",
+            pending_continuation_fingerprint=pending.continuation_fingerprint,
+            terminal_projection_reference=pending.terminal_projection_reference,
+            terminal_projection_committed_event_reference=terminal_refs[0],
+            accepted_disposition_event_reference=(
+                pending.accepted_disposition_event_ref
+            ),
+            predecessor_transcript_frontier_fingerprint=(
+                predecessor_frontier.provider_semantic_frontier_fingerprint
+            ),
+            resulting_transcript_frontier_fingerprint=(
+                resulting_frontier.provider_semantic_frontier_fingerprint
+            ),
+            rewritten_stable_leaf_reference=rewritten_leaf,
+            rewrite_authority_reference=(
+                continuation_rewrite_authority.rewrite_authority_reference
+            ),
+            replacement_summary_source_attribution=source_attribution,
+            ordered_projection_identity_fingerprint=(
+                ordered_projection.identity.identity_fingerprint
+            ),
+            replacement_summary_unit_ordinal=previous_unit_count + index,
+            replacement_summary_unit_semantic_fingerprint=(
+                selected.attribution.semantic.semantic_fingerprint
+            ),
+            replacement_summary_unit_materialization_fingerprint=(
+                selected.materialization_fingerprint
+            ),
+            replacement_summary_unit_owner_semantic_fingerprint=(
+                selected.attribution.owner_semantic_fingerprint
+            ),
+        )
+    assert continuation_append_unit_index is not None
     selected_indices = (continuation_append_unit_index,)
     selected = tuple(append_units[index] for index in selected_indices)
     ordinals = tuple(previous_unit_count + index for index in selected_indices)
@@ -2232,6 +2330,7 @@ def _continuation_materialization_proof(
     return build_frozen_fact(
         ProviderInputContinuationMaterializationProofFact,
         schema_version="provider_input_continuation_materialization_proof.v1",
+        proof_kind="exact_materialization",
         pending_continuation_fingerprint=pending.continuation_fingerprint,
         terminal_projection_reference=pending.terminal_projection_reference,
         predecessor_transcript_frontier_fingerprint=(
@@ -2538,9 +2637,7 @@ def _source_disposition_rollover_intent(
     )
     heads = []
     for disposition in ordered:
-        head = head_by_key.get(
-            (disposition.source_id, disposition.source_instance_id)
-        )
+        head = head_by_key.get((disposition.source_id, disposition.source_instance_id))
         if head is None:
             raise ValueError("source-disposition rewrite lacks a predecessor head")
         heads.append(head.semantic_head_fingerprint)
@@ -2614,14 +2711,10 @@ def _root_units(
         freeze_message_unit(
             LLMMessage.system(ROOT_USER_CARRIER_INTERPRETATION),
             unit_kind="context_source",
-            owner_semantic_fingerprint=(
-                ROOT_USER_CARRIER_INTERPRETATION_FINGERPRINT
-            ),
+            owner_semantic_fingerprint=(ROOT_USER_CARRIER_INTERPRETATION_FINGERPRINT),
             authority_horizons=(),
             estimated_tokens=0,
-            required_replay_bindings=(
-                _provider_lowering_replay_binding(),
-            ),
+            required_replay_bindings=(_provider_lowering_replay_binding(),),
         )
     )
     materialized_tools = prepared_context_input.invocation.materialized_tool_specs
@@ -2712,6 +2805,9 @@ def _new_transcript_units(
     required_replay_bindings: tuple[ProviderInputReplayBindingIdentityFact, ...],
     pending: ProviderInputPendingContinuationFact | None,
     pending_materialization: PreparedProviderInputContinuationMaterialization | None,
+    continuation_rewrite_authority: (
+        ProviderLongHorizonRewriteRolloverAuthorityFact | None
+    ),
 ):
     prepared = compiled_context.prepared_ordered_transcript_projection
     if prepared is None:
@@ -2728,7 +2824,9 @@ def _new_transcript_units(
     )
     if not initial:
         if len(previous_transcript) > len(ordered_units):
-            raise ValueError("transcript frontier moved backwards without rewrite authority")
+            raise ValueError(
+                "transcript frontier moved backwards without rewrite authority"
+            )
         for index, prior in enumerate(previous_transcript):
             if (
                 prior.attribution.owner_semantic_fingerprint
@@ -2755,7 +2853,7 @@ def _new_transcript_units(
     if pending is None:
         if pending_materialization is not None:
             raise ValueError("continuation materialization lacks pending authority")
-        return new_units, owner_fingerprints, None, None
+        return new_units, owner_fingerprints, None, None, None
     if (
         pending_materialization is None
         or pending_materialization.pending_continuation_fingerprint
@@ -2780,6 +2878,65 @@ def _new_transcript_units(
         and ordered.wire_semantic.provider_message
         == freeze_provider_message_fragment(pending_materialization.provider_message)
     )
+    if not matching_projection_indices and continuation_rewrite_authority is not None:
+        rewritten_leaf = pending_materialization.matched_stable_entry_reference
+        summaries = tuple(
+            (index, item)
+            for index, item in enumerate(ordered_units)
+            if isinstance(
+                item.source_attribution,
+                CompactionReplacementSummarySourceAttributionFact,
+            )
+            and item.source_attribution.rewrite_authority_reference
+            == continuation_rewrite_authority.rewrite_authority_reference
+        )
+        source_refs = rewritten_leaf.source_event_references
+        terminal_refs = tuple(
+            ref
+            for ref in source_refs
+            if ref.event_type == "MODEL_CALL_TERMINAL_PROJECTION_COMMITTED"
+        )
+        authority = continuation_rewrite_authority.rewrite_authority_reference
+        checks = {
+            "summary_count": len(summaries),
+            "fact_match": rewritten_leaf.entry_fact_fingerprint
+            == pending_materialization.matched_stable_entry_fact_fingerprint,
+            "semantic_match": rewritten_leaf.entry_semantic_fingerprint
+            == pending_materialization.matched_stable_entry_semantic_fingerprint,
+            "ordinal": rewritten_leaf.ordinal,
+            "rewrite_range": (
+                authority.replaced_first_stable_ordinal,
+                authority.replaced_last_stable_ordinal,
+            ),
+            "disposition_present": pending.accepted_disposition_event_ref
+            in source_refs,
+            "terminal_count": len(terminal_refs),
+        }
+        if (
+            checks["summary_count"] != 1
+            or checks["fact_match"] is not True
+            or checks["semantic_match"] is not True
+            or not (
+                authority.replaced_first_stable_ordinal
+                <= rewritten_leaf.ordinal
+                <= authority.replaced_last_stable_ordinal
+            )
+            or checks["disposition_present"] is not True
+            or checks["terminal_count"] != 1
+        ):
+            raise ValueError(
+                f"accepted continuation lacks compaction rewrite coverage ({checks!r})"
+            )
+        summary_index = summaries[0][0]
+        if summary_index < start:
+            raise ValueError("continuation rewrite summary is already committed")
+        return (
+            new_units,
+            owner_fingerprints,
+            None,
+            None,
+            summary_index - start,
+        )
     if len(matching_projection_indices) != 1:
         raise ValueError(
             "accepted continuation does not match one exact ordered projection unit "
@@ -2804,11 +2961,9 @@ def _new_transcript_units(
         matched_unit_causal_semantic_fingerprint=(
             matched.unit_causal_semantic_fingerprint
         ),
-        continuation_join_contract_fingerprint=(
-            CONTINUATION_JOIN_CONTRACT_FINGERPRINT
-        ),
+        continuation_join_contract_fingerprint=(CONTINUATION_JOIN_CONTRACT_FINGERPRINT),
     )
-    return new_units, owner_fingerprints, continuation_index, join
+    return new_units, owner_fingerprints, continuation_index, join, None
 
 
 def _arrange_transcript_delta_and_frame(
@@ -2850,8 +3005,9 @@ def _arrange_transcript_delta_and_frame(
         insertion_kind = "before_new_current_user"
         absolute_index = delta_start + offset
         preceding = (
-            projection_units[absolute_index - 1]
-            .causal_placement.node_identity.node_identity_fingerprint
+            projection_units[
+                absolute_index - 1
+            ].causal_placement.node_identity.node_identity_fingerprint
             if absolute_index > 0
             else None
         )
@@ -2864,8 +3020,9 @@ def _arrange_transcript_delta_and_frame(
         append_units = (*transcript_units, *frame_units)
         insertion_kind = "after_new_transcript_tail"
         preceding = (
-            projection_units[-1]
-            .causal_placement.node_identity.node_identity_fingerprint
+            projection_units[
+                -1
+            ].causal_placement.node_identity.node_identity_fingerprint
             if projection_units
             else None
         )
@@ -2950,16 +3107,14 @@ def _retained_rollover_observations(
         for item in selected_candidates
     }
     dispositions = {
-        (item.source_id, item.source_instance_id): item
-        for item in source_dispositions
+        (item.source_id, item.source_instance_id): item for item in source_dispositions
     }
     effective_replacement_ids = {
         item.effective_snapshot.observation_semantic_id
         for item in predecessor.committed_source_heads
     }
     unit_by_semantic = {
-        item.attribution.semantic.semantic_fingerprint: item
-        for item in resident.units
+        item.attribution.semantic.semantic_fingerprint: item for item in resident.units
     }
     retained_units = []
     retained_facts = []
@@ -2973,7 +3128,10 @@ def _retained_rollover_observations(
                 not in effective_replacement_ids
             ):
                 continue
-            if observation.source_id is None or observation.source_candidate_key is None:
+            if (
+                observation.source_id is None
+                or observation.source_candidate_key is None
+            ):
                 raise ValueError("replacement observation lacks ContextSource identity")
             disposition = dispositions.get(
                 (
@@ -3042,11 +3200,11 @@ def _arrange_rollover_observations(
     if projection is None or len(projection.projection.ordered_units) != len(
         transcript_units
     ):
-        raise ValueError("rollover requires complete ordered transcript materialization")
+        raise ValueError(
+            "rollover requires complete ordered transcript materialization"
+        )
     retained_by_predecessor: dict[str | None, list[object]] = {}
-    for unit, observation in zip(
-        retained_units, retained_observations, strict=True
-    ):
+    for unit, observation in zip(retained_units, retained_observations, strict=True):
         predecessor = observation.causal_placement.stable_predecessor_transcript_node
         key = predecessor.node_identity_fingerprint if predecessor is not None else None
         retained_by_predecessor.setdefault(key, []).append(unit)
@@ -3157,12 +3315,10 @@ def _prepared_runtime_observation_units(
             causal_occurrence_semantic_fingerprint=occurrence,
         )
         lifecycle = context_source_lifecycle_entry(candidate.source_id)
-        protection_scope_kind, protection_scope_id = (
-            _context_source_protection_scope(
-                candidate,
-                runtime_session_id=runtime_session_id,
-                run_id=run_id,
-            )
+        protection_scope_kind, protection_scope_id = _context_source_protection_scope(
+            candidate,
+            runtime_session_id=runtime_session_id,
+            run_id=run_id,
         )
         scope_kind = (
             "model_invocation"
@@ -3196,9 +3352,7 @@ def _prepared_runtime_observation_units(
         attribution = build_frozen_fact(
             RuntimeObservationSourceAttributionFact,
             schema_version="runtime_observation_source_attribution.v3",
-            observation_semantic_fingerprint=(
-                wire_semantic.wire_semantic_fingerprint
-            ),
+            observation_semantic_fingerprint=(wire_semantic.wire_semantic_fingerprint),
             producer=runtime_observation_context_source_producer(
                 observation_kind=wire_semantic.observation_kind,
                 source_id=candidate.source_id,
@@ -3234,16 +3388,12 @@ def _prepared_runtime_observation_units(
                 causal_placement=placement,
                 source_attribution=attribution,
                 source_id=candidate.source_id,
-                source_candidate_key=(
-                    candidate.attribution.semantic.candidate_key
-                ),
+                source_candidate_key=(candidate.attribution.semantic.candidate_key),
                 source_payload_semantic_fingerprint=(
                     candidate.attribution.semantic.payload.semantic_fingerprint
                 ),
                 owner_semantic_fingerprint=candidate.semantic_fingerprint,
-                provider_fragment_semantic_fingerprint=(
-                    fragment.semantic_fingerprint
-                ),
+                provider_fragment_semantic_fingerprint=(fragment.semantic_fingerprint),
                 provider_unit_semantic_fingerprint=(
                     unit.attribution.semantic.semantic_fingerprint
                 ),
@@ -3390,7 +3540,10 @@ def _context_source_protection_scope(
 ) -> tuple[str, str]:
     lifecycle = context_source_lifecycle_entry(candidate.source_id)
     payload = candidate.attribution.semantic.payload
-    if candidate.source_id in {ContextSourceId.PLAN_STATUS, ContextSourceId.PLAN_GUIDANCE}:
+    if candidate.source_id in {
+        ContextSourceId.PLAN_STATUS,
+        ContextSourceId.PLAN_GUIDANCE,
+    }:
         workflow_id = getattr(payload, "workflow_id", None)
         if not workflow_id:
             raise ValueError("plan observation lacks workflow protection identity")
@@ -3422,7 +3575,11 @@ def _context_source_protection_scope(
             "runtime_session",
             context_fingerprint(
                 "runtime-observation-session-source-scope:v1",
-                (runtime_session_id, candidate.source_id.value, candidate.source_instance_id),
+                (
+                    runtime_session_id,
+                    candidate.source_id.value,
+                    candidate.source_instance_id,
+                ),
             ),
         )
     return (
@@ -3471,9 +3628,7 @@ def _changed_source_units(
         ): item
         for item in (predecessor.committed_source_heads if predecessor else ())
     }
-    prior_occurrences = {
-        item.owner_semantic_fingerprint for item in prior_observations
-    }
+    prior_occurrences = {item.owner_semantic_fingerprint for item in prior_observations}
     changed_fragments = []
     semantic_noop_count = 0
     for fragment in compiled_context.provider_source_fragments:
@@ -3617,9 +3772,7 @@ def _validate_generation_root_sources(
     resident,
 ) -> None:
     if resident is None:
-        raise ProviderInputResidentRestoreRequired(
-            predecessor.generation.generation_id
-        )
+        raise ProviderInputResidentRestoreRequired(predecessor.generation.generation_id)
     root_count = predecessor.root_reference.root_semantic.root_unit_count
     root_owner_semantics = {
         item.attribution.owner_semantic_fingerprint
@@ -3697,9 +3850,7 @@ def _source_heads(
     source_dispositions: tuple[ContextSourceDispositionFact, ...],
     predecessor: CommittedProviderInputGenerationCoreStateFact | None,
     available_source_units,
-    runtime_observation_units: tuple[
-        PreparedRuntimeObservationProviderUnitFact, ...
-    ],
+    runtime_observation_units: tuple[PreparedRuntimeObservationProviderUnitFact, ...],
     rollover: bool,
 ):
     historical = {
@@ -3712,8 +3863,7 @@ def _source_heads(
     previous = dict(historical)
     selected = {item.semantic_fingerprint: item for item in selected_candidates}
     dispositions = {
-        (item.source_id, item.source_instance_id): item
-        for item in source_dispositions
+        (item.source_id, item.source_instance_id): item for item in source_dispositions
     }
     for key, head in historical.items():
         disposition = dispositions.get(key)
@@ -3733,7 +3883,23 @@ def _source_heads(
         item.attribution.semantic.semantic_fingerprint: item
         for item in available_source_units
     }
-    for observation in runtime_observation_units:
+    latest_replacement_index_by_key: dict[tuple[ContextSourceId, str], int] = {}
+    for index, observation in enumerate(runtime_observation_units):
+        if observation.source_id in {None, ContextSourceId.RUNTIME_CLOCK}:
+            continue
+        if (
+            runtime_observation_kind_contract(
+                observation.wire_semantic.observation_kind
+            ).lifecycle_class
+            == "replacement_snapshot"
+        ):
+            latest_replacement_index_by_key[
+                (
+                    observation.source_id,
+                    observation.wire_semantic.source_instance_id,
+                )
+            ] = index
+    for index, observation in enumerate(runtime_observation_units):
         if observation.source_id in {None, ContextSourceId.RUNTIME_CLOCK}:
             continue
         if (
@@ -3753,6 +3919,8 @@ def _source_heads(
             observation.source_id,
             observation.wire_semantic.source_instance_id,
         )
+        if latest_replacement_index_by_key.get(key) != index:
+            continue
         disposition = dispositions.get(key)
         if disposition is None:
             raise ValueError("committed replacement observation lacks disposition")
@@ -3799,9 +3967,7 @@ def _source_heads(
             source_id=observation.source_id,
             source_instance_id=observation.wire_semantic.source_instance_id,
             committed_revision=source_revision,
-            observation_semantic_id=(
-                observation.wire_semantic.observation_semantic_id
-            ),
+            observation_semantic_id=(observation.wire_semantic.observation_semantic_id),
             predecessor_observation_semantic_id=predecessor_id,
             snapshot_semantic_fingerprint=(
                 observation.source_payload_semantic_fingerprint

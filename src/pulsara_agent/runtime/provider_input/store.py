@@ -32,7 +32,9 @@ from pulsara_agent.primitives.provider_input import (
     InlineProviderInputUnitHydrationAttributionFact,
     OneShotGenerationScopeFact,
     ProviderInputAwaitingControlDispositionFact,
+    ProviderInputContinuationConsumptionProofFact,
     ProviderInputContinuationMaterializationProofFact,
+    ProviderInputContinuationRewriteCoverageProofFact,
     ProviderInputUnitPlacementAttributionFact,
     ProviderInputGenerationAttributionStateFact,
     ProviderInputGenerationScopeBindingFact,
@@ -46,6 +48,7 @@ from pulsara_agent.primitives.provider_input import (
     ExistingAppendCommitGuardFact,
     RolloverGenerationCommitGuardFact,
     SessionProviderInputContinuityScopeFact,
+    ProviderLongHorizonRewriteRolloverAuthorityFact,
     ProviderSourceDispositionRewriteAuthorityFact,
 )
 from pulsara_agent.primitives.runtime_observation import (
@@ -56,6 +59,7 @@ from pulsara_agent.runtime.provider_input.materialization import (
     RecursivelyImmutableProviderInputCarrier,
     build_provider_unit_semantic_document,
 )
+from pulsara_agent.runtime.context_input.event_slice import event_reference_from_stored
 from pulsara_agent.runtime.provider_input.observation_rewrite import (
     RuntimeObservationLifecycleReducerState,
     advance_runtime_observation_lifecycle_state,
@@ -78,13 +82,14 @@ class ProviderInputGenerationReducerError(RuntimeError):
     pass
 
 
-def _validate_continuation_materialization(
+def _validate_continuation_consumption(
     *,
     pending: ProviderInputPendingContinuationFact | None,
-    proof: ProviderInputContinuationMaterializationProofFact | None,
+    proof: ProviderInputContinuationConsumptionProofFact | None,
     predecessor_frontier: ProviderTranscriptFrontierFact,
     resulting_core: CommittedProviderInputGenerationCoreStateFact,
     append_event: ProviderInputAppendCommittedEvent,
+    rollover_authority: ProviderLongHorizonRewriteRolloverAuthorityFact | None,
     resident: "ProviderInputResidentGeneration | None",
     require_staged_resident: bool,
 ) -> None:
@@ -105,19 +110,44 @@ def _validate_continuation_materialization(
         != predecessor_frontier.provider_semantic_frontier_fingerprint
         or proof.resulting_transcript_frontier_fingerprint
         != resulting_core.transcript_frontier.provider_semantic_frontier_fingerprint
-        or (
-            append_event.expected_revision > 0
-            and resulting_core.transcript_frontier.committed_transcript_unit_count
-            <= predecessor_frontier.committed_transcript_unit_count
-        )
-        or (
-            append_event.expected_revision == 0
-            and resulting_core.transcript_frontier.committed_transcript_unit_count
-            < len(proof.appended_unit_ordinals)
-        )
     ):
         raise ProviderInputGenerationReducerError(
             "provider continuation proof authority join failed"
+        )
+    if isinstance(proof, ProviderInputContinuationMaterializationProofFact):
+        if (
+            append_event.expected_revision > 0
+            and resulting_core.transcript_frontier.committed_transcript_unit_count
+            <= predecessor_frontier.committed_transcript_unit_count
+            or (
+                append_event.expected_revision == 0
+                and resulting_core.transcript_frontier.committed_transcript_unit_count
+                < len(proof.appended_unit_ordinals)
+            )
+        ):
+            raise ProviderInputGenerationReducerError(
+                "provider continuation materialization branch is invalid"
+            )
+    elif isinstance(proof, ProviderInputContinuationRewriteCoverageProofFact):
+        if (
+            append_event.expected_revision != 0
+            or rollover_authority is None
+            or proof.rewrite_authority_reference
+            != rollover_authority.rewrite_authority_reference
+            or proof.ordered_projection_identity_fingerprint
+            != rollover_authority.ordered_projection_identity_fingerprint
+            or append_event.causal_validation is None
+            or proof.ordered_projection_identity_fingerprint
+            != append_event.causal_validation.projection_identity_fingerprint
+            or proof.replacement_summary_source_attribution.rewrite_authority_reference
+            != rollover_authority.rewrite_authority_reference
+        ):
+            raise ProviderInputGenerationReducerError(
+                "provider continuation rewrite authority join failed"
+            )
+    else:  # pragma: no cover - discriminated union is closed
+        raise ProviderInputGenerationReducerError(
+            "unknown provider continuation proof kind"
         )
     if resident is None:
         if require_staged_resident:
@@ -129,29 +159,54 @@ def _validate_continuation_materialization(
         # root; the vector loader revalidates the content-addressed artifacts
         # before the generation may be dispatched again.
         return
+    if isinstance(proof, ProviderInputContinuationMaterializationProofFact):
+        try:
+            units = tuple(
+                resident.units[ordinal] for ordinal in proof.appended_unit_ordinals
+            )
+        except IndexError as exc:
+            raise ProviderInputGenerationReducerError(
+                "provider continuation proof exceeds resident vector"
+            ) from exc
+        if (
+            tuple(item.attribution.semantic.semantic_fingerprint for item in units)
+            != proof.ordered_appended_unit_semantic_fingerprints
+            or tuple(item.materialization_fingerprint for item in units)
+            != proof.ordered_appended_unit_materialization_fingerprints
+            or tuple(item.attribution.owner_semantic_fingerprint for item in units)
+            != proof.ordered_appended_unit_owner_semantic_fingerprints
+            or any(
+                item.attribution.semantic.unit_kind != "transcript_message"
+                or getattr(item.canonical_provider_fragment, "role", None) == "user"
+                for item in units
+            )
+        ):
+            raise ProviderInputGenerationReducerError(
+                "provider continuation proof differs from staged transcript units"
+            )
+        return
+    assert isinstance(proof, ProviderInputContinuationRewriteCoverageProofFact)
     try:
-        units = tuple(
-            resident.units[ordinal] for ordinal in proof.appended_unit_ordinals
-        )
+        summary = resident.units[proof.replacement_summary_unit_ordinal]
     except IndexError as exc:
         raise ProviderInputGenerationReducerError(
-            "provider continuation proof exceeds resident vector"
+            "provider continuation rewrite summary exceeds resident vector"
         ) from exc
+    compaction_ref = (
+        proof.rewrite_authority_reference.compaction_completed_event_reference
+    )
     if (
-        tuple(item.attribution.semantic.semantic_fingerprint for item in units)
-        != proof.ordered_appended_unit_semantic_fingerprints
-        or tuple(item.materialization_fingerprint for item in units)
-        != proof.ordered_appended_unit_materialization_fingerprints
-        or tuple(item.attribution.owner_semantic_fingerprint for item in units)
-        != proof.ordered_appended_unit_owner_semantic_fingerprints
-        or any(
-            item.attribution.semantic.unit_kind != "transcript_message"
-            or getattr(item.canonical_provider_fragment, "role", None) == "user"
-            for item in units
-        )
+        summary.attribution.semantic.semantic_fingerprint
+        != proof.replacement_summary_unit_semantic_fingerprint
+        or summary.materialization_fingerprint
+        != proof.replacement_summary_unit_materialization_fingerprint
+        or summary.attribution.owner_semantic_fingerprint
+        != proof.replacement_summary_unit_owner_semantic_fingerprint
+        or summary.attribution.semantic.unit_kind != "transcript_message"
+        or compaction_ref not in summary.attribution.source_event_refs
     ):
         raise ProviderInputGenerationReducerError(
-            "provider continuation proof differs from staged transcript units"
+            "provider continuation rewrite summary materialization drifted"
         )
     if append_event.resulting_core_state != resulting_core:
         raise ProviderInputGenerationReducerError(
@@ -194,15 +249,9 @@ class ProviderInputGenerationSnapshot:
     preparation_attribution: ProviderInputPreparationOwnershipAttributionFact | None
     resident: ProviderInputResidentGeneration | None
     frame_placements: tuple[ProviderInvocationContextFramePlacementFact, ...]
-    runtime_observation_units: tuple[
-        PreparedRuntimeObservationProviderUnitFact, ...
-    ]
-    runtime_observation_rewrites: tuple[
-        RuntimeObservationProjectionRewriteFact, ...
-    ]
-    runtime_observation_lifecycle_state: (
-        RuntimeObservationLifecycleReducerState | None
-    )
+    runtime_observation_units: tuple[PreparedRuntimeObservationProviderUnitFact, ...]
+    runtime_observation_rewrites: tuple[RuntimeObservationProjectionRewriteFact, ...]
+    runtime_observation_lifecycle_state: RuntimeObservationLifecycleReducerState | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -819,9 +868,7 @@ class ProviderInputGenerationStore:
             append_identities_by_call = dict(self._append_identities_by_call)
             frame_placements = dict(self._frame_placements)
             runtime_observation_units = dict(self._runtime_observation_units)
-            runtime_observation_rewrites = dict(
-                self._runtime_observation_rewrites
-            )
+            runtime_observation_rewrites = dict(self._runtime_observation_rewrites)
             runtime_observation_lifecycle_states = dict(
                 self._runtime_observation_lifecycle_states
             )
@@ -861,9 +908,7 @@ class ProviderInputGenerationStore:
                         context_compiled_event_ref=_event_ref(
                             event, runtime_session_id=self._runtime_session_id
                         ),
-                        prepared_candidate_fingerprint=(
-                            prepared.candidate_fingerprint
-                        ),
+                        prepared_candidate_fingerprint=(prepared.candidate_fingerprint),
                         prepared_plan_fingerprint=(
                             prepared.prepared_plan.plan_fingerprint
                         ),
@@ -1007,12 +1052,34 @@ class ProviderInputGenerationStore:
                         if generation_id in rollover_frontier_by_successor
                         else predecessor.transcript_frontier
                     )
-                    _validate_continuation_materialization(
+                    rollover_resolution = next(
+                        (
+                            candidate
+                            for candidate in events
+                            if isinstance(
+                                candidate,
+                                ProviderInputGenerationRolloverResolvedEvent,
+                            )
+                            and candidate.new_generation.generation_id == generation_id
+                        ),
+                        None,
+                    )
+                    rollover_authority = (
+                        rollover_resolution.rollover_request.intent.authority
+                        if rollover_resolution is not None
+                        and isinstance(
+                            rollover_resolution.rollover_request.intent.authority,
+                            ProviderLongHorizonRewriteRolloverAuthorityFact,
+                        )
+                        else None
+                    )
+                    _validate_continuation_consumption(
                         pending=pending,
-                        proof=event.continuation_materialization_proof,
+                        proof=event.continuation_consumption_proof,
                         predecessor_frontier=expected_frontier,
                         resulting_core=event.resulting_core_state,
                         append_event=event,
+                        rollover_authority=rollover_authority,
                         resident=resident,
                         require_staged_resident=require_staged_resident,
                     )
@@ -1031,6 +1098,11 @@ class ProviderInputGenerationStore:
                             ),
                             allow_rewrite_drop=(
                                 generation_id in rollover_source_core_by_successor
+                            ),
+                            allow_placement_rebind=(
+                                rollover_resolution is not None
+                                and rollover_resolution.runtime_observation_rewrite
+                                is not None
                             ),
                         )
                     except ValueError as exc:
@@ -1228,7 +1300,9 @@ class ProviderInputGenerationStore:
                         )
                     if append is not None:
                         compiled = append.append_kind == "compiled_manifest"
-                        if compiled != (reference.reference_kind == "compiled_manifest"):
+                        if compiled != (
+                            reference.reference_kind == "compiled_manifest"
+                        ):
                             raise ProviderInputGenerationReducerError(
                                 "ModelStart provider reference kind drifted"
                             )
@@ -1563,8 +1637,7 @@ class ProviderInputGenerationStore:
                                 if isinstance(
                                     candidate, ProviderInputGenerationClosedEvent
                                 )
-                                and candidate.id
-                                == event.expected_old_close_event_id
+                                and candidate.id == event.expected_old_close_event_id
                             ),
                             None,
                         )
@@ -1882,17 +1955,13 @@ def _source_head_attributions_from_resident(
             and unit.attribution.source_event_refs
             else None
         )
-        if (snapshot.effective_status == "source_closed") != (
-            closure_ref is not None
-        ):
+        if (snapshot.effective_status == "source_closed") != (closure_ref is not None):
             raise ProviderInputGenerationReducerError(
                 "provider source-head closure attribution is incomplete"
             )
         hydration = build_frozen_fact(
             InlineProviderInputUnitHydrationAttributionFact,
-            schema_version=(
-                "inline_provider_input_unit_hydration_attribution.v1"
-            ),
+            schema_version=("inline_provider_input_unit_hydration_attribution.v1"),
             semantic_document_identity_fingerprint=(
                 document_identity.document_semantic_fingerprint
             ),
@@ -1955,15 +2024,9 @@ def _event_ref(
         raise ProviderInputGenerationReducerError(
             "provider generation event reference requires committed sequence"
         )
-    candidate = freeze_event_write_candidate(
-        event.model_copy(update={"sequence": None})
-    )
-    return ContextEventReferenceFact(
+    return event_reference_from_stored(
+        event,
         runtime_session_id=runtime_session_id,
-        event_id=event.id,
-        sequence=event.sequence,
-        event_type=str(event.type),
-        payload_fingerprint=candidate.payload_fingerprint,
     )
 
 
